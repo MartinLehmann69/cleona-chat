@@ -5,8 +5,8 @@
 ///
 /// §11.9: "A node reads the records while it is below 32 answering
 /// neighbours, and only at the edges of §11.8". A ROUND begins at start
-/// and at every network change; sources 1–3 are done in it when the
-/// query of the remembered neighbours AND the call series are finished. After that, and
+/// and at every network change; sources 1–3 are done in it when the call
+/// series is over — the query is out by then, not waited for (§11.8). After that, and
 /// BEFORE the entries, the board is asked ONCE (§11.8a,
 /// `board.dart`); then reading happens as long as fewer than
 /// [Neighbourhood.atMost] neighbours answer. Until S390 only a node that had
@@ -44,9 +44,7 @@
 /// rest: ONE event per ~19 h to 2–3 relays, a few hundred
 /// bytes — under 2 KB/day, over TCP to the relay. Behind CGNAT: nothing.
 ///
-/// The flag for it (`outside_state.dart`) is RESTART-PROOF. Without it
-/// every start would write an entry although the old one is still valid for almost a day
-/// — exactly the traffic the gate is meant to prevent.
+/// The flag for it (`outside_state.dart`) is RESTART-PROOF (no entry per start).
 ///
 /// ── DELETION ─────────────────────────────────────────────────────────────
 ///
@@ -71,12 +69,12 @@ library;
 
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:mycelium/outside_address.dart';
 import 'package:mycelium/outside_entry.dart';
 import 'package:mycelium/outside_relay.dart';
 import 'package:mycelium/outside_state.dart';
+import 'package:mycelium/device_records.dart' show DeviceRecords;
 import 'package:mycelium/card.dart' show CardAddress, CardAddressType;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_outside.dart';
@@ -98,15 +96,10 @@ const int kOutsideAskAtMost = 3;
 /// check, not of writing — the check mostly does nothing.
 const Duration kRefreshCheck = Duration(hours: 1);
 
-/// §11.9: "less than 80 % of the record's lifetime has elapsed" — as a fraction,
-/// so that the computation stays integral and does not round.
-const int kRefreshCounter = 4;
-const int kRefreshDenominator = 5;
-
 class OutsideSource {
   final Node _k;
   final OutsideState _state;
-  final void Function(List<int> ip, int port) _neighbourRemember;
+  final void Function(List<int> ip, int port, {DateTime? confirmedAt}) _neighbourRemember;
   final void Function(String)? _report;
   final Duration _checkInterval;
   final int Function() _responding;
@@ -132,8 +125,8 @@ class OutsideSource {
   /// one" be counted would be a proxy.
   ({bool written, String reason})? lastSpelling;
 
-  /// [directory] and [key] say where the stable key lies; without
-  /// them it is transient (probes, and a node without storage).
+  /// [records] say where the stable key lies (in the app the device
+  /// database); without them it is transient (probes, a node without storage).
   ///
   /// THE CLOCK RUNS FROM CONSTRUCTION, and that is intentional: an outside source that
   /// lives keeps its entry alive (§11.9). Arming it with a second
@@ -144,16 +137,15 @@ class OutsideSource {
   OutsideSource(this._k,
       {required this.to,
       required DateTime roundsStart,
-      required void Function(List<int> ip, int port) neighbourRemember,
-      Directory? directory,
-      Uint8List? key,
+      required void Function(List<int> ip, int port, {DateTime? confirmedAt}) neighbourRemember,
+      DeviceRecords? records,
       Duration checkInterval = kRefreshCheck,
       int Function()? responding,
       void Function(String)? report})
       : _roundsStart = roundsStart,
-        _state = directory == null || key == null
+        _state = records == null
             ? OutsideState.ephemeral()
-            : OutsideState.open(directory, key),
+            : OutsideState.open(records),
         _checkInterval = checkInterval,
         _responding = responding ?? (() => _k.readiness.respondingCount),
         _neighbourRemember = neighbourRemember,
@@ -161,6 +153,9 @@ class OutsideSource {
     if (_checkInterval > Duration.zero) {
       _clock = Timer.periodic(_checkInterval, (_) => unawaited(write()));
     }
+    // §15.2: an issued card names the key only while the record stands.
+    _k.publisherKeyFrom(() =>
+        to && _state.publishedAt(nowSeconds()) ? _state.publicKey : null);
   }
 
   /// The public key under which this node publishes —
@@ -197,8 +192,8 @@ class OutsideSource {
     answer?.networkChanged();
   }
 
-  /// The edge "sources 1–3 done": [settled] ends with query AND
-  /// call series. Does not throw.
+  /// The edge "sources 1–3 done": [settled] ends with the call series
+  /// (§11.8), never with a holder's answer. Does not throw.
   Future<void> afterSources(Future<void> settled) async {
     try {
       await settled;
@@ -247,7 +242,7 @@ class OutsideSource {
         return;
       }
       final now = nowSeconds();
-      final inhibit = _gate(addresses, now);
+      final inhibit = _state.refreshInhibit(addresses, now);
       if (inhibit != null) {
         _say(false, inhibit);
         return;
@@ -311,24 +306,6 @@ class OutsideSource {
         .toList();
   }
 
-  /// `null` = write. Otherwise the reason why not (§11.9: byte-identical
-  /// AND under 80 % of the validity elapsed — BOTH must apply).
-  String? _gate(List<CardAddress> fresh, int now) {
-    final created = _state.lastCreated;
-    if (created == null) return null;
-    if (!addressesEqual(fresh, _state.lastAddresses)) return null;
-    final elapsed = now - created;
-    // A clock set backwards does not fall into the gate: otherwise the
-    // entry would expire without ever being refreshed.
-    if (elapsed < 0) return null;
-    if (elapsed * kRefreshDenominator >=
-        kRefreshCounter * kEntryLifetime) {
-      return null;
-    }
-    return 'unchanged, ${elapsed}s of $kEntryLifetime s '
-        'elapsed (< $kRefreshCounter/$kRefreshDenominator)';
-  }
-
   void _say(bool written, String reason) {
     lastSpelling = (written: written, reason: reason);
     _report?.call('Source 4 ${written ? 'written' : 'not '
@@ -350,7 +327,7 @@ class OutsideSource {
     final answers = await Future.wait([
       for (final r in relay) entriesFetch(r, filter, report: _report)
     ]);
-    final finds = <String, CardAddress>{};
+    final finds = <String, (CardAddress, DateTime)>{}; // S406: newest creation
     var own = 0;
     for (final ev in answers.expand((x) => x)) {
       // D2-6: the OWN entry still lies in the relay at the next start.
@@ -366,27 +343,28 @@ class OutsideSource {
       }
       final e = eventCheck(ev, cardChannel);
       if (e == null) continue;
+      final c = DateTime.fromMillisecondsSinceEpoch((ev['created_at'] as int) * 1000);
       for (final a in e.addresses) {
-        finds.putIfAbsent('$a', () => a);
+        if (!(finds['$a']?.$2.isAfter(c) ?? false)) finds['$a'] = (a, c);
       }
     }
     // S394 V1: no candidate of a family without socket — it takes a place.
     final taken = finds.values
-        .where((a) => _k.speaks(InternetAddress.fromRawAddress(a.address)))
+        .where((a) => _k.speaks(InternetAddress.fromRawAddress(a.$1.address)))
         .take(Neighbourhood.atMost)
         .toList();
     _report?.call('Source 4: ${relay.length} relay(s) read, '
         '${taken.length} address(es)'
         '${own > 0 ? ', $own own skipped' : ''}');
-    for (final a in taken) {
-      _neighbourRemember(a.address, a.port);
+    for (final (a, c) in taken) {
+      _neighbourRemember(a.address, a.port, confirmedAt: c); // S406, §11.8
     }
     // The own public address can only be named by a counterpart outside the
     // segment — and a node that needs source 4 has nobody else to ask.
     final o = _k.publicAddress;
     if (o != null && !identical(o, _publicBeforeRound)) return;
     var asked = 0;
-    for (final a in taken) {
+    for (final (a, _) in taken) {
       // ONLY IPv4: `OutsideRoute._onWhatIsMyAddress` rejects a packet from an
       // IPv6 address (`outside_route.dart`, "Karte kennt nur IPv4"). Asking via
       // IPv6 would cost a round trip that is never answered.

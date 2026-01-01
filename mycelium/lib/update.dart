@@ -6,15 +6,15 @@
 /// |---|---|---|
 /// | manifest in the post box | `update_manifest_compartment.dart` | M1+ |
 /// | fetch pieces | `update_assembler.dart` | P1 |
+/// | the target's partial state on disk | `update_partial.dart` | S406 P2 |
 /// | hand out pieces | `update_holder.dart` | P1 (always-on node) |
 ///
 /// ── WHAT THE SEAM MUST DO ──────────────────────────────────────────────
 ///
-/// 1. After `Host.start`: `service.updateTraeger =
-///    aktualisierungAnbinden(wirt, kanal: …)`. Setting it is the moment
-///    „start".
-/// 2. At the moments network change, app opened, new neighbour:
-///    `service.updateManifestFragen()`.
+/// 1. After `Host.start`: `service.updateCarrier = updateAttach(host,
+///    channel: …, partialDir: …)`. Setting it is the moment „start".
+/// 2. At the moments network change, app opened, new neighbour: ask the
+///    manifest AND present the known target again (`UpdateOffer.againTry`).
 /// 3. Nothing: the constructor attaches [Update.receive] to the
 ///    distributor of the node (`Knoten.aktualisierungEmpfang`, S387
 ///    merge). Until then the node discarded 0x70-0x7F as
@@ -31,23 +31,32 @@ import 'package:cleona/core/update/update_carrier.dart';
 import 'package:mycelium/card.dart' show CardAddress;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_post_box.dart';
+import 'package:mycelium/node_collect_queue.dart' show NodeCollectQueue;
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/post_box_proof.dart' show compartmentQuestion;
 import 'package:mycelium/update_holder.dart';
 import 'package:mycelium/update_manifest_compartment.dart';
 import 'package:mycelium/update_assembler.dart';
 import 'package:mycelium/update_piece.dart';
+import 'package:mycelium/update_trace.dart';
 import 'package:mycelium/host.dart';
 
 /// The entry point for the seam: binds the update to the node of the
 /// [host]. [channel] is `kKanalLive`/`kKanalBeta`.
+/// [partialDir] is where the partial state of the update target lies (in
+/// the profile, S406-UPDPKG P2).
 Update updateAttach(
   Host host, {
   required int channel,
+  required String partialDir,
   int? Function(Uint8List json) manifestCheck = UpdateCarrier.manifestSequence,
   void Function(String)? report,
 }) =>
     Update(host.node,
-        channel: channel, manifestCheck: manifestCheck, report: report);
+        channel: channel,
+        partialDir: partialDir,
+        manifestCheck: manifestCheck,
+        report: report);
 
 class Update implements UpdateCarrier {
   final Node node;
@@ -59,18 +68,22 @@ class Update implements UpdateCarrier {
   Update(
     this.node, {
     required int channel,
+    required String partialDir,
     required int? Function(Uint8List json) manifestCheck,
     this.report,
   }) {
     void send(Uint8List p, UpdateNeighbour target) => node.rawSend(
         p, CardAddress(Uint8List.fromList(target.$1.rawAddress), target.$2));
     holder = UpdateHolder(send: send, report: report);
-    assembler = UpdateAssembler(send: send, report: report);
+    assembler =
+        UpdateAssembler(send: send, partialDir: partialDir, report: report);
     compartment = ManifestCompartment(
       compartment: manifestValue(channel),
       check: manifestCheck,
       collect: _compartmentCollect,
       deposit: (content, identifier) => node.deposit(content, identifier),
+      // §26.5.4: what this node knows, every neighbour asking it is handed.
+      holdOwn: (json) => node.postBoxDeposit.holdOwn(manifestValue(channel), json),
       report: report,
     );
     // In the constructor, not in [updateAttach]: whoever builds the
@@ -88,15 +101,26 @@ class Update implements UpdateCarrier {
     }
   }
 
-  // The deposit handles ONE collection at a time. Until S388 the compartment was dropped
-  // when the identity collection ran („this moment is dropped"), and
-  // conversely the identity collection lost its moment — measured in
-  // `smoke_update_manifest_compartment` (9a)/(9b). Now both queue up in
-  // the same queue (`NodePostBox.compartmentCollect`); none gets lost.
-  Future<List<Uint8List>?> _compartmentCollect(Uint8List f) =>
-      node.compartmentCollect(f);
+  // The compartment and the identity collection ask side by side
+  // (`NodeCompartment.compartmentCollect`): at a holder both ask, the
+  // questions follow one another, and neither loses its moment
+  // (`smoke_update_manifest_compartment` (9a)/(9b)).
+  Future<List<Uint8List>?> _compartmentCollect(
+      Uint8List f, void Function(Uint8List piece) onPiece) {
+    final asked = node.lastHeard;
+    updateTrace('ask-holders',
+        reason: asked.isEmpty
+            ? 'no neighbour heard — not asked'
+            : '${asked.length} neighbour(s): '
+                '${asked.map((n) => '${n.$1.address}:${n.$2}').join(', ')}');
+    return node.compartmentCollect([compartmentQuestion(f)], withWhom: asked,
+        onPiece: (p) {
+      onPiece(p);
+      return true; // the compartment is read, never deleted (§26.5.4)
+    });
+  }
 
-  // ── UpdateTraeger ────────────────────────────────────────────────────
+  // ── UpdateCarrier ─────────────────────────────────────────────────────
 
   @override
   Future<void> manifestAsk() => compartment.ask();
@@ -109,10 +133,24 @@ class Update implements UpdateCarrier {
       compartment.onManifest = callback;
 
   @override
-  Future<Uint8List?> piecesFetch(
+  void objectExpect(Uint8List contentHash, int length) =>
+      assembler.expect(contentHash, length);
+
+  @override
+  Future<String?> objectFetch(
           {required Uint8List contentHash, required int length}) =>
       assembler.fetch(
           object: contentHash, length: length, withWhom: node.depositNeighbours);
+
+  @override
+  set onObjectComplete(void Function(Uint8List contentHash, String path)? f) =>
+      assembler.onComplete = f;
+
+  @override
+  void objectTaken(Uint8List contentHash) => assembler.taken(contentHash);
+
+  @override
+  void objectDiscard(Uint8List contentHash) => assembler.discard(contentHash);
 
   @override
   void fetchAbort() => assembler.abort();
@@ -121,6 +159,10 @@ class Update implements UpdateCarrier {
   void objectHold(
           Uint8List contentHash, Future<Uint8List?> Function() read) =>
       holder.hold(contentHash, read);
+
+  @override
+  void objectHoldFile(Uint8List contentHash, String path) =>
+      holder.holdFile(contentHash, path);
 
   @override
   void objectRelease(Uint8List contentHash) => holder.release(contentHash);

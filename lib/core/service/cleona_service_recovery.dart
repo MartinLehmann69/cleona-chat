@@ -47,18 +47,11 @@ extension V3IdentityRecoveryOps on CleonaService {
       if (existingIndices.contains(idx)) continue;
       final name = entry['name'] as String? ?? 'Identity ${idx + 1}';
       try {
-        // §7.1.3 (P2): every identity recovered in this run describes the
-        // same physical device the user just answered the restore question
-        // for — forward the same "additional device vs. lost device" choice
-        // so a secondary identity doesn't race its own original device for
-        // the auth-key slot while the primary identity correctly waits.
-        // §13 (S382): `restoredFromPhrase` travels along, for the same
-        // reason as `restoreAwaitingPairing` one line below — every identity
+        // §13 (S382): `restoredFromPhrase` travels along — every identity
         // recovered in this run describes THE SAME device and the same
         // process. Without passing it on, the second identity of a real
         // recovery case would have no marker and would never get its data.
         final id = await mgr.createIdentityAtIndex(idx, name,
-            restoreAwaitingPairing: identity.restoreAwaitingPairing,
             restoredFromPhrase: identity.restoredFromPhrase);
         created.add(id);
         _log.info('Registry recovery: created identity "$name" at hdIndex=$idx');

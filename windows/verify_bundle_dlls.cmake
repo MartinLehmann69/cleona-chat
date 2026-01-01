@@ -144,7 +144,53 @@ if(_foreign)
     "directory 1:1, so a stale DLL here ships to end users.")
 endif()
 
+# ── Helper programs (S403): -DEXPECTED_PROGRAMS=a.exe,b.exe ─────────────────
+#
+# A helper program the daemon starts by name is the same failure class as a
+# DLL it loads by name: when it is absent nothing fails, a feature is just
+# gone. Without cleona-play.exe every sound is silent on Windows — which was
+# the state of every Windows build up to S403 and went unnoticed for months,
+# because the old player quietly did nothing. The argument is optional so
+# that a caller with no helper program stays valid; a caller that passes it
+# must pass a non-empty list.
+set(_program_count 0)
+if(DEFINED EXPECTED_PROGRAMS)
+  string(REPLACE "," ";" _programs "${EXPECTED_PROGRAMS}")
+  set(_missing_programs "")
+  foreach(_program IN LISTS _programs)
+    string(STRIP "${_program}" _program)
+    if(_program STREQUAL "")
+      continue()
+    endif()
+    math(EXPR _program_count "${_program_count} + 1")
+    if(NOT EXISTS "${BUNDLE_DIR}/${_program}")
+      list(APPEND _missing_programs "${_program}")
+    endif()
+  endforeach()
+  if(_program_count EQUAL 0)
+    message(FATAL_ERROR
+      "verify_bundle_dlls: EXPECTED_PROGRAMS parsed to an empty list (got: "
+      "'${EXPECTED_PROGRAMS}').\n"
+      "Fix the -DEXPECTED_PROGRAMS argument in windows/runner/CMakeLists.txt.")
+  endif()
+  if(_missing_programs)
+    string(REPLACE ";" "\n  " _missing_programs_text "${_missing_programs}")
+    message(FATAL_ERROR
+      "Windows bundle is incomplete — these helper programs are missing:\n"
+      "  ${_missing_programs_text}\n"
+      "\n"
+      "Bundle directory:\n  ${BUNDLE_DIR}\n"
+      "\n"
+      "cleona-play.exe is built from windows/cleona_play/ and copied by a\n"
+      "POST_BUILD step in windows/runner/CMakeLists.txt. Check that the\n"
+      "target was built (its sources are fetched from github.com/xiph on the\n"
+      "first configure) and that the copy succeeded.\n"
+      "\n"
+      "This build is failed on purpose: without it the daemon plays no sound.")
+  endif()
+endif()
+
 list(LENGTH _expected _count)
 message(STATUS
-  "Windows bundle verified: ${_count} native DLLs present, "
-  "no foreign cleona_*.dll in ${BUNDLE_DIR}")
+  "Windows bundle verified: ${_count} native DLLs and ${_program_count} "
+  "helper program(s) present, no foreign cleona_*.dll in ${BUNDLE_DIR}")

@@ -88,6 +88,18 @@ typedef _SigKeypairDart = int Function(
   Pointer<Uint8> secretKey,
 );
 
+// OQS_KEM_ml_kem_768_keypair_derand (FIPS 203 keygen from 64 B of coins)
+typedef _KemKeypairDerandNative = Int32 Function(
+  Pointer<Uint8> publicKey,
+  Pointer<Uint8> secretKey,
+  Pointer<Uint8> seed,
+);
+typedef _KemKeypairDerandDart = int Function(
+  Pointer<Uint8> publicKey,
+  Pointer<Uint8> secretKey,
+  Pointer<Uint8> seed,
+);
+
 // OQS_randombytes_custom_algorithm
 typedef _RandCustomNative = Void Function(
   Pointer<NativeFunction<Void Function(Pointer<Uint8>, Size)>> algorithmPtr,
@@ -250,6 +262,7 @@ class OqsFFI {
   late final _KemNewDart _kemNew;
   late final _KemFreeDart _kemFree;
   late final _KemKeypairDart _kemKeypair;
+  late final _KemKeypairDerandDart _kemKeypairDerand;
   late final _KemEncapsDart _kemEncaps;
   late final _KemDecapsDart _kemDecaps;
   late final _SigNewDart _sigNew;
@@ -320,6 +333,9 @@ class OqsFFI {
         _lib.lookupFunction<_SigSignNative, _SigSignDart>('OQS_SIG_sign');
     _sigVerify = _lib
         .lookupFunction<_SigVerifyNative, _SigVerifyDart>('OQS_SIG_verify');
+    _kemKeypairDerand = _lib
+        .lookupFunction<_KemKeypairDerandNative, _KemKeypairDerandDart>(
+            'OQS_KEM_ml_kem_768_keypair_derand');
     _randCustom = _lib.lookupFunction<_RandCustomNative, _RandCustomDart>(
         'OQS_randombytes_custom_algorithm');
     _randSwitch = _lib.lookupFunction<_RandSwitchNative, _RandSwitchDart>(
@@ -388,9 +404,12 @@ class OqsFFI {
 
   /// Generate a deterministic ML-KEM-768 keypair from a 64-byte seed.
   ///
-  /// Same DRBG-injection technique as mlDsaKeypairDerand: replaces liboqs's
-  /// randomness source with a SHA-256 counter-mode PRNG seeded from the
-  /// provided seed, then restores the system DRBG after keygen.
+  /// WITHOUT touching liboqs's process-global randomness source (S398): the
+  /// FIPS 203 keygen takes its 64 bytes of coins directly. The coins are the
+  /// first 64 bytes of the SHA-256 counter stream that [_derandCallback]
+  /// produced for this seed while keygen drew them through the hook — so an
+  /// identity restored from its phrase gets the same key as before
+  /// (`test/smoke/smoke_pq_derand_stable.dart` pins it).
   ({Uint8List publicKey, Uint8List secretKey}) mlKemKeypairDerand(
       Uint8List seed) {
     _ensureInitialized();
@@ -398,29 +417,34 @@ class OqsFFI {
       throw ArgumentError('seed must be 64 bytes, got ${seed.length}');
     }
 
-    _derandSeed = Uint8List.fromList(seed);
-    _derandOffset = 0;
-    _derandCallable ??= NativeCallable<Void Function(Pointer<Uint8>, Size)>
-        .isolateLocal(_derandCallback);
-    _randCustom(_derandCallable!.nativeFunction);
-
+    final sodium = SodiumFFI();
+    final coins = calloc<Uint8>(64);
     final pk = calloc<Uint8>(mlKemPublicKeyLength);
     final sk = calloc<Uint8>(mlKemSecretKeyLength);
 
     try {
-      final status = _kemKeypair(_kem, pk, sk);
+      for (var block = 0; block < 2; block++) {
+        final input = Uint8List(seed.length + 4)
+          ..setAll(0, seed)
+          ..buffer.asByteData().setUint32(seed.length, block, Endian.big);
+        final hash = sodium.sha256(input);
+        for (var i = 0; i < 32; i++) {
+          coins[block * 32 + i] = hash[i];
+        }
+      }
+      final status = _kemKeypairDerand(pk, sk, coins);
       if (status != OqsStatus.success) {
-        throw StateError('OQS_KEM_keypair (derand) failed with status $status');
+        throw StateError('OQS_KEM_keypair_derand failed with status $status');
       }
       return (
         publicKey: _copyToUint8List(pk, mlKemPublicKeyLength),
         secretKey: _copyToUint8List(sk, mlKemSecretKeyLength),
       );
     } finally {
-      // Sec-hardening: zero secret key before freeing native memory.
+      // Sec-hardening: zero secret key and coins before freeing native memory.
       _zeroAndFree(sk, mlKemSecretKeyLength);
+      _zeroAndFree(coins, 64);
       calloc.free(pk);
-      _restoreSystemDrbg();
     }
   }
 

@@ -4,17 +4,15 @@
 /// cover stream, ladder, storage for third parties, state checker) is held by the
 /// [Host], once for all mailboxes (V4.2 §4.5.1, S385 cut F).
 ///
-/// A caller that serves an identity needs only THIS class:
-/// issue an invitation, join one, send, read the history,
-/// see the contacts. The mailboxes are separate because two
-/// identities of the same human must not be connected with each other
-/// (`identity.dart`) — a mailbox never asks
-/// the contacts of another.
+/// A caller that serves an identity needs only THIS class. The mailboxes
+/// are separate because two identities of the same human must not be
+/// connected (`identity.dart`) — a mailbox never asks another's contacts.
 ///
-/// RESTART: post box + contacts lie in the mailbox's [Memory],
-/// every sent/received message in the peer's [History]. A
-/// message not yet receipted at stopping afterwards stands again as
-/// open in the history AND immediately goes back onto the ladder.
+/// RESTART: post box + contacts lie in the mailbox's [Memory], every own
+/// message that is still open in the peer's [History] (`history.dart`), the
+/// identifier of every received one in the identity's received memory
+/// (§20.2). A message neither receipted nor placed at stopping stands as
+/// open there AND goes back onto the ladder (§9.3).
 ///
 /// WHERE A ROUTE COMES FROM: exactly three sources, and there should not be more
 /// — every further one could learn a wrong address. (1)
@@ -27,7 +25,6 @@
 library;
 
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/address_class.dart' show routesToContact;
@@ -38,16 +35,22 @@ import 'package:mycelium/identity.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_invitation.dart' show NodeInvitation;
+import 'package:mycelium/invitation_face_to_face.dart' show MailboxFaceToFace;
 import 'package:mycelium/media.dart';
-import 'package:mycelium/message.dart'
-    show Outbound, Inbound, DeliveryState, kModeRoutesApplyFurther;
+import 'package:mycelium/message.dart' show Outbound, Inbound;
+import 'package:mycelium/mailbox_parked.dart' show parkedAttach;
 import 'package:mycelium/amendment.dart' show Edit, ReadMark, Reaction;
 import 'package:mycelium/first_contact_pair.dart' show CodeSend;
 import 'package:mycelium/mailbox_pair.dart' show MailboxPair;
+import 'package:mycelium/mailbox_first_contact.dart';
+import 'package:mycelium/mailbox_book.dart';
+import 'package:mycelium/mailbox_history.dart';
 import 'package:mycelium/mailbox_start.dart';
 import 'package:mycelium/envelope.dart';
 import 'package:mycelium/history.dart';
 import 'package:mycelium/host.dart';
+import 'package:mycelium/host_contact_seats.dart' show HostContactSeats;
+export 'package:mycelium/mailbox_in_transit.dart' show MailboxInTransit;
 
 /// Unknown identifier, or no known route to a contact.
 class MailboxError implements Exception {
@@ -66,15 +69,13 @@ String identifierFrom(Address a) => _hex(a.identifier);
 String contactPlaceholderName(String identifierHex) =>
     'Contact-${identifierHex.substring(0, 8)}';
 
-typedef _InTransit = ({
+typedef InTransit = ({
   Address to, Outbound outbound, Uint8List identifierInHistory, bool withoutRoute});
 
 class Mailbox {
   /// The host that carries this mailbox.
   final Host host;
   final Identity identity;
-  final Directory _directory;
-  final Uint8List _key;
   final Memory _memory;
   final void Function(String)? report;
   final void Function(ContactRequest a)? _onContactRequest;
@@ -87,8 +88,12 @@ class Mailbox {
 
   /// The groups of THIS identity, by their identifier.
   final Map<String, Group> groups = {};
-  final Map<String, History> _histories = {};
-  final Map<String, _InTransit> _inTransit = {};
+  /// The histories, in the store the caller gave (`mailbox_history.dart`).
+  final MailboxHistories histories;
+  /// The running shipments, by the identifier of the shipment — public for
+  /// `mailbox_in_transit.dart` and `mailbox_outbound.dart`, which ends those
+  /// of a forgotten entry.
+  final Map<String, InTransit> inTransit = {};
 
   /// The route under a code (proposal M, part M2 connects it); without
   /// it there is only a report (`mailbox_pair.dart`).
@@ -99,34 +104,38 @@ class Mailbox {
   ///
   /// Only the [Host] creates mailboxes ([Host.start], [Host.register]).
   Mailbox(this.host, this.identity, this._memory, MailboxDetails a)
-      : _directory = a.directory,
-        _key = a.key,
+      : histories = MailboxHistories.forRegistration(a, host.report),
         report = host.report,
         _onContactRequest = a.onContactRequest,
         onMessage = a.onMessage,
         onReaction = a.onReaction,
         onEdit = a.onEdit,
         onReadMark = a.onReadMark {
-    // RESTART (S388, ES-7/B3): the issued invitations of the last
-    // run become living invitations again — revocable, capped, and
-    // they answer bundle plea and request as before the restart.
+    // RESTART (S388, ES-7/B3): the issued invitations become living ones
+    // again, with what their waiting requests carry beyond the memory, and
+    // the open joins wait again for their answer (proposal E).
+    mailboxBookAttach(this, a); // the prior state of every acceptance (A)
+    parkedAttach(this, a.directory, a.key); // cells awaiting a generation (D-40)
+    firstContactOpen(a);
+    historiesSettle(a); // old files taken over, ended peers' records gone
     for (final g in _memory.rememberedInvitations) {
-      node.invitationRestore(identity, invitationFromRemembered(g));
+      node.invitationRestore(identity, firstContactInvitation(g));
     }
+    faceToFaceClose(atStart: true); // §15.3: 60 s since shown, or never shown
     pairHookSet(); // proposal M: first contact → pair data
+    joinsRestore();
   }
 
   /// Writes the issued invitations of THIS identity into
-  /// memory — at every change: issue, accept, revoke.
-  void invitationsRemember() {
+  /// memory — at every change: issue, accept, revoke. [codes] `false`: the
+  /// code list did not change (a renewed card, `invitation_way_in.dart`).
+  void invitationsRemember({bool codes = true}) {
     _memory.rememberedInvitations
       ..clear()
       ..addAll(identity.invitationsSave());
     _memory.save();
-    // EDGE (§8.1): with every issued, accepted or revoked
-    // invitation the set of own incoming codes changes — the
-    // first-contact code depends on the invitation (`mailbox_pair.dart`).
-    node.codeRoute.codesChanged();
+    firstContactSave(); // day keys and marks of the waiting requests (E)
+    if (codes) node.codeRoute.codesChanged(); // EDGE §8.1: own incoming codes
   }
 
   Node get node => host.node;
@@ -143,44 +152,43 @@ class Mailbox {
   /// All remembered contacts of THIS identity.
   List<Contact> get contacts => _memory.contacts;
 
-  /// §15.9: [a] is no longer a contact — deleted or blocked. A
-  /// later request is then again a question, not a recontact.
+  /// §15.9: [a] is no longer a contact — deleted or blocked; a later request is again a
+  /// question, its history leaves with it (`mailbox_history.dart`). Its delivery
+  /// identifiers stay in the received memory (§20.2, V-3 = a): a late copy stays refused.
   void contactForget(Address a) {
     _memory.contactForget(a);
     _memory.save();
+    histories.drop(identifierFrom(a));
+    host.contactSeatsEdge(); // S405 V1: "stops being a contact" frees its seat now
   }
 
   /// Routine KEM rotation of THIS identity (V4.2 §4.5.4). The keys
-  /// are created by the caller — the app (W1); mycelium swaps in the post box,
-  /// saves, and announces PAIRWISE to every contact with a known route.
-  /// Without a route no announcement, and none rests for later: accepted
-  /// (owner decision) — the contact learns the address with the next
-  /// message. Returns the number of announcements.
-  int keyChange(KemParts fresh, {DateTime? now}) {
-    final b = identity.postBox..rotate(fresh, now: now);
-    final t = b.secretParts();
-    _memory.ownPostBox = (
-      address: b.address,
-      ed25519Sk: t.ed25519Sk,
-      x25519Sk: t.x25519Sk,
-      mlKemSk: t.mlKemSk,
-      mlDsaSk: t.mlDsaSk,
-      previous: t.previous,
-    );
+  /// are created by the caller — the app (W1, `_performKeyRotation`);
+  /// mycelium swaps them into the RUNNING post box (the current generation
+  /// becomes the one previous) and saves. From here on every envelope of
+  /// this identity carries the new address.
+  ///
+  /// NO ANNOUNCEMENT OF ITS OWN (S398): the app's KEY_ROTATION_BROADCAST,
+  /// sent right after as an ordinary message, carries the new address in its
+  /// envelope — the contact's mailbox and app learn from ONE packet. The
+  /// Emergency Key Rotation stands in `mailbox_rotation.dart`.
+  void keyChange(KemParts fresh, {DateTime? now}) {
+    identity.postBox.rotate(fresh, now: now);
+    ownPostBoxSave();
+  }
+
+  /// Writes [k] as it is — for what [contactRemember] does not name (the
+  /// chain state, `mailbox_rotation.dart`). The address still goes through
+  /// the adoption rule.
+  void contactPut(Contact k) {
+    _memory.contactRemember(k);
     _memory.save();
-    var number = 0;
-    for (final k in contacts) {
-      final destination = routeTo(k);
-      if (destination == null) {
-        report?.call('no announcement to ${identifierFrom(k.address)} — '
-            'no route known');
-        continue;
-      }
-      node.send(Uint8List(0), k.address, destination,
-          forField: identity, mode: kModeRoutesApplyFurther);
-      number++;
-    }
-    return number;
+  }
+
+  /// Writes the running post box into memory — after every change of it.
+  void ownPostBoxSave() {
+    _memory.ownPostBox = ownPostBoxOf(identity.postBox);
+    _memory.save();
   }
 
   /// A request on a card of THIS identity (V4.2 §12.5, §15.5).
@@ -200,10 +208,10 @@ class Mailbox {
   /// [origin] is the address from which it arrived. Remembering it here is
   /// the only way in which the INVITING side ever learns where it
   /// can answer — the card names its own address, not that of the
-  /// joiner.
-  void requestAccepted(Address who, CardAddress origin) {
+  /// joiner. `null` for a request from a post box: no route (proposal E).
+  void requestAccepted(Address who, CardAddress? origin) {
     invitationsRemember(); // the counter has changed
-    _routeRemember(who, origin);
+    origin == null ? host.giveUpAgainFor(this, who) : _routeRemember(who, origin);
   }
 
   /// A request is waiting — passed on to whoever asks the user.
@@ -217,27 +225,6 @@ class Mailbox {
     _onContactRequest?.call(a);
   }
 
-  /// No callback available for receipt/give-up — [Outbound] is
-  /// the same mutable instance that the message layer changes directly;
-  /// this check enters the change into the history. The
-  /// clock for it is ONE, at the host.
-  void stateCheck() {
-    final settled = <String>[];
-    for (final e in _inTransit.entries) {
-      final u = e.value;
-      if (u.outbound.state == DeliveryState.inTransit) continue;
-      try {
-        historyFor(u.to).stateChange(u.identifierInHistory, u.outbound.state);
-      } on HistoryError catch (err) {
-        report?.call('State change discarded: $err');
-      }
-      settled.add(e.key);
-    }
-    for (final k in settled) {
-      _inTransit.remove(k);
-    }
-  }
-
   /// ALL routes to [a] from THIS mailbox — for [Node.routesTo]. Three
   /// addresses (§7.1), not one; `null` only if [a] is not a contact here.
   Routes? routesToAddress(Address a) {
@@ -246,32 +233,6 @@ class Mailbox {
   }
 
   // ── Contacts, routes, histories ───────────────────────────────────────
-
-  /// Notes a running shipment, so that [stateCheck] enters its state
-  /// into the history afterwards. [identifierInHistory] is the identifier of the
-  /// ENTRY — for a re-dispatch a different one than that of the shipment;
-  /// a re-dispatch therefore REPLACES the previous note of the same
-  /// entry. [withoutRoute]: started without any address, see [runsWithoutRoute].
-  void marksInTransit(Address to, Outbound outbound,
-          Uint8List identifierInHistory, {bool withoutRoute = false}) =>
-      _inTransit
-        ..removeWhere(
-            (_, u) => _hex(u.identifierInHistory) == _hex(identifierInHistory))
-        ..[_hex(outbound.identifier)] = (to: to, outbound: outbound,
-            identifierInHistory: identifierInHistory, withoutRoute: withoutRoute);
-
-  /// Whether a shipment is currently running for [identifierInHistory]. The re-dispatch
-  /// asks this before it dispatches something again — otherwise the same
-  /// message would go out twice.
-  bool runsCurrently(Uint8List identifierInHistory) => _inTransit.values
-      .any((u) => _hex(u.identifierInHistory) == _hex(identifierInHistory));
-
-  /// Whether the running shipment for [identifierInHistory] started WITHOUT any address.
-  /// Such a one no longer learns an address added later
-  /// — the ladder sets up its steps at start —, so it is replaced at the
-  /// edge (§9.3).
-  bool runsWithoutRoute(Uint8List identifierInHistory) => _inTransit.values.any((u) =>
-      _hex(u.identifierInHistory) == _hex(identifierInHistory) && u.withoutRoute);
 
   /// The contact for [identifier] including a proven route to it — or
   /// [MailboxError].
@@ -282,8 +243,9 @@ class Mailbox {
     return (k, destination);
   }
 
-  /// The messages with the contact [contactIdentifier], in the order
-  /// of arrival/sending.
+  /// The history entries with the contact [contactIdentifier], in the order
+  /// of sending — own entries only: a received delivery keeps no entry since
+  /// S403, its identifier lives in the identity's received memory (§20.2).
   List<HistoryEntry> historyRead(String contactIdentifier) =>
       historyFor(contact(contactIdentifier).address).entries;
 
@@ -313,7 +275,7 @@ class Mailbox {
   /// [cardsAddresses] and [neighbours] come from the card of this
   /// counterpart (§15.2) — only the ONE place that has read a card
   /// passes them along ([MailboxInvitation.join]). Without specification what is
-  /// already remembered stays: a publication or an inbound knows nothing
+  /// already remembered stays: an inbound knows nothing
   /// about the card and therefore must not delete it either.
   ///
   /// **The list is passed, not the classification.** Until S390
@@ -339,7 +301,7 @@ class Mailbox {
       since: soFar?.since ?? DateTime.now(),
       // [ip] carries 4 or 16 bytes; [CardAddress] sets the type byte and
       // rejects every other length. Without [ip] the remembered evidence
-      // stays — a publication does not delete it.
+      // stays — an inbound does not delete it.
       lastSeen:
           ip == null ? soFar?.lastSeen : CardAddress(ip, port!),
       cardsAddresses: cardsAddresses ?? soFar?.cardsAddresses ?? const [],
@@ -349,6 +311,7 @@ class Mailbox {
       pairRandom: pairRandom ?? soFar?.pairRandom,
       dayKey: dayKey ?? soFar?.dayKey ?? const {},
       dayKeySent: dayKeySent ?? soFar?.dayKeySent,
+      chainAcked: soFar?.chainAcked ?? false, // set only by `contactPut`
     ));
     _memory.save();
     if (changed) {
@@ -383,8 +346,7 @@ class Mailbox {
   /// find sets the observed address itself.
   CardAddress? routeTo(Contact k) => k.lastSeen;
 
-  History historyFor(Address a) => _histories.putIfAbsent(
-      identifierFrom(a), () => History.load(_directory, a, _key));
+  History historyFor(Address a) => histories.of(a);
 
   Future<bool> waitFor(bool Function() condition, Duration deadline) async {
     final limit = DateTime.now().add(deadline);

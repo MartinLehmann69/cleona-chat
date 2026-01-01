@@ -115,6 +115,19 @@ class VideoEngine {
   /// [reason] maps 1:1 to `CallVideoOffReason.bandwidthInsufficient` (V1.12).
   void Function(VideoRateShutdownReason reason, String detail)? onVideoShutdown;
 
+  /// [start] finished — `true` if the engine runs. Lets the factory owner
+  /// (`main.dart`, which wires the remote texture) react without starting
+  /// the engine itself: the CALL SERVICE starts it, after hooking
+  /// [onVideoShutdown] (S399, O-3).
+  void Function(bool ok)? onStarted;
+
+  /// Why the last [start] returned `false`, when the engine knows (S399,
+  /// owner C8). Null after a successful start, and null when the open was
+  /// refused for the rate — that reason already went out through
+  /// [onVideoShutdown]. Read by the call service (via `dynamic`) to name the
+  /// reason in `CALL_MEDIA_STATE` instead of "unspecified".
+  VideoStartFailure? startFailure;
+
   // ── Getters ────────────────────────────────────────────────────────────
 
   bool get isRunning => _running;
@@ -141,12 +154,24 @@ class VideoEngine {
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   Future<bool> start() async {
+    final ok = await _start();
+    try {
+      onStarted?.call(ok);
+    } catch (e) {
+      _log.warn('onStarted threw: $e');
+    }
+    return ok;
+  }
+
+  Future<bool> _start() async {
     if (_running) return true;
+    startFailure = null;
 
     try {
       _sodium = SodiumFFI();
     } catch (e) {
       _log.warn('SodiumFFI unavailable — video disabled: $e');
+      startFailure = VideoStartFailure.failed;
       return false;
     }
 
@@ -164,9 +189,11 @@ class VideoEngine {
       outcome = VideoPipeline.open(config);
     } on VideoLibraryNotAvailable catch (e) {
       _log.warn('No video backend: $e');
+      startFailure = VideoStartFailure.of(e);
       return false;
     } on VideoPipelineException catch (e) {
       _log.warn('Video pipeline open failed: $e');
+      startFailure = VideoStartFailure.of(e);
       return false;
     }
 
@@ -188,6 +215,7 @@ class VideoEngine {
       _pipeline!.start();
     } catch (e) {
       _log.warn('Video pipeline start failed: $e');
+      startFailure = VideoStartFailure.of(e);
       _pipeline!.close();
       _pipeline = null;
       _rateController = null;
@@ -217,6 +245,13 @@ class VideoEngine {
     } catch (e) {
       _log.warn('onCaptureStop threw: $e');
     }
+
+    // The verification report of this session (§17.5, ABI I11: "logged once
+    // per call by the Dart layer"): one line, read at the end — its counters
+    // describe the whole session — and before the pipeline closes. Codec,
+    // size, backends and counters; no peer, no content.
+    final sessionReport = report;
+    if (sessionReport != null) _log.event(sessionReport.toLogLine());
 
     try {
       _pipeline?.stop();

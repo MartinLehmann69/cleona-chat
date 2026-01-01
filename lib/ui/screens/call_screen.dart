@@ -29,7 +29,17 @@ class _CallScreenState extends State<CallScreen> {
   Duration _duration = Duration.zero;
   bool _muted = false;
   bool _speaker = true;
-  bool _videoEnabled = true;
+  /// Own video on? In-process the SERVICE decides (S399, O-4): it turns the
+  /// state off when the rate control gives up or the video never started,
+  /// which a local flag toggled only by taps could not follow. Over IPC the
+  /// daemon pushes no such change, so the tap-driven flag stays there.
+  bool get _videoEnabled {
+    final s = _appStateRef?.service;
+    if (s is CleonaService) return !s.isVideoMuted;
+    return _videoEnabledLocal;
+  }
+
+  bool _videoEnabledLocal = true;
   bool _frontCamera = true;
   bool _userInitiatedPop = false;
   bool _autoPopScheduled = false;
@@ -238,20 +248,41 @@ class _CallScreenState extends State<CallScreen> {
             child: SafeArea(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.lock, size: 14, color: Colors.green),
-                    const SizedBox(width: 4),
-                    Text(
-                      _formatDuration(_duration),
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                    Row(
+                      children: [
+                        const Icon(Icons.lock, size: 14, color: Colors.green),
+                        const SizedBox(width: 4),
+                        Text(
+                          _formatDuration(_duration),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 14),
+                        ),
+                        const Spacer(),
+                        Text(
+                          widget.peerDisplayName,
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 14),
+                        ),
+                      ],
                     ),
-                    const Spacer(),
-                    Text(
-                      widget.peerDisplayName,
-                      style: const TextStyle(
-                          color: Colors.white70, fontSize: 14),
-                    ),
+                    // This device cannot capture and sends silence: the call
+                    // stands, but the peer does not hear the user. The same
+                    // line as in the audio layout; the colour is the one
+                    // this layout uses for a fact that is not a choice.
+                    if (currentCall?.captureUnavailable ?? false)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          locale.get('call_microphone_unavailable'),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              color: PeerVideoOffOverlay.bandwidthColor,
+                              fontSize: 14),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -388,6 +419,21 @@ class _CallScreenState extends State<CallScreen> {
                   ),
             ),
 
+            // This device cannot capture and sends silence: the call stands,
+            // but the peer does not hear the user.
+            if (!isRinging &&
+                (appState.service?.currentCall?.captureUnavailable ?? false))
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+                child: Text(
+                  locale.get('call_microphone_unavailable'),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                ),
+              ),
+
             // Encryption indicator
             const SizedBox(height: 16),
             Row(
@@ -483,7 +529,7 @@ class _CallScreenState extends State<CallScreen> {
 
   void _toggleVideo() {
     setState(() {
-      _videoEnabled = !_videoEnabled;
+      _videoEnabledLocal = !_videoEnabledLocal;
     });
     final service = _appStateRef?.service;
     if (service == null) {

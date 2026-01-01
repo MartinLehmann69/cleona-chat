@@ -39,6 +39,7 @@ import 'package:mycelium/host.dart';
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/memory.dart' show Contact;
 import 'package:mycelium/neighbour.dart';
+import 'package:mycelium/trace_first_contact.dart' show contactWhy, contactWhyAt;
 
 /// Whether [n] is a device of the contact [k]: one of [n]'s addresses or
 /// names is [Contact.lastSeen] or an address of [k]'s card.
@@ -50,6 +51,7 @@ extension HostContactSeats on Host {
   /// read [mailboxes] only on call, so a mailbox registered later counts.
   void contactSeatsWireUp() {
     final n = node.neighbourhood;
+    contactWhy[n] = (x) => contactWhyAt(this, x); // S405 (proposal D), log only
     n.isContactDevice = (x) => mailboxes
         .any((p) => p.contacts.any((k) => deviceOfContact(k, x)));
     n.neverFixedNeighbour = (x) => mailboxes.any((p) => p.contacts

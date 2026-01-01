@@ -1,134 +1,124 @@
-/// The assembler — the side that FETCHES an object of the public update
-/// (V4.2 §26.6.1 „The fetch path", decision P1 of 14.09.2026). S387.
+/// The assembler — the side that FETCHES the object of the node's own
+/// update target (V4.2 §26.6.1 "The fetch path"; S387, rebuilt S406-UPDPKG).
 ///
-/// Flow per holder: request without task → task → request with task → up
-/// to [UpdateAssembler.piecesPerAnswer] pieces. If the round is full, or
-/// [UpdateAssembler.restPeriod] passes without a further piece: if something
-/// new was among them, the next request to the same holder; if nothing was among them,
-/// the next holder. After the last one the run ends without result — the
-/// next occasion (start, network change, app opened, new neighbour) asks
-/// again („asks again at the next such moment").
+/// ── THE TARGET ────────────────────────────────────────────────────────
 ///
-/// **No clock.** The next request follows the ARRIVAL of a round;
-/// the quiet period ends a round, it does not trigger one.
+/// ONE object at a time ([expect]). Its partial state lies on disk
+/// ([UpdatePartial], P2), fed by the rounds of a run ([fetch]) and by cover
+/// fill ([aside], P3) — also while no run is allowed (§24.4.2). Another
+/// target ends the run and deletes every other state (§26.6.1, P1); a
+/// completed object whose SHA-256 does not match is deleted whole.
 ///
-/// **The request names the object, never a piece**, and it does not depend on the
-/// cover stream: this route carries the update even with the cover stream
-/// switched off (§3.1 test sentence, decision A).
+/// ── A RUN ──────────────────────────────────────────────────────────────
 ///
-/// Pieces are accepted only from the holder currently asked. The finished
-/// state is checked against SHA-256 of the object; if it does not match, the
-/// whole state is discarded (§26.6.1 self-healing) and the run ends without
-/// result.
+/// Per holder: request → task → request with task and count → answer.
+/// * The next request follows the ARRIVAL of the answer: all pieces asked
+///   for, or a quiet gap after the last one (§11.3). No clock runs while
+///   pieces arrive. Three answers in a row without a new piece (a task is
+///   one) → next holder.
+/// * **Silence is no answer** (§8.2, P6): a request without any packet back
+///   within the quiet period gets ONE more request; silent again → next
+///   holder. After the last holder the run ends; the state stays, and the
+///   next moment of §26.5.4 resumes it — never a timer.
+/// * A task from the asked holder is always taken (an address change needs
+///   one again); a request names how many pieces it wants, sized from the
+///   round trip ([piecesPerAnswerFor], P7) — never which ones. No cover
+///   stream (§3.1); pieces count only from the holder asked.
 library;
 
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/fountain/fountain_block.dart';
-import 'package:cleona/core/fountain/fountain_decoder.dart';
+import 'package:cleona/core/fountain/fountain_decoder.dart' show FountainOffer;
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/update_partial.dart';
 import 'package:mycelium/update_piece.dart';
-
-/// How long a round waits for the next piece. PROVISIONAL —
-/// decision point in report S387 (cellular round trip against waiting time
-/// with a mute holder).
-const Duration kRestPeriod = Duration(milliseconds: 800);
-
-/// This many rounds in a row without a new piece, then the next holder.
-///
-/// Measured (S387, `smoke_update_piece` (3)): with ONE round the
-/// assembler gave up its only holder at 20 % loss as soon as the first
-/// request or the task got lost — „1 requests, 0 pieces". Three, like
-/// the attempts of the splitter (`split.dart` `kHoechstensAnlaeufe`). Price:
-/// a mute holder costs 3 × [kRestPeriod] instead of one. PROVISIONAL.
-const int kEmptyRoundsPerHolder = 3;
-
-/// How many unrequested pieces the pool holds per object until a
-/// request fetches them ([UpdateAssembler.aside]).
-///
-/// 1024 x 1041 B = **1.07 MB per object**, with [kPoolObjects] thus
-/// at most 2.14 MB. The number is measured on the superseded layer,
-/// which kept the same item (`cover_fill_blocks.dart`: 1024 blocks
-/// per object, own pot next to the holder service) — and it is the
-/// SMALLER of the two limits: a 5-MB object needs roughly 5000 blocks,
-/// so the pool contributes at most a fifth of them. More would
-/// not be justifiable on the retention-bounded level (§22.6), and the
-/// level is not distinguished here: what the node ACCEPTS is the same on
-/// all platforms — only the pushing is distinguished (§5.5).
-const int kPoolPerObject = 1024;
-
-/// For how many objects a pool is kept at the same time. Two:
-/// the current target and the previous one, so that a version change does not throw
-/// the pool away in the middle. The third displaces the oldest.
-const int kPoolObjects = 2;
-
-class _Run {
-  final Uint8List object;
-  final FountainDecoder decoder;
-  final List<UpdateNeighbour> holder;
-  final Completer<Uint8List?> result = Completer();
-
-  /// A run does not accept more pieces than this from ONE holder — a
-  /// holder that endlessly sends pieces that never make up an object
-  /// would otherwise hold the run fast.
-  final int upperLimitPerHolder;
-  int holderNo = 0;
-  Uint8List? task;
-  int tasksFromHolder = 0;
-  int piecesFromHolder = 0;
-  int emptyRounds = 0;
-  int inRound = 0;
-  int newInRound = 0;
-  Timer? deadline;
-
-  _Run(this.object, this.decoder, this.holder, int piecesPerAnswer)
-      : upperLimitPerHolder =
-            3 * FountainBlock.sourceBlockCount(decoder.objectLength) +
-                2 * piecesPerAnswer;
-}
+import 'package:mycelium/update_run.dart';
+import 'package:mycelium/update_trace.dart';
 
 class UpdateAssembler {
   final UpdateSend send;
+  final String partialDir; // the partial state: one directory per object
   final Duration restPeriod;
-  final int piecesPerAnswer;
   final void Function(String)? report;
-  _Run? _run;
 
-  /// Unrequested pieces, by fountain identifier (8 B, hex). See
-  /// [aside].
-  final Map<String, List<FountainBlock>> _pool = {};
+  /// The target completed outside a run (by cover fill): its file.
+  void Function(Uint8List object, String path)? onComplete;
 
-  /// The identifiers that this node ITSELF has already fetched or is currently
-  /// fetching — youngest last. Only for them does [aside] accept anything.
-  final List<String> _expected = [];
+  UpdatePartial? _partial;
+  String? _taken;
+  UpdateRun? _run;
+  bool _checking = false, _draining = false;
 
-  /// Diagnostics over the lifetime.
   int receivedPieces = 0;
   int sentPleas = 0;
-
-  /// Unrequested pieces: accepted or rejected ([aside]).
   int asidePieces = 0;
   int asideDropped = 0;
 
-  /// Unrequested pieces that a request has taken over from the pool.
-  int outPool = 0;
-
   UpdateAssembler({
     required this.send,
+    required this.partialDir,
     this.restPeriod = kRestPeriod,
-    this.piecesPerAnswer = kPiecesPerAnswer,
     this.report,
   });
 
   bool get runs => _run != null;
+  UpdatePartial? get partial => _partial;
 
-  /// Fetches [object] (SHA-256, [length] B) from [withWhom], in order.
-  /// `null`: no holder delivered a matching object. If a run for THE SAME
-  /// object is already running, the caller gets its result.
-  Future<Uint8List?> fetch({
+  /// [object] ([length] B) becomes the target: a former one's run ends, every
+  /// other state under [partialDir] is deleted, its own opened from disk.
+  void expect(Uint8List object, int length) {
+    final p = _partial;
+    if (p != null && sameBytes(p.object, object) && p.length == length) return;
+    final hex = partialHex(object);
+    if (_taken == hex) return;
+    final r = _run;
+    if (r != null) _end(r, null, 'aborted — another object is the target');
+    p?.close();
+    _taken = null;
+    final base = Directory(partialDir);
+    if (base.existsSync()) {
+      for (final e in base.listSync()) {
+        if (e.path.endsWith(hex)) continue;
+        updateTrace('discard',
+            object: e.path.split(Platform.pathSeparator).last,
+            reason: 'partial state of a former target deleted');
+        e.deleteSync(recursive: true);
+      }
+    }
+    final n = _partial = UpdatePartial.open(partialDir, object, length);
+    updateTrace('partial',
+        object: object,
+        reason: '${n.resumed ? 'resumed from disk' : 'new'}: ${n.describe()}');
+    if (n.isComplete) unawaited(_complete(n));
+  }
+
+  /// The caller checked and moved the target's file: its state goes.
+  void taken(Uint8List object) {
+    final p = _partial;
+    if (p == null || !sameBytes(p.object, object)) return;
+    p.delete();
+    _partial = null;
+    _taken = partialHex(object);
+  }
+
+  /// The target failed its check: the whole state goes, the target stays.
+  void discard(Uint8List object) {
+    final p = _partial;
+    if (p == null || !sameBytes(p.object, object)) return;
+    final r = _run;
+    if (r != null) _end(r, null, 'discarded');
+    p.delete();
+    _partial = UpdatePartial.open(partialDir, object, p.length);
+  }
+
+  /// Fetches the target [object] from [withWhom], in order. The file of the
+  /// complete, SHA-256-checked object, or `null`: no holder delivered it
+  /// (the state stays). A run for the same object hands back its result.
+  Future<String?> fetch({
     required Uint8List object,
     required int length,
     required List<UpdateNeighbour> withWhom,
@@ -136,209 +126,228 @@ class UpdateAssembler {
     if (object.length != kObjectLength) {
       throw ArgumentError('Object must be $kObjectLength B');
     }
-    final l = _run;
-    if (l != null) {
-      if (sameBytes(l.object, object)) return l.result.future;
-      throw StateError('a different object is being fetched — abort first');
-    }
-    final run = _Run(
-      Uint8List.fromList(object),
-      FountainDecoder(objectId: fountainIdentifier(object), objectLength: length),
-      List.of(withWhom),
-      piecesPerAnswer,
-    );
-    _run = run;
-    // What arrived unrequested counts BEFORE the first request — it saves requests,
-    // it does not replace them (§26.6.1: „Push makes fetching cheaper; it does
-    // not replace it"). If the pool is empty, from here on everything runs as
-    // without it.
-    _expect(_identifier(object));
-    final v = _pool.remove(_identifier(object));
-    if (v != null) {
-      for (final b in v) {
-        if (run.decoder.offer(b) != FountainOffer.foreign) outPool++;
-      }
-      report?.call('Update collector: ${objectShort(object)} — ${v.length} '
-          'piece(s) taken over from the pool');
-    }
-    if (run.decoder.isComplete) {
-      _done(run);
+    expect(object, length);
+    final p = _partial;
+    if (p == null) return Future.value(null);
+    final r = _run;
+    if (r != null) return r.result.future;
+    final run = _run = UpdateRun(List.of(withWhom), p.sourceBlocks);
+    updateTrace('fetch-start',
+        object: object,
+        reason: '$length B, ${p.describe()}, ${run.holder.length} holder(s): '
+            '${run.holder.map((h) => '${h.$1.address}:${h.$2}').join(', ')}');
+    if (p.isComplete) {
+      unawaited(_complete(p));
     } else {
-      _pleas(run);
+      _plea(run);
     }
     return run.result.future;
   }
 
-  /// A piece that did NOT come from a round: it lay in a packet that
-  /// was flying anyway (§5.5 rule 2, §26.6.1 „Push over cover fill").
-  /// `true` if it was accepted.
-  ///
-  /// Three caps, in this order:
-  ///
-  /// 1. only for an object that this node itself has already fetched
-  ///    or is currently fetching. What was never asked for is never stored —
-  ///    this way §5.5 („retention-bounded nodes keep only their own
-  ///    platform's pieces") holds without this layer knowing the platform,
-  ///    and a stranger cannot occupy memory that the node did not
-  ///    want anyway;
-  /// 2. at most [kPoolObjects] such objects;
-  /// 3. at most [kPoolPerObject] pieces per object.
-  ///
-  /// **Never a packet.** This place does not send, plans nothing and
-  /// ends no round: [_Run.inRound] and [_Run.newInRound] stay
-  /// untouched, so that the rhythm of the requests is the same as without
-  /// this route (§3.1). The only thing it may do is make a run FINISHED
-  /// when the piece resolves the last source block.
+  /// A piece from a packet that was flying anyway (§5.5 rule 2): kept if it
+  /// belongs to the target, run or not (§24.4.2 "pieces arriving by cover
+  /// fill are still kept"). Never a packet, never the end of a round.
   bool aside(FountainBlock block) {
-    final id = _identifier(block.objectId);
-    if (!_expected.contains(id)) {
+    final p = _partial;
+    final f = p == null ? FountainOffer.foreign : _offer(p, block);
+    if (f == FountainOffer.foreign ||
+        f == FountainOffer.duplicate ||
+        f == FountainOffer.complete) {
       asideDropped++;
       return false;
     }
-    final l = _run;
-    if (l != null && _identifier(l.object) == id) {
-      if (l.decoder.offer(block) == FountainOffer.foreign) {
-        asideDropped++;
-        return false;
-      }
-      asidePieces++;
-      if (l.decoder.isComplete) _done(l);
-      return true;
-    }
-    final list = _pool.putIfAbsent(id, () => <FountainBlock>[]);
-    if (list.length >= kPoolPerObject) {
-      asideDropped++;
-      return false;
-    }
-    list.add(block);
     asidePieces++;
     return true;
   }
 
-  void _expect(String id) {
-    _expected
-      ..remove(id)
-      ..add(id);
-    while (_expected.length > kPoolObjects) {
-      _pool.remove(_expected.removeAt(0));
+  FountainOffer _offer(UpdatePartial p, FountainBlock block) {
+    try {
+      final f = p.offer(block);
+      if (p.busy) _drainSoon(p);
+      if (p.isComplete && f != FountainOffer.complete) unawaited(_complete(p));
+      return f;
+    } on FileSystemException catch (e) {
+      // A disk error drops the piece — it never reaches the packet path.
+      report?.call('Update collector: partial state not writable: $e');
+      return FountainOffer.foreign;
     }
   }
 
-  /// The 8-B fountain identifier as text. [b] is either the 32-B object
-  /// or the identifier itself.
-  static String _identifier(Uint8List b) => b
-      .sublist(0, kFountainObjectIdBytes)
-      .map((x) => x.toRadixString(16).padLeft(2, '0'))
-      .join();
+  /// The rest of the peeling wave, one batch per event-loop turn — no clock.
+  void _drainSoon(UpdatePartial p) {
+    if (_draining) return;
+    _draining = true;
+    void step() {
+      try {
+        if (identical(_partial, p) && p.drain()) return Timer.run(step);
+        if (identical(_partial, p) && p.isComplete) unawaited(_complete(p));
+      } on FileSystemException catch (e) {
+        report?.call('Update collector: partial state not readable: $e');
+      }
+      _draining = false;
+    }
 
-  /// Ends a running run without result — a newer manifest has
-  /// made another object the target (Z1).
+    Timer.run(step);
+  }
+
+  /// Ends a running run without result; the state stays.
   void abort() {
-    final l = _run;
-    if (l != null) _end(l, null, 'abgebrochen');
+    final r = _run;
+    if (r != null) _end(r, null, 'aborted');
   }
 
   /// Packets of kinds 0x71-0x73. Every other kind is ignored.
   void receive(Uint8List packet, InternetAddress from, int fromPort) {
     final l = _run;
-    if (l == null || packet.isEmpty || l.holderNo >= l.holder.length) return;
+    final p = _partial;
+    if (l == null || p == null || packet.isEmpty) return;
+    if (l.holderNo >= l.holder.length || _checking) return;
     final h = l.holder[l.holderNo];
     if (h.$1.address != from.address || h.$2 != fromPort) return;
     switch (packet[0]) {
       case kinds.kPieceTask:
         final a = pleaOrTaskRead(packet);
-        // At most two tasks per holder: a second one is only needed
-        // when its window changes; more would be ping-pong with a
-        // forged source.
-        if (a == null ||
-            !sameBytes(a.object, l.object) ||
-            l.tasksFromHolder >= 2) {
-          return;
-        }
-        l.tasksFromHolder++;
+        if (a == null || !sameBytes(a.object, p.object)) return;
+        l.sample();
+        updateTrace('task-in',
+            object: p.object, reason: 'from ${from.address}:$fromPort taken');
         l.task = a.task;
-        _pleas(l);
+        _answerEnd(l);
       case kinds.kNoPieces:
         final o = noRead(packet);
-        if (o == null || !sameBytes(o, l.object)) return;
+        if (o == null || !sameBytes(o, p.object)) return;
         _nextHolder(l, 'does not have it');
       case kinds.kUpdatePiece:
         final block = pieceRead(packet);
         if (block == null) return;
-        final finding = l.decoder.offer(block);
+        final finding = _offer(p, block);
         if (finding == FountainOffer.foreign) return;
         receivedPieces++;
-        l.inRound++;
-        l.piecesFromHolder++;
-        if (finding != FountainOffer.duplicate) l.newInRound++;
-        if (l.decoder.isComplete) {
-          _done(l);
-        } else if (l.piecesFromHolder > l.upperLimitPerHolder) {
+        l.piece(fresh: finding != FountainOffer.duplicate);
+        if (_checking || !identical(_run, l)) return;
+        if (l.piecesFromHolder > l.upperLimitPerHolder) {
           _nextHolder(l, 'upper limit ${l.upperLimitPerHolder} without object');
-        } else if (l.inRound >= piecesPerAnswer) {
-          _roundEnd(l);
+        } else if (l.inRound >= l.asked) {
+          _answerEnd(l);
+        } else {
+          _arm(l, l.gap());
         }
     }
   }
 
-  void _pleas(_Run l) {
-    l.deadline?.cancel();
+  void _arm(UpdateRun l, Duration d) {
+    l.quiet?.cancel();
+    l.quiet = Timer(d, () => _quietEnd(l));
+  }
+
+  void _plea(UpdateRun l) {
+    if (!identical(_run, l)) return;
+    final p = _partial!;
     if (l.holderNo >= l.holder.length) {
-      _end(l, null, 'no holder delivered the object');
+      _end(l, null, 'no holder delivered the object — the state stays');
       return;
     }
-    l.inRound = 0;
-    l.newInRound = 0;
-    send(pleaPacket(l.object, l.task ?? Uint8List(kTaskLength)),
-        l.holder[l.holderNo]);
+    l.roundStart();
+    send(pleaPacket(p.object, l.task ?? Uint8List(kTaskLength), count: l.asked),
+        l.current);
     sentPleas++;
-    l.deadline = Timer(restPeriod, () => _roundEnd(l));
+    _arm(l, l.silence(restPeriod));
   }
 
-  void _roundEnd(_Run l) {
-    if (!identical(_run, l)) return;
-    l.deadline?.cancel();
+  void _quietEnd(UpdateRun l) {
+    if (!identical(_run, l) || _checking) return;
+    if (l.inRound > 0) {
+      _answerEnd(l);
+      return;
+    }
+    final h = l.holder[l.holderNo];
+    if (!l.askedAgain) {
+      l.askedAgain = true;
+      updateTrace('ask-again',
+          object: _partial?.object,
+          reason: '${h.$1.address}:${h.$2} — no answer within the quiet '
+              'period, asked once more');
+      _plea(l);
+      return;
+    }
+    _nextHolder(l, 'silent after one more request');
+  }
+
+  void _answerEnd(UpdateRun l) {
+    l.quiet?.cancel();
+    final p = _partial!;
+    final h = l.holder[l.holderNo];
+    updateTrace('round',
+        object: p.object,
+        reason: 'holder ${h.$1.address}:${h.$2}: ${l.inRound} of ${l.asked} '
+            'piece(s), ${l.newInRound} new, ${p.describe()}, rtt '
+            '${l.rtt?.inMilliseconds ?? '-'} ms, empty answers before '
+            '${l.emptyAnswers}');
+    l.askedAgain = false;
     if (l.newInRound > 0) {
-      l.emptyRounds = 0;
-      _pleas(l);
-    } else if (++l.emptyRounds < kEmptyRoundsPerHolder) {
-      _pleas(l);
-    } else {
-      _nextHolder(l, '$kEmptyRoundsPerHolder rounds without a new piece');
+      l.emptyAnswers = 0;
+    } else if (++l.emptyAnswers >= kEmptyAnswersPerHolder) {
+      _nextHolder(l, '$kEmptyAnswersPerHolder answers without a new piece');
+      return;
+    }
+    _plea(l);
+  }
+
+  void _nextHolder(UpdateRun l, String reason) {
+    l.quiet?.cancel();
+    final h = l.holder[l.holderNo];
+    updateTrace('holder-next',
+        object: _partial?.object,
+        reason: '${h.$1.address}:${h.$2} — $reason (${_partial?.describe()})');
+    report?.call('Update collector: ${objectShort(_partial!.object)} at '
+        '${h.$1.address}:${h.$2} — $reason, next holder');
+    l.nextHolder();
+    _plea(l);
+  }
+
+  /// The target is complete: cut, checked against its SHA-256. Matches →
+  /// the run (or [onComplete]) gets the file; does not → the whole state
+  /// is deleted (§26.6.1 self-healing).
+  Future<void> _complete(UpdatePartial p) async {
+    if (_checking) return;
+    _checking = true;
+    _run?.quiet?.cancel();
+    try {
+      final path = p.finish();
+      final ok = sameBytes(await sha256OfFile(path), p.object);
+      if (!identical(_partial, p)) return;
+      if (!ok) {
+        updateTrace('discard',
+            object: p.object,
+            reason: 'complete, but SHA-256 does not match — the state is deleted');
+        discard(p.object);
+        return;
+      }
+      updateTrace('object-complete',
+          object: p.object,
+          reason: '${p.length} B, SHA-256 matches — ${_run == null ? 'by cover fill, no run' : 'in a run'}');
+      final r = _run;
+      if (r != null) {
+        _end(r, path, 'complete (${p.length} B)');
+      } else {
+        onComplete?.call(p.object, path);
+      }
+    } on FileSystemException catch (e) {
+      report?.call('Update collector: completing failed: $e');
+      final r = _run;
+      if (r != null) _end(r, null, 'completing failed');
+    } finally {
+      _checking = false;
     }
   }
 
-  void _nextHolder(_Run l, String reason) {
-    if (l.holderNo < l.holder.length) {
-      final h = l.holder[l.holderNo];
-      report?.call('Update collector: ${objectShort(l.object)} at '
-          '${h.$1.address}:${h.$2} — $reason, next holder');
-    }
-    l.holderNo++;
-    l.task = null;
-    l.tasksFromHolder = 0;
-    l.piecesFromHolder = 0;
-    l.emptyRounds = 0;
-    _pleas(l);
-  }
-
-  void _done(_Run l) {
-    final bytes = l.decoder.takeObject();
-    if (bytes != null && sameBytes(SodiumFFI().sha256(bytes), l.object)) {
-      // Fetched no longer means wanted: from now on [aside] rejects pieces
-      // of this object instead of filling a pool for nothing.
-      _expected.remove(_identifier(l.object));
-      _pool.remove(_identifier(l.object));
-      _end(l, bytes, 'complete (${bytes.length} B)');
-    } else {
-      _end(l, null, 'complete, but SHA-256 does not match — version discarded');
-    }
-  }
-
-  void _end(_Run l, Uint8List? bytes, String reason) {
-    l.deadline?.cancel();
+  void _end(UpdateRun l, String? path, String reason) {
+    l.quiet?.cancel();
     if (identical(_run, l)) _run = null;
-    report?.call('Update collector: ${objectShort(l.object)} $reason');
-    if (!l.result.isCompleted) l.result.complete(bytes);
+    updateTrace('fetch-end',
+        object: _partial?.object,
+        reason: '$reason — ${path == null ? 'without result, ${_partial?.describe()}' : 'object'}');
+    report?.call('Update collector: ${_partial == null ? '-' : objectShort(_partial!.object)} $reason');
+    if (!l.result.isCompleted) l.result.complete(path);
   }
 }

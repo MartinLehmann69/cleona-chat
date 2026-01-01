@@ -13,7 +13,8 @@
 ///   0x00 filling            content: nothing
 ///   0x01 update piece       content: length u16 LE | piece
 ///   0x02 address entries    content: `address_entries.dart` (ONE codec, own first)
-///   0x03 code registration  content: length u16 LE | piece (`code_registration.dart`)
+///   (0x03 is no content any more: the code registration travels as `0x24`,
+///   §5.5, §8.1 — F-B, owner 06.10.2026)
 ///   0x04 keep-alive         content: device code 16 | token 8 (§8.1)
 /// ```
 ///
@@ -60,8 +61,6 @@ import 'package:mycelium/split.dart' show kHeader;
 const int kContentFill = kinds.kCoverFill;
 const int kContentPiece = kinds.kCoverPiece;
 const int kContentEntries = kinds.kCoverEntries;
-/// Codes for the fixed neighbour (§8.1, S391) — layout `code_registration.dart`.
-const int kContentRegistration = kinds.kCoverRegistration;
 /// The keep-alive (§8.1) — device code and token, `mapping_echo.dart`.
 const int kContentKeepAlive = kinds.kCoverKeepAlive;
 
@@ -90,7 +89,7 @@ bool isCoverPayload(Uint8List payload) {
 
 /// Builds a cover payload of exactly [kCoverPayload] B.
 ///
-/// [piece] for [kContentPiece] and [kContentRegistration], [entries] for
+/// [piece] for [kContentPiece], [entries] for
 /// [kContentEntries], [piece] of exactly [kKeepAliveContent] B for
 /// [kContentKeepAlive].
 /// Too many entries (`addressListWrite`) or a piece above
@@ -105,7 +104,7 @@ Uint8List coverPayloadBuild(
   switch (kind) {
     case kContentFill:
       break;
-    case kContentPiece || kContentRegistration:
+    case kContentPiece:
       final s = piece ?? (throw ArgumentError('Piece missing'));
       if (s.length > kPieceAtMost) {
         throw ArgumentError('Piece ${s.length} B, at most $kPieceAtMost');
@@ -144,7 +143,6 @@ typedef CoverContent = ({
   int kind,
   Uint8List? piece,
   AddressList? entries,
-  Uint8List? registration,
   Uint8List? keepAlive,
 });
 
@@ -168,20 +166,16 @@ CoverContent? coverPayloadRead(Uint8List p) {
           kind: kContentFill,
           piece: null,
           entries: null,
-          registration: null,
           keepAlive: null
         );
-      case kContentPiece || kContentRegistration:
-        final kind = p[0];
+      case kContentPiece:
         final l = read(2);
         final n = l[0] | (l[1] << 8);
         if (n > kPieceAtMost) return null;
-        final b = Uint8List.fromList(read(n));
         return (
-          kind: kind,
-          piece: kind == kContentPiece ? b : null,
+          kind: kContentPiece,
+          piece: Uint8List.fromList(read(n)),
           entries: null,
-          registration: kind == kContentRegistration ? b : null,
           keepAlive: null
         );
       case kContentEntries:
@@ -189,7 +183,6 @@ CoverContent? coverPayloadRead(Uint8List p) {
           kind: kContentEntries,
           piece: null,
           entries: addressListRead(read),
-          registration: null,
           keepAlive: null
         );
       case kContentKeepAlive:
@@ -197,7 +190,6 @@ CoverContent? coverPayloadRead(Uint8List p) {
           kind: kContentKeepAlive,
           piece: null,
           entries: null,
-          registration: null,
           keepAlive: Uint8List.fromList(read(kKeepAliveContent))
         );
       default:

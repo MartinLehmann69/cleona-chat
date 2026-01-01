@@ -115,6 +115,10 @@ final class PunchOutcome {
   /// translated (the same rule as `CallTransport.mediaUnavailableReason`).
   final String? refusal;
 
+  /// The refusal is the one §17.3 names apart: the own candidates and the
+  /// peer's share no address family ("no common connection type").
+  final bool noCommonFamily;
+
   /// What the window cost. Stands in the result and not merely in the
   /// log, so that a measurement can READ it instead of estimating it.
   final int packetsSent;
@@ -127,6 +131,7 @@ final class PunchOutcome {
     this.address,
     this.port,
     this.refusal,
+    this.noCommonFamily = false,
     required this.packetsSent,
     required this.bytesSent,
     required this.roundCarried,
@@ -205,9 +210,11 @@ final class PunchWindow {
     }
     if (ownCandidates.isNotEmpty &&
         !haveCommonFamily(ownCandidates, peerCandidates)) {
-      return _cancellation('No common connection type (§17.3): the own '
+      return _cancellation(
+          'No common connection type (§17.3): the own '
           'candidates and those of the other side share no address '
-          'family. Messages are unaffected by this.');
+          'family. Messages are unaffected by this.',
+          noCommonFamily: true);
     }
 
     final prediction = predictPorts(peerCandidates);
@@ -267,10 +274,11 @@ final class PunchWindow {
             '"no call".');
   }
 
-  PunchOutcome _cancellation(String reason) {
+  PunchOutcome _cancellation(String reason, {bool noCommonFamily = false}) {
     log?.call('Punch window (§17.3) without success: $reason');
     return PunchOutcome(
       refusal: reason,
+      noCommonFamily: noCommonFamily,
       packetsSent: _packets,
       bytesSent: _bytes,
       roundCarried: -1,

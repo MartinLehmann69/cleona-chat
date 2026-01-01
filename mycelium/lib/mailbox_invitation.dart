@@ -2,19 +2,28 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:mycelium/bundle.dart'
+    show lineBundleAddress, lineBundleFits;
 import 'package:mycelium/first_contact.dart'
     show Join, ContactRequest, Introduction;
+import 'package:mycelium/proof_of_work.dart' show ProofOfWork;
+import 'package:mycelium/publisher_lookup.dart' show cardFromPublisher;
 import 'package:mycelium/memory.dart' show Contact;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/card_text.dart';
+import 'package:mycelium/code_send_retry.dart' show kStepThreeHandOnAtMost;
+import 'package:mycelium/shell_link.dart' show kAnswerDeadline;
 import 'package:mycelium/node_outside.dart';
 import 'package:mycelium/node_join.dart';
 import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node_helpers.dart' show outTheSegment, cardChannel;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_outbound.dart';
-import 'package:mycelium/mailbox_pair.dart' show MailboxPair;
+import 'package:mycelium/mailbox_first_contact.dart';
+import 'package:mycelium/invitation_way_in.dart' show MailboxWayIn;
 import 'package:mycelium/envelope.dart' show Address;
+import 'package:mycelium/trace_first_contact.dart' show traceCardIssued, traceCardRead;
 
 /// How a contact comes about: issue an invitation, join
 /// one, decide a request — always AS the identity of this
@@ -32,7 +41,8 @@ import 'package:mycelium/envelope.dart' show Address;
 /// [MailboxOutbound.giveUpAgain].
 extension MailboxInvitation on Mailbox {
   /// Issues an invitation and returns card (QR) and invitation text
-  /// (copy/paste). [inPerson]: the card is being handed over
+  /// (copy/paste) — the `cleona:2:` line with `pk_inv` and the key bundle
+  /// (proposal E), so that a requester reaches this identity while it is off. [inPerson]: the card is being handed over
   /// face to face right now (NFC, QR on site) — a request
   /// on it is accepted without a second question (§15.5).
   /// [days]/[unlimited] choose the validity (§15.3), [label] the
@@ -46,15 +56,18 @@ extension MailboxInvitation on Mailbox {
     bool unlimited = false,
     String label = '',
   }) {
-    final (card, _) = node.invite(
+    final (card, e) = node.invite(
         open: open,
         inPerson: inPerson,
         days: days,
         unlimited: unlimited,
         label: label,
         forField: identity);
-    invitationsRemember();
-    return (card: card, text: asInvitationText(card));
+    invitationsRemember(); // with the invitation's secret keys (R-b)
+    traceCardIssued(this, card); // S405 (proposal D): field by field, and why
+    // T-a: signed by the identity's Ed25519 key, checked at redemption;
+    // §15.6: the chain from the fingerprint to the bundle's keys.
+    return (card: card, text: invitationLine(card, e));
   }
 
   /// Revokes the invitation with [code] (§15.3): from now on a request
@@ -116,8 +129,10 @@ extension MailboxInvitation on Mailbox {
   /// Joins via a pasted invitation text.
   ///
   /// Two steps, two time scales. Step 1 — fetch bundle, send request —
-  /// is a round trip in the network: 5 s, otherwise [MailboxError]. Step 2 — the
-  /// answer — comes when the inviter has DECIDED (§12.5), and that
+  /// is a round trip in the network: 5 s, otherwise [MailboxError]. With a
+  /// `cleona:2:` line the bundle stands in the line: step 1 is the request
+  /// alone, it goes out at once and waits for nothing (proposal E). Step 2 —
+  /// the answer — comes when the inviter has DECIDED (§12.5), and that
   /// can take hours; there is no deadline for it. The future ends with
   /// the contact, or with [MailboxError] if declined. The
   /// contact is remembered even if nobody is waiting for the future any more.
@@ -130,10 +145,20 @@ extension MailboxInvitation on Mailbox {
   /// sent" hooks in HERE and not on the future —
   /// that only ends with the decision (S388). [introduction] stands in the
   /// request so that the inviter knows who is asking (§15.5).
+  ///
+  /// The out-of-band line (S405 F-1, owner decision 06.10.2026; §15.1
+  /// "Neither side has to be on at the same time", §9.1, §12.2): no round
+  /// trip, no deadline. [onSent] fires when a way carried the request or the
+  /// post box took it (`in transit`); [onResting] when its placing ended
+  /// without either — it is saved and goes out again at the next edge, no
+  /// error. The join is saved as soon as the request exists. QR/NFC keep the
+  /// round trip and its deadline (S405 V4).
   Future<Contact> join(String text,
       {Introduction? introduction,
-      void Function(Address counterpart)? onSent}) async {
-    final card = _cardRead(text);
+      void Function(Address counterpart)? onSent,
+      void Function(Address counterpart)? onResting}) async {
+    final line = _cardRead(text);
+    final card = line.card;
     // The relay list of the read card is remembered (§11.9 "learned from
     // the relay lists of cards it has read") — it has been read here, no matter
     // how the join turns out.
@@ -148,8 +173,9 @@ extension MailboxInvitation on Mailbox {
     // restart-proof: every new neighbour is saved immediately (source 1).
     // S390: three fixed roles became the neighbour address plus the
     // issuer's address list (§15.2). EVERYTHING is entered that
-    // `Neighbourhood.possible` lets through — which of them lies in the own
-    // segment does not matter here: a neighbour is a neighbour.
+    // `Neighbourhood.possible` lets through. A private address of a FOREIGN
+    // segment it does not (S405 V6, `own_segment.dart`): from here it is
+    // unreachable, §15.2 "a fact about you".
     for (final a in [card.neighbourAddress, ...card.ownAddresses]) {
       // S390: here stood `a.typ == KarteAdressTyp.ipv4`. A card with
       // IPv6 addresses is per §15.2 a completely ordinary card ("an
@@ -162,19 +188,74 @@ extension MailboxInvitation on Mailbox {
     final result = Completer<Contact>();
     // A rejection that nobody is waiting for any more is not a crash.
     result.future.ignore();
-    final joining = node.join(card,
-        forField: identity, introduction: introduction)
-      ..onCompletion = (b) => unawaited(_complete(b, card, result));
-    final sent = await waitFor(
-        () => joining.counterpart != null || joining.declined,
-        const Duration(seconds: 5));
-    final counterpart = joining.counterpart;
-    if (!sent || counterpart == null) {
+    final bundle = line.bundle;
+    traceCardRead(this, card, line: bundle != null); // S405 (proposal D)
+    final issuer = bundle == null
+        ? null
+        : lineBundleAddress(bundle, card.letterKeyX25519,
+            chain: line.chain, fingerprint: card.fingerprint);
+    late final Join joining;
+    joining = node.join(card,
+        forField: identity,
+        introduction: introduction,
+        lineBundle: issuer,
+        pkInv: line.pkInv,
+        // Told one turn later: without a fixed neighbour the request leaves
+        // INSIDE `node.join`, before `joining` is assigned.
+        onRequest: issuer == null
+            ? null
+            : (inTransit) => scheduleMicrotask(() {
+                  joinRemember(joining, pkInv: line.pkInv);
+                  (inTransit ? onSent : onResting)?.call(issuer);
+                }),
+        onPlaced: () => scheduleMicrotask(() => joinRemember(joining, pkInv: line.pkInv)))
+      ..onCompletion = (b) => unawaited(joinComplete(b, card, result));
+    if (issuer != null) {
+      // The request exists once its window is set — after the reply code's
+      // registration (§15.5, F-B: two answer deadlines at most). From here
+      // the join survives a restart; nothing ends it but the answer (3).
+      await waitFor(() => joining.requestWindow != null,
+          kAnswerDeadline * 2 + const Duration(seconds: 1));
+      joinRemember(joining, pkInv: line.pkInv);
+      return result.future;
+    }
+    var current = joining;
+    var counterpart = await _roundTrip(current);
+    if (counterpart == null) {
+      // §15.2 (E-3, S406): neither the card's addresses nor its neighbour
+      // answered — ONE lookup under its publisher key, if it carries one, and
+      // ONE more round trip to what the record names (`publisher_lookup.dart`).
+      final moved = await cardFromPublisher(this, card);
+      if (moved != null) {
+        current = node.join(moved, forField: identity, introduction: introduction)
+          ..onCompletion = (b) => unawaited(joinComplete(b, moved, result));
+        counterpart = await _roundTrip(current);
+      }
+    }
+    if (counterpart == null) {
       throw MailboxError('Join did not come about '
           '(no bundle from the other side)');
     }
+    // Proposal E: the request is out — the join survives a restart until
+    // the answer (3) comes (`mailbox_first_contact.dart`).
+    joinRemember(current);
     onSent?.call(counterpart);
     return result.future;
+  }
+
+  /// The QR/NFC round trip of [b]: its counterpart once the bundle came, or
+  /// `null` after the deadline — and then [b] has ended entirely (S405 V4).
+  /// 5 s for the answer itself, plus the time step 3 may spend handing the
+  /// request on past silent candidates (S405 field test 06.10.2026), plus the
+  /// wait for the reply code's registration before the request leaves
+  /// (§15.5, two answer deadlines at most — `node_join.dart`, F-B).
+  Future<Address?> _roundTrip(Join b) async {
+    final sent = await waitFor(() => b.counterpart != null || b.declined,
+        const Duration(seconds: 5) + kStepThreeHandOnAtMost + kAnswerDeadline * 2);
+    final counterpart = b.counterpart;
+    if (sent && counterpart != null) return counterpart;
+    node.joinAbandon(b, forField: identity); // S405 V4 (QR/NFC): ends entirely
+    return null;
   }
 
   /// Reads the card in the own channel ([cardChannel]). The text reader
@@ -183,9 +264,16 @@ extension MailboxInvitation on Mailbox {
   /// error path is it therefore re-read in the foreign channel: if that succeeds, it is
   /// a card of the other network, and [CardChannelError] says so by
   /// name — without evaluating the message text.
-  Card _cardRead(String text) {
+  CardLine _cardRead(String text) {
     try {
-      return outInvitationText(text, expectedChannel: cardChannel);
+      final line = outInvitationLine(text,
+          expectedChannel: cardChannel, verify: SodiumFFI().verifyEd25519);
+      if (!lineBundleFits(line)) {
+        throw CardTextError(CardTextErrorKind.badSignature,
+            'the bundle of the line neither founds the fingerprint nor is '
+            'connected to it by its chain — the line was altered (§15.6)');
+      }
+      return line;
     } on CardTextError catch (error) {
       if (error.kind != CardTextErrorKind.wrongVersion) rethrow;
       final foreign =
@@ -201,8 +289,11 @@ extension MailboxInvitation on Mailbox {
     }
   }
 
-  Future<void> _complete(
+  /// The answer (3) to [b] is there — accepted or declined. Public for the
+  /// joins restored after a restart (`mailbox_first_contact.dart`).
+  Future<void> joinComplete(
       Join b, Card card, Completer<Contact> result) async {
+    joinForget(b); // it is answered: nothing more to restore (proposal E)
     final counterpart = b.counterpart;
     if (b.declined || !b.done || counterpart == null) {
       if (!result.isCompleted) {
@@ -229,11 +320,20 @@ extension MailboxInvitation on Mailbox {
     // precondition of a builder that threw at 16 bytes; since version
     // 12 `memory.dart` keeps the evidence typed (§6.3).
     final proof = b.provenRoute;
+    final named = b.counterpartNeighbours;
     contactRemember(counterpart,
         ip: proof?.address,
         port: proof?.port,
         cardsAddresses: card.ownAddresses,
-        neighbours: card.neighbourAddress == null ? null : [card.neighbourAddress!],
+        // Proposal E: the fixed neighbours the acceptance named (§9.2), else
+        // the card's; the issuer's day keys from the acceptance, and the own
+        // ones went in the request — the edge "new contact" (§8.2).
+        neighbours: named.isNotEmpty
+            ? named
+            : card.neighbourAddress == null ? null : [card.neighbourAddress!],
+        dayKey: b.counterpartDayKeys,
+        dayKeySent: DateTime.fromMillisecondsSinceEpoch(
+            b.requestWindow! * ProofOfWork.windowSeconds * 1000),
         pairRandom: b.pairRandom, // proposal M: s_AB from the acceptance
         // S394-11: the name from the introduction in answer (3) — until then
         // the requester showed a placeholder until a later profile message.
@@ -249,8 +349,6 @@ extension MailboxInvitation on Mailbox {
     // even without any address, and `giveUpAgain` knows the case
     // (`mailbox_outbound.dart`, finding B-2).
     giveUpAgain(only: counterpart);
-    // EDGE "new contact" (proposal M §8.2): the own day keys.
-    dayKeyDistribute(only: counterpart);
     // If the answer came from OUTSIDE the own segment, then someone stands there
     // right now who can say how one looks from outside oneself —
     // and that is the only way to get to the own public address.

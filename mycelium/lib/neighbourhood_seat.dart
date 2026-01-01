@@ -98,3 +98,27 @@ List<Neighbour> seatsFromMemory(
             contactSeat: seats.add(n.contactSeat) ? n.contactSeat : 0),
   ];
 }
+
+/// The edge "the contact seats changed" (S405 V1, owner decision
+/// 06.10.2026): the card's seat is handed over by the same rule as at a
+/// confirmation ([seatAfterConfirm]) — away from a contact's device or a
+/// private holder to a reachable neighbour that answered. Until S405 only a
+/// confirmation asked it; a deleted contact left its former device holding
+/// the card's seat until the next confirmations (field 06.10.2026: 20:15:32
+/// deleted, 20:15:58 still "card neighbour NONE"). In place, like
+/// `seatContacts`; `true` if the seat moved.
+bool cardSeatHandOver(List<Neighbour> list, bool Function(Neighbour n) answered,
+    bool Function(Neighbour n) named, bool Function(NeighbourAddress a) public,
+    bool Function(Neighbour n) contact) {
+  final f = list.where((n) => n.fixed).firstOrNull;
+  if (f == null) return false;
+  final to = seatAfterConfirm(list, f, -1,
+      answered: answered, named: named, public: public, contact: contact);
+  if (to == null) return false;
+  for (var j = 0; j < list.length; j++) {
+    if (list[j].fixed != (list[j].id == to.id)) {
+      list[j] = list[j].copy(fixed: list[j].id == to.id);
+    }
+  }
+  return true;
+}

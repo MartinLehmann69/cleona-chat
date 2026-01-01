@@ -1,55 +1,36 @@
-/// The contact card — what stands in the QR when someone invites.
+/// The contact card — what stands in the QR when someone invites. In the
+/// norm: the invitation data (V4.2 §15.2, field table).
 ///
-/// FOURTH VERSION (relay list, S388). The version byte stays at 1 because
-/// nothing has shipped yet and consequently there is no card out there
-/// that carries an earlier version. Spec: V4.2 §15.2.
+/// SIXTH VERSION (S406, E-3 A+A1, owner decision 07.10.2026): the
+/// publisher-key flag and the publisher key (0 or 32 B) between the
+/// neighbour address and the relay count, version byte `0x02`. A card of
+/// version `0x01` is rejected as "unknown card version" before any other
+/// field is read — no partial read (§15.2).
 ///
-/// The first version carried the complete keys (Ed25519 +
-/// ML-DSA-65 + X25519 + ML-KEM-768) and a signature over them — 6543/6549
-/// bytes, fits into no QR code. The layout since the second version
-/// carries only what Alice needs to REACH Bob and IMMEDIATELY send him something
-/// encrypted:
+/// History in brief: the first version carried the complete keys and a
+/// signature (6543 B, fits no QR); since the second it carries only what
+/// a reader needs to REACH the issuer and send it something sealed —
+/// letter key (32 B, the invitation's own X25519, R-b), fingerprint
+/// (32 B, the identifier, survives every KEM rotation; the bundle is
+/// matched against it, [matchesIdentifier]), addresses, a code (16 B) and
+/// the expiry. The third added [channel], a type byte per address and
+/// [difficulty]; the fourth the [relay] list (§11.9); the fifth (S390)
+/// ONE list of own addresses in the issuer's order of preference (the
+/// reader classifies them, `address_class.routesFromCard`); the sixth the
+/// [publisherKey]. Address and relay codec: `card_address.dart`.
 ///
-///  1. Bob's X25519 (32 B) at the time of the card — since E1 NOT for
-///     sealing: it changes every 7 d, the card is valid 90 d
-///  2. The fingerprint (32 B) = Bob's identifier, `Address.identifier`, only
-///     over the signing part — the card survives every KEM rotation.
-///     The bundle later travels SIGNED over the network; after the
-///     signature its identifier is checked here ([matchesIdentifier])
-///  3. Three addresses: LAN address (mandatory), public address
-///     (optional) and neighbour address (optional) — a neighbour via which
-///     Bob is reachable when he is not directly reachable behind NAT/CGNAT
-///     and the public address is therefore worthless
-///  4. A code: 16 random bytes + expiry time (Unix seconds, u32 LE)
-///     — spam protection, nothing else
+/// Sizes of the packed format (§15.2: 91 / 98 / 413), measured by
+/// `test/smoke_card_publisher.dart` (text form) and the app smoke
+/// `test/smoke/smoke_invitation_card_reader.dart` (QR version, level M):
 ///
-/// The third version added [channel] (0x00 live, 0x01 beta, every
-/// other value rejects, [CardChannelError]), one type byte before each
-/// address (4/6; an unknown type rejects the WHOLE card, a
-/// guessed length would shift every following field) and [difficulty] (1 B,
-/// leading zero bits of the proof of work — the reader must know it).
-///
-/// The fourth version adds [relay] (§11.9): count byte (0–3) and per
-/// entry length byte (1–64) + address as text, behind the neighbour address.
-/// Codec in `card_address.dart`.
-///
-/// The fifth version (S390) replaces LAN and public address with
-/// ONE list of own addresses with count byte (0-4), in the
-/// issuer's order of preference. The roles go away: which address
-/// is segment-local is computed by the READER (`address_class.routesFromCard`).
-///
-/// Measured sizes of the packed format (§15.2: 90 / 97 / 380):
-///
-/// | Case                             | Card  | + 2 B checksum   | + prefix  |
-/// |----------------------------------|-------|------------------|-----------|
-/// | no address (CGNAT), no relays    |  90 B |             92 B |       132 |
-/// | one own IPv4, no relays          |  97 B |             99 B |       141 |
-/// | 4x IPv6 + neighbour + 3 relays   | 380 B |            382 B |       519 |
+/// | Case                                     | Card  | `cleona:1:` | QR M |
+/// |------------------------------------------|-------|-------------|------|
+/// | no address (CGNAT), no key, no relays    |  91 B |         133 | V6   |
+/// | one own IPv4, no key, no relays          |  98 B |         143 | V6   |
+/// | 4x IPv6 + neighbour + key + 3 relays     | 413 B |         563 | V16  |
 ///
 /// The text form computes `ceil(n x 4 / 3)` base64url characters plus 9 for
-/// `cleona:1:`. The QR carries the BINARY form: at error correction M
-/// version 6 (41x41) for the smallest and version 15 (77x77) for the
-/// largest card (measured 16.09.2026, §15.2).
+/// the prefix (`card_text.dart`). The QR carries the BINARY form.
 ///
 /// NO SIGNATURE. The card travels over a visible channel (Bob's
 /// screen); a signature from a key whose fingerprint stands in
@@ -80,9 +61,9 @@ import 'package:mycelium/card_address.dart';
 export 'package:mycelium/card_address.dart';
 
 class Card {
-  /// Version byte at the front of the packed format. Stays at 1: nothing has
-  /// shipped yet, so there is no card of an older version out there.
-  static const int version = 1;
+  /// Version byte at the front of the packed format (§15.2: `0x02`, owner
+  /// decision 07.10.2026, E-3 A1). Any other value rejects the whole card.
+  static const int version = 2;
 
   /// Channel "live" — the value that a card from the live network carries.
   static const int channelLive = kChannelLive;
@@ -116,14 +97,20 @@ class Card {
   /// At most this many relays does a card carry (§15.2).
   static const int relayAtMost = kRelayAtMost;
 
-  /// Size of the packed format without the own addresses, without the
-  /// neighbour address and without the relay list — version(1) + channel(1) +
-  /// letter key(32) + fingerprint(32) + neighbour flag(1) +
-  /// difficulty(1) + code(16) + expiry(4) = 88 B. Added to that are the
-  /// address list (at least 1 B count byte), with flag=1 the neighbour address
-  /// (7 or 19 B) and the relay list (at least 1 B) — together
-  /// at least 90 B (§15.2).
-  static const int bodyLength = 1 + 1 + letterKeyLength + fingerprintLength + 1 + 1 + codeLength + 4;
+  /// The publisher key: the x-only secp256k1 key under which the issuing
+  /// device publishes its address record (§11.9, BIP-340: 32 B).
+  static const int publisherKeyLength = 32;
+
+  /// Size of the packed format without the own addresses, the neighbour
+  /// address, the publisher key and the relay list — version(1) +
+  /// channel(1) + letter key(32) + fingerprint(32) + neighbour flag(1) +
+  /// publisher-key flag(1) + difficulty(1) + code(16) + expiry(4) = 89 B.
+  /// Added to that are the address list (at least 1 B count byte), with
+  /// flag=1 the neighbour address (7 or 19 B), with flag=1 the publisher key
+  /// (32 B) and the relay list (at least 1 B) — together at least 91 B
+  /// (§15.2).
+  static const int bodyLength =
+      1 + 1 + letterKeyLength + fingerprintLength + 1 + 1 + 1 + codeLength + 4;
 
   /// For error messages: a nameable name instead of a bare number.
   static String channelName(int channelNo) => addr.channelName(channelNo);
@@ -169,6 +156,12 @@ class Card {
   /// (§11.8), no delivery information. Immutable.
   final List<String> relay;
 
+  /// The issuer's publisher key (§15.2, §11.9) — set only while the issuing
+  /// device actually publishes its address record; `null` = flag `0x00`. A
+  /// reader whose card addresses no longer answer looks the current ones up
+  /// under it (`publisher_lookup.dart`).
+  final Uint8List? publisherKey;
+
   /// Leading zero bits that a proof of work must have before the
   /// holder of this card even looks at a request.
   final int difficulty;
@@ -188,6 +181,7 @@ class Card {
     required Uint8List fingerprint,
     List<CardAddress> ownAddresses = const [],
     this.neighbourAddress,
+    Uint8List? publisherKey,
     List<String> relay = const [],
     this.difficulty = difficultyDefault,
     required Uint8List code,
@@ -196,6 +190,8 @@ class Card {
         fingerprint = Uint8List.fromList(fingerprint),
         ownAddresses = List.unmodifiable(ownAddresses),
         relay = List.unmodifiable(relay),
+        publisherKey =
+            publisherKey == null ? null : Uint8List.fromList(publisherKey),
         code = Uint8List.fromList(code) {
     if (channel != channelLive && channel != channelBeta) {
       throw ArgumentError(
@@ -212,6 +208,11 @@ class Card {
     if (this.ownAddresses.length > kOwnAddressesAtMost) {
       throw ArgumentError('at most $kOwnAddressesAtMost own '
           'addresses, got ${this.ownAddresses.length}');
+    }
+    final pk = this.publisherKey;
+    if (pk != null && pk.length != publisherKeyLength) {
+      throw ArgumentError(
+          'publisherKey must be $publisherKeyLength bytes long, was ${pk.length}');
     }
     if (this.relay.length > relayAtMost) {
       throw ArgumentError(
@@ -240,6 +241,7 @@ class Card {
       bodyLength +
       addressesLength(ownAddresses) +
       (neighbourAddress?.packedLength ?? 0) +
+      (publisherKey?.length ?? 0) +
       relayLength(relay);
 
   /// Checks the identifier of a bundle received later over the network and
@@ -259,6 +261,9 @@ class Card {
     output.add(fingerprint);
     addressesWrite(output, ownAddresses);
     optionalAddressWrite(output, neighbourAddress);
+    final pk = publisherKey;
+    output.addByte(pk == null ? 0 : 1);
+    if (pk != null) output.add(pk);
     relayWrite(output, relay);
     output.addByte(difficulty);
     output.add(code);
@@ -314,6 +319,12 @@ class Card {
     final fingerprint = read(fingerprintLength);
     final ownAddresses = addressesRead(read);
     final neighbourAddress = optionalAddress('neighbour address');
+    final publisherFlag = read(1)[0];
+    if (publisherFlag != 0 && publisherFlag != 1) {
+      throw CardFormatError(
+          'invalid flag for publisher key: $publisherFlag (expected 0 or 1)');
+    }
+    final publisherKey = publisherFlag == 1 ? read(publisherKeyLength) : null;
     final relay = relayRead(read);
 
     final difficulty = read(1)[0];
@@ -331,6 +342,7 @@ class Card {
       fingerprint: fingerprint,
       ownAddresses: ownAddresses,
       neighbourAddress: neighbourAddress,
+      publisherKey: publisherKey,
       relay: relay,
       difficulty: difficulty,
       code: code,
@@ -359,6 +371,10 @@ class Card {
             ownAddresses[i].equal(other.ownAddresses[i])
         ].every((x) => x) &&
         addressEqual(neighbourAddress, other.neighbourAddress) &&
+        ((publisherKey == null && other.publisherKey == null) ||
+            (publisherKey != null &&
+                other.publisherKey != null &&
+                _bytesEqual(publisherKey!, other.publisherKey!))) &&
         relay.join('\n') == other.relay.join('\n') &&
         relay.length == other.relay.length &&
         difficulty == other.difficulty &&

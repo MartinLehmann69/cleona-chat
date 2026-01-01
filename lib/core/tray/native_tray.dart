@@ -3,6 +3,7 @@ import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:cleona/core/config/network_channel.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/readiness_names.dart';
 import 'package:cleona/core/tray/native_tray_windows.dart';
 import 'package:cleona/core/tray/tray_status.dart';
@@ -365,7 +366,7 @@ class NativeTray {
       return true;
     } catch (e, st) {
       logW('init threw: $e\n$st');
-      try { stderr.writeln('NativeTray init failed: $e'); } catch (_) {}
+      try { RedactedConsole.err('NativeTray init failed: $e'); } catch (_) {}
       return false;
     }
   }

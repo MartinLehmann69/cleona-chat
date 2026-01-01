@@ -6,6 +6,8 @@ import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/storage/device_store.dart'
+    show kDeviceStoreFileName;
 
 /// THE TAKEOVER OF A LEGACY PROFILE IS GONE (S368). What remains here is
 /// the device-wide envelope change — and the inventory lists against which
@@ -96,28 +98,34 @@ class KeyMigration {
   // What REMAINS lying next to it stands here, and it is measured instead
   // of enumerated: `smoke_key_rotation_list.dart` holds these lists
   // against the actual callers of `FileEncryption.writeJsonFile`/
-  // `writeBinaryFile` and `PlaintextSweep.sweepOne` in `lib/` — in BOTH
-  // directions. A new writer without an entry is red, an entry without a
-  // writer as well.
+  // `writeBinaryFile` in `lib/` — in BOTH directions. A new writer without
+  // an entry is red, an entry without a writer as well. Since S403 the same
+  // holds for the writers in `mycelium/lib` and the two `mycelium…` lists
+  // further below (part F of the guard).
   //
-  // WHY THE FOUR SWEEPER NAMES STAY IN, although their collections have
-  // long been in the storage: `PlaintextSweep` still WRITES them — it
-  // encrypts a plaintext remnant found in a legacy profile under exactly
-  // this key (`cleona_service.dart:_sweepPlaintextUserContent`). An entry
-  // missing here would be a remnant that can no longer be opened at all
-  // after the key change.
+  // THE FOUR SWEEPER NAMES ARE OUT (S401, 02.10.2026).
+  // `voice_transcriptions.json`, `profile_picture.b64`,
+  // `profile_description.txt` and `reputation.json` stood here because
+  // `PlaintextSweep` SEALED a plaintext file found under one of these
+  // names. The result was a sealed file no code opened — the running
+  // service reads the same content from the store (areas
+  // `voice_transcriptions` and `profile`), and transcripts are message
+  // content, which lives in the store and nowhere else (v4_2 §21.4.2).
+  // Since S401 the sweeper REMOVES every form of these four names
+  // (`cleona_service.dart:_sweepPlaintextUserContent`), so they have no
+  // writer any more and an entry here would be a dead one.
+  //
+  // What that means for `LegacyKeyPurge` (the running reader of
+  // [perIdentityFiles]): a file of one of these names that still lies
+  // sealed under a found key file no longer holds that key file. Nothing
+  // is lost by it — the sealed file has no reader, and the sweeper deletes
+  // it at the same start.
 
   /// Per IDENTITY, sealed with `HdWallet.deriveFileEncKey(seed, hdIndex)`.
   ///
-  /// Measured completely against the writers in `lib/` (05.09.2026):
+  /// Measured completely against the writers in `lib/` (02.10.2026):
   ///
   ///   keys.json                 identity_context.dart, identity_manager.dart
-  ///   v41_prekeys.json          v41_attach.dart
-  ///   v41_daily_secrets.json    v41_attach.dart
-  ///   voice_transcriptions.json cleona_service.dart (PlaintextSweep)
-  ///   profile_picture.b64       cleona_service.dart (PlaintextSweep)
-  ///   profile_description.txt   cleona_service.dart (PlaintextSweep)
-  ///   reputation.json           cleona_service.dart (PlaintextSweep)
   ///
   /// ── THREE NAMES ARE OUT OF HERE (S368) ───────────────────────────────
   ///
@@ -134,8 +142,8 @@ class KeyMigration {
   ///
   /// They moved into `messages.db` with `31328094` ("identity collections
   /// into the storage", S366). Their carriers today are AREAS of the table
-  /// `state`: `LinkedDeviceKeysStore.area = 'linked_device_keys'`
-  /// (`linked_device_keys_store.dart:45`),
+  /// `state`: `linked_device_keys` (the store fell with the delegation
+  /// model in S398 P1, D-39 — the area has no writer any more),
   /// `CleonaService.areaProcessedIds = 'processed_msg_ids'`
   /// (`cleona_service.dart:7564`); the counters behind
   /// `identity_resolution.json` have been dropped entirely with the 2D DHT
@@ -192,12 +200,50 @@ class KeyMigration {
   /// The legacy holdings are taken care of: `v41_attach.dart` takes over a
   /// found file into the storage on first access and deletes it only after
   /// the content demonstrably lies there.
+  ///
+  /// ── THIS LIST HAS A RUNNING READER (S401, 02.10.2026) ────────────────
+  ///
+  /// The sections above do not name it: `LegacyKeyPurge.purge` (called on
+  /// every start from `IdentityContext.initCrypto`) asks for EVERY name of
+  /// this list, in every identity directory, whether a found legacy key
+  /// (`db.key`, `.db.key.migrated`) still opens the file — and removes the
+  /// key only if it opens none. A file that is sealed under the legacy key
+  /// and is NOT listed here loses its key at the next start. The cleaner
+  /// reads the listed files and never writes or deletes them (measured in
+  /// `smoke_key_rotation_list.dart`, part E).
+  ///
+  /// ── TWO NAMES CAME AND WENT THE SAME DAY (S401, 02.10.2026) ──────────
+  ///
+  /// `recovery_bundle.json` (`078af47c`, S398 B-1, D-35 — the state of the
+  /// rescue bundle box) and `enrolment.json` (`3672405c`, S398 B-4b, D-39 —
+  /// the enrolment window and its pending requests) were written by the
+  /// service into `<profileDir>/` since 29.09.2026 without an entry here.
+  /// They were entered on the morning of 02.10. and are out again: both
+  /// states are metadata of one identity and moved into its store (areas
+  /// `recovery_bundle` and `enrolment`,
+  /// `cleona_service_recovery_bundle.dart` / `cleona_service_enrolment.dart`;
+  /// owner 02.10.2026, v4_2 §21.4.2). A name without a writer is a dead
+  /// entry, and the staleness test of the guard reports it.
+  ///
+  /// What the removal means for the cleaner, the running reader of this
+  /// list: it no longer asks for the two names, so a file of one of them
+  /// that lies sealed under a FOUND key file no longer holds that key file.
+  /// Nothing is lost by it. The removed writers only ever sealed with
+  /// `_fileEnc` of a service that has a master seed — the derived key of
+  /// the identity, never a found key file (the bundle box and the enrolment
+  /// are attached only for an identity with seed and HD index). A file of
+  /// these names under a found key file is therefore not one this line
+  /// wrote; the reader of the state cannot open it and removes it
+  /// (`_stateFileIntoStore`).
+  ///
+  /// And the question of the sections above, for the two new areas: the
+  /// answer is the same. They lie in `messages.db` under
+  /// `deriveFileEncKey(masterSeed, hdIndex)`; no rotation changes these two
+  /// values, so there is nothing to re-key — and should a real change of
+  /// the storage key ever come, the store needs a re-keyer of its own,
+  /// which no file list would have replaced.
   static const List<String> perIdentityFiles = [
     'keys.json',
-    'voice_transcriptions.json',
-    'profile_picture.b64',
-    'profile_description.txt',
-    'reputation.json',
   ];
 
   /// At the profile ROOT DIRECTORY, under a FOUND `db.key` and not under a
@@ -240,26 +286,163 @@ class KeyMigration {
   /// EXPLICITLY NOT in [deviceScopedJsonFiles], i.e. not part of the
   /// takeover that [migrateDeviceScopedFiles] runs on every start.
   ///
-  /// **Why a list of its own and not the one next to it.** The two files
-  /// lay in PLAINTEXT until S368, not under `db.key`. So there can be no
-  /// profile that carries them under the legacy key — and entered in
-  /// [deviceScopedJsonFiles], [migrateDeviceScopedFiles] would try on a
-  /// profile with a found `db.key` to open with the WRONG key a ciphertext
-  /// that already lies under the right one. Building a takeover for
-  /// holdings that do not exist would be exactly the compatibility path
-  /// that V4.1 does not have.
+  /// **Why a list of its own and not the one next to it.** The list began
+  /// in S368 with `identities.json` and `last_profile.json` (both moved on
+  /// in S403, see the end of this comment). The two files had lain in
+  /// PLAINTEXT until then, not under `db.key`. So there could be no
+  /// profile that carried them under the legacy key — and entered in
+  /// [deviceScopedJsonFiles], [migrateDeviceScopedFiles] would have tried
+  /// on a profile with a found `db.key` to open with the WRONG key a
+  /// ciphertext that already lay under the right one. Building a takeover
+  /// for holdings that do not exist would be exactly the compatibility
+  /// path that V4.1 does not have. The same holds for every member since.
   ///
   /// The list is purely EXPLANATORY, like [deliberatelyUnderDbKey]: it says to
   /// which key class the files belong, so that the guard
   /// `smoke_key_rotation_list.dart` finds no writer without
   /// classification. It is run by nobody.
   ///
-  /// `identities.json` carries the display name next to `nodeIdHex`,
-  /// `last_profile.json` the same link for the active identity
-  /// (S368, reasoning at `IdentityManager._identitiesFile`).
-  static const List<String> deviceWideWithoutTakeover = [
-    'identities.json',
-    'last_profile.json',
+  /// From S401 the list also carried the two network switches of the
+  /// device (`port_mapping`, v4_2 §7.3; `cover_reduce`, §12.7) and the
+  /// setting of the local CalDAV server (`caldav_server.json`, §18.2), for
+  /// the same reason: files created after S368 by a writer that only ever
+  /// took the key of the host.
+  ///
+  /// ── THE LIST IS EMPTY SINCE S403 ─────────────────────────────────────
+  ///
+  /// Every one of its members moved into the device database
+  /// ([deviceDatabase]): the list of identities and the identity shown
+  /// last (areas `DeviceStore.areaIdentities` and `DeviceStore.areaDevice`;
+  /// `identity_manager.dart`) and the three settings (area
+  /// `DeviceStore.areaSettings`; `port_mapping_setting.dart`,
+  /// `cover_reduce_setting.dart`, `caldav_server_setting.dart`). None has a
+  /// writer any more — the staleness test of the guard would report an
+  /// entry that stayed as dead. The files an earlier build left are
+  /// removed at start (`removeSupersededDeviceFiles`), not taken over.
+  ///
+  /// The list itself stays: it is the class a device-wide file under the
+  /// derived key WITHOUT holdings under a legacy key belongs to, and the
+  /// guard's comparison names it. A new file of that class is entered here
+  /// — or, better, becomes a row of the device database.
+  static const List<String> deviceWideWithoutTakeover = [];
+
+  // ── THE TWO DATABASES (S403) ───────────────────────────────────────────
+  //
+  // The statement at the top of these lists — "the complete set of files
+  // that lie sealed in the profile under a DERIVED key" — has two members
+  // that are no files of `FileEncryption` and stand in none of the lists
+  // above: the database of an identity and, since S403, the database of the
+  // device (v4_2 §4.5.3 forms 1 and 2, §21.4.1). They are NAMED here so
+  // that the register is complete; they must never be ENTERED into a list
+  // a re-keyer runs: `_reEncryptJsonFile` would read the database as JSON
+  // and write it back — that destroys it (guard, part D).
+  //
+  // Neither has a re-keyer, and neither needs one today: both keys depend
+  // on the master seed (and, for the identity, the HD index) alone, and no
+  // rotation changes those ([perIdentityFiles], section "AND IS THIS
+  // CONTENT TAKEN ALONG ON A KEY CHANGE?"). Should the seed ever change,
+  // both databases need a re-keyer of their own.
+
+  /// Per IDENTITY, `<profileDir>/messages.db`, under
+  /// `HdWallet.deriveFileEncKey(seed, hdIndex)` (`message_store.dart`).
+  static const String identityDatabase = 'messages.db';
+
+  /// Per DEVICE, `<baseDir>/device.db`, under
+  /// `HdWallet.deriveSharedFileEncKey(seed)` (`device_store.dart`): the
+  /// list of identities, the device keys, device-wide settings, the secret
+  /// of the daemon–GUI connection.
+  static const String deviceDatabase = kDeviceStoreFileName;
+
+  // ── THE FILES OF THE DELIVERY LAYER (S403, owner decision 6 = A) ──────
+  //
+  // Until S403 the statement at the top of these lists — "the complete set
+  // of files that lie sealed in the profile under a DERIVED key" — was not
+  // true: what the package `mycelium/` seals stood in no list, and the
+  // guard `smoke_key_rotation_list.dart` searched `lib/` only. The owner
+  // decided on 02.10.2026 (point 6 = A,
+  // `mycelium/berichte/S401-ENTSCHEIDE-02-10.md`): the register carries the
+  // files of the delivery layer as a group of their own, per identity and
+  // per device, and the guard searches `mycelium/lib` as well.
+  //
+  // Names are RELATIVE TO THE `mycelium/` DIRECTORY of their class and
+  // carry no `.enc` (`FileEncryption` appends it), like every name in this
+  // file. An entry that ends in `*` names a FAMILY: the rest of the name
+  // arises at runtime (one file per medium), the part before the `*` is
+  // fixed in the source.
+  //
+  // BOTH LISTS ARE PURELY EXPLANATORY, like [deviceWideWithoutTakeover]:
+  // nothing in `lib/` runs them. In particular `LegacyKeyPurge` does NOT
+  // read them, and [migrateDeviceScopedFiles] does not either — that is
+  // the variant the owner chose ("the new group only describes"). The
+  // consequence, named: a file of the delivery layer that lay under a
+  // FOUND key file (`db.key`) would not hold that key file. No 4.2 profile
+  // has one (it is never minted, `file_encryption.dart`; no old profiles,
+  // v4_2 Appendix D, D-21), and there are no holdings a takeover could
+  // fetch — the delivery layer was built after S368.
+  //
+  // The files are BINARY (`writeBinaryFile`); should a re-keyer for them
+  // ever grow in, it cannot be `_reEncryptJsonFile`.
+
+  /// Per IDENTITY, in `<profileDir>/mycelium/` (`mailboxDirectoryIn`,
+  /// `mycelium_seam.dart`), sealed with the file key of the identity —
+  /// `HdWallet.deriveFileEncKey(seed, hdIndex)`, handed over by
+  /// `mailboxDetailsFor`. What v4_2 §4.5.2 names for
+  /// `identities/N/mycelium/` ("contacts' delivery state, group pairs,
+  /// first contact, parked cells") and §9.4 for a medium in reception.
+  ///
+  /// Measured against the writers on 02.10.2026:
+  ///
+  ///   memory          mycelium/lib/memory.dart (`Memory.save`); also
+  ///                   written by `lib/` when a further own device is
+  ///                   enrolled (`cleona_service_enrolment.dart`, §14.6.2)
+  ///   first-contact   mycelium/lib/memory_first_contact.dart; enrolment
+  ///   group-pairs     mycelium/lib/memory_group_pair.dart; enrolment
+  ///   parked          mycelium/lib/parked.dart
+  ///   bulk/o_*        mycelium/lib/bulk_disk.dart (`openedAppend`): the
+  ///                   opened stripes of a medium in reception, one file
+  ///                   per chunk (`o_<identifier>_<n>`)
+  ///
+  /// NOT here, because they are no files any more (S401): the history
+  /// (`verlauf_<identifier>`) and the open collections (`bulk/collect`) —
+  /// both lie in the store of the identity.
+  static const List<String> myceliumPerIdentityFiles = [
+    'memory',
+    'first-contact',
+    'group-pairs',
+    'parked',
+    'bulk/o_*',
+  ];
+
+  /// Per DEVICE, in `<baseDir>/mycelium/` (`hostDirectoryIn`,
+  /// `mycelium_seam.dart`), sealed with the key of the host —
+  /// `hostKey(baseDir, seed)` = `HdWallet.deriveSharedFileEncKey(seed)`.
+  /// What v4_2 §4.5.2 names for the node, and the holder's side of lane 3
+  /// (§21.3.3).
+  ///
+  /// Measured against the writers on 02.10.2026:
+  ///
+  ///   host              mycelium/lib/device_records.dart
+  ///   post_box          (`FileDeviceRecords`, the names `kRecord*`)
+  ///   outside
+  ///   bulk/bulk_index   mycelium/lib/bulk_disk.dart (`indexSave`)
+  ///   bulk/h_*          mycelium/lib/bulk_disk.dart (`piecesSave`): the
+  ///                     sealed pieces held for third parties, one file
+  ///                     per transfer (`h_<hash>`)
+  ///
+  /// `host`, `post_box`, `outside` (S403 step 3): the host's memory, the
+  /// post box and the key of the own address record. The APP never lets
+  /// them become files — it hands the host the device database
+  /// (`hostRecordsIn`, rows of `DeviceStore.areaNode`, under the same key),
+  /// and `kSupersededDeviceFiles` removes files of an earlier build. The
+  /// package still CAN seal them as files: where no records are handed in
+  /// (`FileDeviceRecords` — the probes and `myceliumd`). That is what this
+  /// explanatory list names.
+  static const List<String> myceliumDeviceWideFiles = [
+    'host',
+    'post_box',
+    'outside',
+    'bulk/bulk_index',
+    'bulk/h_*',
   ];
 
   // ── S362: the device-wide storages at the profile ROOT DIRECTORY ──────
@@ -319,10 +502,11 @@ class KeyMigration {
   /// this entry it stayed there and the node stored once too often on
   /// every start.
   ///
-  /// `device_keys.bin` is also new here. Until S366 it was taken along ONLY
-  /// by the meanwhile removed takeover — a path that ran exactly once per
-  /// profile and after the first-start deletion path (§21.4) found no more
-  /// holdings. Here it is covered repeatably.
+  /// `device_keys.bin` stood here from S366 to S403. The device keys lie
+  /// in the device database since ([deviceDatabase], area
+  /// `DeviceStore.areaDeviceKeys`; `device_keys_store.dart`); the file has
+  /// no writer any more and is removed at start, not re-keyed
+  /// (`superseded_device_files.dart`).
   static const List<String> deviceScopedJsonFiles = [
     'v41_entries.json',
     'v41_ages.json',
@@ -330,7 +514,6 @@ class KeyMigration {
   ];
   static const List<String> deviceScopedBinaryFiles = [
     'node_keys',
-    'device_keys.bin',
   ];
 
   /// Re-seals the daemon-wide, device-scoped files at the profile root with

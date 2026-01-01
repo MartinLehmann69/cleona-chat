@@ -40,6 +40,12 @@
 ///     held generation any more ([kemCopyFreshness]).
 const Duration kKemRotationInterval = Duration(days: 7);
 
+/// With more than one device, the age of the current generation from which
+/// on ANY device of the set may perform the due routine rotation, not only
+/// the one with the smallest DeviceID (§4.5.4, D-40, E7 = b1). Two rotation
+/// intervals: the responsible device has missed one full turn.
+const Duration kKemRotationTakeover = Duration(days: 14);
+
 /// How a stored copy of foreign KEM keys stands in relation to the
 /// recipient's generation retention (§4.5.4).
 enum KemCopyFreshness {
@@ -66,6 +72,11 @@ enum KemCopyFreshness {
   unknown,
 }
 
+/// The largest KEM state (ms since the epoch) that is a placeholder, not a
+/// point in time: the state 1 of an address from a `cleona:2:` line
+/// (`mycelium/lib/bundle.dart`), and 0.
+const int kKemStatePlaceholderMs = 1;
+
 /// How old the copy is at time [now], measured by [seenAt].
 ///
 /// [seenAt] is the last point in time at which this copy DEMONSTRABLY
@@ -80,6 +91,14 @@ KemCopyFreshness kemCopyFreshness({
   Duration interval = kKemRotationInterval,
 }) {
   if (seenAt == null) return KemCopyFreshness.unknown;
+  // A `cleona:2:` line carries no KEM generation: its address has state 1
+  // (`mycelium/lib/bundle.dart`), stored as `kemRotationAt` = 1 ms after the
+  // epoch until the answer (3) lifts it. That is a placeholder, not a point
+  // in time — read as an age it made "20725 days old" and a false warning
+  // after a restart (S398 lab run 2, finding 3).
+  if (seenAt.millisecondsSinceEpoch <= kKemStatePlaceholderMs) {
+    return KemCopyFreshness.unknown;
+  }
   final age = now.difference(seenAt);
   // A copy from the FUTURE is not a fresh copy but a timestamp that is not
   // to be trusted. It is treated like a current one (not like an outdated

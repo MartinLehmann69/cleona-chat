@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 
 /// Interactive poll card rendered inside group/channel chat bubbles (§24.6).
@@ -12,19 +13,41 @@ import 'package:cleona/core/service/service_types.dart';
 ///   • progress bars / date grid / scale histogram / free-text list
 ///   • vote / revoke / close / delete action buttons
 ///   • anonymity notice when [Poll.settings.anonymous] is true
-class PollCard extends StatelessWidget {
+class PollCard extends StatefulWidget {
   final String pollId;
 
   const PollCard({super.key, required this.pollId});
+
+  @override
+  State<PollCard> createState() => _PollCardState();
+}
+
+class _PollCardState extends State<PollCard> {
+  ICleonaService? _service;
+  Future<bool>? _finalityFuture;
+
+  void _updateService(CleonaAppState appState) {
+    final service = appState.service;
+    if (service == null) {
+      _service = null;
+      _finalityFuture = null;
+      return;
+    }
+    if (service != _service) {
+      _service = service;
+      _finalityFuture = service.isPollFinal(widget.pollId);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final locale = AppLocale.of(context);
     final appState = context.watch<CleonaAppState>();
-    final service = appState.service;
+    _updateService(appState);
+    final service = _service;
     if (service == null) return const SizedBox.shrink();
-    final poll = service.pollManager.polls[pollId];
+    final poll = service.pollManager.polls[widget.pollId];
     if (poll == null) {
       return Padding(
         padding: const EdgeInsets.all(8),
@@ -32,7 +55,7 @@ class PollCard extends StatelessWidget {
             style: TextStyle(fontStyle: FontStyle.italic, color: colorScheme.outline)),
       );
     }
-    final tally = service.pollManager.computeTally(pollId);
+    final tally = service.pollManager.computeTally(widget.pollId);
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -44,7 +67,12 @@ class PollCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _header(context, poll, colorScheme, locale),
+          FutureBuilder<bool>(
+            future: _finalityFuture,
+            initialData: true,
+            builder: (context, snapshot) =>
+                _header(context, poll, colorScheme, locale, snapshot.data ?? true),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
             child: Text(poll.question,
@@ -65,7 +93,8 @@ class PollCard extends StatelessWidget {
     );
   }
 
-  Widget _header(BuildContext context, Poll poll, ColorScheme colorScheme, AppLocale locale) {
+  Widget _header(BuildContext context, Poll poll, ColorScheme colorScheme,
+      AppLocale locale, bool isFinal) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -79,9 +108,21 @@ class PollCard extends StatelessWidget {
           Text('[${locale.get(_typeLabelKey(poll.pollType))}]',
               style: TextStyle(fontSize: 12, color: colorScheme.primary, fontWeight: FontWeight.bold)),
           const Spacer(),
+          if (poll.closed && !isFinal)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              margin: const EdgeInsets.only(left: 4),
+              decoration: BoxDecoration(
+                color: colorScheme.tertiary.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(locale.get('poll_provisional'),
+                  style: TextStyle(fontSize: 10, color: colorScheme.tertiary)),
+            ),
           if (poll.closed)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              margin: const EdgeInsets.only(left: 4),
               decoration: BoxDecoration(
                 color: colorScheme.error.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(4),
@@ -338,7 +379,7 @@ class PollCard extends StatelessWidget {
 
   Future<void> _openVoteSheet(BuildContext context, Poll poll) async {
     final service = context.read<CleonaAppState>().service!;
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
 
     switch (poll.pollType) {
       case PollType.singleChoice:

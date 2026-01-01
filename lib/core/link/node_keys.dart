@@ -41,6 +41,7 @@ import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/secure_memory.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 
 /// The node-bound, identity-free key material of the link layer.
 ///
@@ -486,7 +487,7 @@ class NodeKeys {
             SecureMemory.zero(rescued);
           }
           recovered.persist(baseDir, fileEnc: enc);
-          stderr.writeln('[NodeKeys] INFO: $path.enc was still under the '
+          RedactedConsole.err('[NodeKeys] INFO: $path.enc was still under the '
               'legacy db.key envelope — re-sealed with the caller key.');
           return recovered;
         }

@@ -133,7 +133,7 @@ extension IdentityDeletionOps on CleonaService {
   /// container.
   ///
   /// WHAT IS NOT YET DONE WITH THIS: the directory itself, the entry in
-  /// `identities.json` and the attachments (`*.cmenc`). Those belong to the
+  /// list of identities and the attachments (`*.cmenc`). Those belong to the
   /// `IdentityManager` — see the paragraph at the end of this comment and
   /// [CleonaService.onIdentityDeletedRemotely], which to this day has no
   /// assigner in `lib/` (gap book P-12).
@@ -142,7 +142,7 @@ extension IdentityDeletionOps on CleonaService {
   /// The other way round, step 1 would recreate the files.
   ///
   /// WHAT DOES NOT HAPPEN HERE, and why: the identity's entry in
-  /// `identities.json` and the directory itself belong to the
+  /// list of identities and the directory itself belong to the
   /// `IdentityManager`, i.e. the level above this service
   /// (`service_daemon.dart::_deleteIdentityAtRuntime`,
   /// `IdentityManager.deleteIdentity`). The service reports the deletion

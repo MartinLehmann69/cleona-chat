@@ -25,7 +25,8 @@
 # Usage:
 #   ./scripts/sign-update-manifest.sh <version> <download-url> <archive-hash> <changelog> \
 #       [<min-required-version> <min-required-reason>] \
-#       [--bin-dir DIR] [--dht-tag TAG | --dht-tag PLATFORM=TAG ...] [--mono-seq N]
+#       [--bin-dir DIR] [--dht-tag TAG | --dht-tag PLATFORM=TAG ...] [--mono-seq N] \
+#       [--prev PLATFORM=VERSION=FILE ...] [--delta-out DIR]
 #
 # Example (legacy, no hard-block):
 #   ./scripts/sign-update-manifest.sh "3.1.71" "https://github.com/.../cleona-linux.tar.gz" \
@@ -56,6 +57,12 @@
 #                               Per §19.6.5 the tag is HKDF-derived per platform from the
 #                               network secret — with more than one platform in --bin-dir,
 #                               each platform needs its own tag via this form.
+#   --prev PLATFORM=VERSION=FILE
+#                     The in-network object of an earlier release (V-1 or V-2, at most
+#                     two per platform, §26.6.2). PLATFORM must be android (E-D2 A). A delta FILE -> new binary is built
+#                     with $BSDIFF (default scripts/make-delta.sh) into --delta-out
+#                     (default <bin-dir>/deltas) and named in the manifest with its
+#                     SHA-256 (deltaHash) and length (deltaSize).
 #   --mono-seq N      Monotonically increasing sequence number (downgrade protection,
 #                      §19.6.2). Nodes reject any manifest whose minMonotoneSeq is not
 #                      strictly greater than the highest previously-seen value.
@@ -124,7 +131,10 @@ BIN_DIR=""
 MONO_SEQ=""
 PREVS=()
 DELTA_OUT=""
-BSDIFF="${BSDIFF:-bsdiff}"
+# S406-DELTA: the generator is Cleona's own (bsdiff 4.3 algorithm, zstd-framed
+# container, round trip checked) — `scripts/make-delta.sh`. BSDIFF stays
+# overridable for tests; same argument order as bsdiff(1): OLD NEW DELTA.
+BSDIFF="${BSDIFF:-$SCRIPT_DIR/make-delta.sh}"
 DHT_TAG_GLOBAL=""
 declare -A DHT_TAGS
 POSITIONAL=()
@@ -296,9 +306,11 @@ fi
 # neither derive the delta's key nor tell when it is complete." Until S387
 # this script produced no delta, and deltaBin stayed empty in the payload.
 #
-# Generated with bsdiff (environment variable BSDIFF, default `bsdiff`).
-# If the tool is missing, the script aborts — a manifest that promises a delta
-# that does not exist would be worse than none.
+# Generated with `scripts/make-delta.sh` (environment variable BSDIFF; until
+# S406 the default was a stock `bsdiff`, which is not installed and whose
+# bzip2 container no node could read). If the tool is missing or fails, the
+# script aborts — a manifest that promises a delta that does not exist would
+# be worse than none.
 DELTA_BIN_JSON=""
 DELTA_HASH_JSON=""
 DELTA_SIZE_JSON=""
@@ -327,13 +339,23 @@ if [ "${#PREVS[@]}" -gt 0 ]; then
             echo "Error: --prev for '$P_PLAT', but no new cleona-$P_PLAT in --bin-dir" >&2
             exit 1
         fi
+        # Desktop delta updates — owner decision 07.10.2026 E-D2 A, planned.
+        # Nodes ignore a desktop delta (update_target.dart kDeltaPlatforms);
+        # the manifest must not promise one.
+        if [ "$P_PLAT" != "android" ]; then
+            echo "Error: --prev for '$P_PLAT' — deltas are built for android only (E-D2 A, 07.10.2026)" >&2
+            exit 1
+        fi
         PREV_COUNT["$P_PLAT"]=$(( ${PREV_COUNT[$P_PLAT]:-0} + 1 ))
         if [ "${PREV_COUNT[$P_PLAT]}" -gt 2 ]; then
             echo "Error: more than two --prev for '$P_PLAT' — D1 allows V-1 and V-2 only" >&2
             exit 1
         fi
         D_FILE="$DELTA_OUT/cleona-$P_PLAT-$VERSION-from-$P_VER.bsdiff"
-        "$BSDIFF" "$P_FILE" "$(realpath "$BIN_DIR/cleona-$P_PLAT")" "$D_FILE"
+        if ! "$BSDIFF" "$P_FILE" "$(realpath "$BIN_DIR/cleona-$P_PLAT")" "$D_FILE" >&2; then
+            echo "Error: delta $P_PLAT $P_VER -> $VERSION could not be built" >&2
+            exit 1
+        fi
         D_HEX=$(openssl dgst -sha256 "$D_FILE" | awk '{print $NF}')
         D_LEN=$(stat -c%s "$D_FILE" 2>/dev/null || stat -f%z "$D_FILE")
         D_BIN["$P_PLAT"]+="${D_BIN[$P_PLAT]:+,}\"$P_VER\":\"1\""

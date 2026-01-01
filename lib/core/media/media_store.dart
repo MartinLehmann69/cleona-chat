@@ -11,8 +11,8 @@ import 'package:cleona/core/crypto/media_cipher.dart';
 /// the occurrences at state `d4d1f680`, BEFORE the switch; today there stands at
 /// each a call of this class:
 ///
-/// * `service/cleona_service_media.dart:281` — V4.1 bulk receive
-/// * `service/cleona_service_media.dart:445` — V3 stage 2 receive
+/// * `service/cleona_service_media.dart`, lines 281 and 445 at `d4d1f680` —
+///   V4.1 bulk receive and V3 stage 2 receive (both removed in S399 P2)
 /// * `service/cleona_service.dart:11608` — inline receive (<256 KB)
 /// * `service/cleona_service.dart:1650/:1657/:1660` — the SEND PATH, which copies the
 ///   file chosen by the user into the profile

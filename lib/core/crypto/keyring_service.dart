@@ -4,16 +4,23 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/dpapi_ffi.dart';
+import 'package:cleona/core/platform/libsecret_ffi.dart';
 
 /// OS Keyring abstraction (Architecture §3.7).
 ///
 /// Protects master_seed and device_keys via platform-native credential storage:
-/// Linux: libsecret (GNOME Keyring / KWallet) via secret-tool CLI
+/// Linux: libsecret (GNOME Keyring / KWallet) — store via FFI, lookup/delete
+///        via the secret-tool CLI
 /// Windows: DPAPI (CryptProtectData / CryptUnprotectData)
 /// Android/macOS/iOS: file-based fallback (platform backends TBD)
 ///
-/// Falls back to file-based storage when no OS keyring is available (daemons
-/// without desktop session, unsupported platforms).
+/// Falls back to file-based storage when no OS keyring is available —
+/// INCLUDING a keyring that exists but is LOCKED (automatic login): where
+/// the system has a keyring, the keyring is binding, and storing behind a
+/// locked collection would wait on an unlock dialog without limit (owner
+/// decision V18; measured on the autologin lab VMs, 02.10.2026). A start
+/// on the file variant shows the warning once
+/// (`keyring_file_warning.dart`, GUI).
 ///
 /// All operations are synchronous — keyring access happens only at daemon
 /// start/shutdown, not in hot paths.
@@ -22,27 +29,91 @@ abstract class KeyringService {
 
   static KeyringService? _instance;
 
+  /// The answer of the Linux start question (V18), as the TEST seam hands
+  /// it in. Production: `null` — then [init] asks the real Secret Service
+  /// (`libsecret_ffi.dart`, `defaultCollectionState`).
+  ///
+  /// The seam exists because the DECISION is the statement under test, and
+  /// a corpus machine cannot answer the real question deterministically:
+  /// some lab VMs run headless (no service), others have an unlocked
+  /// keyring. `LinuxKeyringAnswer` fixes all three answers (present+
+  /// unlocked / locked / absent) and can hand in a fake backend so that
+  /// the takeover — the same code on the Linux, Windows and macOS keyring
+  /// paths — runs against a stand-in instead of a real keyring.
+  static LinuxKeyringAnswer Function()? linuxProbeForTest;
+
   /// Initialize the global KeyringService for [baseDir].
   /// Must be called once at daemon startup before any key access.
   /// The [probeAsync] step (secret-tool availability check) is the only
   /// async part — subsequent load/store calls are synchronous.
+  ///
+  /// ── THE START QUESTION (owner decision V18, 02.10.2026) ──────────────
+  ///
+  /// WHERE THE SYSTEM HAS A KEYRING, THE KEYRING IS BINDING. The file
+  /// variant is used only where the system has no keyring or logs in
+  /// automatically (keyring stays locked) — and a start on the file
+  /// variant shows the warning once (GUI, `keyring_file_warning.dart`).
+  ///
+  /// Measured on the autologin lab VMs (02.10.2026): the old code chose
+  /// the keyring backend on a LOCKED collection (the `_probe` lookup
+  /// answers exit 1 either way) and the store call then waited without
+  /// limit. That route is closed twice: the locked collection falls to
+  /// the file variant here, and every native libsecret call carries a
+  /// short timeout (`libsecret_ffi.dart`, canceller).
   static Future<KeyringService> init(String baseDir) async {
     if (_instance != null) return _instance!;
     final log = CLogger.get('keyring', profileDir: baseDir);
 
     if (Platform.isLinux) {
-      final service = _LinuxSecretToolKeyring(log);
-      if (await service._isAvailable()) {
-        log.info('Using GNOME Keyring / KWallet via secret-tool');
-        _instance = service;
-        return _instance!;
+      final seam = linuxProbeForTest;
+      if (seam != null) {
+        final answer = seam();
+        if (answer.serviceReachable && answer.defaultCollectionUnlocked) {
+          _instance = answer.backendOverride ?? _LinuxSecretToolKeyring(log);
+          log.info('Secret Service present, default collection unlocked — '
+              'the OS keyring is binding (V18)');
+          _takeFileVariantIntoKeyring(_instance!, baseDir, log);
+          return _instance!;
+        }
+        log.warn(answer.serviceReachable
+            ? 'Secret Service present, but the default collection is LOCKED '
+                '(automatic login?) — file variant; the first start shows '
+                'the warning (V18)'
+            : 'no reachable Secret Service — file variant; the first start '
+                'shows the warning (V18)');
+      } else {
+        final service = _LinuxSecretToolKeyring(log);
+        if (await service._isAvailable()) {
+          // Before any guarded native call: the canceller isolate must be
+          // confirmed, because a synchronous FFI call blocks this isolate
+          // and nothing spawned at that moment can be relied upon to start.
+          await LibsecretFfi.instance.prepareCanceller();
+          final state = LibsecretFfi.instance.defaultCollectionState();
+          if (state == LibsecretCollectionState.unlocked) {
+            log.info('Using GNOME Keyring / KWallet (store via libsecret, '
+                'lookup/delete via secret-tool) — default collection '
+                'unlocked, the OS keyring is binding (V18)');
+            _instance = service;
+            _takeFileVariantIntoKeyring(_instance!, baseDir, log);
+            return _instance!;
+          }
+          log.warn(state == LibsecretCollectionState.locked
+              ? 'Secret Service present, but its default collection is '
+                  'LOCKED (automatic login?) — file variant; the first '
+                  'start shows the warning (V18)'
+              : 'Secret Service did not answer the collection probe within '
+                  'the bound — file variant; the first start shows the '
+                  'warning (V18)');
+        } else {
+          log.warn('secret-tool not available — file-based key storage');
+        }
       }
-      log.warn('secret-tool not available — file-based key storage');
     } else if (Platform.isWindows) {
       final dpapi = _WindowsDpapiKeyring(baseDir, log);
       if (await dpapi._roundTripProbe()) {
         log.info('Using Windows DPAPI for key protection');
         _instance = dpapi;
+        _takeFileVariantIntoKeyring(_instance!, baseDir, log);
         return _instance!;
       }
       log.warn('DPAPI round-trip probe failed or timed out — file-based key storage');
@@ -50,6 +121,7 @@ abstract class KeyringService {
     } else if (Platform.isMacOS) {
       log.info('Using macOS Keychain via security CLI');
       _instance = _MacOsKeychainKeyring(log);
+      _takeFileVariantIntoKeyring(_instance!, baseDir, log);
       return _instance!;
     } else if (Platform.isAndroid || Platform.isIOS) {
       // Android/iOS: registerInstance() from main.dart with MethodChannel
@@ -82,8 +154,12 @@ abstract class KeyringService {
   /// Whether a KeyringService has been initialized.
   static bool get isInitialized => _instance != null;
 
-  /// Reset singleton (for testing only).
-  static void resetForTest() => _instance = null;
+  /// Reset singleton (for testing only). Also clears the Linux start seam
+  /// so that one test's answer cannot leak into the next.
+  static void resetForTest() {
+    _instance = null;
+    linuxProbeForTest = null;
+  }
 
   /// Test seam (S363): builds the file fallback directly, optionally as if
   /// the machine had a different name.
@@ -164,6 +240,143 @@ abstract class KeyringService {
   Future<void> promoteGatedNames() async {}
 }
 
+/// The answer to the Linux start question (V18): is a Secret Service
+/// reachable, and is its default collection unlocked? Handed in by the
+/// test seam `KeyringService.linuxProbeForTest`; production asks the real
+/// service (`libsecret_ffi.dart`).
+///
+/// [backendOverride] lets a test substitute the backend that [init]
+/// chooses on the "unlocked" answer (a fake hardware-protected keyring) —
+/// production leaves it `null` and gets `_LinuxSecretToolKeyring`.
+class LinuxKeyringAnswer {
+  /// The Secret Service answers at all (headless and uninstalled machines
+  /// answer false — the file variant follows).
+  final bool serviceReachable;
+
+  /// The default collection can be written without an unlock dialog.
+  /// False on automatic login: the keyring exists but stays locked.
+  final bool defaultCollectionUnlocked;
+
+  final KeyringService? backendOverride;
+
+  const LinuxKeyringAnswer({
+    required this.serviceReachable,
+    required this.defaultCollectionUnlocked,
+    this.backendOverride,
+  });
+}
+
+// ── The V18 takeover (runs on every keyring path) ──────────────────────
+
+/// The names the keyring carries — the measured inventory (see the gate
+/// comment in [KeyringService]): the master seed and the 24 words.
+const List<String> _keyringNames = ['master_seed', 'seed_phrase'];
+
+/// V18 takeover: a profile that started on the file variant carries its
+/// secrets in `.<name>.keyring` containers. Once a REAL OS keyring is
+/// binding, those copies are stored into it, verified verbatim, and
+/// REMOVED — the file variant is not a silent second copy any more.
+///
+/// Called from [KeyringService.init] on every path that chose a
+/// hardware-protected backend (Linux unlocked, Windows DPAPI, macOS
+/// Keychain). Not on mobile: a registered mobile keyring has its own
+/// promote/gate flow, and an unregistered one falls to the file variant
+/// anyway.
+///
+/// NEVER deleted, each with its reason:
+///  * a copy that does not open — unverifiable content;
+///  * a value that DIVERGES from the keyring's — profile corruption, and
+///    a silent winner would be exactly the loss this cascade prevents;
+///  * a copy whose verified keyring store failed — it may be the only one;
+///  * a side file that decodes to a DIFFERENT value (see above);
+///  * `.keyring_salt` — it seals nothing any more, but deleting it
+///    unasked is not this function's job.
+void _takeFileVariantIntoKeyring(
+    KeyringService ring, String baseDir, CLogger log) {
+  if (!ring.isHardwareProtected) return;
+  final reader = _FileKeyringFallback(baseDir, log);
+  for (final name in _keyringNames) {
+    try {
+      final canonical = File(reader._pathFor(name));
+      final sidecars =
+          reader._sidecarsOf(name).where((f) => f.existsSync()).toList();
+      if (!canonical.existsSync() && sidecars.isEmpty) continue;
+
+      final fromFile = reader.load(name);
+      if (fromFile == null) {
+        log.warn('V18 takeover for "$name": a file-variant copy exists but '
+            'does not open — left untouched (unverifiable content is never '
+            'deleted)');
+        continue;
+      }
+      final inRing = ring.load(name);
+      if (inRing != null &&
+          !_FileKeyringFallback._bytesEqual(inRing, fromFile)) {
+        log.error('V18 takeover for "$name": the keyring and the file copy '
+            'hold DIFFERENT values — nothing deleted, nothing overwritten. '
+            'This is profile corruption; decide which value is real with '
+            'the 24 words.');
+        continue;
+      }
+      if (inRing == null) {
+        if (!ring.store(name, fromFile)) {
+          log.warn('V18 takeover for "$name": the keyring refused the '
+              'store — the file copy stays');
+          continue;
+        }
+        final back = ring.load(name);
+        if (back == null ||
+            !_FileKeyringFallback._bytesEqual(back, fromFile)) {
+          log.error('V18 takeover for "$name": the keyring did not return '
+              'the value verbatim — the file copy stays');
+          continue;
+        }
+      }
+
+      // Verified — the file copies may go.
+      final removed = <String>[];
+      if (canonical.existsSync()) {
+        try {
+          canonical.deleteSync();
+          removed.add(canonical.uri.pathSegments.last);
+        } catch (e) {
+          log.warn('V18 takeover for "$name": the verified file copy '
+              'could not be removed ($e) — the keyring holds the value, '
+              'the copy stays');
+        }
+      }
+      for (final f in sidecars) {
+        Uint8List? plain;
+        try {
+          plain = reader._decodeAny(f.readAsBytesSync());
+        } catch (_) {
+          plain = null;
+        }
+        if (plain == null ||
+            !_FileKeyringFallback._bytesEqual(plain, fromFile)) {
+          log.warn('V18 takeover for "$name": sidecar '
+              '${f.uri.pathSegments.last} holds a different or unopenable '
+              'value — left untouched');
+          continue;
+        }
+        try {
+          f.deleteSync();
+          removed.add(f.uri.pathSegments.last);
+        } catch (e) {
+          log.warn('V18 takeover for "$name": sidecar '
+              '${f.uri.pathSegments.last} could not be removed ($e)');
+        }
+      }
+      if (removed.isNotEmpty) {
+        log.info('V18 takeover for "$name": taken into the OS keyring, '
+            'verified, removed: ${removed.join(', ')}');
+      }
+    } catch (e) {
+      log.warn('V18 takeover for "$name" failed: $e — file copies stay');
+    }
+  }
+}
+
 /// Outcome of an access to the gated storage.
 enum GateOutcome {
   /// Read, or ready.
@@ -196,7 +409,7 @@ class GatedRead {
   const GatedRead(this.value, this.outcome);
 }
 
-// ── Linux: secret-tool CLI (wraps libsecret) ────────────────────────────
+// ── Linux: libsecret (GNOME Keyring / KWallet) ─────────────────────────
 
 class _LinuxSecretToolKeyring extends KeyringService {
   final CLogger _log;
@@ -206,9 +419,16 @@ class _LinuxSecretToolKeyring extends KeyringService {
   @override
   bool get isHardwareProtected => true;
 
-  /// Check if secret-tool is installed and a Secret Service daemon is reachable.
+  /// Check that libsecret/glib load (for the FFI store path), that
+  /// secret-tool is installed (for the lookup/delete/probe path) and that a
+  /// Secret Service daemon is reachable.
   Future<bool> _isAvailable() async {
     try {
+      // The store path binds libsecret directly (no child process, no
+      // argument list); if that library or glib cannot be loaded, the Linux
+      // backend is unavailable exactly as it is today when secret-tool is
+      // missing.
+      if (!LibsecretFfi.isAvailable()) return false;
       final which = await Process.run('which', ['secret-tool'])
           .timeout(const Duration(seconds: 2));
       if (which.exitCode != 0) return false;
@@ -228,21 +448,20 @@ class _LinuxSecretToolKeyring extends KeyringService {
   bool store(String name, Uint8List data) {
     try {
       final b64 = base64Encode(data);
-      // secret-tool store reads the secret from stdin. Use Process.start
-      // synchronously by writing stdin and waiting for exit.
-      final result = Process.runSync(
-        'bash', ['-c',
-          'echo -n ${_shellEscape(b64)} | secret-tool store '
-          '--label=${_shellEscape('Cleona: $name')} '
-          'application cleona type ${_shellEscape(name)}'],
-      );
-      if (result.exitCode != 0) {
-        _log.warn('secret-tool store failed for "$name" (exit ${result.exitCode})');
+      // Store directly through libsecret (the library secret-tool wraps): the
+      // secret travels only in a calloc'd native buffer, never in a process
+      // argument list (§23.10 "No secret in a process argument"). The
+      // attributes and label match what the `secret-tool` CLI used to write,
+      // so the existing `secret-tool lookup` path keeps finding the item.
+      final res = LibsecretFfi.instance.store(name, b64);
+      if (!res.ok) {
+        _log.warn('libsecret store failed for "$name"'
+            '${res.error != null ? ' (${res.error})' : ''}');
         return false;
       }
       return true;
     } catch (e) {
-      _log.warn('secret-tool store error for "$name": $e');
+      _log.warn('libsecret store error for "$name": $e');
       return false;
     }
   }
@@ -277,8 +496,6 @@ class _LinuxSecretToolKeyring extends KeyringService {
       return false;
     }
   }
-
-  static String _shellEscape(String s) => "'${s.replaceAll("'", "'\\''")}'";
 }
 
 // ── Windows: DPAPI via PowerShell ───────────────────────────────────────

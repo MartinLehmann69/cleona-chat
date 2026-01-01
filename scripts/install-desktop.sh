@@ -41,7 +41,14 @@ done
 # Today's contract is ONE daemon per machine via `--base-dir`,
 # with all identities active at the same time. Exactly that is now in the
 # autostart file.
-PROFILE_MARK="$HOME/.cleona/identities.json.enc"
+#
+# S403: the list of identities lies in the device database
+# (`$HOME/.cleona/device.db`, v4_2 §4.5.2); the file `identities.json.enc`
+# this mark asked for until then is no longer written. `device.db` is
+# created by the first writer of device state — in the GUI's setup that is
+# the creation of the first identity — and never by a reader, so it answers
+# the same question: "is there a set-up profile at all?"
+PROFILE_MARK="$HOME/.cleona/device.db"
 
 # Desktop entry (opens GUI window)
 mkdir -p "$DESKTOP_DIR"
@@ -85,7 +92,8 @@ done
 #   * `--profile` is dropped — the daemon accepted the switch and discarded it
 #   * `$PROFILE_MARK` — `last_profile.json` is now encrypted;
 #     a shell script can no longer read it, so the marker
-#     `identities.json.enc` carries the question "is there a profile at all?"
+#     carries the question "is there a profile at all?" (since S403 it is
+#     `device.db`, see the assignment above)
 # `$PORT`/`$NAME` no longer exist — checking on them would mean checking on
 # a condition that is always false.
 if [ -n "$DAEMON_BIN" ] && [ -f "$PROFILE_MARK" ]; then

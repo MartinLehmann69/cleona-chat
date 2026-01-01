@@ -107,6 +107,33 @@ if not exist %RELEASE%\bin\..\lib\*.dll (
 )
 echo [OK] daemon build >> %LOG%
 
+REM --- Dart build IPC tool ---
+REM S403 (v4_2 §22.1): the connection between window and daemon is protected,
+REM a plaintext line is not served any more. Scripts and the E2E harness talk
+REM to the daemon through `cleona-ipc.exe`, built like the daemon (`dart build
+REM cli`, the same hooks; it opens the device database) and placed beside it
+REM in bin\. Until S403-9 only scripts/vm/win-deploy.sh built it, over SSH.
+echo [STEP 4b] Dart build IPC tool (dart build cli)...
+call %DART% build cli --target bin/cleona_ipc.dart --output build\.ipc-cli >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] IPC tool build failed >> %LOG%
+    echo FAIL_IPC > %MARK%
+    exit /b 1
+)
+copy /Y build\.ipc-cli\bundle\bin\cleona_ipc.exe %RELEASE%\bin\cleona-ipc.exe >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] IPC tool copy to bin\ failed >> %LOG%
+    echo FAIL_IPC > %MARK%
+    exit /b 1
+)
+copy /Y build\.ipc-cli\bundle\lib\*.dll %RELEASE%\lib\ >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] IPC tool runtime DLL copy to lib\ failed >> %LOG%
+    echo FAIL_IPC > %MARK%
+    exit /b 1
+)
+echo [OK] IPC tool build >> %LOG%
+
 REM --- DLL Check ---
 REM Fallback copies from windows\runner\. For libsodium.dll this branch should
 REM no longer trigger since provisioning via windows/provision-libsodium.ps1 --
@@ -125,7 +152,7 @@ echo [OK] All DLLs present >> %LOG%
 
 REM --- Summary ---
 echo [STEP 6] Build complete! >> %LOG%
-dir %RELEASE%\cleona.exe %RELEASE%\bin\cleona-daemon.exe %RELEASE%\libsodium.dll %RELEASE%\liboqs.dll %RELEASE%\libzstd.dll >> %LOG% 2>&1
+dir %RELEASE%\cleona.exe %RELEASE%\bin\cleona-daemon.exe %RELEASE%\bin\cleona-ipc.exe %RELEASE%\libsodium.dll %RELEASE%\liboqs.dll %RELEASE%\libzstd.dll >> %LOG% 2>&1
 echo ALL_DONE > %MARK%
 echo [%date% %time%] Build finished successfully >> %LOG%
 exit /b 0

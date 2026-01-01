@@ -1,7 +1,8 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_keys_store.dart';
+import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/key_migration.dart';
@@ -18,8 +19,9 @@ import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/first_start_wipe.dart';
-import 'package:cleona/core/identity/linked_device_keys.dart';
+import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/storage/superseded_device_files.dart';
 
 /// One persisted soft-re-key link old→new (§7.4b / SR-2). Plain data holder
 /// in this file. The reason for this stood here until S368 as
@@ -48,11 +50,7 @@ class StoredRotationLink {
   /// verifiable artifact)." Without this field the founding binding of
   /// every rotated author hangs on Ed25519 alone — whoever breaks Ed25519
   /// builds himself a chain to any foreign UserID and writes in its name.
-  /// Empty exactly where [oldSignatureEd25519] is empty as well. Until S392
-  /// that was the regular case of every second and later LD-8 rotation
-  /// (stale user sig SK); since the co-rotation per v4_2 §14.4 it is the
-  /// exceptional case of an incomplete LD-8 message — see
-  /// [IdentityContext.rotateDelegation].
+  /// Empty exactly where [oldSignatureEd25519] is empty as well.
   final Uint8List oldSignatureMlDsa;
 
   StoredRotationLink({
@@ -151,17 +149,12 @@ class IdentityContext {
   DateTime? keyRotatedAt;
   DateTime? keysCreatedAt;
 
-  // §7.1 LD-3: Inner-Sig signing keys.
-  // Linked Device → delegated keys; Primary/legacy → User-Keys.
-  Uint8List get signingEd25519Sk =>
-      linkedDeviceKeys?.delegatedEd25519Sk ?? ed25519SecretKey;
-  Uint8List get signingMlDsaSk =>
-      linkedDeviceKeys?.delegatedMlDsaSk ?? mlDsaSecretKey;
-  Uint8List get signingEd25519Pk =>
-      linkedDeviceKeys?.delegatedEd25519Pk ?? ed25519PublicKey;
-  Uint8List get signingMlDsaPk =>
-      linkedDeviceKeys?.delegatedMlDsaPk ?? mlDsaPublicKey;
-  bool get isLinkedDevice => linkedDeviceKeys != null;
+  // Inner-sig signing keys: every device signs with the identity signing
+  // keys (v4_2 §14.6.2 "There is no delegation certificate", D-39).
+  Uint8List get signingEd25519Sk => ed25519SecretKey;
+  Uint8List get signingMlDsaSk => mlDsaSecretKey;
+  Uint8List get signingEd25519Pk => ed25519PublicKey;
+  Uint8List get signingMlDsaPk => mlDsaPublicKey;
 
   /// SR-2 (§3.1 stable anchor / §7.4b): persisted founding→current rotation
   /// chain. Empty unless the identity has soft-re-keyed. The userId is
@@ -222,48 +215,38 @@ class IdentityContext {
   ///
   /// ── THE LIMIT, NAMED INSTEAD OF HIDDEN ─────────────────────────────
   ///
-  /// Without [masterSeed]/[hdIndex] (identities created the legacy way;
-  /// linked devices, which per v4_2 §14.6.2 do NOT receive a seed — the
-  /// seed is the only piece explicitly excluded there) there is no
-  /// back-derivation. These cases stay on [ed25519SecretKey] — which is
-  /// EXACTLY today's behaviour, so no deterioration, but no improvement
-  /// either.
-  ///
-  /// **For a linked device this fallback is, since S392, NOT accidentally
-  /// the founding key any more — and the warning sentence below is now
-  /// true.** Until then [rotateDelegation] left `ed25519SecretKey`
-  /// untouched; the device therefore kept holding the original user sig SK
-  /// and fell out of its own system channels on exactly that, while this
-  /// getter accidentally returned the correct founding key. Since the
-  /// co-rotation per §14.4 the device carries the CURRENT user sig SK at
-  /// any time; this getter consequently hands it the current one, and the
-  /// `hasRotated` branch below logs exactly what happens then ("K_AB
-  /// continues under the CURRENT key"). Whoever NEEDS the founding key here
-  /// needs the seed — and a linked device does not have it per §14.6.2.
-  ///
-  /// S392 reported this, it did not decide it: whether a rotated linked
-  /// device should keep its K_AB anchor (the chain or the LD-8 message
-  /// would then have to carry the founding key) belongs to the owner. It
-  /// is latent anyway — LD-8 has no sender today.
-  Uint8List get foundingEd25519SecretKey {
+  /// Without [masterSeed]/[hdIndex] (identities created the legacy way)
+  /// there is no back-derivation. These cases stay on [ed25519SecretKey] —
+  /// which is EXACTLY today's behaviour, so no deterioration, but no
+  /// improvement either. Every further device holds the seed (D-39), so
+  /// this is not a per-device limit.
+  Uint8List get foundingEd25519SecretKey =>
+      foundingEd25519SecretKeyDerived ?? ed25519SecretKey;
+
+  /// The founding secret key derived from the seed and checked against the
+  /// founding public key — or `null` where it cannot be (no HD wallet, or
+  /// the derivation does not match). V4.2 §4.5.4: "An identity whose
+  /// founding secret key cannot be derived from the seed on the rotating
+  /// device does not rotate — `K_AB` would change silently"
+  /// (`CleonaService.rotateIdentityKeys`, E-A8); the delivery layer takes it
+  /// as the founding key of a rotated identity (`mycelium_seam.dart`).
+  Uint8List? get foundingEd25519SecretKeyDerived {
     final seed = masterSeed;
     final idx = hdIndex;
     if (seed == null || idx == null) {
       if (hasRotated) {
         _log.warn('§15.2: rotated identity without HD wallet '
             '(masterSeed/hdIndex missing) — the founding secret cannot be '
-            'recomputed, K_AB continues for this identity under '
-            'the CURRENT key.');
+            'recomputed.');
       }
-      return ed25519SecretKey;
+      return null;
     }
     final derived = HdWallet.deriveEd25519(seed, idx);
     if (!_bytesEqual(derived.publicKey, foundingEd25519Pk)) {
       _log.warn('§15.2: the HD derivation at index $idx does NOT match the '
-          'founding pubkey — anchor and derivation diverge. '
-          'K_AB stays on the current key instead of '
-          'silently using a foreign one.');
-      return ed25519SecretKey;
+          'founding pubkey — anchor and derivation diverge; no founding '
+          'secret key instead of a foreign one.');
+      return null;
     }
     return derived.secretKey;
   }
@@ -361,36 +344,18 @@ class IdentityContext {
   /// Master seed for HD-Wallet derivation (null = legacy).
   final Uint8List? masterSeed;
 
-  // §7.1 LD-3: delegation keys for Linked Devices (null = Primary or legacy).
-  LinkedDeviceKeys? linkedDeviceKeys;
-
   /// When this identity was created (from IdentityManager).
   final DateTime createdAt;
 
   /// Self-declaration: user claims to be 18+ (from IdentityManager).
   bool isAdult;
 
-  /// §7.1.3 (P2): true iff this identity was restored from the seed phrase
-  /// AND the user told the restore screen they still have another device
-  /// running with this identity ("additional device"). Read by
-  /// `IdentityPublisher._isPrimaryDevice` to withhold the AuthManifest
-  /// publish until pairing completes — see `Identity.restoreAwaitingPairing`
-  /// (identity_manager.dart) for the full rationale, this is its runtime
-  /// mirror. Mutable (not `final`) for the same reason `linkedDeviceKeys` is:
-  /// pairing can complete while this IdentityContext instance is already
-  /// running, and the publisher must see the change on its next cycle
-  /// without a restart.
-  bool restoreAwaitingPairing;
-
   /// §13 (S382): runtime mirror of `Identity.restoredFromPhrase`
   /// (identity_manager.dart) — the complete reasoning stands there.
-  /// Together with [restoreAwaitingPairing] it represents the recovery
-  /// case: created from the phrase AND no other device under the same
-  /// phrase.
   ///
-  /// Not `final`, for the same reason as [restoreAwaitingPairing]:
-  /// the marker is deleted as soon as the search has fulfilled its
-  /// purpose, and the running service must see that without a restart.
+  /// Not `final`: the marker is deleted as soon as the search has
+  /// fulfilled its purpose, and the running service must see that without
+  /// a restart.
   bool restoredFromPhrase;
 
   IdentityContext({
@@ -402,7 +367,6 @@ class IdentityContext {
     this.masterSeed,
     DateTime? createdAt,
     this.isAdult = false,
-    this.restoreAwaitingPairing = false,
     this.restoredFromPhrase = false,
   })  : _baseDir = baseDir ?? _resolveBaseDir(),
         createdAt = createdAt ?? DateTime.now(),
@@ -418,7 +382,7 @@ class IdentityContext {
   /// `profileDir`: the base dir is per-DEVICE, never per-profile. Callers
   /// that need isolation (tests, multi-device scenarios) MUST pass an
   /// explicit `baseDir` — setting only `profileDir` does not isolate
-  /// device keys, db.key or device_kem_public.json.
+  /// device keys or db.key.
   static String _resolveBaseDir() => '${AppPaths.home}/.cleona';
 
   // ── Shared startup sequence (S106 fix) ──────────────────────────────
@@ -484,6 +448,19 @@ class IdentityContext {
     }
 
     IdentityManager(baseDir: baseDir).reconcileKeyringDeposit();
+
+    // ── THE DEVICE FILES THE DEVICE DATABASE SUPERSEDED (S403) ──────────
+    //
+    // The list of identities, the device keys and the device-wide settings
+    // lie in `device.db` since S403. What an earlier build of this line
+    // left under the old file names is removed here, at every start, and
+    // not read (`superseded_device_files.dart`).
+    //
+    // BEFORE `migrateDeviceScopedFiles` and `LegacyKeyPurge`: neither
+    // should spend a look at a file that is about to go, and the cleaner
+    // must not keep a legacy key alive for one.
+    removeSupersededDeviceFiles(baseDir,
+        log: CLogger.get('identity', profileDir: baseDir));
 
     // ── HERE STOOD `migrateIfNeeded` AND `repairIfNeeded` (S368) ─────
     //
@@ -601,11 +578,68 @@ class IdentityContext {
     return fresh;
   }
 
-  /// The two names in the keyring for the case without master seed.
-  /// Both are DEVICE-WIDE: an identity without seed has no HD index on
+  /// The name in the keyring for the case without master seed.
+  /// It is DEVICE-WIDE: an identity without seed has no HD index on
   /// which a key could hang.
+  ///
+  /// Until S403 a second name stood here, `device_shared_file_key`, for
+  /// the device keys of an identity without seed. They are no longer
+  /// stored in that case — see [_deviceKeysOf].
   static const String _identityFileKeyName = 'identity_file_key';
-  static const String _deviceFileKeyName = 'device_shared_file_key';
+
+  /// The device keys of a profile directory WITHOUT a master seed, for the
+  /// lifetime of this process — see [_deviceKeysOf].
+  static final Map<String, DeviceKeyBundle> _seedlessDeviceKeys = {};
+
+  /// The device keys of this device (§4.4.2).
+  ///
+  /// ── WITH A MASTER SEED — the only case that occurs in operation ──────
+  ///
+  /// From the device database (`DeviceKeysStore.loadOrCreate`), created at
+  /// the first start and the same ever after. Fail-loud (§4.5.2): a device
+  /// database that lies there and does not open THROWS.
+  ///
+  /// ── WITHOUT A MASTER SEED ────────────────────────────────────────────
+  ///
+  /// The device database opens under `deriveSharedFileEncKey(master_seed)`
+  /// and under nothing else (§4.5.3, §21.4.1) — without a seed there is no
+  /// device database, and so no place where device keys could be stored.
+  /// Until S403 they were sealed into `device_keys.bin.enc` under a random
+  /// key kept in the keyring; a device database under such a key would be
+  /// one the rest of the start (`IdentityManager`) could not open.
+  ///
+  /// No start path of the product arrives here: every one of them reads
+  /// the seed with `IdentityManager.loadMasterSeed()` right after it read
+  /// the list of identities, which itself needs the seed
+  /// (`service_daemon.dart`, `main.dart`, `ios_background_fetch.dart`,
+  /// `scripts/init_profile.dart`). Who arrives here are the guards that
+  /// measure an identity WITHOUT a seed. For them the keys are generated
+  /// once per profile directory and process and kept in memory — two
+  /// identities of one directory still share ONE device.
+  ///
+  /// And where a device database DOES lie in the directory, a missing seed
+  /// is not this case but a keyring that did not answer: then it THROWS.
+  /// Fresh keys there would be the silent regeneration §4.5.2 rules out.
+  DeviceKeyBundle _deviceKeysOf() {
+    final seed = masterSeed;
+    if (seed != null) {
+      return DeviceKeysStore.loadOrCreate(
+          baseDir: _baseDir, key: HdWallet.deriveSharedFileEncKey(seed));
+    }
+    if (DeviceStore.present(_baseDir)) {
+      throw StateError(
+          'No master seed for an identity in $_baseDir, but a device '
+          'database lies there — the device keys in it cannot be read, and '
+          'they are NOT generated anew (that would change the device node '
+          'id).');
+    }
+    return _seedlessDeviceKeys.putIfAbsent(
+        Directory(_baseDir).absolute.path,
+        () => DeviceKeyBundle(
+              sig: DeviceKeyPair.generate(),
+              kem: DeviceKemKeyPair.generate(),
+            ));
+  }
 
   /// The resolved key for the SYNCHRONOUS write paths.
   ///
@@ -632,7 +666,6 @@ class IdentityContext {
       masterSeed: masterSeed,
       createdAt: identity.createdAt,
       isAdult: identity.isAdult,
-      restoreAwaitingPairing: identity.restoreAwaitingPairing,
       restoredFromPhrase: identity.restoredFromPhrase,
     );
     await ctx.initKeys();
@@ -669,13 +702,14 @@ class IdentityContext {
   // ── THE UNLOCK CHAIN, RE-MEASURED (S366) ───────────────────────
   //
   // What is needed to OPEN the storage cannot lie in it. Measured against
-  // the start order, these are exactly two things, and both stay files:
+  // the start order, these are exactly two things, and both lie outside:
   //   * the master seed — keyring, otherwise `<baseDir>/master_seed.json`
   //     (`IdentityManager.loadMasterSeed`, explicitly justified there),
-  //   * `<baseDir>/identities.json`, which carries the `hdIndex`.
-  // `service_daemon.dart:541` or `main.dart:2097` fetch the seed,
-  // `identities.first.hdIndex` comes from `identities.json` — and only
-  // AFTER that does `createFromIdentity` (`identity_context.dart:427`) call
+  //   * the list of identities, which carries the `hdIndex` — in the
+  //     device database since S403 (`<baseDir>/device.db`, which opens
+  //     under the seed alone), a file of its own before.
+  // The start paths fetch the seed, `hdIndex` comes from the list — and
+  // only AFTER that does `createFromIdentity` call
   // `initKeys()`. `keys.json` was thus never part of the unlock chain,
   // but always its consumer.
   MessageStore? _store;
@@ -694,6 +728,28 @@ class IdentityContext {
     if (_store != null) return _store;
     Directory(profileDir).createSync(recursive: true);
     return _store = MessageStore.open('$profileDir/messages.db', k, logger: _log);
+  }
+
+  /// The DEVICE database (`device.db` in [_baseDir], S403; v4_2 §21.4.1)
+  /// for a reader — `null` without a master seed (it opens only under the
+  /// key derived from the seed) or where none lies (the reader does not
+  /// create it). For state of the device that a service of this identity
+  /// reads, so that every identity of the device reads the same value.
+  DeviceStore? get deviceStoreOrNull {
+    final seed = masterSeed;
+    if (seed == null) return null;
+    return DeviceStore.atIfPresent(
+        _baseDir, HdWallet.deriveSharedFileEncKey(seed));
+  }
+
+  /// The DEVICE database for a writer — created if it is not there; `null`
+  /// without a master seed. There is no falling back to the database of
+  /// the identity: a device setting written there would be one value per
+  /// identity again.
+  DeviceStore? deviceStoreForWrite() {
+    final seed = masterSeed;
+    if (seed == null) return null;
+    return DeviceStore.at(_baseDir, HdWallet.deriveSharedFileEncKey(seed));
   }
 
   /// Closes the storage. Callable separately, so that an identity switch
@@ -772,24 +828,7 @@ class IdentityContext {
         : _readKeysOutDeposit(deposit);
 
     if (json != null) {
-      ed25519PublicKey = hexToBytes(json['ed25519_pk'] as String);
-      ed25519SecretKey = hexToBytes(json['ed25519_sk'] as String);
-      mlDsaPublicKey = hexToBytes(json['ml_dsa_pk'] as String);
-      mlDsaSecretKey = hexToBytes(json['ml_dsa_sk'] as String);
-      x25519PublicKey = hexToBytes(json['x25519_pk'] as String);
-      x25519SecretKey = hexToBytes(json['x25519_sk'] as String);
-      mlKemPublicKey = hexToBytes(json['ml_kem_pk'] as String);
-      mlKemSecretKey = hexToBytes(json['ml_kem_sk'] as String);
-      // Load previous keys if present (rotation fallback)
-      if (json['prev_x25519_sk'] != null) {
-        previousX25519Sk = hexToBytes(json['prev_x25519_sk'] as String);
-      }
-      if (json['prev_ml_kem_sk'] != null) {
-        previousMlKemSk = hexToBytes(json['prev_ml_kem_sk'] as String);
-      }
-      if (json['key_rotated_at'] != null) {
-        keyRotatedAt = DateTime.fromMillisecondsSinceEpoch(json['key_rotated_at'] as int);
-      }
+      _keysApply(json);
       if (json['keys_created_at'] != null) {
         keysCreatedAt = DateTime.fromMillisecondsSinceEpoch(json['keys_created_at'] as int);
       } else {
@@ -832,25 +871,13 @@ class IdentityContext {
     // `Address.identifier` in mycelium and the card fingerprint.
     userId = HdWallet.computeUserId(foundingEd25519Pk, foundingMlDsaPk);
 
-    // Compute Device-Node-ID from the daemon-global Device-Sig keypair
-    // (§3.1, §3.5). Multi-Identity sharing: all IdentityContexts in this
-    // daemon load the SAME DeviceKeysStore (single file in baseDir) and
-    // therefore derive the SAME deviceNodeId.
-    // Device keys use the daemon-global SHARED encryption key (not the
-    // per-identity key) so that every identity in this daemon decrypts
-    // the same file with the same key. (Here stood "all identities and
-    // CleonaNode"; `CleonaNode` was deleted with the CUT of 2026-08-31 —
-    // the statement about the shared key applies unchanged.)
-    // S368: WITHOUT a master seed this key was `null`, and `FileEncryption`
-    // created a plaintext `db.key` for it. The same three-stage resolution
-    // as for the identity files, only with a DEVICE-WIDE name in the
-    // keyring — `device_keys.bin` belongs to the device, not to an
-    // identity.
-    final sharedFileEncKey = masterSeed != null
-        ? HdWallet.deriveSharedFileEncKey(masterSeed!)
-        : await _dissolveBundleKey(_deviceFileKeyName);
-    final deviceFileEnc = FileEncryption(baseDir: _baseDir, key: sharedFileEncKey);
-    final deviceBundle = DeviceKeysStore.loadOrCreate(baseDir: _baseDir, fileEnc: deviceFileEnc);
+    // Compute Device-Node-ID from the device-wide Device-Sig keypair
+    // (§4.1, §4.4.2). Multi-Identity sharing: all IdentityContexts of this
+    // device load the SAME device keys — ONE row of the device database
+    // (`device.db` in baseDir, S403) — and therefore derive the SAME
+    // deviceNodeId. The device database opens under the device-wide key
+    // derived from the master seed, not under the key of an identity.
+    final deviceBundle = _deviceKeysOf();
     // S360: the bundle is KEPT instead of thrown away after the one
     // derivation — see [deviceKeys].
     _deviceKeys = deviceBundle;
@@ -863,68 +890,87 @@ class IdentityContext {
     _log.info('Identity User-ID: ${userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${deviceNodeIdHex.substring(0, 16)}...');
 
-    // Export device KEM public keys to plaintext JSON for E2E test
-    // infrastructure (Android has no IPC — tests read this via ADB run-as).
-    // Contains only PUBLIC keys, no secrets.
+    // ── `device_kem_public.json` IS NO LONGER WRITTEN (S401, U-2) ──────────
     //
-    // ── S362: STAYS IN PLAINTEXT DELIBERATELY ──────────────────────────
+    // Until S401 every start of every identity wrote this file into the
+    // device directory, unencrypted: the device node ID, the device's two
+    // public KEM keys and — since S368 — the identity's public signing key
+    // and founding key. S362 kept it in plaintext for a price that was real
+    // then: three E2E suites read it with `adb run-as … cat`
+    // (`gui-01b-ensure-contacts-android`,
+    // `gui-01c-ensure-contacts-avm-pair`, `gui-55-identity-resolution`).
+    // The same note left open "that a pure test crutch is written at all on
+    // every production start".
     //
-    // The finding report lists this file under 2.2 ("number and
-    // identifiers of the devices"). Re-measured on 02.09.2026, that is not
-    // right: EXACTLY THREE SCALAR FIELDS of this ONE device are written —
-    // `deviceNodeIdHex`, `deviceX25519PkB64`, `deviceMlKemPkB64`. It is
-    // not a list; no count stands in it, and neither do the identifiers of
-    // other devices. The device list lies in `devices.json.enc` and is
-    // encrypted.
+    // That question is answered by what became of the readers: all three
+    // suites are switched off as V3 (`test.skip(true, v3ReturnRoute(…))`,
+    // `test.describe.skip`, S382/S383) — they built a ContactSeed from the
+    // file, a thing this line no longer has (a contact arises from an
+    // invitation card, §15.2). Nothing in `lib/`, `bin/`, `scripts/` or the
+    // native shells reads the file. What stayed was a writer without a
+    // reader that put, next to the device keys, a file saying which
+    // identity this device runs — and with several identities the one that
+    // happened to start last.
     //
-    // What would remain is the own device node ID plus two public keys.
-    // The device node ID is the ROUTING identifier of this node — it
-    // stands on the wire in every frame it sends. Whoever has the disk has
-    // `identities/` anyway; he learns nothing here that the network does
-    // not freely show every intermediate node.
-    //
-    // Against this stands a measurable price: FOUR E2E suites read the
-    // file with `adb run-as … cat` and have no seed on the device from
-    // which they could derive a key —
-    // `gui-01b-ensure-contacts-android` (:123),
-    // `gui-01c-ensure-contacts-avm-pair` (:210, :1012),
-    // `gui-55-identity-resolution` (:156). An encryption here would cost
-    // these four suites and buy nothing.
-    //
-    // OPEN and NOT to be decided here: that a pure test crutch is written
-    // at all on every production start. That is a question of its own
-    // (E2E access without IPC on Android) and not one of encryption at
-    // rest.
-    //
-    // ── S368: THE TRUST ANCHOR IS ADDED ──────────────────────────
-    //
-    // `userEd25519PkB64` and `foundingEd25519PkB64` are the two keys that
-    // EVERY ContactSeed carries publicly as `ep` and `fp` (§8.1.1) — so
-    // nothing stands here that is not printed on every invitation link of
-    // this node anyway.
-    //
-    // They must stand here, because `gui-01c-ensure-contacts-avm-pair`
-    // (:1025-1033) assembles its ContactSeed URI from exactly this file
-    // and until today built it WITHOUT `ep`. Such a seed could not be
-    // recomputed by the other side; since S368 it is rejected, and without
-    // this addition the suite could no longer build a valid one at all.
-    // (The request would never have gone out before either — the then
-    // `sendContactRequest` aborted without `ep` —, it just did not become
-    // visible.) S389: `sendContactRequest` no longer exists
-    // (S388-BAU-KONTAKT); on the V4.2 line the request arises when
-    // redeeming an invitation card (§15.5) and goes out via the seam
-    // `sendToUser` (§22.5, `mycelium_seam.dart`).
+    // So the writer is gone, and what an earlier build left is removed
+    // here, at the place that wrote it at every start. One `existsSync`.
     try {
-      File('$_baseDir/device_kem_public.json').writeAsStringSync(jsonEncode({
-        'deviceNodeIdHex': deviceNodeIdHex,
-        'deviceX25519PkB64': base64Encode(deviceBundle.kem.x25519PublicKey),
-        'deviceMlKemPkB64': base64Encode(deviceBundle.kem.mlKemPublicKey),
-        'userEd25519PkB64': base64Encode(ed25519PublicKey),
-        'foundingEd25519PkB64': base64Encode(foundingEd25519Pk),
-      }));
-    } catch (_) {
-      // Non-fatal: file is only consumed by E2E tests.
+      final left = File('$_baseDir/device_kem_public.json');
+      if (left.existsSync()) {
+        left.deleteSync();
+        _log.info('Removed device_kem_public.json — a file of an earlier '
+            'build that named this device together with its identity');
+      }
+    } catch (e) {
+      _log.warn('device_kem_public.json could not be removed: $e');
     }
+  }
+
+  /// The fields of a `keys` row (the layout of [_saveKeys]).
+  void _keysApply(Map<String, dynamic> json) {
+    ed25519PublicKey = hexToBytes(json['ed25519_pk'] as String);
+    ed25519SecretKey = hexToBytes(json['ed25519_sk'] as String);
+    mlDsaPublicKey = hexToBytes(json['ml_dsa_pk'] as String);
+    mlDsaSecretKey = hexToBytes(json['ml_dsa_sk'] as String);
+    x25519PublicKey = hexToBytes(json['x25519_pk'] as String);
+    x25519SecretKey = hexToBytes(json['x25519_sk'] as String);
+    mlKemPublicKey = hexToBytes(json['ml_kem_pk'] as String);
+    mlKemSecretKey = hexToBytes(json['ml_kem_sk'] as String);
+    // The previous generation (rotation fallback), if present.
+    previousX25519Sk = json['prev_x25519_sk'] == null
+        ? null
+        : hexToBytes(json['prev_x25519_sk'] as String);
+    previousMlKemSk = json['prev_ml_kem_sk'] == null
+        ? null
+        : hexToBytes(json['prev_ml_kem_sk'] as String);
+    keyRotatedAt = json['key_rotated_at'] == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(json['key_rotated_at'] as int);
+    if (json['keys_created_at'] != null) {
+      keysCreatedAt =
+          DateTime.fromMillisecondsSinceEpoch(json['keys_created_at'] as int);
+    }
+  }
+
+  /// B-4b (§14.6.2, D-39): the key state an existing own device handed
+  /// over — the current signing keys with the rotation chain and the
+  /// current and previous KEM generation with its time. Written as it came
+  /// and read back like at start. The caller has checked that [row] and
+  /// [chain] continue THIS identity (the UserID does not change).
+  void keysTakeOver(
+      Map<String, dynamic> row, Map<String, Map<String, dynamic>> chain) {
+    final deposit = storeOrNull;
+    if (deposit == null) {
+      throw StateError('keys handed over to an identity without storage');
+    }
+    deposit.replaceArea(areaRotationChain, chain);
+    deposit.putEntry(areaKeys, keyKeys, row);
+    rotationChain.clear();
+    _readRotationChainOutDeposit(deposit);
+    _keysApply(row);
+    _log.info('Keys handed over by an own device taken over (§14.6.2): '
+        'chain ${rotationChain.length} link(s), previous KEM generation '
+        '${previousX25519Sk == null ? "none" : "kept"}');
   }
 
   /// Reads the `keys` row — with the latch from [initKeys].
@@ -1095,6 +1141,36 @@ class IdentityContext {
         '${previousKeyRetention.inDays} days.');
   }
 
+  /// Since when the current KEM generation stands: its rotation time, or
+  /// the creation of the keys when it never rotated. `null` without either.
+  DateTime? get kemGenerationSince => keyRotatedAt ?? keysCreatedAt;
+
+  /// §14.7 Type 19 `KEM_ROTATED` (§4.5.4, D-40): takes the generation another
+  /// own device rotated to as the current one. The current generation
+  /// becomes the ONE previous one — exactly what [rotateKemKeys] does on the
+  /// rotating device, so both devices hold the same pair of generations.
+  /// [at] is the rotating device's time; it becomes [keyRotatedAt], so both
+  /// devices count the next interval and the retention from the same instant.
+  void adoptKemGeneration({
+    required Uint8List x25519Pk,
+    required Uint8List x25519Sk,
+    required Uint8List mlKemPk,
+    required Uint8List mlKemSk,
+    required DateTime at,
+  }) {
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKeyEffective);
+    previousX25519Sk = x25519SecretKey;
+    previousMlKemSk = mlKemSecretKey;
+    x25519PublicKey = x25519Pk;
+    x25519SecretKey = x25519Sk;
+    mlKemPublicKey = mlKemPk;
+    mlKemSecretKey = mlKemSk;
+    keyRotatedAt = at;
+    _saveKeys(fileEnc);
+    _log.info('KEM generation of another own device taken over (Type 19). '
+        'Previous keys kept for ${previousKeyRetention.inDays} days.');
+  }
+
   /// Emergency full identity rotation (§26.6.2).
   /// Replaces ALL keys (Ed25519, ML-DSA, X25519, ML-KEM), recomputes Node-ID,
   /// keeps old KEM secret keys as previous for the [previousKeyRetention]
@@ -1165,133 +1241,60 @@ class IdentityContext {
         'chain length ${rotationChain.length}');
   }
 
-  /// LD-8: Linked-Device delegation rotation after the Primary's emergency
-  /// key rotation. Updates the User-PKs, the user signature SKs, the user KEM
-  /// SK, the delegation keys and the rotation chain — WITHOUT receiving the
-  /// master seed.
+  /// Takes over the keys and the rotation chain a recovery bundle brought
+  /// (§13.3.2, §4.5.4, D-33; B-1 E7-a) — on a device that came from the
+  /// 24 words and holds the FOUNDING keys, after an Emergency Key Rotation
+  /// elsewhere. No link is signed here: the chain comes whole, signed by the
+  /// device that rotated.
   ///
-  /// ── THE SIGNATURE SECRET KEYS ROTATE ALONG (v4_2 §14.4) ──────────────
-  ///
-  /// Until S392 this method updated the PUBLIC user signature keys and left
-  /// the SECRET ones untouched, justified in the doc comment as "the
-  /// load-bearing boundary of §7.1.1". **That justification came from a
-  /// record state, not from the norm.** §7.1.1 is a V3 number
-  /// (`Cleona_Chat_Architecture_v3_0.md:3233`, the linked-device model:
-  /// delegated subkey + certificate + user KEM SK, but no user sig SK); in
-  /// v4_2 chapter 7 is the delivery ladder and no §7.1.1 exists there.
-  ///
-  /// v4_2 §14.4 ("What rotates along") says the opposite, verbatim:
-  ///
-  /// > **The identity signature keys also rotate along at lock-out.** They
-  /// > sit — like the user KEM SK — **under the shared key on every
-  /// > device**; only this way can every device issue delegation
-  /// > certificates alone. Without co-rotation, a locked-out device would
-  /// > retain the ability to sign in the identity's name.
-  ///
-  /// §14.6.2 lists exactly one piece a linked device does NOT receive:
-  /// **the seed**. Not the signature keys. So [newUserEd25519Sk] /
-  /// [newUserMlDsaSk] travel in the LD-8 message — the same channel, the
-  /// same sealing that already carries `newUserX25519Sk` / `newUserMlKemSk`
-  /// — and are set here.
-  ///
-  /// What that repairs (measured, S392 report `S392-FIX-LD8.md`): before
-  /// this change the device signed every system-channel record with a key
-  /// that did not belong to the public key the same record carried inline,
-  /// so `SystemChannelRecordStore.verifyRecord` failed at its FIRST step —
-  /// in the device's own admission. Bug Log, feature requests, voting and
-  /// retraction fell out silently from the FIRST rotation on. From the
-  /// second rotation a second cause was added: the chain link could no
-  /// longer be signed (see `canProveLink` below) and a chain with an empty
-  /// link is rejected. Both causes share this one root.
-  ///
-  /// What this does NOT change: `signingEd25519Sk` / `signingMlDsaSk` keep
-  /// routing every inner-sig of a linked device to the DELEGATED keys, and
-  /// the device's own device-bound records keep going out under the
-  /// delegated key plus certificate chain (§14.6.2). The user signature keys
-  /// are the identity's keys, not the device's.
-  ///
-  /// The trade-off is §14.4's, not this code's: the secret identity
-  /// signature keys now lie on every linked device, which widens what a
-  /// stolen, unlocked device holds. §14.4 makes that call explicitly — "a
-  /// stolen, unlocked device is a **valid** member" — and puts the
-  /// protection into the quorum lock-out (§14.8), not into withholding keys.
-  void rotateDelegation({
-    required Uint8List newUserEd25519Pk,
-    required Uint8List newUserMlDsaPk,
-    required Uint8List newUserEd25519Sk,
-    required Uint8List newUserMlDsaSk,
-    required Uint8List newUserX25519Pk,
-    required Uint8List newUserMlKemPk,
-    required Uint8List newUserX25519Sk,
-    required Uint8List newUserMlKemSk,
-    required LinkedDeviceKeys newLinkedKeys,
+  /// The caller has checked the chain against this identity's UserID and the
+  /// new signing keys (`RotationChain.holds`). Here only what that check
+  /// cannot see: the chain starts at THIS device's current keys (the
+  /// founding ones), it ends at [ed25519Pk]/[mlDsaPk], and the secret keys
+  /// belong to them. Throws [ArgumentError] otherwise; nothing changed then.
+  /// The current KEM generation becomes the previous one (7 d window).
+  void adoptRecoveredKeys({
+    required List<StoredRotationLink> chain,
+    required Uint8List ed25519Pk,
+    required Uint8List ed25519Sk,
+    required Uint8List mlDsaPk,
+    required Uint8List mlDsaSk,
+    required Uint8List x25519Pk,
+    required Uint8List x25519Sk,
+    required Uint8List mlKemPk,
+    required Uint8List mlKemSk,
   }) {
-    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKeyEffective);
-
-    final linkContent =
-        StoredRotationLink.linkContentOf(newUserEd25519Pk, newUserMlDsaPk);
-    // The link is only a continuity proof if the OLD User-SK we still hold
-    // actually belongs to `ed25519PublicKey`. Since S392 it does — the sig
-    // SKs rotate along (§14.4), so `canProveLink` is expected to be true on
-    // every rotation, and a linked device produces a fully hybrid-signed
-    // chain just like the Primary does in `rotateIdentityFull`.
-    //
-    // The check stays as a fail-closed guard, not as an expected path: if a
-    // caller ever hands in a key pair that does not match (a truncated LD-8
-    // message, a future sender that forgets a field), signing anyway would
-    // emit a link that LOOKS like a proof but verifies against nothing —
-    // worse than an absent one, because a resolver classifies a manifest
-    // carrying a broken chain as `forged`. Better an empty link plus the
-    // warning below than a forged-looking one.
-    // S392: the probe runs over BOTH signatures. A chain whose link only
-    // holds classically is not a hybrid proof according to §4.5.4 — and a
-    // checker that checks it hybrid (system_channel_records.dart) would
-    // reject it anyway. Either both or neither.
-    final candidateSig = SodiumFFI().signEd25519(linkContent, ed25519SecretKey);
-    final candidateSigMlDsa = OqsFFI().mlDsaSign(linkContent, mlDsaSecretKey);
-    final canProveLink =
-        SodiumFFI().verifyEd25519(linkContent, candidateSig, ed25519PublicKey) &&
-            OqsFFI()
-                .mlDsaVerify(linkContent, candidateSigMlDsa, mlDsaPublicKey);
-    if (!canProveLink) {
-      // Since S392 this is an ANOMALY, not the normal path: §14.4 has the
-      // sig SKs rotate along, so the key we sign with must match. Reaching
-      // this line means the LD-8 message was incomplete.
-      _log.error('LD-8: User-Sig-SK does not match current User-PK although '
-          '§14.4 co-rotation is in effect — rotation-chain link stored '
-          'WITHOUT signature (fail closed); the LD-8 message is incomplete');
+    bool same(Uint8List a, Uint8List b) =>
+        a.length == b.length &&
+        Iterable<int>.generate(a.length).every((i) => a[i] == b[i]);
+    if (chain.isEmpty ||
+        !same(chain.first.oldEd25519Pk, ed25519PublicKey) ||
+        !same(chain.first.oldMlDsaPk, mlDsaPublicKey) ||
+        !same(chain.last.newEd25519Pk, ed25519Pk) ||
+        !same(chain.last.newMlDsaPk, mlDsaPk) ||
+        ed25519Sk.length != 64 ||
+        !same(Uint8List.sublistView(ed25519Sk, 32), ed25519Pk)) {
+      throw ArgumentError('recovered keys do not continue this identity');
     }
-    rotationChain.add(StoredRotationLink(
-      oldEd25519Pk: ed25519PublicKey,
-      oldMlDsaPk: mlDsaPublicKey,
-      newEd25519Pk: newUserEd25519Pk,
-      newMlDsaPk: newUserMlDsaPk,
-      oldSignatureEd25519: canProveLink ? candidateSig : Uint8List(0),
-      oldSignatureMlDsa: canProveLink ? candidateSigMlDsa : Uint8List(0),
-    ));
-
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKeyEffective);
+    rotationChain
+      ..clear()
+      ..addAll(chain);
     previousX25519Sk = x25519SecretKey;
     previousMlKemSk = mlKemSecretKey;
-
-    ed25519PublicKey = newUserEd25519Pk;
-    mlDsaPublicKey = newUserMlDsaPk;
-    // §14.4: "The identity signature keys also rotate along at lock-out …
-    // they sit under the shared key on EVERY device." Before S392 these two
-    // lines were missing; see the doc comment above for what that broke.
-    ed25519SecretKey = newUserEd25519Sk;
-    mlDsaSecretKey = newUserMlDsaSk;
-    x25519PublicKey = newUserX25519Pk;
-    x25519SecretKey = newUserX25519Sk;
-    mlKemPublicKey = newUserMlKemPk;
-    mlKemSecretKey = newUserMlKemSk;
-
-    linkedDeviceKeys = newLinkedKeys;
+    ed25519PublicKey = ed25519Pk;
+    ed25519SecretKey = ed25519Sk;
+    mlDsaPublicKey = mlDsaPk;
+    mlDsaSecretKey = mlDsaSk;
+    x25519PublicKey = x25519Pk;
+    x25519SecretKey = x25519Sk;
+    mlKemPublicKey = mlKemPk;
+    mlKemSecretKey = mlKemSk;
     keyRotatedAt = DateTime.now();
-
     _saveKeys(fileEnc);
-    _log.info('Delegation rotation complete (LD-8): User-ID '
-        '${userIdHex.substring(0, 16)}... unchanged, '
-        'chain length ${rotationChain.length}');
+    _log.info('Recovered keys adopted (§13.3, D-33): User-ID '
+        '${userIdHex.substring(0, 16)}... unchanged, chain length '
+        '${rotationChain.length}');
   }
 
   /// How long the PREVIOUS KEM generation stays around after a rotation.

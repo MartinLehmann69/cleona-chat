@@ -33,8 +33,8 @@ import 'package:mycelium/neighbour_list.dart';
 ///
 /// ── THE SEALED PLAINTEXT ───────────────────────────────────────────────────
 /// ```
-/// message, publication, pair notice:  identifier 8 ‖ fixed neighbours ‖ content (or mode 1)
-/// acknowledgement (0x11):              identifier 8 ‖ fixed neighbours
+/// message, pair notice:     identifier 8 ‖ fixed neighbours ‖ content
+/// acknowledgement (0x11):   identifier 8 ‖ fixed neighbours
 /// ```
 /// "Fixed neighbours" is the list of `neighbour_list.dart` (count 0..3 +
 /// addresses, ≤ 58 B): the sender's fixed neighbours as its identity names
@@ -60,12 +60,6 @@ enum DeliveryState {
 
 const int kKindMessage = kinds.kMessage;
 const int kKindReceipt = kinds.kDeliveryReceipt;
-const int kKindPublication = kinds.kKeyRotation;
-
-/// Mode of a publication: identifier and routes continue to apply. mycelium has no
-/// tags; the only thing a contact could derive anew is the identifier,
-/// and that stays the same across the routine rotation.
-const int kModeRoutesApplyFurther = kinds.kModeRoutesApplyFurther;
 
 /// Identifier of a message: 8 bytes, drawn randomly by the sender.
 const int kIdentifierLength = 8;
@@ -88,6 +82,10 @@ class Outbound {
   DeliveryState state;
   DateTime? acknowledgedAt;
 
+  /// The envelope carried the sender's rotation chain (§4.5.4) — its
+  /// receipt then tells the book the chain arrived (`anchor_book.dart`).
+  bool carriedChain = false;
+
   Outbound({
     required this.identifier,
     required this.content,
@@ -104,12 +102,9 @@ class Outbound {
 /// of the recipient stands in front, and [origin] is only a suggestion for the first
 /// route.
 ///
-/// [origin] is `null` if the packet was fetched from a post box:
-/// then the sender address belongs to the HOLDER, not the sender.
-/// Measured on 14.09.2026 (`berichte/S384-QUITTUNG-BRIEFKASTEN.md`): until
-/// then the receipt went to exactly this address, the holder could not
-/// unseal it and discarded it — the sender NEVER learned that
-/// delivery had happened.
+/// [origin] is `null` if the packet was fetched from a post box: then the
+/// sender address is the HOLDER's, who cannot unseal a receipt (measured
+/// 14.09.2026, `berichte/S384-QUITTUNG-BRIEFKASTEN.md`).
 typedef Back = void Function(
     Uint8List packet, Address to, CardAddress? origin);
 
@@ -138,11 +133,6 @@ class Inbound {
   final Address to;
   final DateTime at;
 
-  /// `null` for a message. Set for a PUBLICATION (0x15): then
-  /// [content] is empty, and the only thing that counts is the address in
-  /// [from] — no display, no history entry.
-  final int? mode;
-
   /// `null` for a message. Set for a PAIR NOTICE
   /// (`kinds.isPairNotice`): then it is the kind, [content] its
   /// payload — no display, no history entry (`mailbox_pair.dart`).
@@ -154,7 +144,6 @@ class Inbound {
     required this.from,
     required this.to,
     required this.at,
-    this.mode,
     this.kind,
   });
 }
@@ -176,6 +165,15 @@ class Messages {
   /// Called when an own message has been receipted.
   final void Function(Outbound)? onReceipt;
 
+  /// The same for the mailbox of this identity: a day-key notice to a group
+  /// pair counts as sent only with its receipt (§9.2, §8.2; S398 N-1a).
+  void Function(Outbound)? onReceiptToMailbox;
+
+  /// A receipt for no open outbound — after a restart the one the history
+  /// still holds (§9.2, OP-30). [from] is the proven sender; the application
+  /// decides, without it the receipt is discarded.
+  void Function(Uint8List identifier, Address from)? onReceiptUnknown;
+
   /// The fixed neighbours this identity names to its contacts (D3,
   /// set in `host_codes.dart`) — sealed into every message and
   /// acknowledgement it sends.
@@ -184,6 +182,15 @@ class Messages {
   /// A peer's fixed neighbours came in a message or acknowledgement; [from]
   /// is the sender inside the seal. Empty lists are not reported.
   void Function(Address from, List<CardAddress> neighbours)? onNeighbours;
+
+  /// Q1: the node keeps the way of a held-back copy ([onHeld], [origin] as
+  /// fed) and sends its receipt that way ([heldBack]; `node_receipt.dart`).
+  void Function(Uint8List identifier, CardAddress? origin)? onHeld;
+  void Function(Uint8List identifier, void Function(CardAddress? origin) send)? heldBack;
+
+  /// Q1 (§9.4, D-29): `true` holds the receipt of this copy back (asked
+  /// before [onInbound]); the application sends it with [receiptSend].
+  bool Function(Inbound)? receiptLater;
 
   final Map<String, Outbound> _open = {};
 
@@ -206,32 +213,31 @@ class Messages {
   /// [content] goes out unchanged — arbitrary bytes, including ones that
   /// are not valid UTF-8.
   ///
-  /// With [mode] it is a publication (0x15): [content] is not
-  /// sent, the plaintext is identifier ‖ mode. It is receipted like every
-  /// message. With [kind] (a kind from `kinds.isPairNotice`) it is
-  /// a pair notice: [content] goes out under this kind.
+  /// With [kind] (a kind from `kinds.isPairNotice`) it is
+  /// a pair notice: [content] goes out under this kind. An [identifier] still
+  /// open is sent AGAIN (§9.3), sealed anew, on the [Outbound] its caller holds.
   Outbound ship(Uint8List content, Address to, CardAddress? destination,
-      {Uint8List? identifier, int? mode, int? kind}) {
-    if (kind != null && (mode != null || !kinds.isPairNotice(kind))) {
+      {Uint8List? identifier, int? kind}) {
+    if (kind != null && !kinds.isPairNotice(kind)) {
       throw MessageError('not a pair notification: $kind');
     }
     final k = identifier ?? _roll(kIdentifierLength, _dice);
-    final outbound = Outbound(identifier: k, content: content, to: to);
+    final outbound = (_open[_key(k)] ?? Outbound(identifier: k, content: content, to: to))
+      ..carriedChain = me.carriesChainTo(to);
 
     final envelope = Envelope.seal(
-      plaintext: _head(k, mode == null ? content : [mode]),
+      plaintext: _head(k, content),
       recipient: to,
       sender: me,
     );
 
     _open[_key(k)] = outbound;
-    outbound.state = DeliveryState.inTransit;
-    report?.call('message ${_short(k)} in transit (${envelope.length} B)');
-    send(_withKind(kind ?? (mode == null ? kKindMessage : kKindPublication),
-        envelope), destination);
+    // §9.1 (V11, S403): `in transit` begins only once a way demonstrably
+    // carried the packet or a post box took it — until then it rests.
+    report?.call('message ${_short(k)} on the ladder (${envelope.length} B)');
+    send(_withKind(kind ?? kKindMessage, envelope), destination);
     return outbound;
   }
-
 
   /// Feeds in an incoming packet. [origin] is the address from which
   /// it came — `null` if it was fetched from a post box and the
@@ -240,41 +246,43 @@ class Messages {
     if (packet.isEmpty) throw MessageError('empty packet');
     switch (packet[0]) {
       case kKindMessage:
-        _messageCame(packet, origin, announcement: false);
-      case kKindPublication:
-        _messageCame(packet, origin, announcement: true);
+        _messageCame(packet, origin);
       case kKindReceipt:
         _receiptCame(packet);
       case final s when kinds.isPairNotice(s):
-        _messageCame(packet, origin, announcement: false, kind: s);
+        _messageCame(packet, origin, kind: s);
       default:
         throw MessageError('unexpected kind ${packet[0]}');
     }
   }
 
-  void _messageCame(Uint8List packet, CardAddress? origin,
-      {required bool announcement, int? kind}) {
+  void _messageCame(Uint8List packet, CardAddress? origin, {int? kind}) {
     final (plaintext, sender) = Envelope.unseal(
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
     );
     final (identifier, content) = _cut(plaintext, sender);
-    if (announcement && content.length != 1) {
-      throw MessageError('Announcement with ${content.length} B instead of mode');
-    }
 
-    report?.call('${announcement ? 'Announcement' : 'Message'} '
-        '${_short(identifier)} arrived');
-    onInbound(Inbound(
+    report?.call('Message ${_short(identifier)} arrived');
+    final inbound = Inbound(
       identifier: identifier,
-      content: announcement ? Uint8List(0) : content,
+      content: content,
       from: sender,
       to: me.address,
       at: DateTime.now(),
-      mode: announcement ? content[0] : null,
       kind: kind,
-    ));
+    );
+    final later = receiptLater?.call(inbound) ?? false;
+    if (later) onHeld?.call(identifier, origin);
+    onInbound(inbound);
+    // Twin sync from an own device carries no acknowledgement (§9.2, D-37).
+    if (!later && !sender.sameIdentity(me.address)) {
+      receiptSend(identifier, sender, origin);
+    }
+  }
 
+  /// The receipt (0x11) for [identifier] to [sender]; see [receiptLater].
+  void receiptSend(Uint8List identifier, Address sender, [CardAddress? origin]) {
     // The receipt is sealed: otherwise a third party could forge it
     // and fake a tick to the sender that does not exist.
     final receipt = Envelope.seal(
@@ -282,13 +290,13 @@ class Messages {
       recipient: sender,
       sender: me,
     );
-    // via the LADDER, not to `origin`. For a piece fetched from the post box
-    // `origin` belongs to the holder; it cannot unseal the receipt
-    // and discards it. It therefore goes to the
-    // IDENTITY of the sender, and `origin` is only the suggestion for the
-    // first step — for a message arriving directly that is
-    // still the fastest route.
-    back(_withKind(kKindReceipt, receipt), sender, origin);
+    // Via the LADDER to the sender's IDENTITY, not to `origin` — for collected
+    // post `origin` is the holder, who cannot unseal it. A held-back one
+    // takes the way its message came ([heldBack], §9.2).
+    final p = _withKind(kKindReceipt, receipt);
+    final held = heldBack;
+    if (held == null) return back(p, sender, origin);
+    held(identifier, (o) => back(p, sender, o ?? origin));
   }
 
   void _receiptCame(Uint8List packet) {
@@ -302,8 +310,10 @@ class Messages {
     }
     final outbound = _open[_key(identifier)];
     if (outbound == null) {
+      final late = onReceiptUnknown;
       report?.call('Receipt ${_short(identifier)} without open outbound '
-          '— discarded');
+          '— ${late == null ? 'discarded' : 'handed to the application'}');
+      late?.call(identifier, sender);
       return;
     }
     // Only the one to whom the message went may receipt — the IDENTITY, not
@@ -316,9 +326,11 @@ class Messages {
     }
     outbound.state = DeliveryState.delivered;
     outbound.acknowledgedAt = DateTime.now();
+    if (outbound.carriedChain) me.book.chainArrived(sender);
     _open.remove(_key(identifier));
     report?.call('message ${_short(identifier)} delivered');
     onReceipt?.call(outbound);
+    onReceiptToMailbox?.call(outbound);
   }
 
   /// identifier ‖ own fixed neighbours ‖ [rest] — see the file header.
@@ -357,7 +369,7 @@ class Messages {
 }
 
 /// The sealed plaintext of every kind this file sends — message,
-/// publication, pair notice and acknowledgement (`0x11`): identifier ‖
+/// pair notice and acknowledgement (`0x11`): identifier ‖
 /// [neighbours] ‖ [rest] (file header). The ONE place that lays it out;
 /// whoever builds such a plaintext outside [Messages] builds it here.
 Uint8List messagePlaintext(

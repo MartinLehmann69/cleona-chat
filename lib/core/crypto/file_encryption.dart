@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/storage/atomic_replace.dart';
 
 /// Encrypts/decrypts JSON files on disk using XSalsa20-Poly1305.
@@ -75,7 +76,7 @@ class FileEncryption {
       if (!f.existsSync()) continue;
       final bytes = f.readAsBytesSync();
       if (bytes.length == 32) return Uint8List.fromList(bytes);
-      stderr.writeln('[FileEncryption] WARNING: $name has ${bytes.length} B '
+      RedactedConsole.err('[FileEncryption] WARNING: $name has ${bytes.length} B '
           '(expected 32) — ignored, NOT replaced');
     }
     return null;
@@ -130,7 +131,7 @@ class FileEncryption {
       try {
         decrypted = decryptOrThrow(encFile);
       } catch (e) {
-        stderr.writeln('[FileEncryption] WARNING: $path.enc exists (${encFile.lengthSync()} bytes) '
+        RedactedConsole.err('[FileEncryption] WARNING: $path.enc exists (${encFile.lengthSync()} bytes) '
             'but decryption failed: $e — attempting crash-recovery from sidecars.');
         // fall through to sidecar recovery below
       }
@@ -150,12 +151,12 @@ class FileEncryption {
       if (!side.existsSync()) continue;
       try {
         final recovered = decryptOrThrow(side);
-        stderr.writeln('[FileEncryption] INFO: recovered $path from $suffix sidecar.');
+        RedactedConsole.err('[FileEncryption] INFO: recovered $path from $suffix sidecar.');
         // Promote sidecar to canonical via atomic write.
         writeJsonFile(path, recovered);
         return recovered;
       } catch (e) {
-        stderr.writeln('[FileEncryption] WARNING: sidecar $path$suffix unreadable: $e');
+        RedactedConsole.err('[FileEncryption] WARNING: sidecar $path$suffix unreadable: $e');
       }
     }
 
@@ -183,7 +184,7 @@ class FileEncryption {
     // it is the enforcer, not an intake path: it deletes a plaintext only
     // if a READABLE ciphertext with the SAME content lies next to it.
     if (plainFile.existsSync()) {
-      stderr.writeln('[FileEncryption] WARNING: $path lies in PLAINTEXT and '
+      RedactedConsole.err('[FileEncryption] WARNING: $path lies in PLAINTEXT and '
           'without ciphertext next to it. V4.1 takes over no unencrypted '
           'old stock (S368) — the file is NOT read and NOT '
           'deleted. It still lies open on the disk.');
@@ -218,7 +219,7 @@ class FileEncryption {
   /// recent version and deleting it a data loss. The content is therefore
   /// compared; on inequality both files stay and there is a message. The
   /// same order — first compare, then delete — is followed by
-  /// `PlaintextSweep.sweepOne`.
+  /// `MediaSweep.sweepOne`.
   void _dropRedundantPlaintext(
       String path, File plainFile, Map<String, dynamic> decrypted) {
     if (!plainFile.existsSync()) return;
@@ -226,18 +227,18 @@ class FileEncryption {
       final raw = jsonDecode(plainFile.readAsStringSync());
       if (raw is! Map<String, dynamic> ||
           jsonEncode(raw) != jsonEncode(decrypted)) {
-        stderr.writeln('[FileEncryption] WARNING: $path lies in plaintext '
+        RedactedConsole.err('[FileEncryption] WARNING: $path lies in plaintext '
             'next to a readable $path.enc, but has a DIFFERENT content '
             '— both stay in place (the plaintext version could be the '
             'newer one).');
         return;
       }
       plainFile.deleteSync();
-      stderr.writeln('[FileEncryption] INFO: $path was a remnant of an '
+      RedactedConsole.err('[FileEncryption] INFO: $path was a remnant of an '
           'aborted migration (ciphertext written, plaintext no '
           'longer deleted) — the plaintext version is now removed.');
     } catch (e) {
-      stderr.writeln('[FileEncryption] WARNING: plaintext remnant $path could '
+      RedactedConsole.err('[FileEncryption] WARNING: plaintext remnant $path could '
           'not be checked/removed: $e — it stays in place.');
     }
   }
@@ -246,9 +247,10 @@ class FileEncryption {
   /// or cannot be decrypted (truncated / bad MAC). Mirrors `readJsonFile`'s
   /// crash-recovery sweep over `.enc.tmp` / `.enc.old` sidecars.
   ///
-  /// Use this for fixed-shape on-disk artefacts like the Device-Sig keypair
-  /// (`device_keys.bin.enc`, 6096 bytes) where JSON wrapping would only add
-  /// base64 overhead and a parse step that buys nothing.
+  /// Use this for fixed-shape on-disk artefacts where JSON wrapping would
+  /// only add base64 overhead and a parse step that buys nothing. (Until
+  /// S403 the example here was the device key container,
+  /// `device_keys.bin.enc`; it lies in the device database since.)
   Uint8List? readBinaryFile(String path) {
     final encFile = File('$path.enc');
 
@@ -266,7 +268,7 @@ class FileEncryption {
       try {
         return decryptOrThrow(encFile);
       } catch (e) {
-        stderr.writeln('[FileEncryption] WARNING: $path.enc exists '
+        RedactedConsole.err('[FileEncryption] WARNING: $path.enc exists '
             '(${encFile.lengthSync()} bytes) but binary decryption failed: $e '
             '— attempting crash-recovery from sidecars.');
       }
@@ -277,12 +279,12 @@ class FileEncryption {
       if (!side.existsSync()) continue;
       try {
         final recovered = decryptOrThrow(side);
-        stderr.writeln('[FileEncryption] INFO: recovered binary $path '
+        RedactedConsole.err('[FileEncryption] INFO: recovered binary $path '
             'from $suffix sidecar.');
         writeBinaryFile(path, recovered);
         return recovered;
       } catch (e) {
-        stderr.writeln('[FileEncryption] WARNING: sidecar $path$suffix '
+        RedactedConsole.err('[FileEncryption] WARNING: sidecar $path$suffix '
             'unreadable: $e');
       }
     }
@@ -332,7 +334,7 @@ class FileEncryption {
         try {
           f.deleteSync();
         } catch (e) {
-          stderr.writeln('[FileEncryption] WARNING: could not delete '
+          RedactedConsole.err('[FileEncryption] WARNING: could not delete '
               '$path$suffix: $e');
         }
       }

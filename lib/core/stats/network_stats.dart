@@ -229,6 +229,16 @@ class NetworkStats {
   final int blindEvicted;
   final int blindRefused;
 
+  /// Lane 3 pieces the bulk cache pushed out when full (§21.3.3 items 3+4,
+  /// S398-W4). The delivery-layer half is [storedEvicted].
+  final int bulkEvicted;
+
+  /// Collected cells that no held KEM generation opened, parked for the
+  /// generation of another own device, and lost unopened — expired after
+  /// 7 days or pushed out by the cap of 100 (§4.5.4, D-40). Persisted by the
+  /// delivery layer (`mycelium/lib/parked.dart`); 0 with one device.
+  final int parkedLost;
+
   final int dbSizeBytes;
 
   const NetworkStats({
@@ -262,6 +272,8 @@ class NetworkStats {
     this.blindHeld = 0,
     this.blindEvicted = 0,
     this.blindRefused = 0,
+    this.bulkEvicted = 0,
+    this.parkedLost = 0,
     this.dbSizeBytes = 0,
   });
 
@@ -296,6 +308,8 @@ class NetworkStats {
         'blindHeld': blindHeld,
         'blindEvicted': blindEvicted,
         'blindRefused': blindRefused,
+        'bulkEvicted': bulkEvicted,
+        'parkedLost': parkedLost,
         'dbSizeBytes': dbSizeBytes,
       };
 
@@ -355,6 +369,8 @@ class NetworkStats {
       blindHeld: i('blindHeld'),
       blindEvicted: i('blindEvicted'),
       blindRefused: i('blindRefused'),
+      bulkEvicted: i('bulkEvicted'),
+      parkedLost: i('parkedLost'),
       dbSizeBytes: i('dbSizeBytes'),
     );
   }
@@ -439,23 +455,29 @@ class NetworkStatsCollector {
   int _lastRelayBytes = 0;
   int _lastRelayCells = 0;
 
+  ///
+  /// [relayBytes]/[relayCells] `null` (S405 A-2, mycelium): the layer does
+  /// not measure them — nothing is booked, the last state stays.
   void noteNodeCounters({
     required int wireSent,
     required int wireReceived,
-    required int relayBytes,
-    required int relayCells,
+    int? relayBytes,
+    int? relayCells,
   }) {
     int growth(int now, int before) => now >= before ? now - before : now;
 
     addBytesSent(growth(wireSent, _lastWireOut));
     addBytesReceived(growth(wireReceived, _lastWireIn));
-    _relayBytes += growth(relayBytes, _lastRelayBytes);
-    _messagesRelayed += growth(relayCells, _lastRelayCells);
-
     _lastWireOut = wireSent;
     _lastWireIn = wireReceived;
-    _lastRelayBytes = relayBytes;
-    _lastRelayCells = relayCells;
+    if (relayBytes != null) {
+      _relayBytes += growth(relayBytes, _lastRelayBytes);
+      _lastRelayBytes = relayBytes;
+    }
+    if (relayCells != null) {
+      _messagesRelayed += growth(relayCells, _lastRelayCells);
+      _lastRelayCells = relayCells;
+    }
   }
 
   // ── THE SNAPSHOTS OF THE NODE (§25.4, G-10, CLOSED) ────────────────
@@ -484,6 +506,27 @@ class NetworkStatsCollector {
   V41NodeGauges _gauges = kNoNodeGauges;
 
   void noteNodeGauges(V41NodeGauges g) => _gauges = g;
+
+  // S398-W4 — THE EVICTIONS OF THE 4.2 LAYER (§21.3.3 item 4, §25).
+  //
+  // Until S398 `storedEvicted` came only from `v41NodeGauges`, whose one
+  // writer (`attachV41`) has no caller; the tile stood at 0 forever while
+  // `post_box_holder.dart` and `bulk_hold.dart` evicted without counting.
+  // Remembered like the gauges: the counters are running totals of the
+  // holders, not events to book.
+  int _postBoxEvicted = 0;
+  int _bulkEvicted = 0;
+
+  void noteEvictions({required int postBox, required int bulk}) {
+    _postBoxEvicted = postBox;
+    _bulkEvicted = bulk;
+  }
+
+  /// D-40: the parked cells lost unopened — a running total of the delivery
+  /// layer, remembered like the evictions above.
+  int _parkedLost = 0;
+
+  void noteParkedLost(int lost) => _parkedLost = lost;
 
   /// Periodic callback: nothing left to do. Historically this held
   /// `recordPeerCount` for the time series of the peer number. It
@@ -547,10 +590,12 @@ class NetworkStatsCollector {
       messagesRelayed: _messagesRelayed,
       relayDataVolume: _relayBytes,
       storedCells: _gauges.storedCells,
-      storedEvicted: _gauges.storedEvicted,
+      storedEvicted: _gauges.storedEvicted + _postBoxEvicted,
       blindHeld: _gauges.blindHeld,
       blindEvicted: _gauges.blindEvicted,
       blindRefused: _gauges.blindRefused,
+      bulkEvicted: _bulkEvicted,
+      parkedLost: _parkedLost,
       dbSizeBytes: _measureDbSize(profileDir),
     );
   }

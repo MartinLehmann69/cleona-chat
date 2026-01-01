@@ -175,8 +175,27 @@ class CLogger {
   final String module;
   final String? profileDir;
 
+  /// Profile directories being deleted (S405 A-5, §14.7 row 17): no
+  /// buffer is kept for them and no flush may recreate `<profile>/logs`.
+  /// Until S405 the next 2-s flush brought the deleted directory back,
+  /// and a new identity with the same number inherited its logs.
+  static final Set<String> _retired = {};
+
+  /// [profileDir] is about to be deleted: pending lines are dropped and
+  /// nothing writes there again until [reviveProfile].
+  static void retireProfile(String profileDir) {
+    _retired.add(profileDir);
+    _buffers.remove(profileDir);
+    _sinkStates.remove(profileDir);
+  }
+
+  /// [profileDir] is (re)created — identity numbers are reused.
+  static void reviveProfile(String profileDir) => _retired.remove(profileDir);
+
   CLogger(this.module, {this.profileDir}) {
-    if (profileDir != null && !_buffers.containsKey(profileDir)) {
+    if (profileDir != null &&
+        !_retired.contains(profileDir) &&
+        !_buffers.containsKey(profileDir)) {
       _buffers[profileDir!] = StringBuffer();
     }
     // HERE STOOD `_ensureFlushTimer()`, and that was a process anchor.
@@ -291,7 +310,9 @@ class CLogger {
     final buffer = profileDir != null ? _buffers[profileDir] : null;
     if (buffer != null) {
       buffer.writeln(line);
-    } else if (consoleEnabled && _blindModulesWarned.add(module)) {
+    } else if (consoleEnabled &&
+        !_retired.contains(profileDir) &&
+        _blindModulesWarned.add(module)) {
       // B1 (2026-07-27) self-alarm: a module without profileDir logs into
       // nothing — the line only goes into console + ring buffer, NEVER into
       // logs/cleona_*.log. Exactly thus all [resolver] lines
@@ -363,6 +384,8 @@ class CLogger {
   /// Append to the current segment of `$baseDir/logs`, rotating segments and
   /// running retention cleanup (at startup, day roll and every 6h).
   static Future<void> _appendToSink(String baseDir, String content) async {
+    // A flush already under way must not bring a deleted profile back.
+    if (_retired.contains(baseDir)) return;
     final logDir = Directory('$baseDir/logs');
     if (!logDir.existsSync()) {
       logDir.createSync(recursive: true);

@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:mycelium/neighbourhood.dart';
+import 'package:mycelium/neighbour_dropped.dart';
+import 'package:mycelium/shell_link.dart' show kLinkSilence;
 
 /// The readiness of the node (V4.2 §22.7.1) — founded on
 /// RESPONDING neighbours, not on remembered ones.
@@ -58,6 +60,9 @@ typedef OnReadiness = void Function(
 /// From this many responding neighbours on, the node is `ready` (E1, §8.2).
 const int kThresholdReady = 2;
 
+/// §11.8: "An entry counts as failed only when two uses of it failed".
+const int kUsesFailed = 2;
+
 class Readiness {
   final Neighbourhood _neighbourhood;
 
@@ -89,9 +94,11 @@ class Readiness {
         final keys = [for (final a in gone.addresses) a.key];
         _route(keys);
         keys.forEach(_node.remove);
+        keys.forEach(_failedUses.remove);
       },
       onConfirmed: (n) {
         final k = n.first.key; // [n] carries only the confirmed address
+        _failedUses.remove(k); // §11.8: a confirmation starts the count over
         if (_responding.contains(k)) return;
         report?.call('responding: $k confirmed');
         _change(() => _responding.add(k));
@@ -106,6 +113,20 @@ class Readiness {
   /// The count last reported — [_change] compares against it, so that a
   /// change made inside the neighbourhood (a join) is reported as well.
   int _reported = 0;
+
+  /// Whether [n] answered in this run AND within [within] — the holder rank
+  /// "answered" (OP-19 part A; S398 lab run 2, finding 1). Without the
+  /// window a node that answered once kept that rank until it left the
+  /// list, so ended nodes stood before live ones. The window is the link
+  /// silence (`kLinkSilence`, 120 s, the freshness of `Shell.stands`); the
+  /// time is the address's confirmation stamp. [respondingCount] and the
+  /// seat (W7) keep "in this run" without a window.
+  bool answeredRecently(Neighbour n,
+      {Duration within = kLinkSilence, DateTime? now}) {
+    final since = (now ?? DateTime.now()).subtract(within);
+    return n.addresses.any(
+        (a) => _responding.contains(a.key) && !a.last.isBefore(since));
+  }
 
   /// The responding neighbours as `adresse:port` — for diagnostics
   /// (§22.7.4). Read only. A node under two addresses stands here
@@ -166,16 +187,26 @@ class Readiness {
   /// At most [n] entries from [neighbours], one per node, in the
   /// given order — the holders of a deposit (§8.2 „three") are supposed to be
   /// three NODES, not three addresses of the same one.
+  ///
+  /// [not]: addresses whose NODE is left out — the recipient's devices on a
+  /// deposit (OP-19 part B, S398; §8.2 "chosen so that the recipient will
+  /// ask them": the recipient never asks itself). By node, not by address:
+  /// the recipient under another address of the same node is left out too.
   List<(InternetAddress, int)> different(
-      Iterable<({InternetAddress address, int port})> neighbours, int n) {
-    final seen = <String>{};
+      Iterable<({InternetAddress address, int port})> neighbours, int n,
+      {Iterable<(InternetAddress, int)> not = const []}) {
+    final seen = {for (final (a, p) in not) nodeOf(a, p)};
+    final away = seen.length;
     return [
       for (final e in neighbours)
-        if (seen.length < n &&
-            seen.add(_who('${e.address.address}:${e.port}')))
+        if (seen.length - away < n && seen.add(nodeOf(e.address, e.port)))
           (e.address, e.port)
     ];
   }
+
+  /// The node [a]:[port] belongs to (see [_who]) — two addresses with the
+  /// same value are one place among the holders (OP-19 part A).
+  String nodeOf(InternetAddress a, int port) => _who('${a.address}:$port');
 
   /// Whether the neighbour under [from]:[port] has named its node identifier —
   /// answered a call, called itself or answered as holder. For
@@ -224,8 +255,9 @@ class Readiness {
   /// node has confirmed ANOTHER neighbour in this run. Whoever
   /// confirms nobody — started offline, dead uplink — learns nothing about his
   /// neighbours from silence; the mute ones are then merely no longer
-  /// responding. The second sending that §11.8 requires is done by the
-  /// post box itself (`post_box_deposit.dart`) before it reports here.
+  /// responding. **Two failed uses** (§11.8): an address is removed at its
+  /// second use without an answer; a confirmation in between starts over.
+  /// The post box never repeats a request for this (S399 step 4).
   void mute(Iterable<(InternetAddress, int)> withoutAnswer) {
     final list = withoutAnswer.toList();
     final muteNode = {
@@ -238,13 +270,46 @@ class Readiness {
       return;
     }
     for (final (a, p) in list) {
-      if (!_neighbourhood.useFailed(a, p)) _route(['${a.address}:$p']);
+      final k = '${a.address}:$p';
+      // Counted only for an address the list holds: nothing else can be
+      // removed, and the count stays within the list's own bound (§20.2).
+      if (_neighbourhood.holding(a, p) == null) {
+        _route([k]);
+        continue;
+      }
+      final failed = (_failedUses[k] ?? 0) + 1;
+      if (failed < kUsesFailed) {
+        _failedUses[k] = failed;
+        _route([k]);
+        continue;
+      }
+      _failedUses.remove(k);
+      if (_neighbourhood.useFailed(a, p)) {
+        dropped.dropped(a, p, DateTime.now()); // S406: stays out (§11.8)
+      } else {
+        _route([k]);
+      }
     }
   }
+
+  /// The addresses removed here, and when (`neighbour_dropped.dart`, S406):
+  /// a hint confirmed no later than the removal does not bring one back.
+  final DroppedAddresses dropped = DroppedAddresses();
+
+  /// `adresse:port` -> uses without an answer since its last confirmation.
+  /// Only addresses of the neighbour list stand here (at most
+  /// `Neighbourhood.atMost` neighbours with their addresses); an address
+  /// that leaves the list leaves here too (§20.2).
+  final Map<String, int> _failedUses = {};
+
+  /// How many addresses carry a use without an answer — diagnostics.
+  int get failedUsesHeld => _failedUses.length;
 
   /// Network change or stop: nobody is confirmed any more. The stamps
   /// in the list stay — they are the basis for „outdated".
   void reset() {
+    _failedUses.clear(); // §11.8: failures count since the last network change
+    dropped.clear(); // §11.8: after a network change remembered ones are retried
     _change(_responding.clear);
     _neighbourhood.runLimit();
   }

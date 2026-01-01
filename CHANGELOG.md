@@ -1,6 +1,31 @@
 # Cleona Chat — Changelog
 
-## 4.2.0 — upcoming
+## 4.2.3
+
+### Updates
+- In-network updates also arrive over mobile data; only the data-saving mode holds them back on a metered connection
+- No timer: a node asks for a new manifest only when it starts, when the network changes, when the app is opened and when a new neighbour appears
+- A node that holds a verified manifest hands it to every neighbour that asks
+- The target of an update is the exact object (content hash and sequence number), not a version number; a newer manifest replaces a running fetch cleanly
+- Pieces already fetched are kept on disk and survive an interrupted fetch, a network change and a restart; only a failed verification discards them
+- A silent holder is asked once more before the next one is tried; the answer size follows the measured round trip
+- Delta updates for Android (bsdiff/bspatch): an update between two consecutive versions is a few dozen kilobytes instead of the full package; a device without the matching base falls back to the full package
+- The holder of an update object reads it from disk instead of loading it into memory
+
+### First contact
+- An invitation is shown only when it carries a way in from the internet; otherwise the app waits up to 30 s and then offers to show it for the same network only
+- An invitation handed over face to face (QR code shown in person, NFC) is closed after 60 s if nobody redeemed it
+- Invitation data carry the issuer's publisher key (format version 2), so an invitation survives an address change of the issuer
+
+### Delivery
+- Whether a counterpart is alive is judged only by what arrives from it; a dead first hop is detected at the next real packet and the delivery moves on
+- An address removed after two failed uses returns only with newer evidence — no more idle collection rounds for dead addresses
+- Group member lists are sent complete before any member receives them, so a second join no longer splits the list
+
+### Storage
+- Identifiers of received deliveries are kept permanently in a compact table (about 14 bytes each), so a late copy is never shown twice and a deleted message does not come back
+
+## 4.2.0 — 2026-09-25
 
 **A new line.** 4.2 replaces the delivery layer of 3.x completely and is deliberately not compatible with it: no migration of profiles, no shared network, no shared wire format. The specification is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

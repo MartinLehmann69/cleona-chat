@@ -80,6 +80,9 @@ class _QrScanScreenState extends State<QrScanScreen> {
   Uint8List? _packed;
 
   bool _processing = false;
+
+  /// A request for the shown card was sent once already (S405 V3).
+  bool _attempted = false;
   String? _error;
   final _manualController = TextEditingController();
   _ScannerSituation _scannerSituation = _ScannerSituation.checking;
@@ -114,13 +117,18 @@ class _QrScanScreenState extends State<QrScanScreen> {
     );
   }
 
-  void _found(InvitationReading r, {String? text, Uint8List? packed}) {
+  /// [scanned]: read by the camera — then a redeemable card without expiry
+  /// warning sends at once (S405 V3, [InvitationRedeem.sendsAtOnce]).
+  void _found(InvitationReading r,
+      {String? text, Uint8List? packed, bool scanned = false}) {
     setState(() {
       _reading = r;
       _text = text;
       _packed = packed;
       _error = null;
+      _attempted = false;
     });
+    if (scanned && InvitationRedeem.sendsAtOnce(r)) _send();
   }
 
   void _onDetect(BarcodeCapture capture, AppLocale locale) {
@@ -132,7 +140,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
         final bytes = Uint8List.fromList(raw);
         final r = InvitationRedeem.readBytes(bytes);
         if (InvitationRedeem.isCard(r)) {
-          _found(r, packed: bytes);
+          _found(r, packed: bytes, scanned: true);
           return;
         }
       }
@@ -142,7 +150,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
       if (value != null && value.isNotEmpty) {
         final r = InvitationRedeem.readText(value);
         if (InvitationRedeem.isCard(r)) {
-          _found(r, text: value);
+          _found(r, text: value, scanned: true);
           return;
         }
         // A blurry image is not a finding; a recognisably broken
@@ -229,7 +237,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
             controller: _manualController,
             decoration: InputDecoration(
               labelText: locale.get('card_paste_label'),
-              hintText: 'cleona:1:…',
+              hintText: 'cleona:2:…',
               border: const OutlineInputBorder(),
             ),
             minLines: 2,
@@ -301,7 +309,9 @@ class _QrScanScreenState extends State<QrScanScreen> {
                       height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.person_add),
-              label: Text(locale.get('card_send_request')),
+              // After a failed attempt the same button sends again (S405 V3).
+              label: Text(locale.get(
+                  _attempted ? 'card_send_again' : 'card_send_request')),
             ),
             const SizedBox(height: 8),
             TextButton(
@@ -324,7 +334,10 @@ class _QrScanScreenState extends State<QrScanScreen> {
     final messenger = ScaffoldMessenger.of(context);
     final errorColor = Theme.of(context).colorScheme.error;
     final navigator = Navigator.of(context);
-    setState(() => _processing = true);
+    setState(() {
+      _processing = true;
+      _attempted = true;
+    });
     final ok = await InvitationRedeem.send(
       service: widget.service,
       messenger: messenger,
@@ -376,7 +389,7 @@ class _ManualInputScreenState extends State<_ManualInputScreen> {
                 controller: _controller,
                 decoration: InputDecoration(
                   labelText: locale.get('card_paste_label'),
-                  hintText: 'cleona:1:…',
+                  hintText: 'cleona:2:…',
                   border: const OutlineInputBorder(),
                 ),
                 minLines: 2,

@@ -1,5 +1,6 @@
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/calls/plane_d_host.dart';
 import 'package:cleona/core/service/mycelium_seam.dart';
 import 'package:cleona/core/update/data_port_http.dart';
 import 'package:cleona/core/util/local_addresses.dart'
@@ -28,12 +29,15 @@ import 'package:cleona/core/calls/call_integration_channel.dart';
 import 'package:cleona/core/calls/session_behaviour_channel.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
+import 'package:cleona/core/ipc/ipc_probe.dart' show parseCleonaPortFile;
 import 'package:collection/collection.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/identity/identity_remote_deletion.dart';
 import 'package:cleona/core/media/media_store.dart';
 import 'package:cleona/core/media/media_vault.dart';
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
+import 'package:cleona/core/crypto/keyring_file_warning.dart';
 import 'package:cleona/core/crypto/keyring_mobile.dart';
 import 'package:cleona/core/config/network_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -52,10 +56,14 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/app_screenshot.dart';
+import 'package:cleona/core/platform/process_hardening.dart';
 import 'package:cleona/core/platform/windows_session.dart';
 import 'package:cleona/core/platform/disk_space.dart';
+import 'package:cleona/core/platform/device_name.dart' show PlatformDeviceName;
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/log/log_redaction.dart';
+import 'package:cleona/core/log/redacted_debug_print.dart';
 import 'package:cleona/core/platform/lifecycle_drain_observer.dart';
 import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
@@ -63,20 +71,79 @@ import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
+import 'package:cleona/core/sync/cover_stream.dart' show CoverSaver;
 import 'package:cleona/core/platform/apk_installer.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/ui/screens/first_start_wipe_notice_screen.dart';
+import 'package:cleona/ui/screens/keyring_file_warning_screen.dart';
 import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/ui/components/archive_retrieval_state.dart';
+import 'package:cleona/ui/components/call_notice.dart';
+import 'package:cleona/ui/components/escape_pops_route.dart';
 import 'package:cleona/ui/components/connection_sheet.dart';
+import 'package:cleona/ui/components/transfer_progress_state.dart';
 import 'package:cleona/ui/components/crash_report_dialog.dart';
 import 'package:cleona/ui/components/pending_security_dialogs.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart' show LicenseEntryWithLineBreaks, LicenseRegistry;
 import 'package:path_provider/path_provider.dart' as pp;
 
 
+/// S403 (owner decision 03.10.2026): the license texts of the bundled
+/// third-party native libraries ship as Flutter assets (see `pubspec.yaml`)
+/// and are registered here with Flutter's [LicenseRegistry], so the license
+/// page reachable from the settings shows them next to the Flutter/Dart
+/// package licenses. The texts are VERBATIM upstream copies — the table of
+/// origin is `assets/licenses/INDEX.txt`, and the registered package
+/// name is the library name from that table. A new bundled library extends
+/// this list AND the README table together (guarded by
+/// `test/smoke/smoke_third_party_licenses.dart`).
+const List<(String, String)> kThirdPartyLicenseEntries = [
+  ('libsodium', 'assets/licenses/libsodium.txt'),
+  ('liboqs', 'assets/licenses/liboqs.txt'),
+  ('Zstandard', 'assets/licenses/zstd.txt'),
+  ('Opus', 'assets/licenses/opus.txt'),
+  ('whisper.cpp + GGML', 'assets/licenses/whisper_cpp.txt'),
+  ('SQLite3 Multiple Ciphers', 'assets/licenses/sqlite3mc.txt'),
+  ('SQLite', 'assets/licenses/sqlite3.txt'),
+  ('Monocypher', 'assets/licenses/monocypher.txt'),
+  ('libogg', 'assets/licenses/libogg.txt'),
+  ('libvorbis', 'assets/licenses/libvorbis.txt'),
+];
+
+/// Loads every bundled third-party license text and hands it to
+/// [LicenseRegistry.addLicense] as one [LicenseEntryWithLineBreaks] per
+/// library. A text that fails to load is logged and skipped — the app must
+/// not refuse to start over a license text.
+Future<void> _registerThirdPartyLicenses() async {
+  for (final (package, asset) in kThirdPartyLicenseEntries) {
+    try {
+      final text = await rootBundle.loadString(asset);
+      LicenseRegistry.addLicense(() async* {
+        yield LicenseEntryWithLineBreaks([package], text);
+      });
+    } catch (e) {
+      debugPrint('[main] third-party license not registered: $asset ($e)');
+    }
+  }
+}
+
+
 void main() async {
+  // §4.5.3: every console line of this process goes through the log
+  // redaction — first statement, before anything can call `debugPrint`.
+  RedactedDebugPrint.install();
   WidgetsFlutterBinding.ensureInitialized();
+
+  // S403: the bundled third-party license texts go into Flutter's license
+  // registry BEFORE runApp, so the license page (settings → licenses) shows
+  // every entry from the first frame on.
+  await _registerThirdPartyLicenses();
+
+  // Architecture §23.10: live build on Linux disables core dumps and
+  // cross-process memory access. Done before any key material is loaded.
+  hardenLinuxProcessMemory(context: 'gui');
 
   // §19.6: hand the Android platform call to lib/core, which must stay
   // Flutter-free — the daemon is a pure-Dart AOT binary and cannot link
@@ -131,6 +198,17 @@ void main() async {
       exit(0);
     }
     _writeGuiLock();
+  }
+
+  // The start edge of the surface: what an earlier run left behind of its
+  // own plaintext in transit (a voice recording, a pasted clipboard item, a
+  // camera picture — after a crash, or from a build that never deleted them)
+  // goes, before any new one can exist. After the single-instance check: a
+  // second start must not clear what the running instance is recording.
+  try {
+    TransientFiles.sweepSurfaceAtStart();
+  } catch (e) {
+    debugPrint('[main] transient sweep failed: $e');
   }
 
   // Mobile: Portrait lock prevents Activity/Scene recreation on rotation
@@ -255,7 +333,7 @@ void main() async {
 
   // Sec H-5 (V3.1.72) / T13: Hard-block check at startup.
   // Reads the cached, signature-verified update manifest written by the
-  // previous session's 6h DHT-poll (`CleonaService._checkForUpdates`).
+  // previous session (`CleonaService._manifestsProcess`).
   // If the manifest specifies `minRequiredVersion` and the running app
   // is older, we route to [UpdateRequiredScreen] before any service is
   // constructed. Fail-safe: any IO/parse/signature problem leaves the
@@ -507,6 +585,14 @@ class _CleonaAppState extends State<CleonaApp> {
                 setState(() => _wipeNotice = null);
               },
             );
+          } else if (appState.keyringFileWarningPending) {
+            // V18: no unlocked OS keyring — the master secret lies in the
+            // file-variant containers. A blocking screen before the first
+            // HomeScreen frame, shown exactly once (the acknowledge button
+            // persists the flag in the device database).
+            home = KeyringFileWarningScreen(
+              onAcknowledge: appState.acknowledgeKeyringFileWarning,
+            );
           } else if (appState.isInitialized) {
             home = const HomeScreen();
           } else if (appState.hasProfile) {
@@ -527,15 +613,17 @@ class _CleonaAppState extends State<CleonaApp> {
               themeMode: appState.themeMode,
               themeAnimationDuration: const Duration(milliseconds: 400),
               themeAnimationCurve: Curves.easeInOut,
-              actions: <Type, Action<Intent>>{
-                ...WidgetsApp.defaultActions,
-                DismissIntent: CallbackAction<DismissIntent>(
-                  onInvoke: (_) {
-                    navigatorKey.currentState?.maybePop();
-                    return null;
-                  },
-                ),
-              },
+              // S405 (owner decision 1A): Escape closes the topmost page;
+              // dialogs keep their own dismiss behaviour
+              // (lib/ui/components/escape_pops_route.dart).
+              shortcuts: escapePopsRouteShortcuts(),
+              actions: escapePopsRouteActions(() => navigatorKey.currentState),
+              // §23.10: the application's own screenshot is made from this
+              // one boundary around everything a route shows.
+              builder: (context, child) => RepaintBoundary(
+                key: AppScreenshot.boundaryKey,
+                child: child ?? const SizedBox.shrink(),
+              ),
               home: home,
             ),
           );
@@ -629,6 +717,19 @@ class ContactRotationNotice {
   });
 }
 
+/// §4.5.4 (S398, E-A9): a FORK of a contact's rotation chain — two
+/// successors of one key; the old keys are in other hands. Nothing was
+/// adopted; the banner asks the user to verify the contact in person.
+class ContactKeyForkNotice {
+  final String contactNodeIdHex;
+  final String displayName;
+
+  const ContactKeyForkNotice({
+    required this.contactNodeIdHex,
+    required this.displayName,
+  });
+}
+
 /// §7.5 / §14.5: a LINKED DEVICE of a contact actively rejected a rotation —
 /// the strongest theft signal the system has. Distinct from
 /// [CoAuthWarning] (which says "the quorum was not reached"): here a device
@@ -643,6 +744,30 @@ class RotationRejectionNotice {
   });
 }
 
+/// Whether the one-time V18 warning stands: this DESKTOP machine's keyring
+/// fell to the file variant (no Secret Service, or a LOCKED collection
+/// behind automatic login), a master seed exists, and the warning has not
+/// been acknowledged yet.
+///
+/// Mobile is excluded deliberately: an unregistered mobile keyring is a
+/// broken build state with its own gate flow (`keyring_mobile.dart`), and
+/// the warning text speaks of the disk and the computer name. Windows and
+/// macOS answer the question as well — on both, a working backend is
+/// chosen by [KeyringService.init] and only the failure path lands here.
+bool _keyringFileVariantWarningDue() {
+  if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) {
+    return false;
+  }
+  if (!KeyringService.isInitialized ||
+      KeyringService.instance.isHardwareProtected) {
+    return false;
+  }
+  final seed = IdentityManager().loadMasterSeed();
+  if (seed == null) return false;
+  return !keyringFileWarningShown(
+      AppPaths.dataDir, HdWallet.deriveSharedFileEncKey(seed));
+}
+
 class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   static CleonaAppState? _instance;
 
@@ -651,6 +776,37 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _isInitialized = false;
   bool _hasProfile = false;
   String? _initError;
+
+  /// V18 (02.10.2026): set while the one-time warning about the file
+  /// variant of the keyring stands — the machine has no unlocked OS
+  /// keyring (headless or automatic login), the master secret lies in
+  /// the file-variant containers, and the user has not acknowledged the
+  /// warning yet. Evaluated at the start of [initialize]; cleared by
+  /// [acknowledgeKeyringFileWarning], which persists the flag in the
+  /// device database so it is shown EXACTLY ONCE.
+  bool _keyringFileWarningPending = false;
+  bool get keyringFileWarningPending => _keyringFileWarningPending;
+
+  /// The acknowledge button of the warning screen. Marks the flag in the
+  /// device database (device-wide row, no second key) and lets the app
+  /// continue into the HomeScreen.
+  void acknowledgeKeyringFileWarning() {
+    try {
+      final seed = IdentityManager().loadMasterSeed();
+      if (seed != null) {
+        markKeyringFileWarningShown(
+            AppPaths.dataDir, HdWallet.deriveSharedFileEncKey(seed));
+      } else {
+        debugPrint('[main] Keyring file warning acknowledged without a '
+            'seed — the flag is not persisted, the warning returns.');
+      }
+    } catch (e) {
+      debugPrint('[main] Could not persist the keyring warning flag ($e) '
+          '— it will be shown again at the next start.');
+    }
+    _keyringFileWarningPending = false;
+    notifyListeners();
+  }
 
   /// S395 (S394-5): exit status of the daemon THIS GUI started (Linux).
   /// `null` when the daemon was already running or was started otherwise —
@@ -782,8 +938,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// connection icon (§22.9: "The tiering's input quantity is the
   /// count of verified outbound sync partners"). Incoming says what
   /// this node carries for others.
-  int get syncPartnersOutbound => _service?.syncPartnersOutbound ?? 0;
-  int get syncPartnersInbound => _service?.syncPartnersInbound ?? 0;
+  int? get syncPartnersOutbound => _service?.syncPartnersOutbound;
+  int? get syncPartnersInbound => _service?.syncPartnersInbound;
   int get independentSyncPartners => _service?.independentSyncPartners ?? 0;
 
   /// §9.2 — the measured responsibility set. The consent dialog
@@ -878,6 +1034,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Initial value `false`, so that the first report `resumed` counts as an edge
   /// — the same assumption as in `CleonaService._isAppResumed`.
   bool _appResumed = false;
+
+  /// This process has been connected to the daemon before (desktop). A
+  /// later connection is a reconnect, not an opening of the application.
+  bool _daemonConnectedBefore = false;
 
 
   ICleonaService? get service => _service;
@@ -1053,6 +1213,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final isResumed = state == AppLifecycleState.resumed;
+    // Desktop (V4.2 §8.2): the daemon asks the post box when a window
+    // APPEARS, not when a visible one gets the focus back. `inactive` is "at
+    // least one view is visible, but none have input focus"; `hidden` is
+    // "minimized or placed on a desktop that is no longer visible"
+    // (`AppLifecycleState`, dart:ui). Said BEFORE the foreground state below,
+    // because it travels with that request (`IpcClient.windowVisible`).
+    _ipcClient?.windowVisible =
+        isResumed || state == AppLifecycleState.inactive;
     // Propagate foreground state to every per-identity service so that
     // _shouldSuppressForegroundNotification can gate sound/vibrate/banner
     // for the conversation that ChatScreen has registered as active.
@@ -1085,8 +1253,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // S387: the mycelium counterpart of the V4.1 catch-up harvest — ONE
       // collection request per known holder, on the edge, no tick
       // (`NodePostBox.collect`).
-      // S388: the manifest slot after the end of this collection (M1+).
-      unawaited(host.node.collect().then((_) => _updateManifestAsk()));
+      // The manifest slot at the same edge (M1+), behind the collection's
+      // questions at each holder — it does not wait for a holder (§8.2).
+      unawaited(host.node.collect());
+      unawaited(_updateManifestAsk(moment: 'app opened'));
     }
 
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
@@ -1192,9 +1362,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// own offer; the GUI there only sends the click (`apply_update`).
   /// A moment according to M1+ (S388). Only the service with an update carrier asks
   /// (`updateAnbinden`); for the others the call is empty — no packet.
-  Future<void> _updateManifestAsk() async {
+  Future<void> _updateManifestAsk({required String moment}) async {
     for (final s in List.of(_inProcessServices.values)) {
-      await s.updateManifestAsk();
+      await s.updateManifestAsk(moment: moment);
     }
     // E-9 (package 10 = A, S389): a collection run that ended without a result
     // was never repeated until the restart. The renewed attempt hangs on
@@ -1211,20 +1381,21 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     isNew: (a, b) => UpdateChecker().isNewer(a, b),
     report: (m) => debugPrint('[update] $m'),
     fetchLocked: _updateFetchLocked,
+    expect: (svc, manifest) => svc.updateTargetExpect(manifest),
   );
 
-  /// Metered connection, last read — `null`: not yet read
-  /// (S388, owner decision 15.09.2026: no update fetching over mobile
-  /// or metered connection). Read at the edges of
-  /// `connectivity_plus` in [_startConnectivityMonitor], no tick.
+  /// Metered connection, last read — `null`: not yet read. Read at the
+  /// edges of `connectivity_plus` in [_startConnectivityMonitor], no tick.
   bool? _connectionMetered;
 
-  /// On mobile a not yet read network kind counts as metered: otherwise a
-  /// manifest that arrives before the first reading would fetch over mobile.
-  bool _updateFetchLocked() {
-    if (!(Platform.isAndroid || Platform.isIOS)) return false;
-    return _connectionMetered ?? true;
-  }
+  /// v4_2 §26.6.1/§24.4.2: only the data-saving mode suspends the fetch
+  /// path, and only over a metered connection — mobile data alone does not
+  /// (S406-UPD, finding U-1). The rule lives in [updateFetchLockedFor].
+  bool _updateFetchLocked() => updateFetchLockedFor(
+        mobile: Platform.isAndroid || Platform.isIOS,
+        dataSaving: CoverSaver.instance.active,
+        metered: _connectionMetered,
+      );
 
   /// Reads the network kind and reports a change to the offer.
   ///
@@ -1295,7 +1466,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   // Settings → Devices (read via `context.watch<CleonaAppState>()`) always
   // agree on what is still outstanding.
 
-  List<Map<String, dynamic>> _pendingPairRequests = [];
   List<Map<String, dynamic>> _pendingRotationApprovals = [];
   final List<CoAuthWarning> _coAuthWarnings = [];
 
@@ -1316,8 +1486,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   // always wired, these two never.
   final List<ContactRotationNotice> _contactRotationNotices = [];
   final List<RotationRejectionNotice> _rotationRejections = [];
+  final List<ContactKeyForkNotice> _keyForks = [];
+  List<ContactKeyForkNotice> get keyForks => List.unmodifiable(_keyForks);
 
-  List<Map<String, dynamic>> get pendingPairRequests => _pendingPairRequests;
   List<Map<String, dynamic>> get pendingRotationApprovals =>
       _pendingRotationApprovals;
   List<CoAuthWarning> get coAuthWarnings => List.unmodifiable(_coAuthWarnings);
@@ -1326,7 +1497,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RotationRejectionNotice> get rotationRejections =>
       List.unmodifiable(_rotationRejections);
 
-  bool _showingGlobalPairDialog = false;
   bool _showingGlobalRotationDialog = false;
 
   /// Re-fetches both catch-up lists from the active service. No-op with no
@@ -1338,12 +1508,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> refreshPendingSecurityRequests() async {
     final svc = _service;
     if (svc == null) return;
-    final results = await Future.wait([
-      svc.getPendingPairRequests(),
-      svc.getPendingRotationApprovals(),
-    ]);
-    _pendingPairRequests = results[0];
-    _pendingRotationApprovals = results[1];
+    // B-4b: the V3 pairing requests are gone; an enrolment request is part
+    // of the state snapshot (`enrolmentView`) and shows in the Requests tab.
+    _pendingRotationApprovals = await svc.getPendingRotationApprovals();
     notifyListeners();
   }
 
@@ -1353,29 +1520,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   void dismissCoAuthWarning(String contactNodeIdHex) {
     _coAuthWarnings.removeWhere((w) => w.contactNodeIdHex == contactNodeIdHex);
     notifyListeners();
-  }
-
-  Future<void> _handleDevicePairRequest(String deviceIdHex) async {
-    await refreshPendingSecurityRequests();
-    final svc = _service;
-    if (svc == null || _showingGlobalPairDialog) return;
-    // Re-check against the just-refreshed list: the request may already be
-    // gone again (LD-9 auto-approve, or it lost a race with another client's
-    // decision) between the event firing and this refresh completing.
-    final stillPending = _pendingPairRequests
-        .any((e) => e['deviceIdHex'] == deviceIdHex);
-    if (!stillPending) return;
-    _showGlobalDialog((ctx) {
-      _showingGlobalPairDialog = true;
-      return showIncomingPairRequestDialog(
-        context: ctx,
-        service: svc,
-        deviceIdHex: deviceIdHex,
-      ).whenComplete(() {
-        _showingGlobalPairDialog = false;
-        unawaited(refreshPendingSecurityRequests());
-      });
-    });
   }
 
   /// [kind] distinguishes key rotation from device-set change (§7.5,
@@ -1463,6 +1607,21 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       contactNodeIdHex: contactNodeIdHex,
       displayName: displayName,
     ));
+    notifyListeners();
+  }
+
+  /// §4.5.4 (S398, E-A9): a fork of a contact's rotation chain. One line per
+  /// contact, like the other rotation notices.
+  void _handleContactKeyFork(String contactNodeIdHex, String displayName) {
+    _keyForks.removeWhere((n) => n.contactNodeIdHex == contactNodeIdHex);
+    _keyForks.add(ContactKeyForkNotice(
+        contactNodeIdHex: contactNodeIdHex, displayName: displayName));
+    notifyListeners();
+  }
+
+  /// UI acknowledgement only — see [dismissContactRotationNotice].
+  void dismissKeyFork(String contactNodeIdHex) {
+    _keyForks.removeWhere((n) => n.contactNodeIdHex == contactNodeIdHex);
     notifyListeners();
   }
 
@@ -1869,13 +2028,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         buf.writeln(_daemonStdioTail());
       }
 
-      final crashLog = File('/tmp/cleona-daemon-crash.log');
-      // This file lies in `/tmp`, so it is readable for every user of the
-      // device — it needs the redaction rather more than the one in the
-      // profile, not less.
+      final crashLog = File('$_baseDir/crash-daemon.log');
+      // Architecture §23.10: crash logs go into the profile directory and are
+      // readable by the owner only — never into the shared temp directory.
+      Directory(_baseDir).createSync(recursive: true);
       crashLog.writeAsStringSync('${LogRedaction.apply(buf.toString())}\n',
           mode: FileMode.append, flush: true);
-      debugPrint('[main] Crash info written to /tmp/cleona-daemon-crash.log');
+      if (Platform.isLinux || Platform.isMacOS) {
+        try {
+          Process.runSync('chmod', ['600', crashLog.path]);
+        } catch (_) {/* best-effort owner-only permission */}
+      }
+      debugPrint('[main] Crash info written to ${crashLog.path}');
     } catch (e) {
       debugPrint('[main] Failed to log daemon crash: $e');
     }
@@ -2098,20 +2262,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     while (DateTime.now().difference(start).inMilliseconds < maxWaitMs) {
       try {
         if (Platform.isWindows) {
-          // Windows: TCP loopback — read port + auth token from file
+          // Windows: TCP loopback — read the port from the file (§22.1:
+          // the port number only). This only asks whether the daemon
+          // accepts connections; the protected exchange is `IpcClient`'s.
           final portFile = File('$_baseDir/cleona.port');
           if (portFile.existsSync()) {
-            final contents = portFile.readAsStringSync().trim();
-            final parts = contents.split(':');
-            final port = int.parse(parts[0]);
-            final token = parts.length > 1 ? parts[1] : null;
+            final port = parseCleonaPortFile(portFile.readAsStringSync())?.port;
+            if (port == null) {
+              throw const FormatException('cleona.port holds no port number');
+            }
             final sock = await Socket.connect(
               InternetAddress.loopbackIPv4, port,
             ).timeout(const Duration(seconds: 2));
-            // Send auth token so daemon doesn't disconnect us
-            if (token != null) {
-              sock.write('{"type":"auth","token":"$token"}\n');
-            }
             sock.destroy();
             return true;
           }
@@ -2253,7 +2415,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
                 debugPrint('[main] mycelium network change (node part): $e');
               }
               // The manifest slot AFTER the end of the network change (S388, M1+).
-              unawaited(_updateManifestAsk());
+              unawaited(_updateManifestAsk(moment: 'network change'));
               // The port mapping at the same edge (§7.3, task D) —
               // NOT awaited, for the same reason as at start
               // (RFC 6886 backoff).
@@ -2297,8 +2459,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// attachments, the UI displays them — so it needs the same
   /// key. It can derive it itself: `loadMasterSeed()` reads the
   /// keyring or `master_seed.json` and is process-independent
-  /// (`identity_manager.dart:207`), and `hdIndex` stands in
-  /// `identities.json`.
+  /// (`identity_manager.dart`), and `hdIndex` stands in the list of
+  /// identities (the device database, S403).
   ///
   /// The reader of this process is a SEPARATE one — its own ephemeral port,
   /// its own path secret. Two readers side by side are no problem:
@@ -2331,6 +2493,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> initialize() async {
     _hasProfile = true;
 
+    // V18: the one-time warning about the file variant is evaluated here —
+    // this covers the `_boot()` path (existing profile) AND the
+    // SetupScreen path (fresh install, which calls `initialize()` again
+    // once the seed exists).
+    _keyringFileWarningPending = _keyringFileVariantWarningDue();
+
     // S362: before building the UI, so that the first rendering
     // of a conversation can already resolve the attachments.
     await _mediaDepositRegister();
@@ -2340,9 +2508,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     if (daemonStarted) {
       final socketPath = '$_baseDir/cleona.sock';
       final ipcClient = IpcClient(socketPath: socketPath);
-      final connected = await ipcClient.connect();
+      // A second connection of this process (the first one had stalled) is
+      // not the user opening the application — the daemon must not ask the
+      // post box for it (V4.2 §8.2; `IpcServer.onUserInterfaceOpened`).
+      final connected =
+          await ipcClient.connect(reconnect: _daemonConnectedBefore);
 
       if (connected) {
+        _daemonConnectedBefore = true;
         _ipcClient = ipcClient;
         _service = ipcClient;
 
@@ -2357,9 +2530,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onContactRequestReceived = (nodeId, name) => notifyListeners();
         ipcClient.onContactAccepted = (nodeId) => notifyListeners();
         ipcClient.onIncomingCall = (call) => _showIncomingCallScreen(call);
-        ipcClient.onCallEnded = (_) => notifyListeners();
+        ipcClient.onCallEnded = _onCallEnded;
         ipcClient.onCallAccepted = (_) => notifyListeners();
-        ipcClient.onCallRejected = (call, reason) => notifyListeners();
+        ipcClient.onCallRejected = _onCallRejected;
+        ipcClient.onCallUnavailable = _onCallUnavailable;
         ipcClient.onJuryRequestReceived = (_) => notifyListeners();
         ipcClient.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
         ipcClient.onGroupCallStarted = (_) => notifyListeners();
@@ -2368,9 +2542,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // §7.1 LD-2 / §7.5: see [refreshPendingSecurityRequests] doc for why
         // these funnel through the shared handlers instead of setting
         // per-transport UI logic here.
-        ipcClient.onDevicePairRequest = (deviceIdHex) {
-          unawaited(_handleDevicePairRequest(deviceIdHex));
-        };
         ipcClient.onRotationApprovalRequest =
             (hashHex, requesterHex, kind, newDeviceNodeIds) {
           unawaited(_handleRotationApprovalRequest(
@@ -2392,6 +2563,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onRotationRejectionAlert = (contactHex, displayName) {
           _handleRotationRejectionAlert(contactHex, displayName);
         };
+        ipcClient.onContactKeyFork = (contactHex, displayName) {
+          _handleContactKeyFork(contactHex, displayName);
+        };
+        // S398-W4: archive retrieval (§21.6) and transfer progress
+        // (§22.5.1) — both events arrived and went nowhere.
+        _wireSurfaceHolders(ipcClient);
         // §19.6: Desktop update notification from daemon via IPC
         ipcClient.onUpdateAvailable = (manifest, inNetworkAvailable) {
           final prev = _availableUpdateManifest;
@@ -2430,6 +2607,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           debugPrint('[main] IPC stalled (daemon alive) — re-arming retry');
           _ipcClient = null;
           _service = null;
+          // S398-W4: no event will arrive for runs of the old connection.
+          ArchiveRetrievalState.instance.reset();
+          TransferProgressState.instance.reset();
           _isInitialized = false;
           // ── P-12: `_hasProfile` IS A STATEMENT ABOUT THE DISK ────
           //
@@ -2498,8 +2678,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // when the daemon comes up (e.g. after slow PQ keygen or a transient
     // startup crash).
     if (Platform.isLinux || Platform.isWindows) {
-      debugPrint('[main] Daemon not reachable — scheduling retry connect');
-      _scheduleRetryConnect();
+      onDesktopDaemonUnreachable();
       return;
     }
 
@@ -2535,6 +2714,21 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _scheduleRetryConnect();
   }
 
+  /// Desktop failure path of [initialize]: the daemon could not be started or
+  /// the IPC connection failed.
+  ///
+  /// S405 (owner decision 2A, finding R-15 d): notify at once. [initialize]
+  /// has already set [keyringFileWarningPending] and [hasProfile]; without
+  /// this rebuild the warning screen (or `_LoadingScreen` with its error
+  /// state) appeared only after the retry loop gave up — 24 x 5 s = 120 s —
+  /// and the setup page kept showing "Starting..." until then.
+  @visibleForTesting
+  void onDesktopDaemonUnreachable() {
+    debugPrint('[main] Daemon not reachable — scheduling retry connect');
+    notifyListeners();
+    _scheduleRetryConnect();
+  }
+
   // ── In-process init (Android, iOS, macOS — deferred from initialize()) ──
 
   /// Foreground setup, under the iOS lock.
@@ -2561,6 +2755,28 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// service loop. Releasing twice is a no-op.
   Future<void> _initInProcess() async {
     await IosBackgroundFetch.guardForegroundInit(_initInProcessBody);
+  }
+
+  /// S398, B-3: asks the platform for this device's name on the existing
+  /// `chat.cleona/storage` channel (Android `Settings.Global.DEVICE_NAME`,
+  /// `Build.MANUFACTURER`, `Build.MODEL`; iOS `UIDevice`) and hands it to
+  /// [PlatformDeviceName]. The choice itself is `deviceNameChoose`
+  /// (device_name.dart): never "localhost". One local channel call, no
+  /// network. A platform that does not answer leaves the fallback (the
+  /// platform label).
+  Future<void> _platformDeviceNameAdopt() async {
+    try {
+      final r = await const MethodChannel('chat.cleona/storage')
+          .invokeMapMethod<String, dynamic>('getDeviceName');
+      if (r == null) return;
+      PlatformDeviceName.reported = (
+        name: r['name'] as String?,
+        manufacturer: r['manufacturer'] as String?,
+        model: r['model'] as String?,
+      );
+    } on Object catch (e) {
+      debugPrint('[main] device name not reported by the platform: $e');
+    }
   }
 
   Future<void> _initInProcessBody() async {
@@ -2602,7 +2818,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     if (identities.isEmpty) return;
 
     // iOS: the data container path is stable across reinstalls, but the
-    // profileDir stored in identities.json is an absolute path. If the
+    // profileDir stored in the list of identities is absolute. If the
     // app's base dir was relocated (e.g. after an AppPaths fix deployment),
     // rebase all profileDirs to the current _baseDir.
     if (Platform.isIOS || Platform.isAndroid) {
@@ -2727,6 +2943,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // `_mobileFallbackActive` therefore stays at its initial value
     // instead of jumping to an invented one.
 
+    // S398, B-3: the device name as the platform reports it — BEFORE the
+    // first service registers this device (`_initLocalDevice`). Without it
+    // Android named the device "localhost" in the Requests tab.
+    if (Platform.isAndroid || Platform.isIOS) {
+      await _platformDeviceNameAdopt();
+    }
+
     // Wire Android/iOS disk space query for dynamic S&F storage budget.
     // Must be set BEFORE startService() so the initial _updateBudget()
     // in mailboxStore.load() gets the real free-disk value.
@@ -2781,7 +3004,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           baseDir: _baseDir,
           key: hostKey(_baseDir, masterSeed),
           port: devicesPort,
+          // Lane 3 (§21.3.3, D-30, D-32): desktop 1 GB, phone 100 MB.
+          bulkCacheBytes: bulkCacheBytesForPlatform(),
+          bulkClass: bulkClassForPlatform(),
+          bulkServeAllowed: bulkServeAllowedNow,
           report: hostLog.info,
+          traceReport: hostLog.trace, // beta diagnosis: log file only (S406)
         );
         break;
       } on SocketException catch (e) {
@@ -2795,9 +3023,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
     debugPrint('[main] mycelium host started on port ${_host!.port}');
+    // Plane D (§17, S398-W2): call frames on this host's one data port
+    // (§11.1), beside its shell (§17.1). Until S398 only `attachV41` did
+    // this, and it has no caller — every call was rejected.
+    planeDAttach(_host!, _inProcessServices.values, report: hostLog.info);
     // The moment "start" (S388): ONE service per process carries the update.
     attachUpdateToService(_host!, _inProcessServices.values.first,
-        report: hostLog.info);
+        moment: (m) => _updateManifestAsk(moment: m), report: hostLog.info);
     // The port mapping (task D, §7.3): asked at this edge, NOT
     // awaited — the RFC 6886 backoff takes in the worst case
     // eight and a half minutes, and the node start must not wait for it.
@@ -2901,6 +3133,34 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         debugPrint('[heartbeat] $msg');
       }
     });
+  }
+
+  // ── Call ended / did not come about ────────────────────────────
+  //
+  // The call screen closes itself; what the user did not cause is named in
+  // a short hint on whatever screen is on top (`call_notice.dart`). An
+  // ordinary end — somebody hung up — shows nothing.
+
+  void _onCallEnded(CallInfo call) {
+    showCallNotice(
+        navigatorKey.currentContext, callEndNoticeKey(call.endReason));
+    notifyListeners();
+  }
+
+  /// The peer's device refused the accept because its Plane D carries no
+  /// media: for the caller that is "no call", the same hint as its own
+  /// refusal. Every other rejection is the peer's choice and shows nothing.
+  void _onCallRejected(CallInfo call, String reason) {
+    if (reason == kCallRejectMediaUnavailable) {
+      showCallNotice(navigatorKey.currentContext,
+          callUnavailableNoticeKey(CallUnavailableReason.noMediaPath));
+    }
+    notifyListeners();
+  }
+
+  void _onCallUnavailable(CallUnavailableReason reason, String diagnostic) {
+    showCallNotice(
+        navigatorKey.currentContext, callUnavailableNoticeKey(reason));
   }
 
   // ── Incoming Call ──────────────────────────────────────────────
@@ -3066,6 +3326,38 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     channel.invokeMethod('updateBadge', {'count': total});
   }
 
+  /// S398-W4 — the two surface holders that had no feeder.
+  ///
+  /// * `ArchiveRetrievalState` (§21.6): the tile is tappable only while a
+  ///   `sender` is installed. The sender reads `_service` at CALL time, so
+  ///   an identity switch or a reconnect needs no re-install, and a dropped
+  ///   connection (`_service == null`) answers `unavailable` instead of
+  ///   leaving a ring spinning.
+  /// * `TransferProgressState` (§22.5.1): the running lane 2/3 transfer.
+  ///
+  /// The same for both surfaces: [ICleonaService] carries the callbacks for
+  /// the in-process service (Android/iOS) and for the IPC client (desktop).
+  void _wireSurfaceHolders(ICleonaService service) {
+    ArchiveRetrievalState.instance.sender = (messageId) async {
+      final s = _service;
+      if (s == null) return ArchiveRetrievalStart.unavailable;
+      return (await s.requestArchiveRetrieval(messageId)).start;
+    };
+    service.onArchiveRetrieveProgress = (messageId, sent, total) {
+      if (!identical(service, _service)) return;
+      ArchiveRetrievalState.instance.reportProgress(messageId, sent, total);
+    };
+    service.onArchiveRetrieveDone = (messageId, ok) {
+      ArchiveRetrievalState.instance.finish(messageId);
+      if (identical(service, _service)) notifyListeners();
+    };
+    // Keyed by message id, so a background identity's transfer cannot land
+    // in the active identity's bubbles — no identity filter needed.
+    service.onMediaTransferProgress = (conversationId, messageId, phase, percent) {
+      TransferProgressState.instance.report(messageId, phase, percent);
+    };
+  }
+
   /// Wires standard callbacks on a CleonaService (avoids duplication).
   void _wireServiceCallbacks(CleonaService service) {
     service.onStateChanged = () => notifyListeners();
@@ -3073,9 +3365,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onContactRequestReceived = (nodeId, name) => notifyListeners();
     service.onContactAccepted = (nodeId) => notifyListeners();
     service.onIncomingCall = (call) => _showIncomingCallScreen(call);
-    service.onCallEnded = (_) => notifyListeners();
+    service.onCallEnded = _onCallEnded;
     service.onCallAccepted = (_) => notifyListeners();
-    service.onCallRejected = (call, reason) => notifyListeners();
+    service.onCallRejected = _onCallRejected;
+    service.onCallUnavailable = _onCallUnavailable;
     // P-12: the host hooks onto the remote deletion. NOT in the stack of the
     // frame that brought the report — `onIdentityDeletedRemotely`
     // is called synchronously from within `_handleTwinIdentityDeleted`, and
@@ -3102,10 +3395,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // that are not currently active. A background identity's request is not
     // lost — it stays queryable via `getPendingPairRequests()` /
     // `getPendingRotationApprovals()` once the user switches to it.
-    service.onDevicePairRequest = (deviceIdHex) {
-      if (!identical(service, _service)) return;
-      unawaited(_handleDevicePairRequest(deviceIdHex));
-    };
     service.onRotationApprovalRequest =
         (hashHex, requesterHex, kind, newDeviceNodeIds) {
       if (!identical(service, _service)) return;
@@ -3130,6 +3419,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (!identical(service, _service)) return;
       _handleRotationRejectionAlert(contactHex, displayName);
     };
+    service.onContactKeyFork = (contactHex, displayName) {
+      if (!identical(service, _service)) return;
+      _handleContactKeyFork(contactHex, displayName);
+    };
+    // S398-W4: archive retrieval (§21.6) and transfer progress (§22.5.1).
+    _wireSurfaceHolders(service);
 
     // §19.6: a newer signed manifest was verified (any newer version, not
     // only hard-blocking ones) and — if it carries a DHT binary tag — the
@@ -3290,13 +3585,17 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       onRemoteVideoTextureChanged?.call(null);
     };
 
-    unawaited(engine.start().then((ok) {
+    // BUILD, DO NOT START (S399, O-3). The call service starts the engine
+    // after hooking `onVideoShutdown`; started here, a rate that is already
+    // unachievable at open fired its shutdown before that hook existed and
+    // the peer was never told why there is no picture (§17.5).
+    engine.onStarted = (ok) {
       if (!ok) {
         debugPrint('[video] VideoEngine.start() failed — audio-only');
         return;
       }
       onRemoteVideoTextureChanged?.call(engine.textureId);
-    }));
+    };
 
     return engine;
   }
@@ -3449,6 +3748,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           // no network, and that silently. First the service, then the
           // connection: the connection collects immediately.
           serviceRegister(host, service);
+          planeDRegister(host, service);
           _inProcessServices[ctx.userIdHex] = service;
         }
         debugPrint('[main] Registry recovery: ${created.length} identities restored in-process');
@@ -4086,6 +4386,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         await service.startService();
         // As above: without a mailbox the new identity would be mute (S387).
         serviceRegister(host, service);
+        planeDRegister(host, service);
         _inProcessServices[ctx.userIdHex] = service;
 
         // Save updated nodeIdHex
@@ -4134,8 +4435,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     final hostBeforeTheStop = _host;
     if (hostBeforeTheStop != null) {
       unawaited(portMappingLayDown(hostBeforeTheStop));
+      // Plane D off (S398-W2) — synchronous part first, like the mapping.
+      unawaited(
+          planeDDetach(hostBeforeTheStop, _inProcessServices.values.toList()));
     }
-    _host?.stop();
+    if (hostBeforeTheStop != null) hostStop(hostBeforeTheStop); // + lane 2
     _host = null;
   }
 
@@ -4144,7 +4448,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   // The in-process path (Android/iOS) is the second host next to
   // `service_daemon.dart`. Without this branch the gap would stay open on a
   // release platform: the service clears up, reports upwards, and
-  // the identity would stay in `identities.json` and in the process.
+  // the identity would stay in the list of identities and in the process.
   //
   // Body and reasoning stand in `identity_remote_deletion.dart`;
   // here stands only what belongs to THIS host: the running service, the

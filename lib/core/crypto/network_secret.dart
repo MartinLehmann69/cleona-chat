@@ -18,8 +18,7 @@ import 'package:cleona/core/config/network_channel.dart';
 /// **What it does (§26.6, §26.7).** It is the input keying material of the
 /// binary-distribution rendezvous: the lookup tag, the record encryption key
 /// and the per-device publishing key all derive from it
-/// (`rendezvous/rendezvous_secret.dart`). It also tags an exported peer-rescue
-/// bundle (`rendezvous/peer_rescue_bundle.dart`). A build made from the
+/// (`rendezvous/rendezvous_secret.dart`). A build made from the
 /// published source derives an all-zero secret and therefore cannot discover
 /// or decrypt update records — see [hasKeyMaterial].
 ///

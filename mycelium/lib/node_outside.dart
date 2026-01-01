@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:mycelium/card.dart';
 import 'package:mycelium/node.dart';
@@ -50,4 +51,16 @@ extension NodeOutside on Node {
   /// `true` as soon as the counterpart knocks in turn.
   Future<bool> knock(InternetAddress target, int targetPort) =>
       outsideRoute.knock(target, targetPort);
+
+  /// The publisher key a card issued NOW carries (§15.2), or `null`: only
+  /// while this node actually publishes its address record (§11.9). The
+  /// outside source of the host answers it ([publisherKeyFrom]); a node
+  /// without one publishes nothing and names no key.
+  Uint8List? get publisherKey => _publisher[this]?.call();
+
+  /// Wired by the outside source (`host_outside.dart`) at its construction.
+  void publisherKeyFrom(Uint8List? Function() source) =>
+      _publisher[this] = source;
 }
+
+final Expando<Uint8List? Function()> _publisher = Expando('publisher key');

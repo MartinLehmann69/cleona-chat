@@ -109,6 +109,10 @@ extension V3IdentityDeviceOps on CleonaService {
       final nodeIdHex = utf8.decode(payload);
       if (_contacts.containsKey(nodeIdHex)) {
         final name = _contacts[nodeIdHex]!.displayName;
+        // §14.7: the deletion on the other own device took the conversation
+        // with it (`deleteContact`); this device follows. Until S401 the
+        // contact went here and its conversation stayed, shown and stored.
+        _conversationLeavesProfile(nodeIdHex, openSendsStop: true);
         _contacts.remove(nodeIdHex);
         _deletedContacts.add(nodeIdHex);
         _saveContacts();
@@ -125,13 +129,94 @@ extension V3IdentityDeviceOps on CleonaService {
     try {
       final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
       final groupInfo = GroupInfo.fromJson(json);
-      if (_groups.containsKey(groupInfo.groupIdHex)) return;
+      // The state of the device that created or joined is taken where this
+      // device holds none, holds only the invitation, or holds an epoch that
+      // is not newer. A newer state here came over the group's own protocol
+      // (§16) and stays; the group pairs are taken in every case.
+      final known = _groups[groupInfo.groupIdHex];
+      if (known != null &&
+          (!groupInfo.joined ||
+              (known.joined &&
+                  known.membershipEpoch > groupInfo.membershipEpoch))) {
+        _ownLineGroupPairsTake(json, known);
+        return;
+      }
+      // §16.2.2: a group THIS device left comes back only with a state
+      // newer than the one it left with (`_groupMayBeHeld`) — the state of
+      // another own device from before the leaving does not lift the mark.
+      if (known == null &&
+          !_groupMayBeHeld(groupInfo.groupIdHex,
+              epoch: groupInfo.membershipEpoch,
+              namesMe: groupInfo.members.containsKey(identity.userIdHex))) {
+        return;
+      }
       _groups[groupInfo.groupIdHex] = groupInfo;
       _saveGroups();
+      _ownLineGroupPairsTake(json, groupInfo);
+      final conv = conversations.putIfAbsent(
+          groupInfo.groupIdHex,
+          () => Conversation(
+                id: groupInfo.groupIdHex,
+                displayName: groupInfo.name,
+                isGroup: true,
+                profilePictureBase64: groupInfo.pictureBase64,
+                notificationsEnabled:
+                    notificationSound.settings.defaultGroupNotify,
+              ));
+      conv.displayName = groupInfo.name;
+      _saveConversations();
+      // What waited here for the invitation into this group (§16.2.2).
+      if (known == null) _groupWaitingApply(groupInfo.groupIdHex);
       _log.info('Twin-synced group created: ${groupInfo.name}');
       onStateChanged?.call();
     } catch (e) {
       _log.warn('Twin GROUP_CREATED failed: $e');
+    }
+  }
+
+  /// Type 21 GROUP_LEFT (§14.7, S403 owner decision 03.10.2026 V1 = A):
+  /// another own device left the group — or the channel — that [payload]
+  /// names, so the identity left. This device removes the conversation and
+  /// sets the same mark; a post the leaving device discarded is not
+  /// forwarded here, so the group must not stay held either. A state this
+  /// device already holds that is NEWER (the identity was re-invited and
+  /// this device took the invitation) wins: that leaving is old news.
+  void _handleTwinGroupLeft(List<int> payload) {
+    try {
+      final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
+      final gid = json['group'] as String;
+      final epoch = (json['epoch'] as num).toInt();
+      final group = _groups[gid];
+      final channel = _channels[gid];
+      // §16.2.2: "Recipients discard updates with an epoch ≤ their local
+      // state" — here the other way round: a held membership newer than
+      // the one at the leaving is a new invitation this device already
+      // took, and the leaving of the other own device does not undo it.
+      if (group != null && group.membershipEpoch > epoch) return;
+      if (channel != null && channel.membershipEpoch > epoch) return;
+      if (group != null) {
+        // Like the leaving device itself (`leaveGroup`): the conversation
+        // goes with the membership, the pairs with the group (B-3).
+        _conversationLeavesProfile(gid, openSendsStop: false);
+        myceliumMailbox?.groupPairLeave(hexToBytes(gid));
+        _groups.remove(gid);
+        _saveGroups();
+      } else if (channel != null) {
+        _conversationLeavesProfile(gid, openSendsStop: false);
+        _channels.remove(gid);
+        _saveChannels();
+      }
+      // §16.2.2: the same mark as on the leaving device — posts of the
+      // group are discarded from now on, a new invitation lifts it. This
+      // device held neither group nor channel: the mark is all that
+      // changes.
+      _groupMarkLeft(gid, epoch);
+      _saveConversations();
+      _log.info('Twin-synced group left: ${gid.substring(0, 8)} '
+          'at epoch $epoch (§14.7 Type 21)');
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('Twin GROUP_LEFT failed: $e');
     }
   }
 
@@ -141,10 +226,15 @@ extension V3IdentityDeviceOps on CleonaService {
       final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
       if (json.containsKey('displayName')) {
         displayName = json['displayName'] as String;
+        _persistDisplayName(displayName);
       }
       if (json.containsKey('profilePicture')) {
         _profilePictureBase64 = json['profilePicture'] as String?;
         _saveProfilePicture();
+      }
+      if (json.containsKey('profileDescription')) {
+        _profileDescription = json['profileDescription'] as String?;
+        _saveProfileDescription();
       }
       onStateChanged?.call();
       _log.info('Twin-synced profile change');
@@ -202,8 +292,19 @@ extension V3IdentityDeviceOps on CleonaService {
 
     try {
       final broadcast = proto.KeyRotationBroadcast.fromBuffer(payload);
-      if (broadcast.oldSignatureEd25519.isNotEmpty &&
-          broadcast.newSignatureEd25519.isNotEmpty) {
+      // §4.5.4 "The announcement must carry the mode". Both notices carry
+      // it under field 9 (`KeyRotationMode`), so it is read here for both.
+      // A notice without a mode, or with one this build does not know, is
+      // rejected — there is no default and no older peer to serve (4.2.1
+      // is not compatible with 4.2.0). The only mode today is TAGS_VALID:
+      // nothing to re-derive, the pair's codes stay as they are.
+      if (broadcast.mode != proto.KeyRotationMode.KEY_ROTATION_MODE_TAGS_VALID) {
+        _log.warn('KEY_ROTATION_BROADCAST from ${senderHex.substring(0, 8)} '
+            'REJECTED: mode ${broadcast.mode.name} — the notice does not '
+            'say whether the tags stay valid (§4.5.4). Keys unchanged.');
+        return;
+      }
+      if (CleonaService.isEmergencyKeyRotationBody(broadcast)) {
         _handleEmergencyKeyRotation(senderUserId, contact, senderHex, broadcast);
       } else {
         // Periodic KEM rotation — delegate to legacy handler. Re-serialize
@@ -232,54 +333,6 @@ extension V3IdentityDeviceOps on CleonaService {
   // has fallen is solely the V3 FRAME in which it once travelled — not the
   // rotation.
 
-
-  void _addDeviceDelegation(Uint8List deviceId, DeviceDelegation cert) {
-    // Register the device locally. `deviceId` IS the device node id here (the
-    // pair request is keyed by it), hence deviceNodeIdHex == the map key.
-    final deviceIdHex = bytesToHex(deviceId);
-    if (!_devices.containsKey(deviceIdHex)) {
-      final now = DateTime.now();
-      _devices[deviceIdHex] = DeviceRecord(
-        deviceId: deviceIdHex,
-        deviceName: 'Linked-${deviceIdHex.substring(0, 6)}',
-        platform: 'unknown',
-        firstSeen: now,
-        lastSeen: now,
-        deviceNodeIdHex: deviceIdHex,
-      );
-      _saveDevices();
-    }
-
-    // §7 (Einleitung): approving the delegation is what authorises the device,
-    // so the published device list has to grow with it. Unconditional (not
-    // inside the `containsKey` guard above): on an LD-9 renewal the record
-    // already exists, yet the publisher may still be missing the entry — e.g.
-    // after a restart in which the manifest was published before this device
-    // registry entry was reachable.
-    _syncAuthorizedDevicesToPublisher();
-
-    // §14.5 path 2: the GROWN device set goes pairwise to the contacts.
-    // §14.4 requires the announcement on EVERY change of the device set,
-    // not only on lock-out — and without the growth announcement the next
-    // shrinking would be checked against too small a denominator.
-    //
-    // It does NOT go out today, and the reason is one line further down:
-    // this node does not hold the signing keys of the admitted device, so
-    // it cannot prove the set completely. [_announceDeviceSetToContacts]
-    // recognises that itself and stays silent with a named log line,
-    // instead of sending an incomplete set that would look like a
-    // shrinking at the receiver.
-    _announceDeviceSetToContacts(occasion: 'Device admitted');
-
-    // FORMERLY: `_identityPublisher.addDelegation(cert)` + republish of the
-    // AuthManifest. The certificate is issued and delivered to the device;
-    // what is missing is the place where THIS device remembers to whom it
-    // has issued one (gap G-9). Without this place the device counts in no
-    // §7.5 quorum and cannot be revoked.
-    _log.warn('Delegation for ${deviceIdHex.substring(0, 8)} issued, '
-        'but not recorded — V4.1 has no holder for the '
-        'delegation list (gap G-9).');
-  }
 
 
   /// D1 (§4.3): trust-anchor lookup and self-healing at the resolver —

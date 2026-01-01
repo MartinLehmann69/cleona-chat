@@ -109,12 +109,12 @@ class UpdateManifest {
   final Map<String, String>? binaryTag;
 
   /// Per platform a mapping source version -> tag of the delta blob
-  /// (§26.6.2). Null on old manifests — and currently ALWAYS null: neither
-  /// does `scripts/sign-update-manifest.sh` produce the field (the payload position
-  /// stays empty), nor could a receiver do anything with it
-  /// as long as `DeltaUpdateManager.applyDelta` without `libcleona_bsdiff`
-  /// returns `null`. The same remark as with [binaryTag]: a tag,
-  /// not a lookup.
+  /// (§26.6.2). Since S387 `scripts/sign-update-manifest.sh --prev` writes it
+  /// (value `"1"` per source version, like [binaryTag]); since S406-DELTA the
+  /// pipeline passes `--prev` for V-1 and V-2. The same remark as with
+  /// [binaryTag]: a presence marker, not a lookup — WHAT a node collects
+  /// follows from [deltaHashes] and [deltaSizes]
+  /// (`lib/core/update/update_target.dart` `updateTargetFor`).
   final Map<String, Map<String, String>>? deltaBinaryTag;
 
   /// NEW (§19.6): monotonically increasing sequence number for downgrade protection.

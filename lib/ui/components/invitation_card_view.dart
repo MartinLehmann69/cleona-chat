@@ -10,13 +10,27 @@
 /// there — acceptance without a second question, no text line. Copying
 /// the text issues a SECOND, separate invitation, for which every request
 /// is asked: the bytes of QR and text are the same, so the issuer could not
-/// tell afterwards which of the two was used. The shown QR invitation is
-/// revoked [kFaceToFaceRevokeDelay] after the view closes.
+/// tell afterwards which of the two was used. The shown QR invitation lives
+/// 60 s after it was shown (§15.3, owner decision 07.10.2026) — the SERVICE
+/// closes it, not this view, so that closing the app does not leave it
+/// standing (`invitation_face_to_face.dart`). This view only reports the one
+/// showing the service cannot know: "show anyway" ([_showAnyway]). When the
+/// service closes the card this view shows, the view hides the code and says
+/// so, with the "Create invitation" button right below (S406-QR2 2A): it
+/// reloads the standing invitations on the service's `onStateChanged` — which
+/// the service raises when it closes one — while a face-to-face card is on
+/// screen, and reads WHY the card is gone from
+/// [StandingInvitationsResult.closedFaceToFace] (a redeemed card disappears
+/// too, without that notice). No clock of its own, no polling.
 ///
-/// The card needs no network and no readiness state (§12.4,
-/// §22.7.2 "The invitation is not gated"). There is therefore neither
-/// a loading indicator nor a spinner here — only "issued", "refused with reason"
-/// or "nothing issued yet".
+/// The card follows §12.4, not the readiness state (§22.7.2): it is shown
+/// at once when its invitation data carry a way in from the open network;
+/// otherwise a waiting indicator stands for at most 30 s, the card comes as
+/// soon as the way in does, and after the deadline a message says the device
+/// cannot be reached from the internet right now, with the button that shows
+/// the card anyway, labelled "same W/LAN only" (`invitation_way_in.dart`).
+/// An invitation issued but never shown has not left the device and is
+/// revoked when the view closes or a new one replaces it.
 library;
 
 import 'dart:async';
@@ -29,6 +43,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/invitation_messages.dart';
+import 'package:cleona/ui/components/invitation_way_in.dart';
 import 'package:cleona/ui/components/share_cleona_dialog.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 
@@ -50,16 +65,6 @@ class InvitationCardView extends StatefulWidget {
   State<InvitationCardView> createState() => _InvitationCardViewState();
 }
 
-/// How long a shown QR invitation stays valid after its view closed.
-///
-/// The scanner reads the card and then presses "send request" — a person
-/// stands between scan and request, and the inviter may close the view as
-/// soon as the scan happened. Measured 24.09.2026 from send to arrival:
-/// 0.07 s (LAN) to 1.2 s (phone behind CGNAT over the internet); the rest
-/// of the window is the scanner's decision. A request arriving later is
-/// rejected silently (§15.3), like after any revocation.
-const Duration kFaceToFaceRevokeDelay = Duration(seconds: 60);
-
 class _InvitationCardViewState extends State<InvitationCardView> {
   // §15.3: "single (default)". The kind is the DOCUMENT's default, not a
   // promise in the user's name — it is visible and changeable.
@@ -76,15 +81,48 @@ class _InvitationCardViewState extends State<InvitationCardView> {
   InvitationIssueRefusal? _refusal;
   bool _busy = false;
 
+  /// §12.4: waiting for the issued card's way in.
+  bool _waiting = false;
+
+  /// §12.4: the deadline passed without a way in — offered "anyway".
+  InvitationCard? _noWayIn;
+
+  /// The issued card that has not been shown yet (waiting or [_noWayIn]).
+  String? _unshown;
+
   /// `null` = not read yet. An empty list and "not read
   /// yet" are two statements, and only the second may stay silent.
   StandingInvitationsResult? _standing;
   String? _revokeMessageKey;
 
+  /// §15.3 (S406-QR2 2A): the notice that the service closed the card this
+  /// view offered — `card_face_to_face_closed` (shown, 60 s over) or
+  /// `card_face_to_face_closed_restart` (never shown, closed at the start of
+  /// the service). `null` = no notice.
+  String? _closedKey;
+
+  /// The holder of the service's single `onStateChanged` slot before this
+  /// view opened; chained while it is open and given back in [dispose]
+  /// (pattern `connection_sheet.dart`, `device_management_screen.dart`).
+  void Function()? _previousOnStateChanged;
+
   @override
   void initState() {
     super.initState();
+    _previousOnStateChanged = widget.service.onStateChanged;
+    widget.service.onStateChanged = _onServiceState;
     unawaited(_loadStanding());
+  }
+
+  /// The service changed state — among others, it closed a face-to-face
+  /// invitation (§15.3). Only while such a card is on screen does the view
+  /// ask which invitations still stand.
+  void _onServiceState() {
+    _previousOnStateChanged?.call();
+    if (!mounted) return;
+    if (_card?.faceToFace == true || _noWayIn?.faceToFace == true) {
+      unawaited(_loadStanding());
+    }
   }
 
   Future<void> _loadStanding() async {
@@ -92,11 +130,23 @@ class _InvitationCardViewState extends State<InvitationCardView> {
     if (!mounted) return;
     setState(() {
       _standing = r;
+      final card = _card;
+      final offered = _noWayIn;
+      // §15.3 (S406-QR2 2A): the SERVICE closed the card on screen — say so
+      // instead of letting the code vanish without a word.
+      final closed = r.closedFaceToFace;
+      if (card != null && card.faceToFace && closed.contains(card.id)) {
+        _closedKey = 'card_face_to_face_closed';
+      } else if (offered != null &&
+          offered.faceToFace &&
+          closed.contains(offered.id)) {
+        _closedKey = 'card_face_to_face_closed_restart';
+        _unshown = null;
+      }
       // If the shown card is no longer in the list (revoked,
       // used up, expired), it is not offered any further — a
       // code that the next scanner silently rejects is a trap.
       final items = r.items;
-      final card = _card;
       if (items != null &&
           _textCard != null &&
           !items.any((i) => i.id == _textCard!.id)) {
@@ -105,35 +155,62 @@ class _InvitationCardViewState extends State<InvitationCardView> {
       if (items != null && card != null && !items.any((i) => i.id == card.id)) {
         _card = null;
       }
+      if (items != null &&
+          offered != null &&
+          !items.any((i) => i.id == offered.id)) {
+        _noWayIn = null;
+      }
     });
   }
 
   @override
   void dispose() {
-    _faceToFaceRevokeLater(_card);
+    widget.service.onStateChanged = _previousOnStateChanged;
+    _revokeUnshown();
     super.dispose();
   }
 
-  /// Revokes the shown QR invitation [card] after [kFaceToFaceRevokeDelay] —
-  /// only if it still stands. A consumed one is left alone: revoked, it
-  /// would silence the re-contact answer (§15.5, ES-11) should the
-  /// scanner's answer have been lost.
-  void _faceToFaceRevokeLater(InvitationCard? card) {
-    if (card == null || !card.faceToFace) return;
-    final service = widget.service;
-    unawaited(Future<void>.delayed(kFaceToFaceRevokeDelay, () async {
-      final items = (await service.standingInvitations()).items;
-      if (items == null || !items.any((i) => i.id == card.id)) return;
-      await service.revokeInvitationCard(card.id);
-    }));
+  /// An invitation that was issued but never shown has not left the device:
+  /// it is revoked at once instead of taking one of the ten places (§15.3).
+  void _revokeUnshown() {
+    final id = _unshown;
+    _unshown = null;
+    if (id != null) unawaited(widget.service.revokeInvitationCard(id));
+  }
+
+  /// "Show anyway – only in the same W/LAN" (§12.4). A face-to-face card is
+  /// reported to the service first: its 60 s begin with this showing
+  /// (§15.3), and a card that no longer stands is not shown.
+  Future<void> _showAnyway() async {
+    final card = _noWayIn;
+    if (card == null) return;
+    if (card.faceToFace &&
+        !await widget.service.reportInvitationShown(card.id)) {
+      if (!mounted) return;
+      _unshown = null;
+      // Read first, then hide: the list says whether the service closed it
+      // (the notice of 2A) — and it is not offered any further either way.
+      await _loadStanding();
+      if (!mounted) return;
+      setState(() {
+        if (identical(_noWayIn, card)) _noWayIn = null;
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _card = card;
+      _noWayIn = null;
+      _unshown = null;
+    });
   }
 
   /// Copies the text of the separate invitation for [card] (§15.5: text
   /// line through another channel — every request is asked).
   Future<void> _copyText(AppLocale locale, InvitationCard card) async {
     final messenger = ScaffoldMessenger.of(context);
-    var text = card.faceToFace ? _textCard?.text : card.text;
-    if (text == null) {
+    var copied = card.faceToFace ? _textCard : card;
+    if (copied == null) {
       final r = await widget.service.issueInvitationCard(
           kind: card.kind, validity: _validity);
       if (!mounted) return;
@@ -142,24 +219,39 @@ class _InvitationCardViewState extends State<InvitationCardView> {
         setState(() => _refusal = r.refusal ?? InvitationIssueRefusal.failed);
         return;
       }
-      setState(() => _textCard = issued);
-      text = issued.text;
+      // §12.4: the out-of-band line follows the same rule as the QR code.
+      final chosen =
+          await invitationLineDialog(context, widget.service, issued);
+      if (!mounted) return;
+      if (chosen == null) {
+        // Closed without copying: the line never left the device.
+        unawaited(widget.service.revokeInvitationCard(issued.id));
+        await _loadStanding();
+        return;
+      }
+      setState(() => _textCard = chosen);
+      copied = chosen;
       await _loadStanding();
     }
-    await Clipboard.setData(ClipboardData(text: text));
-    messenger.showSnackBar(
-      SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-    );
+    await Clipboard.setData(ClipboardData(text: copied.text));
+    messenger.showSnackBar(SnackBar(
+      content: Text(copied.wayIn
+          ? locale.get('copied_to_clipboard')
+          : '${locale.get('copied_to_clipboard')} — '
+              '${locale.get('invite_same_network_only')}'),
+    ));
   }
 
   Future<void> _issue() async {
-    // A new card replaces the shown one — a replaced QR invitation is
-    // no longer shown and goes like a closed view.
-    _faceToFaceRevokeLater(_card);
+    // A new card replaces the shown one; a shown QR invitation runs out in
+    // the service (§15.3), an unshown one is revoked at once.
+    _revokeUnshown();
     _textCard = null;
     setState(() {
       _busy = true;
       _refusal = null;
+      _noWayIn = null;
+      _closedKey = null;
     });
     final r = await widget.service.issueInvitationCard(
         kind: _kind,
@@ -167,10 +259,38 @@ class _InvitationCardViewState extends State<InvitationCardView> {
         // §15.5: "One person" is shown as QR to the person standing there;
         // its text travels as a separate invitation ([_copyText]).
         faceToFace: _kind == InvitationKind.single);
-    if (!mounted) return;
+    final issued = r.card;
+    if (!mounted) {
+      if (issued != null) {
+        unawaited(widget.service.revokeInvitationCard(issued.id));
+      }
+      return;
+    }
+    if (issued != null && !issued.wayIn) {
+      // §12.4: the new card replaces the shown one, but is not shown yet.
+      _unshown = issued.id;
+      setState(() {
+        _card = null;
+        _waiting = true;
+      });
+      final shown = await invitationAwaitWayIn(widget.service, issued);
+      if (!mounted || _unshown != issued.id) return;
+      setState(() {
+        _busy = false;
+        _waiting = false;
+        if (shown.wayIn) {
+          _card = shown;
+          _unshown = null;
+        } else {
+          _noWayIn = shown;
+        }
+      });
+      await _loadStanding();
+      return;
+    }
     setState(() {
       _busy = false;
-      _card = r.card ?? _card;
+      _card = issued ?? _card;
       _refusal = r.refusal;
     });
     await _loadStanding();
@@ -249,6 +369,24 @@ class _InvitationCardViewState extends State<InvitationCardView> {
           Text(locale.get('card_title'), style: theme.textTheme.titleMedium),
           SizedBox(height: tokens.spacing.sm),
           if (_card != null) ..._buildCard(context, locale, _card!),
+          if (_closedKey != null && _card == null) ...[
+            Text(locale.get(_closedKey!),
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: theme.colorScheme.error)),
+            SizedBox(height: tokens.spacing.md),
+            const Divider(),
+          ],
+          if (_waiting)
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: tokens.spacing.md),
+              child: const InvitationWayInWaiting(),
+            ),
+          if (_noWayIn != null) ...[
+            InvitationNoWayIn(onAnyway: _showAnyway),
+            SizedBox(height: tokens.spacing.md),
+            const Divider(),
+          ],
           ..._buildCreate(context, locale),
           ..._buildStanding(context, locale),
           if (widget.showShareCleonaButton) ...[
@@ -274,15 +412,12 @@ class _InvitationCardViewState extends State<InvitationCardView> {
     final radius = tokens.radius.md * theme.character.radiusMultiplier;
     final width = MediaQuery.of(context).size.width;
     final qrSize = (width * 0.55).clamp(180.0, 320.0);
-    // §15.2: the QR code carries the packed card in binary form
-    // ("90–380 B binary"). With the error correction M chosen here that
-    // is version 6 (41x41 modules) for the smallest and version 15
-    // (77x77) for the largest card — measured on 16.09.2026 with exactly
-    // this generator, not estimated (§15.2).
-    //
-    // The cap of four own addresses is no cosmetics: with
-    // error correction H the largest card would lie only THREE bytes below the
-    // jump to version 21 (383 B).
+    // §15.11: the QR code carries the packed card in binary form
+    // ("91–413 B binary"). With the error correction M chosen here that
+    // is version 6 (41x41 modules) for the smallest and version 16
+    // (81x81) for the largest card (L/M/Q/H: V13/V16/V19/V22) — measured on
+    // 07.10.2026 with exactly this generator on real cards, not estimated
+    // (`test/smoke/smoke_invitation_card_reader.dart`, S406 E-3).
     final qr = qr_lib.QrCode.fromUint8List(
       data: card.packed,
       errorCorrectLevel: qr_lib.QrErrorCorrectLevel.M,
@@ -298,6 +433,11 @@ class _InvitationCardViewState extends State<InvitationCardView> {
         style: theme.textTheme.bodySmall
             ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
       ),
+      // §12.4: shown without a way in from the open network.
+      if (!card.wayIn) ...[
+        SizedBox(height: tokens.spacing.xs),
+        const InvitationSameNetworkOnly(),
+      ],
       SizedBox(height: tokens.spacing.sm),
       Center(
         child: Container(
@@ -314,14 +454,11 @@ class _InvitationCardViewState extends State<InvitationCardView> {
         ),
       ),
       SizedBox(height: tokens.spacing.sm),
-      // The whole line, wrapping — §15.2 text is up to 519 characters long,
-      // and truncated it would be exactly the finding "truncated". A card
-      // for showing has NO line (§15.5): neither text nor copy button.
-      if (!card.faceToFace)
-        SelectableText(
-          card.text,
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-        ),
+      // The line is NOT rendered: since proposal E it is a `cleona:2:` line
+      // of about 4,400 characters (card + the issuer's keys) — a wall of
+      // text nobody reads and a partial selection would be exactly the
+      // finding "truncated" (§15.6). It leaves only whole, through the copy
+      // button below. A card for showing has no line at all (§15.5).
       SizedBox(height: tokens.spacing.xs),
       Text(
         invitationExpiryText(locale, card.expiryUnixSeconds),

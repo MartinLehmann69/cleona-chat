@@ -3,14 +3,17 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:mycelium/device_records.dart' show DeviceRecords;
 import 'package:mycelium/post_box_proof.dart';
 import 'package:mycelium/post_box_holder.dart';
+import 'package:mycelium/post_box_collect.dart';
 import 'package:mycelium/post_box_runs.dart';
+import 'package:mycelium/post_box_log.dart';
 import 'package:mycelium/post_box_proof_of_work.dart';
 import 'package:mycelium/post_box_disk.dart';
+import 'package:mycelium/split.dart' show endedAfter, kRestPeriod;
+import 'package:mycelium/split_flow.dart' show SendEnd;
 import 'package:mycelium/kinds.dart' as kinds;
-import 'package:mycelium/update_manifest_compartment.dart' show isManifestValue;
 
 export 'package:mycelium/post_box_proof.dart'
     show Question, DayPair, ownAsk, compartmentQuestion, kAtMostValues;
@@ -30,32 +33,34 @@ export 'package:mycelium/post_box_holder.dart'
 /// day pubkey, `pair.dart`) and acknowledges immediately (0x31). TWO of three
 /// suffice — one may fail. When Bob comes back, he asks the same
 /// neighbours under the day values of the last seven days (0x32); whoever
-/// holds something sends it per value as 0x33 (one per entry), otherwise 0x34. Bob acknowledges every piece INDIVIDUALLY — for that
-/// 0x31 is reused in the opposite direction, no sixth code
-/// needed. Deletion happens only AFTER this receipt, otherwise an
+/// holds something sends it per value as 0x33 (one per entry, each naming
+/// how many it hands out), otherwise 0x34. Bob acknowledges every piece
+/// INDIVIDUALLY — for that 0x31 is reused in the opposite direction, no
+/// sixth code needed. Deletion happens only AFTER this receipt, otherwise an
 /// entry would be gone without replacement if the receipt packet were lost.
+///
+/// **Events, not clocks** (§8.2, D-44; S399 step 4). Placing ends at the
+/// second `0x31`, or not placed when the transmission to every holder has
+/// ended without it — never on a deadline, never repeated. The collection
+/// (`post_box_collect.dart`) is a conversation per holder: a holder is done
+/// when it has handed out what it announced or its link ended unanswered,
+/// and no holder waits for another.
 ///
 /// No point in time for [PostBoxDeposit.collect] in this file — that
 /// is intentional: a permanent clock was the error of the old layer (plan +
 /// clock, 49,000 lines, 12 minutes/message). [collect] is ONE request;
 /// the caller decides WHEN. No timer here, no idle traffic.
 ///
-/// Every neighbour is at the same time deposit site, sender and collector — one
-/// instance covers all three roles. The HOLDER ROLE is in
-/// `post_box_holder.dart` (S385, step 0: the line budget); here
-/// remain sender and collector and the allocation of the packets. [content]
-/// stays opaque throughout for both files.
+/// Every neighbour is deposit site, sender and collector — one instance covers
+/// all three roles: the holder in `post_box_holder.dart`, the collector in
+/// `post_box_collect.dart`, the sender here. [content] stays opaque.
 ///
-/// What a holder holds for others survives a restart: with
-/// `directory` + `key` in the constructor [PostBoxDisk] writes it
-/// encrypted and atomically to disk, and at start it comes back from
-/// there — minus whatever has exceeded the retention period of
-/// [kAtMostAge]. WITHOUT `directory` the deposit works
-/// as before purely in memory and touches no file.
-/// The file format is in `post_box_disk.dart`.
+/// What a holder holds for others survives a restart: with `records` in
+/// the constructor (in the app the device database) [PostBoxDisk] writes
+/// it there as a whole, and at start it comes back from there — minus
+/// whatever has exceeded the retention period of [kAtMostAge]. WITHOUT
+/// `records` the deposit works purely in memory.
 
-const Duration kDepositDeadline = Duration(milliseconds: 800);
-const Duration kCollectDeadline = Duration(seconds: 2);
 /// One length, two users: here for the packets, in
 /// `post_box_disk.dart` for the file format. Therefore taken from there,
 /// not written down here once more.
@@ -66,11 +71,11 @@ class PostBoxDeposit {
   final DateTime Function() now;
   final Random _random;
 
-  /// An own request is completed, and these asked holders
-  /// did NOT answer (V4.2 §22.7.1, downward edge of
-  /// readiness). Reported only at the end of the deadline that is running
-  /// anyway — or immediately if all have answered, then with nobody.
-  /// No timer of its own, no packet.
+  /// These asked holders did NOT answer an own request (V4.2 §22.7.1,
+  /// downward edge of readiness; §11.8 a failed use). A deposit reports
+  /// once, when its run has ended; a collection per holder, when its link
+  /// ended unanswered or one request for what is missing brought no answer
+  /// at all. No timer of its own, no packet.
   final void Function(List<Neighbour> withoutAnswer)? onMute;
 
   /// An asked holder has answered with its node identifier (hex)
@@ -78,64 +83,110 @@ class PostBoxDeposit {
   /// readiness thus counts it per node (B1). No packet.
   final void Function(InternetAddress from, int port, String node)? onNode;
 
+  /// The log (O2, `post_box_log.dart`) — decides nothing.
+  final void Function(String)? report;
+
   /// What I hold for others — see `post_box_holder.dart`.
   late final PostBoxHolder _holder;
 
-  /// Own running [deposit] requests, by id (hex).
+  /// What I collect for myself — see `post_box_collect.dart`.
+  late final PostBoxCollector _collector;
+
+  /// Names packets discarded for their length — see [LengthLog].
+  late final LengthLog _lengths = LengthLog(report);
+
+  /// The bound of the own running deposits — [kDepositsAtMost]; a probe
+  /// sets a smaller one.
+  final int depositsAtMost;
+
+  /// Own running [deposit] requests, by id (hex), oldest first. At most
+  /// [depositsAtMost] (§20.2): beyond it the oldest ends with the receipts
+  /// it has, without counting a use. A run leaves when every holder has
+  /// acknowledged or its transmission has ended; only a [send] without flow
+  /// (probes) gives no end, and such a run stays until its receipts or the
+  /// cap.
   final Map<String, DepositRun> _deposits = {};
 
-  /// At most one own [collect] request at a time; the node
-  /// asks its identities one after the other (`node_post_box.dart`).
-  CollectionRun? _collection;
+  /// How many own deposits are running — diagnostics.
+  int get depositRuns => _deposits.length;
+
+  /// Whether [close] has run. A run it ended did not end by the events of
+  /// §8.2 — the node stopped: nothing is sent again on its account
+  /// (`mailbox_outbound.dart`).
+  bool get closed => _closed;
+  bool _closed = false;
+
+  /// The node stops: every own run ends with what it has, without counting
+  /// a use; the collector ends its conversations ([PostBoxCollector.close]).
+  void close() {
+    _closed = true;
+    for (final h in _deposits.values) {
+      h
+        ..release()
+        ..complete();
+    }
+    _deposits.clear();
+    _collector.close();
+  }
+
+  /// An edge of §8.2 begins — see [PostBoxCollector.edge].
+  void collectEdge() => _collector.edge();
 
   /// How many deposits this holder has accepted — pure
   /// diagnostics, so that the re-deposit loop from S384 is measurable.
   int get deposits => _holder.deposits;
 
-  /// Whether a [collect] request is currently running. Lives here because the
-  /// caller could otherwise only learn it via the thrown [StateError]
-  /// — an exception for flow control is not information.
-  /// Measured 14.09.2026: the edge „new neighbour" fires per neighbour, the
-  /// second throw went through an `unawaited` and took the daemon down with it.
-  bool get collectRuns => _collection != null;
+  /// The manifest in the own post box (§26.5.4) — see [PostBoxHolder.holdOwn].
+  bool holdOwn(Uint8List value, Uint8List content) =>
+      _holder.holdOwn(value, content);
 
-  /// Without [directory] everything stays in memory — so it was until now, and
-  /// so it stays for every caller that passes nothing. With [directory]
-  /// [key] is mandatory; details and [DepositError] at
-  /// [PostBoxHolder].
+  /// Whether a [collect] question is open at any holder.
+  bool get collectRuns => _collector.runs;
+
+  /// Without [records] everything stays in memory; details and
+  /// [DepositError] at [PostBoxHolder].
   PostBoxDeposit({
     required this.send,
     this.now = DateTime.now,
     Random? random,
-    Directory? directory,
-    Uint8List? key,
+    DeviceRecords? records,
     this.onMute,
     this.onNode,
+    this.report,
+    this.depositsAtMost = kDepositsAtMost,
     /// The node identifier that this holder names in its answers — the
     /// node gives that of its call. Without it one is rolled.
     Uint8List? nodeIdentifier,
   }) : _random = random ?? Random.secure() {
     _holder = PostBoxHolder(
-        send: send,
+        send: answersLogged(send, report),
         now: now,
-        directory: directory,
-        key: key,
+        records: records,
         nodeIdentifier: nodeIdentifier ??
             Uint8List.fromList(List<int>.generate(
                 kNodeIdentifierLength, (_) => _random.nextInt(256))));
+    _collector = PostBoxCollector(
+        send: send, onMute: onMute, onNode: onNode, report: report);
   }
 
   /// Deposits [content] (bytes opaque for the recipient) with [withWhom]
   /// under the 16-B value [underValue] — the day value of the recipient
   /// (`dayValue(tagesPk)`, `pair.dart`) or the manifest compartment. Done
-  /// as soon as TWO different nodes have acknowledged — the return value
-  /// names the actual number of NODES. Throws [ArgumentError] on
-  /// wrong value length.
+  /// as soon as TWO different nodes have acknowledged; NOT done once the
+  /// transmission to every holder has ended short of two (§8.2) — the return
+  /// value names the actual number of NODES. Throws [ArgumentError] on wrong
+  /// value length. [ended]: asked once the proof of work is ready; `true`
+  /// leaves nothing (§7.1).
+  ///
+  /// The end of a transmission is what [send] returns ([SendEnd]); a single
+  /// part has ended 1.1 s after it left (§11.3). A send that returns nothing
+  /// (a probe without flow) gives no end, and such a run ends only with the
+  /// receipts.
   Future<(bool done, int acknowledged)> deposit({
     required Uint8List content,
     required Uint8List underValue,
     required List<Neighbour> withWhom,
-    Duration deadline = kDepositDeadline,
+    bool Function()? ended,
   }) {
     if (underValue.length != kValueLength) {
       throw ArgumentError(
@@ -145,17 +196,27 @@ class PostBoxDeposit {
     final idHex = asHex(id);
     final h = DepositRun();
     _deposits[idHex] = h;
+    while (_deposits.length > depositsAtMost) {
+      final old = _deposits.remove(_deposits.keys.first)!
+        ..release()
+        ..complete();
+      report?.call('deposit under ${old.valueShort}: more than '
+          '$depositsAtMost runs — the oldest ends with ${old.node} receipt(s)');
+    }
     if (withWhom.isEmpty) {
-      _depositComplete(idHex); // nobody there: nothing to compute
+      _depositEnd(idHex); // nobody there: nothing to compute
       return h.result.future;
     }
-    // First compute (F3), then send, then the deadline: the deadline measures the
-    // answer time of the holders, not the own computing time. If something fails,
-    // the deposit ends with (false, 0) instead of with an error that
-    // nobody catches in the `unawaited` of the ladder (node.dart, post box step).
+    // Compute (F3), then send. A failure ends (false, 0), never an error in
+    // an `unawaited`.
     unawaited(() async {
       try {
         final proofOfWork = await depositProofOfWork(id, underValue, content);
+        if (ended?.call() ?? false) {
+          report?.call('deposit dropped — acknowledged before its proof of work (§7.1)');
+          _depositEnd(idHex);
+          return;
+        }
         final packet = (BytesBuilder()
               ..addByte(kinds.kDeposit)
               ..add(id)
@@ -163,105 +224,93 @@ class PostBoxDeposit {
               ..add(proofOfWork)
               ..add(content))
             .toBytes();
-        // The run state stands BEFORE dispatch: a receipt that arrives while still in
-        // the send loop would otherwise find an empty list of the
-        // asked and close the run without deadline and without mute ones.
+        // The run state stands BEFORE dispatch: a receipt that arrives while
+        // still in the send loop would otherwise find an empty list of the
+        // asked and end the run.
         h
-          ..packet = packet
-          ..deadlineDuration = deadline
-          ..asked = List.of(withWhom);
-        h.deadline = Timer(deadline, () => _depositComplete(idHex));
+          ..asked = List.of(withWhom)
+          ..sentAt = DateTime.now()
+          ..valueShort = asHex(underValue).substring(0, 8);
         for (final n in withWhom) {
-          send(packet, n);
+          final s = send(packet, n);
+          if (s is Future) {
+            unawaited(s.then((end) => _transmissionEnded(idHex, n, end),
+                onError: (Object _) => _transmissionEnded(idHex, n, null)));
+          }
         }
       } on Object {
-        _depositComplete(idHex);
+        _depositEnd(idHex);
       }
     }());
     return h.result.future;
   }
 
-  /// [isFinal] = the deadline is over (or there was nobody to ask). Otherwise
-  /// two have acknowledged: the result stands, but the third holder has
-  /// time until the end of the deadline — whoever already calls him „mute" now tips
-  /// readiness briefly down with every deposit and right back up again.
-  void _depositComplete(String idHex, {bool isFinal = true}) {
+  /// The transmission of the `0x30` to [n] ended. A single part (`sent`) has
+  /// no end mark: it has ended [endedAfter] its leaving — 1.1 s, the rule of
+  /// §11.3 for a sender without end mark or request; never repeated (§8.2).
+  void _transmissionEnded(String idHex, Neighbour n, Object? end) {
     final h = _deposits[idHex];
     if (h == null) return;
-    if (!h.result.isCompleted) {
-      h.result.complete((h.node >= 2, h.node));
+    if (end == SendEnd.sent) {
+      h.waits.add(Timer(endedAfter(kRestPeriod),
+          () => _transmissionEnded(idHex, n, SendEnd.unconfirmed)));
+      return;
     }
-    if (!isFinal && h.acknowledged.length < h.asked.length) return;
-    h.deadline?.cancel();
+    h.ended.add(neighbourKey(n));
+    if (h.finished) _depositEnd(idHex);
+  }
+
+  /// The run has ended: every holder acknowledged or its transmission
+  /// ended (or there was nobody to ask, or nothing was sent).
+  void _depositEnd(String idHex) {
+    final h = _deposits.remove(idHex);
+    if (h == null) return;
+    h
+      ..release()
+      ..complete();
+    if (h.sentAt != null) report?.call(depositOutcome(h, h.valueShort));
     final mute = [
       for (final n in h.asked)
         if (!h.acknowledged.containsKey(neighbourKey(n))) n
     ];
-    // §11.8 (E2): failed only after the SECOND sending. The result
-    // already stands (above); the repetition only decides about „mute".
-    if (isFinal && mute.isNotEmpty && _repeat(h, mute)) {
-      h.deadline = Timer(h.deadlineDuration, () => _depositComplete(idHex));
-      return;
-    }
-    _deposits.remove(idHex);
     if (mute.isNotEmpty) onMute?.call(mute);
   }
 
   /// Asks [withWhom] for everything under the values of [ask] (1–7; for
   /// an identity [ownAsk], for the manifest compartment [compartmentQuestion]),
   /// proves itself per value against the task of each holder (0x35 → 0x36) and
-  /// acknowledges every piece individually, signed with the day key
-  /// (prerequisite for deleting). Waits at most [deadline], but closes
-  /// immediately as soon as all have answered for all values.
+  /// acknowledges every piece, signed with the day key, to every holder
+  /// asked (prerequisite for deleting). A conversation per holder — see
+  /// `post_box_collect.dart`; the future completes once every holder is
+  /// done. [keep]: read only, no delete receipt (D-40). [onPiece]: where
+  /// every piece goes when it arrives.
   Future<List<Uint8List>> collect({
     required List<Question> ask,
     required List<Neighbour> withWhom,
-    Duration deadline = kCollectDeadline,
-  }) {
-    if (_collection != null) throw StateError('collect() is already running');
-    final packet = collectPacket(ask, SodiumFFI().randomBytes(kCollectLength));
-    final a = CollectionRun(List.of(withWhom), ask);
-    _collection = a;
-    // Arm the deadline BEFORE dispatch: a very fast answer
-    // could otherwise already pass as "complete" during the send loop,
-    // before the remaining packets have even been sent.
-    a.deadline = Timer(deadline, () => _collectComplete(a));
-    a
-      ..packet = packet
-      ..deadlineDuration = deadline;
-    for (final n in withWhom) {
-      send(packet, n);
-    }
-    _collectComplete(a); // covers withWhom.isEmpty immediately
-    return a.result.future;
-  }
+    bool keep = false,
+    PieceTaken? onPiece,
+  }) =>
+      _collector.collect(
+          ask: ask, withWhom: withWhom, keep: keep, onPiece: onPiece);
 
-  void _collectComplete(CollectionRun a) {
-    final deadlineRunsStill = a.deadline != null && a.deadline!.isActive;
-    if (!a.complete && deadlineRunsStill) return;
-    // Whoever's task (0x35) came has answered — the first answer of each
-    // holder to 0x32 (`post_box_holder.dart` beiAbholen).
-    final mute = [
-      for (final n in a.holder)
-        if (!a.random.containsKey(neighbourKey(n))) n
-    ];
-    // §11.8 (E2): whoever has not answered gets the request ONE
-    // second time; the collection waits at most one deadline more for it.
-    if (!a.complete && mute.isNotEmpty && _repeat(a, mute)) {
-      a.deadline = Timer(a.deadlineDuration, () => _collectComplete(a));
-      return;
-    }
-    if (identical(_collection, a)) _collection = null;
-    a.deadline?.cancel();
-    if (a.result.isCompleted) return;
-    a.result.complete(a.found);
-    if (mute.isNotEmpty) onMute?.call(mute);
-  }
+  /// See [PostBoxCollector.beforeRequest] (§11.6 variant A).
+  set beforeRequest(void Function(Neighbour holder)? f) =>
+      _collector.beforeRequest = f;
 
-  /// A packet of one of the five kinds of this file; everything else is ignored.
+  /// See [PostBoxCollector.arriving] (§8.2: no timer while answers arrive).
+  set arriving(bool Function(Neighbour holder)? f) => _collector.arriving = f;
+
+  /// Whether a question still stands at [holder], and of [ask] what it was
+  /// not asked yet — see [PostBoxCollector.busy], [PostBoxCollector.unasked].
+  bool collectBusy(Neighbour holder) => _collector.busy(holder);
+  List<Question> collectUnasked(Neighbour holder, List<Question> ask) =>
+      _collector.unasked(holder, ask);
+
+  /// A packet of one of the eight kinds of this file; everything else is ignored.
   void receive(Uint8List packet, InternetAddress from, int fromPort) {
     if (packet.isEmpty) return;
     final n = (from, fromPort);
+    _lengths.check(packet, n); // log only: a discard for length is named
     switch (packet[0]) {
       case kinds.kDeposit:
         _holder.onDeposit(packet, n);
@@ -270,29 +319,15 @@ class PostBoxDeposit {
       case kinds.kCollect:
         _holder.onCollect(packet, n);
       case kinds.kHereItIs:
-        _onHereItIs(packet, n);
+        _collector.onHereItIs(packet, n);
       case kinds.kNothingThere:
-        _onNothingThere(packet, n);
+        _collector.onNothingThere(packet, n);
+      case kinds.kRefused:
+        _collector.onNothingThere(packet, n, refused: true);
       case kinds.kCollectTask:
-        _onTask(packet, n);
+        _collector.onTask(packet, n);
       case kinds.kCollectProof:
         _holder.onProof(packet, n);
-    }
-  }
-
-  /// 0x35: the task of an asked holder — answered with one
-  /// proof for each asked value.
-  void _onTask(Uint8List packet, Neighbour from) {
-    if (packet.length != 1 + kRandomLength + kNodeIdentifierLength) return;
-    final a = _collection;
-    if (a == null) return;
-    final s = neighbourKey(from);
-    if (!a.asked.contains(s) || a.random.containsKey(s)) return;
-    final random = packet.sublist(1, 1 + kRandomLength);
-    a.random[s] = random;
-    onNode?.call(from.$1, from.$2, asHex(packet.sublist(1 + kRandomLength)));
-    for (final f in a.ask.values) {
-      send(proofPacket(f, random), from);
     }
   }
 
@@ -300,85 +335,22 @@ class PostBoxDeposit {
     if (packet.length < 1 + _kIdLength) return;
     final idHex = asHex(packet.sublist(1, 1 + _kIdLength));
     final h = _deposits[idHex];
+    const at = 1 + _kIdLength + kNodeIdentifierLength;
     if (h != null) {
-      if (packet.length != 1 + _kIdLength + kNodeIdentifierLength) return;
-      final node = asHex(packet.sublist(1 + _kIdLength));
-      h.acknowledged[neighbourKey(from)] = node;
+      if (packet.length != at + kRequestIdLength) return;
+      final node = asHex(packet.sublist(1 + _kIdLength, at));
+      final key = neighbourKey(from);
+      ackNoted(h, key); // log only (O2)
+      h.acknowledged[key] = node;
       onNode?.call(from.$1, from.$2, node);
-      if (h.node >= 2) {
-        _depositComplete(idHex, isFinal: false);
-      }
+      if (h.node >= 2) h.complete(); // placed at the second 0x31 (§8.2)
+      if (h.finished) _depositEnd(idHex);
       return;
     }
     // No running deposit with this id: then it is the
     // delete receipt of a collector for an own entry (0x31
     // carries both roles, distinguished only by the id).
     _holder.onDeleteReceipt(packet, from);
-  }
-
-  /// 0x33 `Sorte | Wert | id | Anzahl | Inhalt`.
-  void _onHereItIs(Uint8List packet, Neighbour from) {
-    if (packet.length < kHereItIsHeader) return;
-    var i = 1;
-    final value = packet.sublist(i, i += kValueLength);
-    final id = packet.sublist(i, i += _kIdLength);
-    final count = packet[i++];
-    final content = packet.sublist(i);
-    // Only what is TAKEN OVER is acknowledged (proposal holder, B3). Until
-    // S385 the receipt went out before this check: a sending that
-    // arrived after the end of the collection was acknowledged, deleted by the holder
-    // and discarded here — a loss without an attacker. Without
-    // receipt the holder keeps the piece, the next collection brings it.
-    final a = _collection;
-    if (a == null) return;
-    final key = neighbourKey(from);
-    if (!a.asked.contains(key)) return; // B6: not asked
-    // Only from a holder whose task is answered: otherwise there would be
-    // no random value to which the delete receipt can be bound.
-    final random = a.random[key];
-    if (random == null) return;
-    final question = a.ask[asHex(value)];
-    if (question == null) return; // not asked
-    final per = '$key|${asHex(value)}';
-    // "received" counts deliveries of THIS neighbour under this value, independent of the
-    // global duplicate check: all three neighbours of a deposit
-    // carry the same id (replica) — otherwise a known-id neighbour would count
-    // as "never answered", and [collect] would always wait the full deadline.
-    a.received[per] = (a.received[per] ?? 0) + 1;
-    a.expected[per] = count;
-    if (a.seen.add(asHex(id))) a.found.add(content);
-    // Now it lies in [found] (or already lay there): taken over. Under
-    // the manifest compartment no delete receipt — it is never deleted (§8.2).
-    final pair = question.pair;
-    if (pair != null && !isManifestValue(value)) {
-      send(deletePacket(pair, value, random, id), from);
-    }
-    _collectComplete(a);
-  }
-
-  /// 0x34 `Sorte | Wert`.
-  void _onNothingThere(Uint8List packet, Neighbour from) {
-    if (packet.length != 1 + kValueLength) return;
-    final a = _collection;
-    if (a == null) return;
-    final key = neighbourKey(from);
-    if (!a.asked.contains(key)) return; // B6: not asked
-    if (!a.random.containsKey(key)) return; // before the proof: not from the holder
-    final valueHex = asHex(packet.sublist(1));
-    if (!a.ask.containsKey(valueHex)) return;
-    a.expected['$key|$valueHex'] = 0;
-    _collectComplete(a);
-  }
-
-  /// The one repetition to [mute]; `false` if it already happened.
-  bool _repeat(Repeatable run, List<Neighbour> mute) {
-    final packet = run.packet;
-    if (run.repeated || packet == null) return false;
-    run.repeated = true;
-    for (final n in mute) {
-      send(packet, n);
-    }
-    return true;
   }
 
   Uint8List _randomId() => Uint8List.fromList(

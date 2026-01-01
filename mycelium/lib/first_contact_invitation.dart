@@ -1,14 +1,8 @@
 /// Bob's side of first contact: he has invited and is waiting.
 ///
-/// A separate file, because both sides together broke the line budget of 400
-/// (`mycelium/README.md`, proposal from S384-RESTLISTE 2.5/2.6). The
-/// cut is the direction: over there [Join] — who APPROACHES; here
-/// [Invitation] — who WAITS. Shared only the wire format ([PacketKind],
-/// [proofOfWorkHeaderLength], [withKind]), no state; `first_contact.dart`
-/// re-exports this file.
-///
-/// [ContactRequest] has stood in `first_contact_request.dart` since S391 and is
-/// re-exported from here.
+/// A separate file (line budget): over there [Join] — who APPROACHES; here
+/// [Invitation] — who WAITS; shared only the wire format, no state.
+/// `first_contact.dart` re-exports this file, this one [ContactRequest].
 library;
 
 export 'package:mycelium/first_contact_request.dart';
@@ -21,7 +15,8 @@ import 'package:mycelium/first_contact_pair.dart';
 import 'package:mycelium/first_contact_plea.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/proof_of_work.dart';
-import 'package:mycelium/pair.dart' show newPairRandom;
+import 'package:mycelium/pair.dart' show newPairRandom, dayValue, utcDay;
+import 'package:mycelium/bundle.dart' show invitationPostBox;
 import 'package:mycelium/envelope.dart';
 
 /// Bob's side: he has invited and is waiting.
@@ -32,26 +27,12 @@ class Invitation {
   final Send send;
   final Report? report;
 
-  /// Is asked before the contact comes about. That is the place
-  /// where the GUI asks the user.
-  ///
-  /// [origin] is the network address from which the request arrived.
-  /// It stands here because the inviting side otherwise learns NO route to the
-  /// peer: the card carries its own address, not that
-  /// of the joiner. Without it the inviter afterwards has a contact
-  /// that it cannot reach (S383, proven in the field).
-  ///
-  /// It is also the only address that is right at this place: with
-  /// a request the joiner dials the address from the card
-  /// itself, so the packet comes directly. A message arriving later
-  /// is NOT fit for this — it may have been passed on via a neighbour
-  /// or fetched from a post box, and
-  /// then the sender address belongs to the forwarder, not to the
-  /// contact.
-  ///
-  /// `null` means "later" (V4.2 §12.5): the request waits in the buffer
-  /// ([waiting]), [onBuffered] reports it, and the decision is made with
-  /// [decide]. `true`/`false` decide immediately (probes).
+  /// Is asked before the contact comes about — where the GUI asks the user.
+  /// [origin] is the network address from which the request arrived (for a
+  /// request collected from a post box: the holder's). `null` means "later"
+  /// (V4.2 §12.5): the request waits in the buffer ([waiting]), [onBuffered]
+  /// reports it, and the decision is made with [decide]. `true`/`false`
+  /// decide immediately (probes).
   final bool? Function(Address who, CardAddress origin) ask;
 
   /// The same question with the asker's introduction (name, greeting); if it is
@@ -65,13 +46,16 @@ class Invitation {
   Introduction? introduction;
 
   /// How an ACCEPTANCE (3) goes out (ES-6 (a), S388): via ladder including
-  /// post box; without specification directly to `origin`. A rejection always directly.
-  final void Function(Uint8List packet, CardAddress origin, Address who)?
+  /// post box; without specification directly to `origin`. `origin` is
+  /// `null` for a request collected from a post box: the address it "came
+  /// from" is the holder's and no evidence (proposal E).
+  final void Function(Uint8List packet, CardAddress? origin, Address who)?
       acceptanceSend;
 
   /// A request is ACCEPTED — immediately or after [decide], no matter.
-  /// The one place for the consequences (consume invitation, remember route).
-  final void Function(Address who, CardAddress origin)? onAccepted;
+  /// The one place for the consequences (consume invitation, remember route
+  /// — none for a collected request, `origin` is then `null`).
+  final void Function(Address who, CardAddress? origin)? onAccepted;
 
   /// A request is NEWLY waiting for the decision (§12.5) — the question to
   /// the user. A repeated request from the same peer replaces
@@ -103,20 +87,20 @@ class Invitation {
       ? const []
       : List.unmodifiable(_entry.requests.all.cast<ContactRequest>());
 
-  /// Leading zero bits that the proof must have before unsealing —
-  /// the same number with which Alice computed via [card].difficulty.
-  /// The default matches the default value of a card ([Card.difficultyDefault]),
-  /// so that existing callers without their own specification keep matching.
+  /// Leading zero bits the proof must have — the card's difficulty
+  /// (default: [Card.difficultyDefault]).
   final int difficulty;
 
-  final RetryStore _retryStore = RetryStore();
+  /// Random values of valid requests within the span a request may be old
+  /// (proposal E) — at most 1000, the oldest first out.
+  final RetryStore _retryStore =
+      RetryStore(span: ProofOfWork.windowsBack + 1);
   int _unsealAttempts = 0;
   Introduction? _requestIntroduction;
 
   bool _done = false;
 
-  /// Whom this invitation has accepted — only for being able to assign a receipt (4)
-  /// ([receiptFrom]).
+  /// Whom this invitation has accepted — to assign a receipt (4).
   final List<Address> _accepted = [];
 
   bool get done => _done;
@@ -134,9 +118,8 @@ class Invitation {
   /// Null as long as none was there or it sent nothing along.
   Introduction? get requestIntroduction => _requestIntroduction;
 
-  /// How often [Envelope.unseal] was actually attempted for a request
-  /// — the metric that shows that a junk request NEVER gets
-  /// that far (see `berichte/P13-nachweis-verdrahtet.md`).
+  /// How often unsealing was attempted for a request — a junk request NEVER
+  /// gets that far (`berichte/P13-nachweis-verdrahtet.md`).
   int get unsealAttempts => _unsealAttempts;
 
   Invitation({
@@ -157,9 +140,8 @@ class Invitation {
   }) {
     // E-1: loaded requests get THIS invitation — only then are
     // they answerable and the question to the user is there again (§12.5).
-    _entry.requests.bind(
-        (a) => ContactRequest.buffered(this, a.who, a.origin, a.introduction, a.at,
-            a.neighbour, a.answerCode));
+    _entry.requests.bind((a) => ContactRequest.buffered(this, a.who, a.origin,
+        a.introduction, a.at, a.neighbour, a.answerCode, a.dayKeys, a.collected));
   }
 
   /// Whether the request (2) in [packet] goes to THIS invitation: header long
@@ -171,20 +153,14 @@ class Invitation {
   /// Until S385 the first open invitation of any identity got every
   /// request and silently discarded the foreign one at step 3.
   bool fitsProofOfWork(Uint8List packet) {
-    if (packet.length < 1 + proofOfWorkHeaderLength) return false;
-    if (packet[0] != PacketKind.request.code) return false;
-    final (randomValue, counter) = _header(packet);
-    return ProofOfWork.codeFindRecent([code], randomValue, counter,
-            difficulty) !=
-        null;
+    if (packet.isEmpty || packet[0] != PacketKind.request.code) return false;
+    final h = requestHeaderRead(packet);
+    return h != null &&
+        ProofOfWork.windowAccepted(h.window, ProofOfWork.windowNow()) &&
+        ProofOfWork.codeFind([code], h.randomValue, h.counter, difficulty,
+                timeWindow: h.window) !=
+            null;
   }
-
-  /// Random value and counter from the visible proof header.
-  (Uint8List, int) _header(Uint8List p) => (
-        Uint8List.sublistView(p, 1, 1 + ProofOfWork.randomValueLength),
-        ByteData.sublistView(p)
-            .getUint64(1 + ProofOfWork.randomValueLength, Endian.little),
-      );
 
   /// Who receipts with [packet] — someone accepted by THIS invitation — or
   /// `null`. Whether the receipt (4) goes to THIS invitation at all is
@@ -202,13 +178,16 @@ class Invitation {
     }
   }
 
-  void receive(Uint8List packet, CardAddress from, {bool forwarded = false}) {
+  /// [collected]: the packet came out of a post box (proposal E) — [from] is
+  /// the holder's address and never a way back.
+  void receive(Uint8List packet, CardAddress from,
+      {bool forwarded = false, bool collected = false}) {
     if (packet.isEmpty) throw FirstContactError('empty packet');
     switch (PacketKind.fromCode(packet[0])) {
       case PacketKind.bundlePlea:
         _bundlePleaCame(packet, from, forwarded);
       case PacketKind.request:
-        _requestCame(packet, from);
+        _requestCame(packet, from, collected);
       case PacketKind.receipt:
         _done = true;
         // Proposal M: the edge "new contact" on this side.
@@ -236,37 +215,34 @@ class Invitation {
     if (forwarded && back) pairHook[me]?.underCodeSend(r.replyCode!, r.neighbour!, bundle);
   }
 
-  void _requestCame(Uint8List packet, CardAddress from) {
-    // Step 1: header long enough? Otherwise discard silently — no
-    // answer, no unsealing. On the same step as a
-    // failed code check.
-    if (packet.length < 1 + proofOfWorkHeaderLength) {
-      return;
-    }
-    final (randomValue, counter) = _header(packet);
-    final timeWindow = ProofOfWork.windowNow();
-
-    // Step 2: random value already seen? Otherwise discard silently.
-    if (!_retryStore.fresh(
-        Uint8List.fromList(randomValue), timeWindow)) {
-      return;
-    }
-
-    // Step 3: does the proof match one of the own codes? Otherwise
-    // discard silently. `codeFind` keeps that bounded to at most ten
-    // SHA-256 calls (here: one, there is only [code]).
-    if (ProofOfWork.codeFindRecent(
-            [code], randomValue, counter, difficulty) ==
+  void _requestCame(Uint8List packet, CardAddress from, bool collected) {
+    // Steps 1–3 discard SILENTLY — no answer, no unsealing, on the same step
+    // as a failed code check. 1: header long enough, its time window within
+    // the retention of the post box (proposal E). 2: the proof matches the
+    // code in THAT window — one hash, read not searched. 3: its random value
+    // not seen before; checked AFTER the proof, so that junk without work
+    // cannot flush the memory of the valid ones.
+    final h = requestHeaderRead(packet);
+    final now = ProofOfWork.windowNow();
+    if (h == null || !ProofOfWork.windowAccepted(h.window, now)) return;
+    if (ProofOfWork.codeFind([code], h.randomValue, h.counter, difficulty,
+            timeWindow: h.window) ==
         null) {
       return;
     }
+    if (!_retryStore.fresh(h.randomValue, now)) return;
 
-    // Step 4: only now unseal.
+    // Step 4: only now unseal — with the invitation's own keys (a request
+    // from a `cleona:2:` line, R-b) while its record holds them, else with
+    // the identity's (a request after the bundle (1)).
     _unsealAttempts++;
-    final (content, sender) = Envelope.unseal(
-      envelope: Uint8List.sublistView(packet, 1 + proofOfWorkHeaderLength),
-      recipient: me,
-    );
+    final sealed = Uint8List.sublistView(packet, 1 + proofOfWorkHeaderLength);
+    final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final kem = t > expiryUnixSeconds + inv.kGracePeriodSeconds ? null : _entry.kem;
+    final (content, sender) = (kem == null
+            ? null
+            : _tryUnseal(sealed, invitationPostBox(me, kem))) ??
+        Envelope.unseal(envelope: sealed, recipient: me);
     // Expiry PLUS grace period, revocation, consumption (`inv.Invitation.check`).
     // Revoked/expired stay silent immediately (§15.3), consumed only after
     // the recontact.
@@ -294,7 +270,7 @@ class Invitation {
     // Proposal M: before it answer code and neighbour of the requester.
     final RequestExtra z;
     try {
-      z = requestExtraRead(content, code.length);
+      z = requestExtraRead(content, code.length, dayOfWindow(h.window));
     } on IntroductionError catch (e) {
       report?.call('rejected: ${e.reason}');
       return;
@@ -303,12 +279,14 @@ class Invitation {
     _requestIntroduction = self;
     // Recontact (§15.5, ES-11): answer without a question, BEFORE the consumed
     // check. If [recontact] asks along, ITS answer applies (§15.9).
-    final already = _accepted.any((a) => a.sameIdentity(sender));
+    final a = ContactRequest.buffered(this, sender, from, self, DateTime.now(),
+        z.neighbour, z.answerCode, z.dayKeys, collected);
+    final already = _accepted.any((x) => x.sameIdentity(sender));
     if (recontact?.call(sender, from) ?? already) {
       report?.call('Re-contact — answer again, unconsumed (ES-11)');
       if (!already) _accepted.add(sender);
-      onAccepted?.call(sender, from);
-      _answer(sender, from, true, z.neighbour, z.answerCode);
+      onAccepted?.call(sender, collected ? null : from);
+      _answer(a, true);
       return;
     }
     if (state == inv.Rejection.consumed) {
@@ -319,11 +297,10 @@ class Invitation {
         ? ask(sender, from)
         : askWithIntroduction!(sender, from, self);
     if (yes == null) {
-      _buffer(ContactRequest.buffered(this, sender, from, self, DateTime.now(),
-          z.neighbour, z.answerCode));
+      _buffer(a);
       return;
     }
-    _decided(sender, from, yes, z.neighbour, z.answerCode);
+    _decided(a, yes);
   }
 
   /// The ONE decision about a waiting request (§12.5, §15.5).
@@ -337,9 +314,16 @@ class Invitation {
       return false;
     }
     _entry.requests.drop(a);
-    _decided(a.who, a.origin, accept, a.neighbour, a.answerCode,
-        count: !recontact);
+    _decided(a, accept, count: !recontact);
     return true;
+  }
+
+  (Uint8List, Address)? _tryUnseal(Uint8List sealed, PostBox box) {
+    try {
+      return Envelope.unseal(envelope: sealed, recipient: box);
+    } on EnvelopeBroken {
+      return null;
+    }
   }
 
   /// Takes [a] out of the buffer without an answer — the displacement from §15.4.
@@ -352,46 +336,64 @@ class Invitation {
     if (fresh) onBuffered?.call(a);
   }
 
-  void _decided(Address sender, CardAddress from, bool yes,
-      CardAddress? neighbour, Uint8List? answerCode, {bool count = true}) {
+  void _decided(ContactRequest a, bool yes, {bool count = true}) {
     if (yes) {
       if (count) _entry.acceptedThroughUser();
-      _accepted.add(sender);
-      onAccepted?.call(sender, from);
+      _accepted.add(a.who);
+      onAccepted?.call(a.who, a.collected ? null : a.origin);
     }
-    _answer(sender, from, yes, neighbour, answerCode);
+    _answer(a, yes);
   }
 
-  void _answer(Address sender, CardAddress from, bool yes,
-      CardAddress? neighbour, Uint8List? answerCode) {
-    if (!yes) {
-      final no = Envelope.seal(
-        plaintext: Uint8List.fromList([0]),
-        recipient: sender,
-        sender: me,
-      );
-      report?.call('declined by the user');
-      send(withKind(PacketKind.answer, no), from);
-      return;
-    }
-    // On acceptance also the own introduction — then each
-    // side holds name and greeting of the other, and nothing has to be asked
-    // afterwards. NOT on a rejection: whoever declines gives nothing away.
-    // Proposal M: s_AB — on recontact the remembered one, otherwise fresh.
+  /// The answer (3). A request collected from a post box is no evidence of
+  /// an address (proposal E): nothing goes to [ContactRequest.origin] — the
+  /// answer takes step 3 under the reply code through the neighbour the
+  /// request names, and step 4 under the requester's day value.
+  void _answer(ContactRequest a, bool yes) {
+    final sender = a.who, from = a.collected ? null : a.origin;
     final h = pairHook[me];
-    final s = h?.knownRandom(sender) ?? newPairRandom();
-    h?.onPair(sender, s, neighbour);
-    final yes2 = Envelope.seal(
-      plaintext: acceptanceContentBuild(s, introduction),
-      recipient: sender,
-      sender: me,
-    );
-    report?.call('accepted — answer sent');
-    final acceptance = withKind(PacketKind.answer, yes2);
-    final ladder = acceptanceSend;
-    ladder == null ? send(acceptance, from) : ladder(acceptance, from, sender);
-    if (neighbour != null && answerCode != null) {
-      h?.underCodeSend(answerCode, neighbour, acceptance);
+    final Uint8List answer;
+    if (!yes) {
+      answer = withKind(PacketKind.answer,
+          Envelope.seal(plaintext: Uint8List.fromList([0]), recipient: sender, sender: me));
+      report?.call('declined by the user');
+      if (from != null) {
+        send(answer, from);
+        return;
+      }
+      // No contact, so no ladder: step 4 directly under its day value.
+      final day = a.dayKeys[utcDay(DateTime.now())];
+      if (day != null) {
+        h?.boxSend?.call(answer, dayValue(day),
+            [if (a.neighbour != null) a.neighbour!]);
+      }
+    } else {
+      // On acceptance also the own introduction (NOT on a rejection: whoever
+      // declines gives nothing away); s_AB — on recontact the remembered one
+      // (proposal M); the own day keys from the request's day on and the own
+      // fixed neighbours (proposal E, §9.2).
+      final s = h?.knownRandom(sender) ?? newPairRandom();
+      h?.onPair(sender, s, a.neighbour, a.dayKeys);
+      // A request without day keys (none known: from memory before
+      // proposal E) gets them from today on.
+      final fromDay = a.dayKeys.keys.fold<int?>(
+              null, (m, d) => m == null || d < m ? d : m) ??
+          utcDay(DateTime.now());
+      answer = withKind(
+          PacketKind.answer,
+          Envelope.seal(
+              plaintext: acceptanceContentBuild(s, dayKeysBuild(me, fromDay),
+                  h?.namedNeighbours?.call() ?? const [], introduction),
+              recipient: sender,
+              sender: me));
+      report?.call('accepted — answer sent');
+      final ladder = acceptanceSend;
+      ladder == null
+          ? (from == null ? null : send(answer, from))
+          : ladder(answer, from, sender);
+    }
+    if (a.neighbour != null && a.answerCode != null) {
+      h?.underCodeSend(a.answerCode!, a.neighbour!, answer);
     }
   }
 }

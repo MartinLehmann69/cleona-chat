@@ -59,7 +59,7 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:mycelium/own_address.dart' show linkKindFrom;
+import 'package:mycelium/own_address.dart' show announced, linkKindFrom;
 import 'package:mycelium/outside_entry.dart' show kEntryAddressesAtMost;
 import 'package:mycelium/card.dart' show CardAddress, CardAddressType;
 
@@ -152,7 +152,7 @@ List<CardAddress> outsideAddresses({
   // „cellular as the last choice"). A phone with WLAN and cellular possibly has
   // a global IPv6 under both; the entry gets the
   // WLAN one first, because the route there costs nothing.
-  final ordered = List<NetworkInterface>.of(interfaces)
+  final ordered = interfaces.where(announced).toList()
     ..sort((x, y) => linkKindFrom(y.name)
         .priority
         .compareTo(linkKindFrom(x.name).priority));

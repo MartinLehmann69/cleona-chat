@@ -13,6 +13,11 @@
 //     ([CallVideoOffReason.bandwidthInsufficient]) — a fact about the
 //     network, not a choice, and rendering it identically to the first case
 //     would tell the user the peer chose silence when they did not,
+//   - the peer's device has no video path at all
+//     ([CallVideoOffReason.notSupported], e.g. the desktop daemon), or its
+//     video could not be started in this call
+//     ([CallVideoOffReason.startFailed]) — known reasons, named as such
+//     (S399, owner C8),
 //   - or this build does not know why ([CallVideoOffReason.unspecified]) —
 //     kept distinct from "user disabled" on purpose: claiming intent for a
 //     reason we could not read would state a fact we do not have.
@@ -57,6 +62,11 @@ class PeerVideoOffOverlay extends StatelessWidget {
         // Distinct glyph from videocam_off (E2) — a connectivity symbol,
         // not a camera symbol, because the camera is not the problem.
         return Icons.signal_cellular_connected_no_internet_4_bar;
+      case CallVideoOffReason.notSupported:
+        // A property of the peer's device — no camera path at all.
+        return Icons.no_photography_outlined;
+      case CallVideoOffReason.startFailed:
+        return Icons.error_outline;
       case CallVideoOffReason.unspecified:
         return Icons.videocam_off_outlined;
     }
@@ -67,6 +77,8 @@ class PeerVideoOffOverlay extends StatelessWidget {
       case CallVideoOffReason.bandwidthInsufficient:
         return bandwidthColor;
       case CallVideoOffReason.userDisabled:
+      case CallVideoOffReason.notSupported:
+      case CallVideoOffReason.startFailed:
       case CallVideoOffReason.unspecified:
         return neutralColor;
     }
@@ -81,6 +93,10 @@ class PeerVideoOffOverlay extends StatelessWidget {
         return 'call_video_off_by_user';
       case CallVideoOffReason.bandwidthInsufficient:
         return 'call_video_off_bandwidth';
+      case CallVideoOffReason.notSupported:
+        return 'call_video_off_not_supported';
+      case CallVideoOffReason.startFailed:
+        return 'call_video_off_start_failed';
       case CallVideoOffReason.unspecified:
         return 'call_video_off_unknown';
     }

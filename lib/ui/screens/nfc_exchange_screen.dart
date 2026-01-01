@@ -10,6 +10,7 @@ import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/invitation_messages.dart';
 import 'package:cleona/ui/components/invitation_redeem.dart';
+import 'package:cleona/ui/components/invitation_way_in.dart';
 
 /// NFC contact exchange (V4.2 §15.5, §15.10 "NFC exchange").
 ///
@@ -20,6 +21,10 @@ import 'package:cleona/ui/components/invitation_redeem.dart';
 ///      — without a text line. An NFC session begins only here; both devices
 ///      must have opened this screen (owner decision 15.09.2026:
 ///      automatic ONLY if both are actively in the contact function).
+///      §12.4: the session starts only once the card carries a way in from
+///      the open network — a waiting indicator for at most 30 s, then the
+///      message with "show anyway", and the card goes out labelled "same
+///      W/LAN only".
 ///   2. The touch exchanges the packed cards of both sides.
 ///   3. The received card is read like a QR code; "Accept" redeems
 ///      it. The other side accepts the request without a second question, because
@@ -31,6 +36,12 @@ import 'package:cleona/ui/components/invitation_redeem.dart';
 ///
 /// If the screen is left before any touch, it revokes its card
 /// again — otherwise after ten visits the cap would be reached (§15.3).
+///
+/// §15.3 "lives 60 s" (S406-QR2 2A): when the SERVICE closes the card this
+/// screen still offers (no touch yet), the screen ends the NFC session and
+/// says so, with the existing "Retry" that issues a new card. The trigger is
+/// the service's `onStateChanged`; the reason comes from
+/// [StandingInvitationsResult.closedFaceToFace]. No clock of its own.
 class NfcExchangeScreen extends StatefulWidget {
   final ICleonaService service;
   const NfcExchangeScreen({super.key, required this.service});
@@ -52,10 +63,68 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   String? _ownCard;
   bool _touched = false;
 
+  /// §12.4: the card is waiting for its way in from the open network.
+  bool _waitingWayIn = false;
+
+  /// §12.4: the deadline passed without a way in — offered "anyway".
+  InvitationCard? _noWayIn;
+
+  /// §12.4: the session runs with a card without a way in.
+  bool _sameNetworkOnly = false;
+
+  /// The own card went out in an NFC session (shown, §15.3).
+  bool _shownOwn = false;
+
+  /// §15.3 (S406-QR2 2A): the service closed the own card — the notice key,
+  /// see `invitation_card_view.dart`. `null` = no notice.
+  String? _closedKey;
+
+  /// The holder of the service's single `onStateChanged` slot before this
+  /// screen opened; chained while it is open, given back in [dispose].
+  void Function()? _previousOnStateChanged;
+
   @override
   void initState() {
     super.initState();
+    _previousOnStateChanged = widget.service.onStateChanged;
+    widget.service.onStateChanged = _onServiceState;
     _initSession();
+  }
+
+  /// Whether the own card is offered right now: in a session nobody touched
+  /// yet, or behind "show anyway".
+  bool get _offering =>
+      _ownCard != null &&
+      !_touched &&
+      (_noWayIn != null ||
+          (_shownOwn &&
+              (_state == NfcSessionState.idle ||
+                  _state == NfcSessionState.waitingForTap)));
+
+  void _onServiceState() {
+    _previousOnStateChanged?.call();
+    if (mounted && _offering) unawaited(_checkClosed());
+  }
+
+  /// Asks the service whether it closed the own card (§15.3); if so, ends
+  /// the session and shows the notice. Returns whether it did.
+  Future<bool> _checkClosed() async {
+    final id = _ownCard;
+    if (id == null) return false;
+    final r = await widget.service.standingInvitations();
+    if (!mounted || _ownCard != id || !r.closedFaceToFace.contains(id)) {
+      return false;
+    }
+    _session?.cancelSession();
+    setState(() {
+      _closedKey = _shownOwn
+          ? 'card_face_to_face_closed'
+          : 'card_face_to_face_closed_restart';
+      _ownCard = null; // closed: nothing left to revoke
+      _noWayIn = null;
+      _starting = false;
+    });
+    return true;
   }
 
   Future<void> _initSession() async {
@@ -73,7 +142,52 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
       return;
     }
     _ownCard = card.id;
+    if (!card.wayIn) {
+      setState(() => _waitingWayIn = true);
+      final shown = await invitationAwaitWayIn(widget.service, card);
+      if (!mounted || _ownCard != card.id) return;
+      setState(() => _waitingWayIn = false);
+      if (!shown.wayIn) {
+        setState(() {
+          _noWayIn = shown;
+          _starting = false;
+        });
+        return;
+      }
+      await _startSession(shown);
+      return;
+    }
+    await _startSession(card);
+  }
 
+  /// "Show anyway – only in the same W/LAN" (§12.4). Reported to the service
+  /// first: the card's 60 s begin with this showing (§15.3), and a card that
+  /// no longer stands does not go out.
+  Future<void> _showAnyway() async {
+    final card = _noWayIn;
+    if (card == null) return;
+    if (!await widget.service.reportInvitationShown(card.id)) {
+      if (!mounted || await _checkClosed() || !mounted) return;
+      setState(() {
+        _noWayIn = null;
+        _state = NfcSessionState.failed;
+        _error = invitationIssueRefusalText(
+            AppLocale.read(context), InvitationIssueRefusal.failed);
+      });
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _noWayIn = null;
+      _sameNetworkOnly = true;
+      _starting = true;
+    });
+    unawaited(_startSession(card));
+  }
+
+  Future<void> _startSession(InvitationCard card) async {
+    final locale = AppLocale.read(context);
+    _shownOwn = true;
     _session = NfcSessionManager(
       onSessionUpdate: (state, payload, error) {
         if (!mounted) return;
@@ -107,6 +221,7 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
 
   @override
   void dispose() {
+    widget.service.onStateChanged = _previousOnStateChanged;
     _session?.cancelSession();
     final id = _ownCard;
     if (id != null && !_touched) {
@@ -147,6 +262,9 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
 
   Widget _buildContent(
       BuildContext context, ColorScheme colorScheme, String myName) {
+    if (_closedKey != null) return _buildClosedState(colorScheme);
+    if (_waitingWayIn) return const InvitationWayInWaiting();
+    if (_noWayIn != null) return InvitationNoWayIn(onAnyway: _showAnyway);
     if (_starting) {
       return Column(
         mainAxisSize: MainAxisSize.min,
@@ -226,6 +344,10 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
             ],
           ),
         ),
+        if (_sameNetworkOnly) ...[
+          const SizedBox(height: 16),
+          const InvitationSameNetworkOnly(),
+        ],
         const SizedBox(height: 24),
         LinearProgressIndicator(
           backgroundColor: colorScheme.surfaceContainerHighest,
@@ -313,7 +435,8 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
     setState(() => _sending = true);
     final r = await widget.service.redeemInvitationCardBytes(Uint8List.fromList(bytes));
     if (!mounted) return;
-    final ok = r.outcome == InvitationRedeemOutcome.requestSent;
+    final ok = r.outcome == InvitationRedeemOutcome.requestSent ||
+        r.outcome == InvitationRedeemOutcome.requestResting;
     setState(() {
       _sending = false;
       _result = invitationRedeemText(locale, r);
@@ -368,25 +491,51 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
           ),
         ],
         const SizedBox(height: 24),
-        OutlinedButton(
-          onPressed: () {
-            final old = _ownCard;
-            if (old != null && !_touched) {
-              unawaited(widget.service.revokeInvitationCard(old));
-            }
-            setState(() {
-              _state = NfcSessionState.idle;
-              _error = null;
-              _reading = null;
-              _ownCard = null;
-              _touched = false;
-              _starting = true;
-            });
-            _initSession();
-          },
-          child: Text(locale.get('retry')),
-        ),
+        _retryButton(locale),
       ],
     );
   }
+
+  /// §15.3 (S406-QR2 2A): the service closed the own card.
+  Widget _buildClosedState(ColorScheme colorScheme) {
+    final locale = AppLocale.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.timer_off_outlined, size: 64, color: colorScheme.error),
+        const SizedBox(height: 16),
+        Text(
+          locale.get(_closedKey!),
+          style: TextStyle(fontSize: 16, color: colorScheme.onSurface),
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 24),
+        _retryButton(locale),
+      ],
+    );
+  }
+
+  /// "Retry": revokes an unused own card and issues a new one.
+  Widget _retryButton(AppLocale locale) => OutlinedButton(
+        onPressed: () {
+          final old = _ownCard;
+          if (old != null && !_touched) {
+            unawaited(widget.service.revokeInvitationCard(old));
+          }
+          setState(() {
+            _state = NfcSessionState.idle;
+            _error = null;
+            _reading = null;
+            _ownCard = null;
+            _touched = false;
+            _starting = true;
+            _noWayIn = null;
+            _sameNetworkOnly = false;
+            _shownOwn = false;
+            _closedKey = null;
+          });
+          _initSession();
+        },
+        child: Text(locale.get('retry')),
+      );
 }

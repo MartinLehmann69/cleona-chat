@@ -22,26 +22,32 @@ def next_id():
     req_counter += 1
     return req_counter
 
+# S403 (v4_2 §22.1): the connection to the daemon is protected — a
+# plaintext JSON line on the socket is not served. Every request goes
+# through `cleona-ipc` (deployed beside the daemon), which runs the exchange
+# with the secret of the device database. `sock` stays in the signature
+# for the callers and is not used.
+IPC_TOOL = os.environ.get('CLEONA_IPC',
+                          os.path.expanduser('~/cleona-app/bin/cleona-ipc'))
+
 def ipc_call(sock, command, params=None, identity_id=None):
+    import subprocess
     rid = next_id()
     req = {"type": "request", "id": rid, "command": command}
     if params:
         req["params"] = params
     if identity_id:
         req["identityId"] = identity_id
-    sock.sendall((json.dumps(req) + "\n").encode())
-    buf = b""
-    while True:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise ConnectionError("Socket closed")
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
+    out = subprocess.run([IPC_TOOL, SOCKET_PATH, "-"], input=json.dumps(req),
+                         capture_output=True, text=True, timeout=60)
+    for line in out.stdout.splitlines():
+        try:
             msg = json.loads(line)
-            if msg.get("type") == "response" and msg.get("id") == rid:
-                return msg
-    return None
+        except ValueError:
+            continue
+        if msg.get("type") == "response" and msg.get("id") == rid:
+            return msg
+    raise ConnectionError("cleona-ipc gave no answer")
 
 def _b64url(v):
     """Standard base64 -> base64url without padding (like `toUri()`)."""
@@ -108,9 +114,8 @@ def main():
     parser.add_argument("--bootstrap-addr", default="")
     args = parser.parse_args()
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(10)
-    sock.connect(SOCKET_PATH)
+    # One request per tool call (see `ipc_call`); no socket held here.
+    sock = None
 
     resp = ipc_call(sock, "get_state")
     if not resp.get("success"):
@@ -138,7 +143,6 @@ def main():
         key = name.lower().replace(" ", "")
         print(f"{key}={uri}")
 
-    sock.close()
 
 if __name__ == "__main__":
     main()

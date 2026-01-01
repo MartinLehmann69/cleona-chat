@@ -34,6 +34,9 @@ import 'package:mycelium/host_outside.dart';
 import 'package:mycelium/host_memory.dart';
 import 'package:mycelium/own_entries.dart';
 import 'package:mycelium/node_invitation.dart' show namedByStandingCard;
+import 'package:mycelium/invitation_way_in.dart' show wayInEdge;
+import 'package:mycelium/trace.dart' show traceOn;
+import 'package:mycelium/trace_first_contact.dart' show seatsOf;
 
 /// An entry whose confirmation lies further back is stale
 /// (§11.8) and is not adopted from foreign lists.
@@ -44,9 +47,9 @@ class HostNetwork {
   final OutsideSource _outside;
   final HostMemory _memory;
 
-  /// The host's edge "new neighbour" (save, re-dispatch,
-  /// collect, notify the app).
-  final void Function() _newNeighbour;
+  /// The host's edge "new neighbour" (save, re-dispatch, ask the new
+  /// ones, notify the app).
+  final void Function(List<(InternetAddress, int)> fresh) _newNeighbour;
 
   /// Sets the current pass of source 4 (`Host.outsideRun`).
   final void Function(Future<void> run) _run;
@@ -113,7 +116,10 @@ class HostNetwork {
       n.contactSeatsCheck();
       fixedCheck();
     };
-    openCheck.onOpen = (_) => keepAlive.edgeNow();
+    openCheck.onOpen = (_) {
+      keepAlive.edgeNow();
+      wayInEdge(_k); // §12.4: an open family can be an invitation's way in
+    };
     _k.coverStream.onKeepAlive = echo.keepAlive;
     echo.onMoved = keepAlive.moved;
     keepAlive.start();
@@ -138,7 +144,8 @@ class HostNetwork {
 
   /// What the cover stream takes along to [target] (§5.5): the own
   /// addresses (S394 V2, `own_entries.dart`) and the confirmed neighbours,
-  /// one entry per node and at most 32, without the target itself.
+  /// one entry per node and at most 32, without the target itself and
+  /// without loopback entries to a target that is not loopback ([entryFor]).
   AddressList _entries((InternetAddress, int) target) {
     final now = DateTime.now();
     return AddressList(
@@ -147,12 +154,15 @@ class HostNetwork {
           for (final x in _k.neighbourhood.confirmed(now))
             if (!x.has(target.$1, target.$2))
               AddressEntry.fromNeighbour(x, now, target.$1),
-        ].take(kAddressEntriesAtMost).toList());
+        ].where((e) => entryFor(e.address, target.$1))
+            .take(kAddressEntriesAtMost)
+            .toList());
   }
 
   /// A received address list (cover §5.5, board §11.8a) from [from]:[port]:
   /// its own addresses are joined into ONE neighbour if the packet came
   /// from one of them (§11.8, V4) — otherwise they are hints like the rest.
+  /// A loopback entry is taken only from a sender on loopback ([entryFor]).
   void addressList(AddressList l, InternetAddress from, int port) {
     final own = [for (final e in l.own) e.address];
     final r = _k.neighbourhood.ownAddresses(from, port, own);
@@ -161,21 +171,34 @@ class HostNetwork {
           ' — ${r.bound ? 'one neighbour${r.fresh ? ' (new)' : ''}' : 'not bound '
               '(not sent from one of them) — taken as hints'}');
     }
-    candidates([if (!r.bound) ...l.own, ...l.neighbours], fresh: r.fresh);
+    candidates([
+      for (final e in [if (!r.bound) ...l.own, ...l.neighbours])
+        if (entryFor(e.address, from)) e,
+    ], fresh: [if (r.fresh) (from, port)]);
   }
 
   /// Learned addresses (cover stream, board) — HINTS, not neighbours.
   /// Admission happens only as long as the list lies below the optimum: a
   /// hint never displaces an entry. Stale entries stay outside.
-  /// One edge, no matter how many are new.
-  void candidates(List<AddressEntry> entries, {bool fresh = false}) {
+  /// One edge, no matter how many are new; [fresh]: new ones the caller
+  /// already entered.
+  void candidates(List<AddressEntry> entries,
+      {List<(InternetAddress, int)> fresh = const []}) {
     final n = _k.neighbourhood;
+    final added = [...fresh];
+    final now = DateTime.now();
     for (final e in entries) {
       if (n.count >= Neighbourhood.atMost) break;
       if (e.ageMinutes >= _staleMinutes) continue;
-      if (neighbourAdd(_k, e.address.address, e.address.port)) fresh = true;
+      final a = e.address;
+      // S406: the entry's age says when its sender last confirmed it; a
+      // removed address returns only with a confirmation after the removal.
+      if (neighbourAdd(_k, a.address, a.port,
+          confirmedAt: now.subtract(Duration(minutes: e.ageMinutes)))) {
+        added.add((InternetAddress.fromRawAddress(a.address), a.port));
+      }
     }
-    if (fresh) _newNeighbour();
+    if (added.isNotEmpty) _newNeighbour(added);
   }
 
   /// Edge: a removal let the list fall below 32 (§11.8). What
@@ -188,9 +211,10 @@ class HostNetwork {
   }
 
   /// Every stale entry is tried ONCE at an edge (§11.8) —
-  /// with the address question whose answer confirms it. It has failed
-  /// only after two sends, and is removed only with counter-evidence (E2,
-  /// `Readiness.mute`).
+  /// with the address question whose answer confirms it. One request, never
+  /// repeated; a failure is one use without an answer, and the entry goes at
+  /// the second (§11.8 "two uses failed", `Readiness.mute`, S399 step 4),
+  /// only with counter-evidence (E2).
   void staleTry() {
     for (final x in _k.neighbourhood.stale(DateTime.now())) {
       unawaited(_try(x));
@@ -198,9 +222,7 @@ class HostNetwork {
   }
 
   Future<void> _try(Neighbour x) async {
-    for (var i = 0; i < 2; i++) {
-      if (await _k.outsideRoute.whatIsMyAddress(x.address, x.port) != null) return;
-    }
+    if (await _k.outsideRoute.whatIsMyAddress(x.address, x.port) != null) return;
     _k.readiness.mute([(x.address, x.port)]);
   }
 
@@ -221,12 +243,16 @@ class HostNetwork {
     final before = _fixedList;
     _fixed = now;
     _fixedList = list;
+    if (traceOn) {
+      _report?.call('TRACE seat fixed neighbours changed: '
+          '${seatsOf(_k.neighbourhood, _k.readiness.responding).join(" | ")}');
+    }
     save();
     // S394 V6: a new fixed NODE needs the codes before a contact sends there
-    // (§8.1) — the registration goes out NOW, not with the next cover packet.
+    // (§8.1) — the registration goes out NOW as `0x24`.
     // Only a neighbour that lacks them gets pieces (`code_registrants.dart`).
     if (list.any((n) => !before.any((b) => b.id == n.id))) {
-      _k.codeRoute.edge(immediately: true);
+      _k.codeRoute.edge();
     }
     // §8.1: whether IPv4 may rest depends on the fixed neighbour.
     keepAlive.edgeNow();

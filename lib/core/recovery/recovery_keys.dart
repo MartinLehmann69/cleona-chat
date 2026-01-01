@@ -262,6 +262,57 @@ Uint8List recoveryBundleTag(Uint8List recoveryKeyI, int epoch, int block) {
       _chain(['recovery', epoch, block]));
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// THE BUNDLE IN THE POST BOX (§13.3.1 for 4.2; B-1, owner approval S398, E3-a)
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   box_key(i, d) = Ed25519 pair from HKDF(recovery_key(i), "recovery-box" ‖ d)
+//   value_R(i, d) = first 16 B of SHA-256(box_key(i, d).pk)
+//
+// `d` is the UTC day of the deposit (days since 1970-01-01, 8 B big-endian
+// like every number here). The value has the form of every post-box value
+// (§8.2, `mycelium/lib/pair.dart` `dayValue`), so a holder cannot tell a
+// bundle from any other post; it hands it out only against the proof with
+// `box_key.sk` — which only the seed yields. A new value per day: two
+// deposits of the same identity on different days are not linkable at a
+// holder (E3-a against E3-b).
+//
+// `σ_R`/`tag_R` above belong to the V4.1 bundle line (`tagline/`), which
+// falls with it; they stay until then and are not used by the post box.
+
+/// The Ed25519 pair of the bundle deposit on UTC day [day] (§13.3.1, E3-a).
+({Uint8List pk, Uint8List sk}) recoveryBoxKey(Uint8List recoveryKeyI, int day) {
+  final seed = _hkdf(_checkKey(recoveryKeyI), _chain(['recovery-box', day]));
+  final p = SodiumFFI().generateEd25519KeyPairFromSeed(seed);
+  return (pk: p.publicKey, sk: p.secretKey);
+}
+
+/// `value_R(i, d)` — the 16-B post-box value of [recoveryBoxKey]'s pk.
+Uint8List recoveryBoxValue(Uint8List boxPk) =>
+    Uint8List.fromList(SodiumFFI().sha256(boxPk).sublist(0, 16));
+
+// ─────────────────────────────────────────────────────────────────────────
+// THE ENROLMENT OF A FURTHER DEVICE (§14.6.1, D-39)
+// ─────────────────────────────────────────────────────────────────────────
+//
+//   enrol_box(i, d) = Ed25519 pair from HKDF(recovery_key(i), "enrol-box" ‖ d)
+//   value_E(i, d)   = first 16 B of SHA-256(enrol_box(i, d).pk)
+//   enrol key       = HKDF(recovery_key(i), "enrol-enc")
+//
+// Formed like the bundle's box key above; only the seed yields them. To a
+// holder `value_E` is an ordinary day value (§8.2).
+
+/// The Ed25519 pair of an enrolment request on UTC day [day] (§14.6.1).
+({Uint8List pk, Uint8List sk}) enrolBoxKey(Uint8List recoveryKeyI, int day) {
+  final seed = _hkdf(_checkKey(recoveryKeyI), _chain(['enrol-box', day]));
+  final p = SodiumFFI().generateEd25519KeyPairFromSeed(seed);
+  return (pk: p.publicKey, sk: p.secretKey);
+}
+
+/// The symmetric key that seals an enrolment request (§14.6.1).
+Uint8List enrolKey(Uint8List recoveryKeyI) =>
+    _hkdf(_checkKey(recoveryKeyI), _chain(['enrol-enc']));
+
 /// `bundle_key = HKDF(seed, "recovery-enc")` (§13.3.3).
 ///
 /// ── THE MISSING FORWARD SECRECY STANDS IN THE DOCUMENT, NOT HERE ───

@@ -448,7 +448,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ── iCal Import ─────────────────────────────────────────────────────
 
   Future<void> _importIcs(BuildContext context, ICleonaService service) async {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['ics'],
@@ -498,7 +498,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ── iCal Export ─────────────────────────────────────────────────────
 
   Future<void> _exportIcs(BuildContext context, ICleonaService service) async {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     final events = service.calendarManager.events.values
         .where((e) => !e.cancelled)
         .toList();

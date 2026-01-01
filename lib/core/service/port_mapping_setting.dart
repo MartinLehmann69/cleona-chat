@@ -1,47 +1,51 @@
 /// The setting "port mapping" (task D, point 5, W9).
 ///
 /// Default ON: as long as nobody explicitly switches it off, the node asks
-/// its router (V4.2 §7.3). There is NO UI for it here —
-/// that comes later, then with i18n in all 34 languages (work rule 7).
-/// This file only PROVIDES the setting: it reads it for
-/// `portMappingToEdge` (`mycelium_seam.dart`), and [portMappingConfigure]
-/// stands ready for the later UI — today without a caller in
-/// `lib/`.
+/// its router (V4.2 §7.3). This file only PROVIDES the setting: it reads it
+/// for `portMappingToEdge` (`mycelium_seam.dart`), and [portMappingConfigure]
+/// writes it for the settings tile (`portMappingSet`, §12.7).
 ///
 /// ── WHY DEVICE-WIDE, NOT PER IDENTITY ───────────────────────────────
 ///
 /// The router it asks belongs to the DEVICE (one host, one port, V4.2
-/// §4.5.1) — like `HostMemory` on the mycelium side. It is therefore
-/// stored under [baseDir], with the same key as the host
-/// (`hostKey`, `mycelium_seam.dart`): form 2 of persistence (§4.5.3),
-/// `FileEncryption`, atomic.
+/// §4.5.1) — like `HostMemory` on the mycelium side.
+///
+/// ── WHERE IT LIES (S403) ────────────────────────────────────────────
+///
+/// In the device database (`device.db`, v4_2 §4.5.3 form 2, §21.4.1): one
+/// row of the area `DeviceStore.areaSettings`. Until S403 it was the file
+/// `<baseDir>/port_mapping.enc`; nothing reads that file any more, and the
+/// start removes it (`superseded_device_files.dart`). The key the callers
+/// hand in is unchanged — `hostKey(baseDir, masterSeed)`, which IS the key
+/// of the device database.
 library;
 
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/storage/device_store.dart';
 
-const String _fileName = 'port_mapping';
-const String _field = 'aktiv';
+/// The key of the row in `DeviceStore.areaSettings`.
+const String kPortMappingSettingKey = 'port_mapping';
+const String _field = 'active';
 
-/// Reads the setting from `<baseDir>/portabbildung.enc`. If the
-/// file is missing or unreadable (no error case a router
-/// cares about): the default applies — ON. [key] is the same as
-/// `hostKey(baseDir, masterSeed)` — no second key.
+/// Reads the setting. No device database, no row, or a database that does
+/// not open (no error case a router cares about): the default applies —
+/// ON. [key] is the same as `hostKey(baseDir, masterSeed)` — no second key.
+/// The reader does not create the database.
 bool portMappingConfigured(String baseDir, Uint8List key) {
   try {
-    final enc = FileEncryption(baseDir: baseDir, key: key);
-    final json = enc.readJsonFile('$baseDir/$_fileName');
-    if (json == null) return true;
-    return json[_field] as bool? ?? true;
+    final row = DeviceStore.atIfPresent(baseDir, key)
+        ?.entry(DeviceStore.areaSettings, kPortMappingSettingKey);
+    if (row == null) return true;
+    return row[_field] as bool? ?? true;
   } on Object {
     return true;
   }
 }
 
-/// Writes the setting. Prepared for the later UI;
-/// today without a caller in `lib/`.
+/// Writes the setting. Only a user action calls it — since S398-W4 through
+/// `portMappingSet` (`mycelium_seam.dart`), from the settings tile (§12.7).
 void portMappingConfigure(String baseDir, Uint8List key, bool to) {
-  FileEncryption(baseDir: baseDir, key: key)
-      .writeJsonFile('$baseDir/$_fileName', {_field: to});
+  DeviceStore.at(baseDir, key).putEntry(
+      DeviceStore.areaSettings, kPortMappingSettingKey, {_field: to});
 }

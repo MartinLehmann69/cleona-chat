@@ -9,6 +9,7 @@ import 'package:cleona/ui/components/contact_issue_dialog.dart';
 import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/components/contact_tile.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
+import 'package:cleona/ui/components/system_notice_text.dart';
 import 'package:cleona/ui/date_format.dart' as df;
 import 'package:cleona/ui/screens/chat_screen.dart';
 
@@ -61,11 +62,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
   /// than shared, since that method is private to `_ConversationListView`,
   /// which still serves the other tabs (Recent/Favorites/Groups).
   static String _previewText(AppLocale locale, UiMessage msg) {
-    if (msg.isDeleted) return locale.get('message_deleted');
     if (msg.isMedia) {
       return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}📎 ${msg.filename ?? locale.get('file_fallback')}';
     }
-    if (msg.senderNodeIdHex.isEmpty) return msg.text; // System message
+    if (msg.senderNodeIdHex.isEmpty) {
+      return systemNoticeText(locale, msg.text); // System message
+    }
     return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
   }
 
@@ -110,7 +112,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
       final lastMsg =
           (conv != null && conv.messages.isNotEmpty) ? conv.messages.last : null;
       if (lastMsg != null &&
-          !lastMsg.isDeleted &&
           lastMsg.text.toLowerCase().contains(query)) {
         return true;
       }
@@ -171,9 +172,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     // §22.7.3: the contact list is a display surface
                     // of the partner count — and from §25.4 on that is
                     // split by direction (out/in).
-                    'Port: ${svc.port} | '
-                    '↗ ${svc.syncPartnersOutbound} '
-                    '↙ ${svc.syncPartnersInbound}',
+                    // S405 A-2: without a direction-split number
+                    // (mycelium) only the port — a 0 would be a claim.
+                    'Port: ${svc.port}'
+                    '${svc.syncPartnersOutbound == null || svc.syncPartnersInbound == null ? '' : ' | ↗ ${svc.syncPartnersOutbound} ↙ ${svc.syncPartnersInbound}'}',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -233,7 +235,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
             ),
             ...pendingOutgoing.map((contact) => ContactTile(
                   name: shownContactName(contact.displayName, locale),
-                  status: locale.get('contact_issue_waiting_status'),
+                  // S405 F-1: after 7 days the invitation's post box no
+                  // longer holds the request — the user sends anew.
+                  status: locale.get(contact.requestedAt != null &&
+                          DateTime.now().difference(contact.requestedAt!) >
+                              const Duration(days: 7)
+                      ? 'contact_request_not_collected'
+                      : 'contact_issue_waiting_status'),
                   verificationLevel: _mapVerification(contact.verificationLevel),
                   avatarOverride: ProfileAvatar(
                     base64: contact.profilePictureBase64,
@@ -521,7 +529,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   /// other contact properties in this menu.
   void _showNeverFixedNeighbourDialog(
       BuildContext context, ICleonaService svc, ContactInfo contact) {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     var never = contact.neverFixedNeighbour;
     showDialog(
       context: context,
@@ -550,7 +558,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   void _showRenameDialog(BuildContext context, ICleonaService svc, ContactInfo contact) {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     final controller = TextEditingController(text: contact.localAlias ?? '');
     showDialog(
       context: context,
@@ -561,7 +569,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '${locale.get('original_name')}: ${contact.displayName}',
+              '${locale.get('original_name')}: ${shownContactName(contact.displayName, locale)}',
               style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
                     color: Theme.of(ctx).colorScheme.outline,
                   ),
@@ -604,7 +612,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (report == null) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(AppLocale.of(context).get('contact_issue_report_error'))),
+          SnackBar(content: Text(AppLocale.read(context).get('contact_issue_report_error'))),
         );
       }
       return;
@@ -619,7 +627,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     );
 
     if (!context.mounted) return;
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     if (result == ContactIssueDialogResult.exported) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(locale.get('contact_issue_exported'))),
@@ -631,8 +639,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
-  void _confirmDelete(BuildContext context, ICleonaService svc, String nodeIdHex, String name) {
-    final locale = AppLocale.of(context);
+  void _confirmDelete(BuildContext context, ICleonaService svc, String nodeIdHex, String rawName) {
+    final locale = AppLocale.read(context);
+    // S406: the pending mark is no name — the waiting contact's dialog showed "Pending...".
+    final name = shownContactName(rawName, locale);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -719,7 +729,9 @@ class _BirthdayDialogState extends State<_BirthdayDialog> {
 
     return AlertDialog(
       title: Text(AppLocale.of(context)
-          .tr('contact_birthday_title', {'name': widget.contact.displayName})),
+          .tr('contact_birthday_title', {
+        'name': shownContactName(widget.contact.displayName, AppLocale.of(context))
+      })),
       content: SizedBox(
         width: 320,
         child: Column(

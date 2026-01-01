@@ -24,14 +24,13 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 /// negligible compared to the cost the sender had to bear for ONE
 /// valid proof.
 ///
-/// **Property 2 — a solution becomes outdated after ~10 minutes.** [timeWindow]
-/// enters as hash input: whoever shows a proof for an old window,
-/// its hash no longer matches against the current window — so it
-/// needs no separate expiry check, the time window IS part
-/// of the checked condition. Within a window [RetryStore] prevents
-/// the same [randomValue] from passing as new twice
-/// (otherwise an intercepted valid proof could be reused arbitrarily
-/// often while the window runs).
+/// **Property 2 — a solution ages.** [timeWindow] enters as hash input, and
+/// the first-contact request carries it visibly (proposal E): the recipient
+/// reads it, accepts it only within [windowsBack] (the post box's seven
+/// days, [windowAccepted]) and checks the hash for exactly that window.
+/// Within that span [RetryStore] prevents the same [randomValue] from
+/// passing as new twice (otherwise an intercepted valid proof could be
+/// reused arbitrarily often while it is accepted).
 ///
 /// **Property 3 — a missing or wrong proof is silently
 /// discarded.** This file makes no network decision on this (it opens
@@ -51,6 +50,20 @@ class ProofOfWork {
 
   /// Width of a time window in seconds (10 minutes).
   static const int windowSeconds = 600;
+
+  /// How far back a request's own time window may lie (proposal E, V4.2
+  /// §15.5.1): the retention of the post box, seven days, in windows —
+  /// 7 × 86400 / 600 = 1008. A request that lay there is meant exactly as it
+  /// arrives; with only the current and the previous window it would be
+  /// discarded silently after ten minutes.
+  static const int windowsBack = 7 * 86400 ~/ windowSeconds;
+
+  /// Whether a request's time window [w], read from its visible header, is
+  /// accepted at [now] (a window): `now − windowsBack − 1 ≤ w ≤ now + 1` —
+  /// one window of clock slack on either side. READ, not searched: the check
+  /// stays at most ten hashes (one per standing code).
+  static bool windowAccepted(int w, int now) =>
+      w >= now - windowsBack - 1 && w <= now + 1;
 
   /// Default for `hoechstzahlVersuche` in [generate] — generous: even
   /// at `d = 24` (expected value roughly 2^24 ≈ 16.8 million attempts) there
@@ -129,19 +142,6 @@ class ProofOfWork {
     return null;
   }
 
-  /// [codeFind] for the current AND the previous time window — v4_2 §15:
-  /// "A solution ages. The time window makes it valid for about ten minutes
-  /// … the current and the previous window". With the current one alone, a
-  /// request computed at xx:x9:58 and checked at xx:x0:00 was silently
-  /// discarded (S397-6, measured 25.09.2026); the post box checks the same
-  /// two windows (`post_box_proof_of_work.dart`).
-  static Uint8List? codeFindRecent(
-      List<Uint8List> ownCodes, Uint8List randomValue, int counter, int d) {
-    final now = windowNow();
-    return codeFind(ownCodes, randomValue, counter, d, timeWindow: now) ??
-        codeFind(ownCodes, randomValue, counter, d, timeWindow: now - 1);
-  }
-
   static bool _fulfilled(
       Uint8List code, Uint8List randomValue, int counter, int window, int d) {
     final hash = SodiumFFI().sha256(_input(code, randomValue, counter, window));
@@ -211,14 +211,19 @@ class ProofOfWorkAborted implements Exception {
 /// — at full capping the oldest entry drops first.
 class RetryStore {
   final int maxCount;
+
+  /// How many windows back an entry is kept — 1 (current and previous) by
+  /// default; the request of first contact keeps the whole span a request may
+  /// be old ([ProofOfWork.windowsBack] + 1, proposal E).
+  final int span;
   final Map<String, int> _seen = <String, int>{};
 
-  RetryStore({this.maxCount = 1000});
+  RetryStore({this.maxCount = 1000, this.span = 1});
 
   /// `true`: [randomValue] was new and is now remembered. `false`: already
   /// seen — the caller rejects the request as a repetition.
   bool fresh(Uint8List randomValue, int timeWindow) {
-    _seen.removeWhere((_, window) => window < timeWindow - 1);
+    _seen.removeWhere((_, window) => window < timeWindow - span);
     final key = _hex(randomValue);
     if (_seen.containsKey(key)) {
       return false;

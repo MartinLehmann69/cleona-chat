@@ -2,8 +2,8 @@
 /// N identities, one stream). S385, cut F.
 ///
 /// What lies here once: the node with wire, fixed port, neighbourhood,
-/// cover stream, ladder and routes, the storage for third parties, the media reception
-/// and the ONE state checker. What lies per identity stands in
+/// cover stream, ladder and routes, the storage for third parties, the bulk
+/// lane of the media (`host_media.dart`) and the ONE state checker. What lies per identity stands in
 /// [Mailbox]. Mailboxes can be registered and deregistered at runtime.
 ///
 /// The host makes no decision about an identity. It passes
@@ -31,7 +31,8 @@ import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node_call.dart';
 import 'package:mycelium/node_helpers.dart' show shortFrom, interfacesRead;
 import 'package:mycelium/media.dart';
-import 'package:mycelium/media_reception.dart';
+import 'package:mycelium/host_media.dart';
+import 'package:mycelium/bulk_piece.dart' show BulkClass;
 import 'package:mycelium/message.dart' show Inbound;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_inbound.dart';
@@ -60,10 +61,11 @@ class Host {
   /// The most recently triggered run of source 4 (§11.9) — for probes.
   Future<void>? outsideRun;
 
-  /// The dispatch of large payloads. It chooses the lane itself by
-  /// size (§9.4); a media object carries no sender, so it belongs
-  /// to no mailbox.
+  /// The codec side of `media.dart` — no route of its own; lane 3 is [bulk].
   late final MediaSender media;
+
+  /// Lane 3 of §9.4: holder, sender, recipient (`host_media.dart`).
+  late final HostMedia bulk;
 
   Host._(this.node, this._memory, this.report, this._relay);
 
@@ -96,12 +98,13 @@ class Host {
 
   /// Starts the host with its first mailbox.
   ///
-  /// [directory] holds what belongs to the DEVICE: `wirt.enc` (port, neighbours)
-  /// and `briefkasten.enc` (what this node holds for third parties). The
-  /// mailboxes lie where their [MailboxDetails.directory] says.
-  static Future<Host> start(
-    Directory directory,
-    Uint8List key, {
+  /// [records] hold the node's own state — port and neighbours, its post
+  /// box, the key of its address record (in the app the device database,
+  /// `device_records.dart`); without them the encrypted files in
+  /// [directory]. [directory] keeps the pieces held for others (lane 3);
+  /// the mailboxes lie where their [MailboxDetails.directory] says.
+  static Future<Host> start(Directory directory, Uint8List key, {
+    DeviceRecords? records,
     required MailboxDetails first,
     int port = 0,
     void Function(String)? report,
@@ -113,10 +116,17 @@ class Host {
     List<String> relay = const [],
     /// See [Host.onReadiness] — set here BEFORE the start asks.
     OnReadiness? onReadiness,
+    /// Lane 3 (§21.3.3, D-30, D-32; `host_media.dart`): the bulk cache
+    /// (0 = no bulk), the class stated in `0x53`, and for a phone whether
+    /// the app allows holding now (data-saving mode, metered link).
+    int bulkCacheBytes = 0,
+    BulkClass bulkClass = BulkClass.desktop,
+    bool Function()? bulkServeAllowed,
   }) async {
     final roundsStart = DateTime.now(); // before the first call (source 4)
     await interfacesRead();
-    final wg = HostMemory.clearedOpen(directory, key, report: report);
+    final own = records ?? FileDeviceRecords(directory, key);
+    final wg = HostMemory.clearedWithin(own, report: report);
     final (g1, b1) = mailboxPrepare(first, report);
 
     Host? ref;
@@ -137,18 +147,14 @@ class Host {
         started = await Node.start(
           postBoxes: [b1],
           port: chosen, devicesCode: wg.devicesCodeSet(),
-          // What this node holds FOR OTHERS belongs on disk:
-          // otherwise a restart of the holder loses the message of a
-          // third party, and nobody notices except the one waiting for it.
-          directory: directory,
-          key: key,
+          // What this node holds FOR OTHERS must survive a restart, or the
+          // message of a third party is lost and only the one waiting notices.
+          records: own,
           report: report ?? (_) {},
           onMessage: (e) => ref == null ? early.add(e) : ref._inbound(e),
           onReaction: (r) => ref?.mailboxFor(r.to)?.onReaction?.call(r),
-          onEdit: (b) =>
-              ref?.mailboxFor(b.to)?.onEdit?.call(b),
-          onReadMark: (l) =>
-              ref?.mailboxFor(l.to)?.onReadMark?.call(l),
+          onEdit: (b) => ref?.mailboxFor(b.to)?.onEdit?.call(b),
+          onReadMark: (l) => ref?.mailboxFor(l.to)?.onReadMark?.call(l),
           // §12.5: the mailbox does not decide — `null` (later). The
           // recontact is answered by `onRecontact` (ES-11, S388), without
           // consuming the invitation. Without a mailbox: reject.
@@ -156,7 +162,7 @@ class Host {
               ref?.mailboxFor(to) == null ? false : null,
           // EDGE: a new neighbour can be the route to a contact
           // for whom something is resting — AND it can itself hold something.
-          onNewNeighbours: () => ref?._newNeighbour(),
+          onNewNeighbours: (a, p) => ref?._newNeighbour([(a, p)]),
         );
       } on SocketException catch (e) {
         // The remembered port is held by a foreign program. Only
@@ -172,10 +178,14 @@ class Host {
     final w = Host._(started, wg, report, List.unmodifiable(relay))
       ..onReadiness = onReadiness;
     w._wireUp();
+    w.bulk = HostMedia(started, directory, key,
+        bulkCacheBytes: bulkCacheBytes, cls: bulkClass,
+        open: (f) => bulkFamilyOpen(w.network, f),
+        serveAllowed: bulkServeAllowed, report: report);
     w._relaySet();
     w._outside = OutsideSource(started,
-        to: wg.outsideSourceOn, roundsStart: roundsStart, directory: directory,
-        key: key, neighbourRemember: w.neighbourRemember, report: report);
+        to: wg.outsideSourceOn, roundsStart: roundsStart, records: own,
+        neighbourRemember: w.neighbourRemember, report: report);
     w.network = HostNetwork(started, w._outside, wg, w._newNeighbour,
         (l) => w.outsideRun = l, report);
     w.contactSeatsWireUp(); // §5.2 contact seats; §8.1 what the contacts learn
@@ -193,16 +203,16 @@ class Host {
     // At start the call is usually not yet answered and there is nothing
     // to collect here; without neighbours the call costs not a single packet.
     w.node.onFirstCollection = onFirstCollection;
-    // Source 4 only when query AND call series of this round are through.
-    w.outsideRun = w._outside.afterSources(
-        Future.wait([w.node.collect(), w.node.callSeriesDone]));
+    unawaited(w.node.collect());
+    // Source 4 when the call series is through (§11.8) — it waits for no holder.
+    w.outsideRun = w._outside.afterSources(w.node.callSeriesDone);
     w.network.staleTry(); // §11.8: source 1, once per edge
     return w;
   }
 
-  /// Registers another mailbox — at runtime, on the same port.
-  /// Registering is an edge: what is resting for the new identity is
-  /// collected and re-dispatched NOW.
+  /// Registers another mailbox — at runtime, on the same port. What is
+  /// resting for the new identity is asked for and re-dispatched NOW; it is
+  /// no edge of §8.2: only the new identity's questions go out, in their turn.
   Mailbox register(MailboxDetails a) {
     final (g, b) = mailboxPrepare(a, report);
     if (_mailboxes.containsKey(identifierFrom(b.address))) {
@@ -210,7 +220,7 @@ class Host {
     }
     final p = _admit(node.register(b), g, a);
     p.giveUpAgain();
-    unawaited(node.collect());
+    unawaited(node.collectFrom(node.collectNeighbours, only: p.identity));
     return p;
   }
 
@@ -221,11 +231,12 @@ class Host {
   /// identity.
   void deregister(Mailbox p) {
     node.deregister(p.identity);
+    bulk.release(p.ownIdentifier); // lane 3: its collections end here
     if (_mailboxes.remove(p.ownIdentifier) != null) codesDeregistered();
   }
 
   /// Saves and shuts down.
-  void stop() {
+  Future<void> stop() async {
     _stateChecker?.cancel();
     _outside.stop(); // §11.9: only the clock; the own entry stays
     network.stop(); // §8.1: the keep-alive clock
@@ -233,21 +244,24 @@ class Host {
     // the neighbourhood may have changed without a NEW neighbour
     // being added (a refreshed address, a displaced one).
     network.save();
-    node.stop();
+    bulk.stop(); // pieces in intake to disk
+    await node.stop(); // begun transmissions leave whole first (R-1)
   }
 
   Mailbox _admit(Identity id, Memory g, MailboxDetails a) {
     final p = Mailbox(this, id, g, a);
     _mailboxes[p.ownIdentifier] = p;
+    bulk.admit(p.ownIdentifier, a.directory, a.key); // lane 3, per identity
     codesAdmit(p); // §8.1 code and registration, §8.2 day key
     return p;
   }
 
-  /// Enters a neighbour that does not come from the call — the
-  /// neighbour address of a card on joining (§11.8 source 3, step 1).
-  /// If it is new, that is the same edge as one found by the call.
-  void neighbourRemember(List<int> ip, int port) {
-    if (neighbourAdd(node, ip, port)) _newNeighbour();
+  /// Enters a neighbour that does not come from the call — invitation data on
+  /// joining (§11.8 source 3, always), an external record (source 4, with
+  /// [confirmedAt], S406 `neighbourAdd`). A new one is the edge of the call.
+  void neighbourRemember(List<int> ip, int port, {DateTime? confirmedAt}) {
+    final a = InternetAddress.fromRawAddress(Uint8List.fromList(ip));
+    if (neighbourAdd(node, ip, port, confirmedAt: confirmedAt)) _newNeighbour([(a, port)]);
   }
 
   /// Remembers the relay list of a READ card (§11.9) — restart-proof,
@@ -284,8 +298,8 @@ class Host {
   ///
   /// All evidence expires IMMEDIATELY (state `searching`), the interfaces
   /// are read anew, then ONE call series and ONE query of the remembered
-  /// neighbours, afterwards — only if both delivered nothing — source 4. None
-  /// of it repeats. The future ends with the query.
+  /// neighbours, after the call series source 4 (§11.8). None of it repeats,
+  /// and the future does not wait for a holder (§8.2).
   Future<void> networkChanged() async {
     node.readiness.reset();
     for (final p in List.of(_mailboxes.values)) {
@@ -295,9 +309,8 @@ class Host {
     await node.networkEnvironmentNewRead();
     network.networkChanged(); // §8.1 measurement anew, §11.8 stale entries
     final row = node.call();
-    final fetch = node.collect();
-    outsideRun = _outside.afterSources(Future.wait([fetch, row]));
-    await fetch;
+    unawaited(node.collect());
+    outsideRun = _outside.afterSources(row);
   }
 
   /// Re-dispatch for [only] in [p] — the edge "a route has arisen".
@@ -312,16 +325,16 @@ class Host {
     p.inboundAccept(e);
   }
 
-  void _newNeighbour() {
+  void _newNeighbour(List<(InternetAddress, int)> fresh) {
     // Remembering happens IMMEDIATELY, not only on stopping: a crash in between
     // would otherwise cost exactly the source that makes the next start fast.
     network.save();
     for (final p in List.of(_mailboxes.values)) {
       p.giveUpAgain();
     }
-    unawaited(node.collect());
-    // Triggered AFTER the own collection: whoever asks here (the
-    // manifest compartment, S388) lines up in the same queue behind it.
+    unawaited(node.collectFrom(fresh)); // §8.2: the new neighbour alone
+    // Triggered AFTER the own questions: whoever asks here (the manifest
+    // compartment, S388) follows them at a holder both ask.
     onNewNeighbours?.call();
   }
 
@@ -381,17 +394,7 @@ class Host {
     };
     media = MediaSender(
       out: (lane, packet) => report?.call(
-          'Media: ${packet.length} B on lane ${lane.name} — '
-          'without target; whoever sends passes the route with each shipment'),
-    );
-    node.mediaReception = MediaReception(
-      onObject: (object, identifier, _) => report?.call(
-          'media object ${_hex(identifier)} complete (${object.length} B)'),
-      onFailure: (identifier, reason) =>
-          report?.call('media object ${_hex(identifier)} failed: $reason'),
+          'Media: ${packet.length} B on lane ${lane.name} — without target'),
     );
   }
 }
-
-String _hex(Uint8List b) =>
-    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();

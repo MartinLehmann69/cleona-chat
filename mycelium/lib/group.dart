@@ -90,9 +90,10 @@ class Group {
   /// What THIS side may do. The creator is owner; every other side
   /// learns its role with the key delivery, not from itself.
   Role _myRole = Role.member;
-  /// Who may issue keys in this group — the Ed25519 part of their
-  /// address (32 B). Set at creation or at the first admission, afterwards
-  /// immutable. See [keyCame].
+  /// Who may issue keys in this group — the IDENTIFIER of their address
+  /// (32 B; since S398 A not the Ed25519 key, which an Emergency Key
+  /// Rotation replaces while the identifier stays, §4.1). Set at creation or
+  /// at the first admission, afterwards immutable. See [keyCame].
   Uint8List? _issuerPk;
   final List<GroupsOutbound> sent = [];
   final List<GroupsInbound> incoming = [];
@@ -115,7 +116,7 @@ class Group {
     _identifier = sodium.randomBytes(kGroupsIdentifierLength);
     _key[0] = sodium.randomBytes(kGroupsKeyLength);
     _myRole = Role.owner;
-    _issuerPk = me.address.ed25519Pk;
+    _issuerPk = me.address.identifier;
   }
 
   bool get hasKey => _identifier != null && _key.isNotEmpty;
@@ -243,13 +244,13 @@ class Group {
   ///
   /// Role and issuer stand INSIDE the seal, packed anew per recipient:
   /// the role is theirs, not that of the group. The issuer is
-  /// 32 B (Ed25519 part) instead of a whole address (3208 B) — the
+  /// 32 B (the identifier) instead of a whole address (3240 B) — the
   /// counter-check in [keyCame] needs no more, it compares exactly this
   /// field with the authenticated sender of the envelope.
   GroupsOutbound _deliver(List<Member> to) {
     final namedBytes = Uint8List.fromList(utf8.encode(name));
     if (namedBytes.length > 255) throw GroupsError('Name zu lang');
-    final issuer = _issuerPk ?? me.address.ed25519Pk;
+    final issuer = _issuerPk ?? me.address.identifier;
     final legs = <GroupsLeg>[];
     for (final m in to.where((m) => !m.address.sameIdentity(me.address))) {
       final content = (BytesBuilder()
@@ -324,7 +325,7 @@ class Group {
         throw GroupsError('Key of a different group');
       }
       if (_issuerPk == null ||
-          !byteEqual(sender.ed25519Pk, _issuerPk!)) {
+          !byteEqual(sender.identifier, _issuerPk!)) {
         throw GroupsError(
             'Key from someone who was not allowed to send it');
       }

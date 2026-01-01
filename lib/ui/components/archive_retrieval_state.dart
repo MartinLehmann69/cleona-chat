@@ -28,25 +28,15 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:cleona/core/archive/archive_transport.dart';
+import 'package:cleona/core/archive/archive_types.dart'
+    show ArchiveRetrievalStart;
 
-/// What the service answered when asked to start a retrieval.
-///
-/// The distinction between the first two is not cosmetic: on
-/// [ArchiveRetrievalStart.alreadyRunning] a run IS in flight in the service,
-/// so the ring must stay; on [ArchiveRetrievalStart.unavailable] nothing is
-/// running anywhere and the ring must go, or the tile hangs on the first
-/// dropped connection.
-enum ArchiveRetrievalStart {
-  /// This call started the run (`{started: true}`).
-  started,
-
-  /// A run was already in flight for this message (`{alreadyRunning: true}`).
-  alreadyRunning,
-
-  /// No run exists and none was started — the command failed, the archive is
-  /// off, or the daemon is gone.
-  unavailable,
-}
+// The answer type moved to the core (S398-W4): the service produces it in
+// process (Android/iOS) and the IPC client from the daemon's reply, and the
+// core must not import the surface. Re-exported so the surface keeps one
+// import.
+export 'package:cleona/core/archive/archive_types.dart'
+    show ArchiveRetrievalStart;
 
 /// Sends `archive_retrieve` for one message and reports what came back.
 ///

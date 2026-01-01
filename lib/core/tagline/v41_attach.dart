@@ -8,7 +8,6 @@ import '../config/rendezvous_relays.dart';
 import '../crypto/file_encryption.dart';
 import '../crypto/oqs_ffi.dart';
 import '../rendezvous/nostr_provider.dart';
-import '../rendezvous/rendezvous_provider.dart' show EndpointAddress;
 import 'package:cleona/generated/proto/transport_v3.pb.dart' as pb;
 import 'package:cleona/generated/proto/transport_v3.pbenum.dart' as pe;
 import 'invite_line.dart';
@@ -23,9 +22,7 @@ import '../link/node_keys.dart';
 import '../link_io/link_host.dart' show ObservedAddressBook;
 import '../service/cleona_service.dart';
 import '../storage/message_store.dart' show MessageStore;
-import '../service/media_bulk_lane.dart' show MediaBulkLane;
-import '../service/media_bulk_transport_v41.dart'
-    show V41MediaBulkTransport, bulkCacheForPlatform;
+import '../bulk/bulk_cache.dart' show BulkCache;
 import '../service/v41_routing.dart' show shortPairLabel;
 // §26.6.5 — the HTTP switch of the data port. Permitted: the separation that
 // `smoke_link_io_milestone` section 5 and `smoke_link_axis_guard`
@@ -53,7 +50,6 @@ import 'own_line.dart';
 import 'port_map_wiring.dart';
 import 'prekey_pool.dart';
 import 'readiness.dart' show Readiness;
-import 'recovery_line.dart';
 import 'package:cleona/core/bulk/responsibility.dart' show nodeEpochNow;
 import 'secure_mode.dart' show kMobileSecureStoreCapBytes;
 import 'v41_host.dart';
@@ -545,8 +541,9 @@ Future<V41Runtime?> startV41Node({
   // The platform derivation stands HERE and not in `lib/core/bulk/`,
   // for the same layer boundary as [maxStoreBytes]: the delivery layer
   // and the bulk lane do not read `Platform.*` (`smoke_link_axis_guard`).
-  final bulkCache = bulkCacheForPlatform(
-      mobile: Platform.isAndroid || Platform.isIOS);
+  final bulkCache = (Platform.isAndroid || Platform.isIOS)
+      ? BulkCache(enabled: false)
+      : BulkCache();
 
   final v41 = await V41Node.start(
       port: port,
@@ -1611,98 +1608,6 @@ Future<void> _appointmentMaintain({
 // it: the portal sends via `UdpSocketSet`, which chooses the family from the
 // target address and binds both.
 
-/// The entry points of this node as BINARY SOURCES (§26.6.4).
-///
-/// ── WHAT §26.6.4 DEMANDS, AND WHAT WAS MISSING UNTIL HERE ─────────────────
-///
-/// „A publishing node that holds a complete binary set is reachable
-/// through the same entry cascade the inviter's `s=` ContactSeed encodes;
-/// the browser assembler (§26.6.5) walks the entry hints, contacting
-/// directly-reachable nodes in turn until one serves the matching
-/// platform." The paragraph puts the entry cascade (§11) in place
-/// of the external carrier.
-///
-/// Measured on 06.09.2026 (S372), the source discovery of the
-/// update download ran via exactly one class: `_startInNetworkUpdate` called
-/// `BinaryRendezvousManager.resolve()`, and that asks Nostr
-/// (`binary_rendezvous_manager.dart`, `_providersOrDefault`). The supply
-/// of the entry cascade had **zero** reference in the whole update path —
-/// re-measured with nine search patterns over `lib/core/update/`,
-/// `cleona_service_update.dart` and `binary_rendezvous_manager.dart`:
-/// `EntryCache` 0, `EntryRecord` 0, `dialCandidates` 0, `EntryAddress` 0,
-/// `ColdStart` 0; the nine hits on `entries` were all
-/// `Map.entries`. If Nostr stayed silent, the click path aborted with „no binary
-/// sources found", although reachable neighbours stood in the supply.
-///
-/// **This function does NOT clear away Nostr.** Whether the external carrier
-/// falls per §26.6.4 or stays per §26.7 is an open
-/// owner decision (the two paragraphs contradict each other; the
-/// finding is at `BinaryRendezvousManager.publish`). A wiring does not
-/// make it on the side — the cascade joins the
-/// Nostr sources, and in the caller comes behind them.
-///
-/// ── WHY THE PORT NUMBER OF THE RECORD IS RIGHT ──────────────────────
-///
-/// The entry record names ONE port for UDP and TCP (E-60;
-/// `v41_node.dart`, at the construction of `TcpLinkListener`:
-/// „THE SAME PORT NUMBER AS UDP"), and `attachV41` hangs the
-/// [BinaryHttpServer] on the four-byte switch of exactly this listener.
-/// `http://<host>:<port>/cleona/binary/<plattform>` is thus the right address
-/// without additional knowledge — exactly the model that §26.6.5
-/// describes („the shared port number for UDP and TCP").
-///
-/// ── THE VERSION IS NOT ON THE RECORD, AND THAT COSTS NOTHING ──────
-///
-/// Unlike the Nostr record (`ResolvedBinaryEndpoint.version`),
-/// an entry record says nothing about WHICH version the neighbour
-/// holds. A filter is nevertheless not needed, and that is measured,
-/// not hoped: `BinaryFetchClient.fetch` rejects an answer whose
-/// `Content-Length` does not EXACTLY match the size expected from the signed manifest
-/// (`binary_fetch_client.dart`,
-/// „Content-Length … != expected … — rejecting early") — a neighbour with
-/// a different version drops out BEFORE the first payload byte. What
-/// would still get through after that is caught by the hash and signature check
-/// (§26.6.1 step 5, `BinaryUpdateManager.verify`).
-///
-/// ── ORDER AND CAP ───────────────────────────────────────────────
-///
-/// `dialCandidates()` already delivers the order of the cascade (fresh before
-/// expired, not failed before deferred). It is taken over,
-/// not re-sorted. [max] caps the list, because every address costs an
-/// HTTP attempt (work rule #5); the default corresponds to that of
-/// [vorratUnicastTargets].
-///
-/// **Private addresses stay in, and that is intentional.** §26.6.4 says
-/// „LAN nodes are found via LAN discovery, not via the entry cascade" —
-/// that concerns the QUESTION of who holds binaries, not the fetch. For the
-/// fetch a neighbour in the same segment is the cheapest source
-/// of all, and `cleona_service_update.dart` lists the loss of exactly
-/// these addresses as part of gap G-11.
-///
-/// Takes [EntryCache] and not `V41Node` — for the same reason
-/// as [vorratUnicastTargets]: testable without a running node.
-List<EndpointAddress> entryBinarySources(EntryCache entries,
-    {int max = 12}) {
-  final out = <EndpointAddress>[];
-  final seen = <String>{};
-  for (final r in entries.dialCandidates()) {
-    for (final a in r.addresses) {
-      if (out.length >= max) return out;
-      final host = a.host;
-      if (host.isEmpty || a.port == 0) continue;
-      // Calling itself yields the version that is running anyway.
-      if (host == '0.0.0.0' ||
-          host == '::' ||
-          host == '::1' ||
-          host.startsWith('127.')) {
-        continue;
-      }
-      if (!seen.add('$host|${a.port}')) continue;
-      out.add(EndpointAddress(host, a.port));
-    }
-  }
-  return out;
-}
 
 Future<LanEntryHandle?> _startLanEntryFromPool(
     V41Node v41, NodeKeys keys, int port, void Function(String)? log) async {
@@ -2133,47 +2038,9 @@ V41Host attachV41({
     mapped: () => runtime.node.advertiseMapped,
   ));
 
-  // ── THE BULK LANE TO THIS IDENTITY (§9.3) ──────────────────────
-  //
-  // The same construction and the same reasoning as level D above: the
-  // HOLDER belongs to the node (one quota, one wire, one outflow),
-  // the TRANSFERS belong to the identity (`MediaBulkLane` carries
-  // tags, tickets and receipts of one identity), and `attachV41` is
-  // the only place at which both are available at the same time.
-  //
-  // **`bindTransport` AND `onBulkScanned` — both, or nothing works.**
-  // `bindTransport` hooks the sink of the lane into the transport; the
-  // back side, via which a scan answer finds its way from the node into the
-  // transport, is `DeliveryNode.onBulkScanned`. Whoever sets only one
-  // of the two gets a lane that stores and never harvests — and
-  // that is traffic no one collects (work rule 5). Exactly this
-  // half-measure is measured by `smoke_bulk_lane_effect.dart` in its reverse test.
-  //
-  // WITH TWO IDENTITIES THE LAST ONE WINS — and that is without
-  // consequences here, unlike with the HTTP switch below: `acceptScanned`
-  // looks up the identifier in its OWN book and discards what
-  // is not in it. An answer to the request of the other
-  // identity would find nothing there and silently drops — it would not land
-  // in the wrong harvest. The price is that two simultaneous
-  // bulk harvests in one process can take each other's answers
-  // away; that is reported and not hidden.
-  final bulkTransport = V41MediaBulkTransport(runtime.node, log: log);
-  service.mediaBulkTransport = bulkTransport;
-  final MediaBulkLane lane = service.mediaBulkLane;
-  lane.bindTransport(bulkTransport);
-  runtime.node.delivery.onBulkScanned = bulkTransport.acceptScanned;
-  // THE ROUND END BELONGS TO IT, and necessarily so: on it — not on the
-  // block input — the resubmission of the scanning hangs
-  // (`BulkOp.scanEnd`). Whoever sets only `onBulkScanned` gets a
-  // harvest that stands still after the FIRST round.
-  runtime.node.delivery.onBulkScanEnd = bulkTransport.acceptScanEnd;
-  // And the cleanup: the transport carries rounds per tag and a hop counter per
-  // holder. Without this call a remainder would stay after every
-  // received file.
-  lane.onTagForgotten = bulkTransport.forgetTag;
-  // Only for the status line — see `V41Node.bulkEgress`.
-  runtime.node.bulkEgress = bulkTransport.egress;
-  runtime.node.bulkSenderStatus = bulkTransport.statusLine;
+  // The V4.1 bulk lane (`MediaBulkLane`, `V41MediaBulkTransport`) was bound
+  // here; it fell with S399 P2 — §9.4 lanes 1-3 are built in mycelium and
+  // `cleona_service_bulk.dart` / `_stream.dart` / `_transfer.dart`.
 
   // ── THE HTTP SWITCH OF THE DATA PORT (§26.6.5, E-118, gap G-20) ───
   //
@@ -2232,59 +2099,13 @@ V41Host attachV41({
         'data port (§26.6.5)');
   }
 
-  // ── THE ENTRY CASCADE AS BINARY SOURCE (§26.6.4, S372) ─────────
-  //
-  // The same construction and the same reason as for the HTTP switch a
-  // hand's breadth higher, only in the opposite direction: the SUPPLY belongs to the
-  // node (`V41Node.entries`, one process), the UPDATE FETCH belongs to the
-  // service (it holds manifest and fragment store), and `attachV41` is
-  // the only place at which both are available at the same time.
-  //
-  // What this line switches on is at [eintrittsBinaerQuellen]: until
-  // S372 `_startInNetworkUpdate` knew exactly ONE source class (Nostr)
-  // and aborted without it, although the supply held reachable neighbours
-  // whose data port the delivery server serves.
-  //
-  // FIRST SERVICE WINS is NOT needed here — the source is a
-  // pure reader without state, every service may see the same supply.
-  service.binarySourcesOutEntry =
-      () => entryBinarySources(runtime.node.entries);
+  // The entry cascade as a binary source of the update (§26.6.4, S372)
+  // fell with S406-UPDPKG P4: an update comes only through the fetch path
+  // of the delivery layer (§26.6.1).
 
-  // ── THE COVER FILL (§5.5) ────────────────────────────────────────
-  //
-  // The same construction and the same reason as for the HTTP switch above:
-  // the SLOT PLAN belongs to the node (one cycle, one process), the
-  // MANIFEST belongs to the service (it checks it and holds the
-  // fragment store), and `attachV41` is the only place at which both
-  // are available at the same time.
-  //
-  // ── WHAT THESE TWO LINES SWITCH ON ────────────────────────────────
-  //
-  // `lib/core/update/cover_fill_blocks.dart` had been built since S365 and
-  // had ZERO callers in all of `lib/` — the hook in
-  // `DeliveryNode.tick` (l. 425-435, behind `takeSlot`) asked a
-  // callback no one set, and every due cover slot went out with
-  // 1169 B of randomness. Exactly this class of bug — built, never entered,
-  // smoke green anyway — cost S349 a whole session.
-  //
-  // ── RULE 1 HOLDS STRUCTURALLY, NOT THROUGH ASSURANCE ──────────
-  //
-  // The callback is only asked after the control queue has had its
-  // slot AND `takeSlot` has decided that no payload
-  // rides along (`slot.isDummy`). It does not know the slot plan and cannot
-  // touch it. Rule 2 likewise: the partner is fixed since
-  // `drawPartner()`, and the callback has no parameters.
-  //
-  // ── FIRST SERVICE WINS ───────────────────────────────────────────
-  //
-  // As with the HTTP switch: there is ONE slot plan, but per identity
-  // one service. What is distributed is the binary of this device —
-  // the same for all identities —, so the choice is without consequence.
-  if (runtime.node.delivery.coverFill == null) {
-    runtime.node.delivery.coverFill = service.nextCoverFillBlock;
-    runtime.node.delivery.onCoverFillBlock = service.takeCoverFillBlock;
-    log?.call('V4.1: cover fill carries fountain blocks (§5.5)');
-  }
+  // The V4.1 cover fill (`UpdateCoverFill`, fountain blocks in dummy slots)
+  // was bound here; it fell with S399 P2 — update pieces ride the cover
+  // stream through `mycelium/lib/update_cover_route.dart` (§5.5, §26.6.1).
 
   // ── THE NETWORK NUMBERS TO THE DISPLAY (§25.5, gap G-10) ────────────
   //
@@ -2646,43 +2467,9 @@ V41Host attachV41({
   host.deregistrations
       .add(() => runtime.node.removeEgressFreeListener(egressEdge));
 
-  // ── AND THE RESCUE BUNDLE (§13.3, gap G-3) ───────────────────
-  //
-  // HERE and not in the node, for exactly the same reason as with
-  // `bindPlacementAcked` and the outbox above: the bundle line
-  // needs BOTH. The tags and the storing belong to the NODE (one
-  // cover cycle, one routing table), the content to the IDENTITY (one
-  // master seed, one contact list). `attachV41` is the only place at
-  // which both are available.
-  //
-  // WHAT THESE LINES CLOSE, measured: `recovery/recovery_keys.dart`
-  // had since S360 **eleven derivations and zero callers in `lib/`** —
-  // tags no one computed, for a line no one populated.
-  // The call edge begins here.
-  //
-  // NO OWN TIMER: `attach()` hangs the line on
-  // `V41Node.addSlotTick`, i.e. on the cover slot that the node beats anyway
-  // (§13.3.4 verbatim: „it hangs off a tick the node keeps
-  // anyway (§19: no polling)").
-  final bundle = RecoveryBundleLine(
-    node: runtime.node,
-    source: service.recoveryBundleMaterial,
-    log: (s) => runtime.node.log(s),
-  )..attach();
-  service.v41RecoveryBundle = bundle;
-
-  // AND THE SEARCH, if this start is a recovery case
-  // (§13.1.3: seed yes, counterpart no). The check costs two
-  // counter glances; a normally used account never makes a request.
-  // It stands HERE because it is the counterpart of `primeV41Pairs` below:
-  // one starts when there ARE pairs, this one when there are none.
-  service.beginRecoveryBundleHarvestIfLost();
-  // AND THE LINE INTO THE LOG. §13.3.4 demands visibility („An expired
-  // bundle must not lapse silently"); the UI for it is a
-  // separate, open item. Until then the state at least stands in the
-  // field log — otherwise a missing bundle is noticed at the earliest after 31
-  // days, i.e. when it is gone.
-  runtime.node.log('V4.1: ${service.recoveryBundleStatus}');
+  // THE RESCUE BUNDLE (§13.3) is no longer wired here: since S398 (B-1) it
+  // lies in mycelium's post box and hangs on `myceliumAttach`
+  // (`cleona_service_recovery_bundle.dart`). This attach has no caller.
 
   // THE HARVEST NEEDS ALL PAIR KEYS, not only those of the contacts
   // this node happens to have written to already (B-23). Without

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cleona/core/calendar/calendar_manager.dart';
+import 'package:cleona/core/calendar/reminder_text.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
@@ -120,9 +121,10 @@ class ReminderService {
 
         _firedReminders.add(key);
         // Identity log: the ONLY confirmation in the system that
-        // this reminder was triggered.
+        // this reminder was triggered. It names the event by its
+        // identifier: the title is the notification's text (§22.8).
         CLogger.get('reminder', profileDir: calendar.profileDir).info(
-            'Firing reminder: ${reminder.title} '
+            'Firing reminder: event ${reminderLogName(reminder.eventId)} '
             '(${reminder.minutesBefore}min before event)');
         onReminderDue?.call(identityId, reminder);
       }

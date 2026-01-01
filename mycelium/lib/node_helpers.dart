@@ -11,13 +11,15 @@ import 'package:mycelium/wire.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/cover_stream.dart' as cover;
 import 'package:mycelium/card.dart';
-import 'package:mycelium/ladder.dart';
 import 'package:mycelium/node_amendment.dart';
+import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
 import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/board_proof.dart';
 import 'package:mycelium/board_node.dart';
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/trace.dart';
+import 'package:mycelium/trace_first_contact.dart' show firstContactMatch;
 
 /// `ownLanAddress` and `ownIpv4` were in this file until S390. They
 /// are still offered here so that the callers remain unchanged;
@@ -124,14 +126,18 @@ Card cardFor(
   List<CardAddress> own, {
   CardAddress? neighbour,
   List<String> relay = const [],
+  Uint8List? publisherKey,
 }) =>
     Card(
+      // Only while the node publishes its record (§15.2, §11.9).
+      publisherKey: publisherKey,
       // The relays the node knows (§11.9) — at most three (§15.2).
       relay: relay,
       channel: cardChannel,
-      // The current X25519 — NOT for sealing (the card is valid 90 d,
-      // the key changes every 7 d). Sealing is done against the bundle.
-      letterKeyX25519: asValue.postBox.address.x25519Pk,
+      // The INVITATION's X25519 (owner decision R-b): the key a request from
+      // a `cleona:2:` line is sealed to, living as long as the invitation —
+      // not the identity's, which rotates every 7 d.
+      letterKeyX25519: e.kem?.x25519Pk ?? asValue.postBox.address.x25519Pk,
       // The identifier — the same across every KEM rotation (S385, E1).
       fingerprint: asValue.postBox.address.identifier,
       ownAddresses: own,
@@ -140,37 +146,6 @@ Card cardFor(
       expiryUnixSeconds: e.expiryUnixSeconds,
       difficulty: e.difficulty,
     );
-
-/// Whether an arriving packet counts as a sign of life OF THE COUNTERPART.
-///
-/// Measured on 14.09.2026: every one counted. A holder, however, acknowledges
-/// every deposit with 0x31, and this packet comes from HIM — he is
-/// in the found neighbours, so the sign of life meant
-/// „step neighbour carries". The ladder thereupon stopped the more expensive
-/// post box, resumed it after the silence period, deposited
-/// again, got another receipt — 10 deposits in 1200 ms at
-/// 120 ms period (`smoke_ladder`), so with the real values roughly 23 KB
-/// every two seconds per unacknowledged message, without end.
-///
-/// **The proof that the deposit works was read as proof
-/// that it is unnecessary.** A packet from the post box range says
-/// something about the DEPOSIT, never about the recipient.
-///
-/// A block list and not an allow list, on purpose: an
-/// allow list would have to be maintained with every new kind, and whoever
-/// forgets it builds exactly this error anew. Whoever adds a kind
-/// that likewise says nothing about the counterpart enters it HERE.
-///
-/// S387: the update (0x70-0x7F) belongs to it. A piece of the
-/// public update comes from the HOLDER, who is a neighbour, and says
-/// nothing about whether the recipient of an open sending is reachable.
-///
-/// S391: the board (0x43/0x44) likewise — it comes from a
-/// NEIGHBOUR and says nothing about the recipient of a sending.
-bool countsAsSignOfLife(int kind) =>
-    !kinds.isPostBox(kind) &&
-    !kinds.isUpdate(kind) &&
-    !kinds.isBoard(kind);
 
 /// Did this packet come from the own segment?
 ///
@@ -206,66 +181,6 @@ bool outTheSegment(InternetAddress a) {
   return false;
 }
 
-
-/// Via which step a packet came in.
-///
-/// **The step is in the PACKET, not in the neighbour list.** [kind] is the
-/// first byte as it came from the wire; §8.1 gives forwarding 0x20/0x21
-/// and §8.2 gives the post box 0x30-0x36, and both are thus readable from the
-/// packet. Everything else came in directly and is step 1 or 2 — which
-/// of the two is told by the sender address ([outTheSegment]).
-///
-/// Measured on 16.09.2026 (finding B-5, `berichte/S390-EVAL-NACHRICHT.md`):
-/// until here this function concluded from „the sender is in my
-/// neighbour list" that it was step 3. That is a PROPERTY OF THE SENDER and
-/// no statement about the ROUTE: a counterpart in the same segment that
-/// is also a neighbour delivered directly and was remembered as step 3
-/// (`[A] zugestellt ueber nachbar`, although only `lan` had been started). The
-/// remembered route moves into probation per §7.1, and the next
-/// message then first goes via a step that has never carried.
-///
-/// The neighbour list is therefore no longer in the signature: it cannot
-/// answer the question, and a parameter that one passes only because
-/// it was needed earlier is the invitation to draw the same conclusion
-/// once more.
-///
-/// Guard: `test/smoke_step_out_packet.dart`.
-LadderStep stepFrom(int kind, InternetAddress from) {
-  if (kinds.isForward(kind)) return LadderStep.neighbour;
-  if (kinds.isPostBox(kind)) return LadderStep.postBox;
-  return outTheSegment(from) ? LadderStep.lan : LadderStep.public;
-}
-
-/// Passes an arriving packet as a sign of life to the [open]
-/// sendings — for the step via which it REALLY came ([stepFrom]), and
-/// only if it says something about a counterpart
-/// ([countsAsSignOfLife]).
-///
-/// **It is not bound to the recipient of the sending.** Every packet from
-/// anywhere counts for EVERY open sending. Measured on 16.09.2026
-/// (`berichte/S389-BAU-QUITTUNG.md`, measurement 2): a node D that has nothing
-/// to do with the sending sends a message — and the sending to
-/// the unreachable C reports "briefkasten stillgestellt — lan traegt",
-/// although C never answered.
-///
-/// From this follows a limit that is easily overlooked when building: a
-/// sign of life may PAUSE a sending, but never END it. Whoever
-/// takes it as the end loses the deposit precisely for the
-/// recipient who needs it — one foreign packet at the wrong
-/// time suffices. Where a sending must end without a receipt, the
-/// caller decides that from evidence that belongs to THIS recipient
-/// ([Target.postBoxApplicable]).
-void signOfLifeDistribute(
-  Uint8List data,
-  InternetAddress from,
-  Iterable<Shipment> open,
-) {
-  if (data.isEmpty || !countsAsSignOfLife(data[0])) return;
-  final step = stepFrom(data[0], from);
-  for (final s in open) {
-    s.signOfLife(step);
-  }
-}
 
 /// The network interfaces read at start — read only.
 ///
@@ -319,6 +234,7 @@ Future<(Wire, Shell, cover.CoverStream)> socketBuild(
   // S391 (W6): the passive proof lies UNDER the shell — only there is the
   // first packet of a stranger visible before the own handshake answer.
   final proof = ReachabilityProof(wire);
+  traceSinkSet(report); // S405 (proposal D): the sink of `traceNote`
   final shell = Shell(proof, report: report);
   final coverStream =
       cover.CoverStream((p, z) => shell.sendCover(p, z.$1, z.$2));
@@ -346,6 +262,16 @@ extension Assignment on Node {
     // Fetched from a compartment or forwarded: the address belongs to the holder
     // or to the forwarder and is not fit as a return route.
     final returnRoute = withoutReturnRoute ? null : origin;
+    // S405 (proposal D): a first-contact packet and who on this node takes
+    // it — or why nobody (`trace_first_contact.dart`). Only first contact
+    // since S406 (owner decision 07.10.2026 "A"): per packet on the
+    // transport path nothing is written.
+    if (traceOn && kinds.isFirstContact(data[0])) {
+      report('TRACE assign in from ${from.address}:$fromPort '
+          '${withoutReturnRoute ? "forwarded or collected" : "direct"}'
+          '${feedingUnderCode ? ", under an own code" : ""}: ${packetDescribe(data)}'
+          ' — ${firstContactMatch(this, data)}');
+    }
     try {
       final s = data[0];
       if (kinds.isFirstContact(s)) {
@@ -360,7 +286,11 @@ extension Assignment on Node {
       } else if (kinds.isAmendment(s)) {
         amendmentToOneIdentity(data, origin);
       } else if (kinds.isForward(s)) {
-        codeRoute.receive(data, from, fromPort);
+        // A registration counts only from the device itself (§8.1): one
+        // forwarded or collected would file codes under a stranger's address.
+        if (!(withoutReturnRoute && kinds.isRegistration(s))) {
+          codeRoute.receive(data, from, fromPort);
+        }
       } else if (kinds.isPostBox(s)) {
         postBoxDeposit.receive(data, from, fromPort);
       } else if (kinds.isBoard(s)) {
@@ -369,11 +299,13 @@ extension Assignment on Node {
       } else if (kinds.isOutsideRoute(s)) {
         outsideRoute.receive(data, from, fromPort);
       } else if (kinds.isMedia(s)) {
-        mediaReception?.receive(data, from, fromPort);
+        mediaReception?.call(data, from, fromPort);
       } else if (kinds.isGroup(s)) {
         groupsReception?.call(data);
       } else if (kinds.isUpdate(s)) {
         updateReception?.call(data, from, fromPort);
+      } else if (kinds.isEnrolment(s)) {
+        if (!withoutReturnRoute) enrolmentReceive(data, from, fromPort);
       } else {
         report('unknown kind $s discarded');
       }

@@ -65,8 +65,8 @@ class Contact {
 
   /// The display name of a CONTACT — foreign user content, and thus
   /// no less in need of protection than the own one. On
-  /// 06.09.2026 it stood in plain text at three log sites
-  /// (`cleona_service_restore.dart:102`, `:224`, `:399`), all three at
+  /// 06.09.2026 it stood in plain text at three log sites (of the V3
+  /// restore path, removed in S398), all three at
   /// `debug` — which is no use: the level only filters the console,
   /// file and ring take it anyway. Registration in the constructor AND in the
   /// setter, replacement afterwards at the sink point in `CLogger`.
@@ -143,14 +143,6 @@ class Contact {
   // no disk write — see the file header for why. Persisting the result is the
   // caller's job and, in production, goes through CleonaService's encrypted
   // ContactInfo store.
-
-  /// Promote to [VerificationLevel.seen] after a successful key exchange.
-  ///
-  /// Never downgrades: a no-op if the contact is already at `seen` or higher.
-  void promoteToSeen() {
-    if (verificationLevel.index >= VerificationLevel.seen.index) return;
-    verificationLevel = VerificationLevel.seen;
-  }
 
   /// Mark as verified (in-person QR/NFC verification).
   ///

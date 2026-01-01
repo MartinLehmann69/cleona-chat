@@ -8,11 +8,13 @@ import 'package:cleona/ui/components/invitation_messages.dart';
 import 'package:cleona/ui/components/invitation_redeem.dart';
 
 /// Entrance for links from outside: channel links (`cleona://channel…`) and
-/// invitation cards in text form (`cleona:1:<base64url>`, V4.2 §15.6).
+/// invitation cards in text form (`cleona:1:<base64url>` and, since
+/// proposal E, `cleona:2:<base64url>` with the issuer's keys, V4.2 §15.6).
 ///
 /// Android delivers both via the same intent filter (`scheme="cleona"`
-/// in `AndroidManifest.xml`) — `cleona:1:…` is a valid, opaque URI
-/// with this scheme. The ContactSeed path of the V4.1 line (`cleona://<id>?…`)
+/// in `AndroidManifest.xml`) — `cleona:1:…` and `cleona:2:…` are valid,
+/// opaque URIs with this scheme; everything that is no channel link goes to
+/// [handleInvitationText], which reads both forms. The ContactSeed path of the V4.1 line (`cleona://<id>?…`)
 /// is removed here: V4.2 knows no ContactSeed.
 class DeepLinkReceiver {
   static const _androidChannel = MethodChannel('chat.cleona/share');

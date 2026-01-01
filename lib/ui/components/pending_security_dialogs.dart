@@ -1,9 +1,10 @@
 // lib/ui/components/pending_security_dialogs.dart
 //
-// §7.1 LD-2 / §7.5: modal dialogs for the two "the daemon parked a security
-// decision and is fully wired to receive an answer, but nothing ever asked
-// the user" gaps — an incoming device-pairing request, and a Primary's
+// §7.5: the modal dialog for "the daemon parked a security decision and is
+// fully wired to receive an answer, but nothing ever asked the user" — a
 // request for a Device-Sig countersignature on an Emergency Key Rotation.
+// (The V3 device-pairing dialog is gone with B-4b: an enrolment request is
+// decided in the Requests tab, §14.6.1.)
 //
 // Both are shown globally (via `navigatorKey`, see main.dart) so they surface
 // regardless of which screen happens to be open — Settings → Devices is
@@ -14,96 +15,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
-
-/// §7.1 LD-2: a device on the network is asking to be paired with this
-/// (Primary) identity. Shows `deviceIdHex` in full, monospace, selectable
-/// plain text — §7.1 step 2 requires the user to compare it against the
-/// requesting device's own display before approving; a truncated or
-/// otherwise non-literal rendering would defeat that check.
-///
-/// There is no reject action: declining is simply not calling
-/// [ICleonaService.approvePairRequest] here. "Later" just closes the dialog —
-/// the request stays queryable via [ICleonaService.getPendingPairRequests]
-/// (surfaced as a list in Settings → Devices) until its display TTL elapses
-/// or the requester retries.
-Future<void> showIncomingPairRequestDialog({
-  required BuildContext context,
-  required ICleonaService service,
-  required String deviceIdHex,
-}) async {
-  final locale = AppLocale.read(context);
-  final messenger = ScaffoldMessenger.maybeOf(context);
-
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    builder: (ctx) => AlertDialog(
-      icon: Icon(Icons.link, color: Theme.of(ctx).colorScheme.primary, size: 48),
-      title: Text(locale.get('device_pending_pairing_incoming_title')),
-      content: SizedBox(
-        width: 380,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(locale.get('device_pending_pairing_incoming_body')),
-            const SizedBox(height: 16),
-            Text(
-              locale.get('device_pending_pairing_id_label'),
-              style: Theme.of(ctx).textTheme.labelMedium,
-            ),
-            const SizedBox(height: 4),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: SelectableText(
-                deviceIdHex,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.warning_amber_rounded,
-                    size: 16, color: Theme.of(ctx).colorScheme.error),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    locale.get('device_pending_pairing_verify_hint'),
-                    style: Theme.of(ctx).textTheme.bodySmall,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: Text(locale.get('cancel')),
-        ),
-        FilledButton(
-          onPressed: () async {
-            Navigator.of(ctx).pop();
-            final ok = await service.approvePairRequest(deviceIdHex);
-            messenger?.showSnackBar(SnackBar(content: Text(locale.get(
-              ok
-                  ? 'device_pending_pairing_approved_snack'
-                  : 'device_pending_pairing_failed_snack',
-            ))));
-          },
-          child: Text(locale.get('accept')),
-        ),
-      ],
-    ),
-  );
-}
 
 /// §7.5: the Primary is asking this Linked Device to countersign an
 /// Emergency Key Rotation. MUST offer both accept and reject — a timeout

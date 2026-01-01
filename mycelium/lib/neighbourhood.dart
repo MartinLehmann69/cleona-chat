@@ -266,11 +266,11 @@ class Neighbourhood {
     _sort();
   }
 
-  /// EDGE for the contact seats (`neighbourhood_contacts.dart`) — also by
-  /// the host when a contact arises or its mark changes.
+  /// EDGE for the contact seats and, after them, the card's seat (S405 V1) — also by the host.
   void contactSeatsCheck([int? justNow]) {
-    seatContacts(_list, justNow, respondingNow ?? (_) => false,
-        isContactDevice, neverFixedNeighbour, _public, v4OnlyOnMetered);
+    final answered = respondingNow ?? (_) => false;
+    seatContacts(_list, justNow, answered, isContactDevice, neverFixedNeighbour, _public, v4OnlyOnMetered);
+    cardSeatHandOver(_list, answered, namedByCards, _public, isContactDevice);
     _sort();
   }
 
@@ -387,9 +387,9 @@ class Neighbourhood {
       : _rank(b).compareTo(_rank(a)));
 
   /// The rank in [all]: a confirmed neighbour's newest stamp, a never
-  /// confirmed hint's LEARNING moment — so a fresh hint is among the first
-  /// three the post box asks (`depositNeighbours`) and sinks if unused
-  /// (`smoke_readiness` B1, G4, network change).
+  /// confirmed hint's LEARNING moment — so a collection asks a fresh hint
+  /// first and it sinks if unused (`smoke_readiness` B1, G4); a deposit
+  /// ranks it last (`ownHoldersRanked`, OP-19).
   DateTime _rank(Neighbour n) => n.last.isAtSameMomentAs(unconfirmed)
       ? (_learned[n.id] ?? unconfirmed)
       : n.last;

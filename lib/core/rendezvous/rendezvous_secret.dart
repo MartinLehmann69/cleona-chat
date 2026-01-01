@@ -1,6 +1,15 @@
-/// Derivations of the two rendezvous paths that still exist on the V4.1
-/// line: first contact (§4.11.10, URI-bound) and binary distribution
-/// (§19.6.5), plus the shared 6 h epoch (§4.11.4).
+/// Derivations of the one rendezvous path that still exists here: the
+/// binary distribution (v4_2 §26.6, §26.7), plus its 6 h epoch.
+///
+/// ── FIRST CONTACT IS GONE (S403, owner decision 5 = B of 02.10.2026) ──
+///
+/// `kFcRoleOwner`, `kFcRoleScanner`, `computeFcTag`, `deriveFcKey` and
+/// `deriveFcNostrSecretKey` stood here — the derivations of a first-contact
+/// rendezvous over the relay network. Their callers were removed with
+/// `cec798c5` (15.09.2026); v4_2 knows no such procedure: first contact
+/// runs over the card (§15), and the relay network carries exactly one
+/// thing, the address record of §11.9, which the delivery layer builds
+/// itself (`mycelium/lib/outside_entry.dart`).
 ///
 /// ── WHAT STOOD HERE UNTIL S362 AND WHY IT IS GONE ─────────────────────
 ///
@@ -38,64 +47,9 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 
 const int kRendezvousEpochHours = 6;
 
-const String _fcTagSalt = 'cleona-rv-fc-tag-v1';
-const String _fcKeySalt = 'cleona-rv-fc-key-v1';
-const String _fcNostrSalt = 'cleona-nostr-fc-v1';
 const String _binaryTagSalt = 'cleona-rv-binary-v1';
 const String _binaryKeySalt = 'cleona-rv-binary-key-v1';
 const String _binaryNostrSalt = 'cleona-nostr-binary-v1';
-
-/// First-Contact Rendezvous role of the URI creator (§4.11.10).
-const String kFcRoleOwner = 'owner';
-
-/// First-Contact Rendezvous role of the URI consumer (§4.11.10).
-const String kFcRoleScanner = 'scanner';
-
-// ---------------------------------------------------------------------------
-// First-Contact Rendezvous (§4.11.10) — URI-scoped, nonce-based
-// ---------------------------------------------------------------------------
-
-/// Computes the First-Contact lookup tag for an epoch and role.
-///
-/// [nonce] — 32-byte random nonce from the ContactSeed-URI `r` parameter
-/// [epochString] — e.g. "2026-06-28-12" (UTC, 6h boundary)
-/// [role] — [kFcRoleOwner] (URI creator) or [kFcRoleScanner] (URI consumer)
-Uint8List computeFcTag(Uint8List nonce, String epochString, String role) {
-  return SodiumFFI().hkdfSha256(
-    nonce,
-    salt: Uint8List.fromList(utf8.encode(_fcTagSalt)),
-    info: Uint8List.fromList(utf8.encode('$epochString/$role')),
-    length: 32,
-  );
-}
-
-/// Derives the encryption key for First-Contact endpoint records.
-/// Shared by both roles within one epoch (each side decrypts the other's
-/// record with the same key; the tag in the AAD keeps roles apart).
-Uint8List deriveFcKey(Uint8List nonce, String epochString) {
-  return SodiumFFI().hkdfSha256(
-    nonce,
-    salt: Uint8List.fromList(utf8.encode(_fcKeySalt)),
-    info: Uint8List.fromList(utf8.encode(epochString)),
-    length: 32,
-  );
-}
-
-/// Derives a deterministic secp256k1 secret key for Nostr First-Contact
-/// publishing per device. Different scanners get different Nostr pubkeys,
-/// so NIP-33 replaceable events do not overwrite each other cross-device
-/// and the owner's d-tag query returns ALL scanner records (same pattern
-/// as Infrastructure Rendezvous §4.11.9).
-Uint8List deriveFcNostrSecretKey(Uint8List nonce, Uint8List ownDeviceId) {
-  final deviceHex =
-      ownDeviceId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  return SodiumFFI().hkdfSha256(
-    nonce,
-    salt: Uint8List.fromList(utf8.encode(_fcNostrSalt)),
-    info: Uint8List.fromList(utf8.encode(deviceHex)),
-    length: 32,
-  );
-}
 
 /// Returns the epoch string for the given UTC time.
 ///

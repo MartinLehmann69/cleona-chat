@@ -14,17 +14,17 @@ import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/call_transport.dart';
 import 'package:cleona/core/calls/call_transport_v41.dart';
 import 'package:cleona/core/calls/upload_probe.dart';
+import 'package:cleona/core/calls/video_pipeline.dart' show VideoStartFailure;
 import 'package:cleona/core/link_io/d_frame.dart';
 // `d_socket.dart` stood here and was removed on 2026-09-03: the
 // analyzer reported it as `unused_import`, and re-measured, not a single identifier from
-// this library occurs in this file. The
-// two remaining mentions (`:187`, `:341`) are COMMENTS that refer to
-// `attachDSocket` or `DSession.lastFrameAt` — references, not
-// use. The D plane stays reachable via `d_frame.dart`.
+// this library occurs in this file; where a comment names the D socket it
+// is a reference, not use. The D plane stays reachable via `d_frame.dart`.
 import 'package:cleona/core/calls/foreground_service.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/calls/group_call_session.dart';
 import 'package:cleona/core/calls/group_video_receiver.dart';
+import 'package:cleona/core/calls/video_fragments.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
@@ -72,6 +72,10 @@ class CallService {
   /// [_stopVoiceSession].
   VoiceEventDispatcher? _voiceEventDispatcher;
 
+  /// Writes the verification report of the open 1:1 voice session when it
+  /// closes ([_writeVoiceReport]); one logger per session, `null` outside.
+  VoiceReportLogger? _voiceReportLogger;
+
   AudioMixer? _audioMixer;
   dynamic _groupVideoEngine;
   GroupVideoReceiver? _groupVideoReceiver;
@@ -85,6 +89,11 @@ class CallService {
   // main.dart _wireServiceCallbacks), exactly like the group video path.
   dynamic _videoEngine;
   bool _videoPaused = false;
+
+  // Reassembly of the peer's fragmented 1:1 video (§17.1, S399); see
+  // [_videoReassemblerFor].
+  VideoFrameReassembler? _videoReassembler;
+  CallSession? _videoReassemblyCall;
 
   // Callbacks forwarded from CleonaService
   void Function(CallInfo)? onIncomingCall;
@@ -241,19 +250,49 @@ class CallService {
       _osDisplayName(call.peerNodeIdHex);
   void Function(String reason)? onVideoUnavailable;
 
-  /// A call was refused BECAUSE plane D cannot carry anything (§17).
+  /// Our OWN video in the running 1:1 video call changed (§17.5): the user
+  /// switched it off or on ([toggleVideoMute]), the rate control gave up
+  /// (`VideoEngine.onVideoShutdown`), or it never came up
+  /// ([_startVideoEngine]). [reason] is meaningful only while [sendingVideo]
+  /// is false.
   ///
-  /// [reason] is the diagnostic line from
-  /// `CallTransport.mediaUnavailableReason` — log and support text, not a
-  /// UI string; it is not translated.
+  /// Fired once per change, never on a clock (Arbeitsregel 5). The service
+  /// turns it into exactly one `CALL_MEDIA_STATE` to the peer
+  /// (`CleonaService._announceOwnVideoState`). I12: this reports what WE
+  /// send; nothing here reads or changes the peer's video.
+  void Function(CallSession session, bool sendingVideo,
+      CallVideoOffReason reason)? onOwnVideoStateChanged;
+
+  /// The own video state last reported through [onOwnVideoStateChanged] for
+  /// the running call — the dedup that makes "once per change" hold when two
+  /// sources (user toggle, rate control) arrive at the same state.
+  ({bool sending, CallVideoOffReason reason})? _ownVideoAnnounced;
+
+  void _ownVideoState(CallSession session, bool sendingVideo,
+      CallVideoOffReason reason) {
+    final r = sendingVideo ? CallVideoOffReason.unspecified : reason;
+    final last = _ownVideoAnnounced;
+    if (last != null && last.sending == sendingVideo && last.reason == r) {
+      return;
+    }
+    _ownVideoAnnounced = (sending: sendingVideo, reason: r);
+    onOwnVideoStateChanged?.call(session, sendingVideo, r);
+  }
+
+  /// A call did not come about BECAUSE plane D cannot carry anything (§17):
+  /// [startCall] or [acceptCall] refused, or the punch window of an accepted
+  /// call found no carrying pair (§17.3).
   ///
-  /// **TODAY NOBODY HANGS ON THIS, and that is reported.**
-  /// `chat_screen.dart:2653` throws a `null` from [startCall] away without a word,
-  /// and `main.dart` does not wire this callback (yet) — both
-  /// files do not belong to this work package. Until that happens,
-  /// the reason stands in the log and the user sees nothing. The callback
-  /// exists so that the wiring is one line and not a search.
-  void Function(String reason)? onCallUnavailable;
+  /// [reason] is what the UI names (i18n keys at [CallUnavailableReason]);
+  /// [diagnostic] is the line from `CallTransport.mediaUnavailableReason` or
+  /// `PunchOutcome.refusal` — log and support text, not translated.
+  ///
+  /// Forwarded by `CleonaService.onCallUnavailable`; the IPC server turns it
+  /// into the event `call_unavailable`, and `main.dart` shows the hint in
+  /// both modes. Not fired for a window that was cancelled by the end of
+  /// its own call.
+  void Function(CallUnavailableReason reason, String diagnostic)?
+      onCallUnavailable;
 
   /// §10.4 / E5 — an inbound CALL_INVITE was refused because the caller runs
   /// a build that does not speak the new voice stack.
@@ -389,9 +428,21 @@ class CallService {
     // `onCallUnavailable` carries the text; §17.3 expressly demands a "clear message"
     // for the case without a shared address family.
     callManager.onMediaPathUnavailable = (session, reason) {
+      // A hang-up cancels the running window (`forgetParticipant`), and the
+      // cancelled window reports "nothing carried" for a call that is
+      // already over. That is no refusal: the user (or the peer) ended it.
+      if (session.state == CallState.ended ||
+          !identical(callManager.currentCall, session)) {
+        _log.debug('Layer D: window of an ended call reported: $reason');
+        return;
+      }
       _log.error('Layer D carries no media for '
           '${session.peerNodeIdHex.substring(0, 8)}: $reason');
-      onCallUnavailable?.call(reason);
+      onCallUnavailable?.call(
+          session.mediaPathNoCommonFamily
+              ? CallUnavailableReason.noCommonConnectionType
+              : CallUnavailableReason.noMediaPath,
+          reason);
       unawaited(callManager.hangup());
     };
     callManager.onCallAccepted = (session) {
@@ -450,19 +501,22 @@ class CallService {
     };
 
     // The loss of the media path comes via the plane D API (§17.4: "10 s
-    // without valid media frames end the session").
-    //
-    // **NOBODY FIRES THIS TODAY.** The 10 s loss rule is not
-    // built — `DSession.lastFrameAt` (`d_socket.dart:87`) is the quantity
-    // it would read, and it has no reader in `lib/`. The callback
-    // stands here nonetheless and not set aside as an empty lambda: it is the
-    // place where the call belongs to be ended as soon as the rule is built.
+    // without valid media frames end the session (UI: "connection lost"),
+    // independent of signaling"). The transport fires it for the session
+    // the 1:1 call armed (`CallTransport.watchMediaLoss`); the call ends
+    // like any hang-up — local teardown first, then one HANGUP, so a peer
+    // that is alive after all learns of it — and carries the end reason
+    // the UI names.
     callTransport.onMediaPathLost = (peerHex) {
       final call = callManager.currentCall;
       if (call == null || call.peerNodeIdHex != peerHex) return;
       _log.warn('Plane D: media path to ${peerHex.substring(0, 8)} lost '
           '(§17.4) — call is being ended');
-      callManager.hangup();
+      unawaited(callManager
+          .hangup(reason: CallEndReason.connectionLost)
+          .catchError((Object e, StackTrace st) {
+        _log.error('Hang-up after media loss threw (detached): $e\n$st');
+      }));
     };
 
     // The receive side of plane D (§17.1). A D-frame carries its
@@ -492,8 +546,12 @@ class CallService {
               AudioFrame(seqNum: frame.seq, data: frame.payload));
           _drainPlayback();
         case DFrameKind.video:
+          // One D frame is one FRAGMENT (§17.1, S399); the decoder and the
+          // counter see whole frames only.
+          final whole = _videoReassemblerFor(call).add(frame.payload);
+          if (whole == null) break;
           call.videoFramesReceived++;
-          _feedVideoFrame(frame.payload);
+          _feedVideoFrame(whole);
         case DFrameKind.stream:
           // §17.6 is the media stream lane, not the call. A
           // stream block has no business in a call session.
@@ -552,6 +610,8 @@ class CallService {
     // control frame that arrived before it would have no recipient.
     callTransport.onControlRecord = groupCallManager.handleControlRecord;
 
+    // The same E5 version field as the 1:1 INVITE (S398-W2).
+    groupCallManager.callerAppMajorMinor = ownAppMajorMinor;
     groupCallManager.sendViaUser = (recipientUserId, type, payload) =>
         _ctx.sendToUser(
           recipientUserId: recipientUserId,
@@ -658,7 +718,7 @@ class CallService {
     final reason = callTransport.mediaUnavailableReason;
     if (reason == null) return true;
     _log.error('$what rejected — Layer D carries no media: $reason');
-    onCallUnavailable?.call(reason);
+    onCallUnavailable?.call(CallUnavailableReason.noMediaPath, reason);
     return false;
   }
 
@@ -714,7 +774,7 @@ class CallService {
     // §17.2 provides it as an ordinary cell, and the caller sees
     // "refused" instead of endless "ringing".
     if (!_mediaCarrierReady('Anrufannahme')) {
-      await callManager.rejectCall(reason: 'media-unavailable');
+      await callManager.rejectCall(reason: kCallRejectMediaUnavailable);
       return;
     }
     await callManager.acceptCall();
@@ -873,6 +933,16 @@ class CallService {
         (serializedFrame) =>
             groupCallManager.sendGroupVideoFrame(serializedFrame),
       );
+      // The factory no longer starts the engine (S399, O-3) — the caller
+      // does, here as in `_startVideoEngine`.
+      final dynamic engine = _groupVideoEngine;
+      unawaited(Future<void>(() async {
+        try {
+          await (engine as dynamic).start();
+        } catch (e) {
+          _log.error('Group video engine start threw: $e');
+        }
+      }));
     } catch (e) {
       _log.error('Group video engine start failed: $e');
       _groupVideoEngine = null;
@@ -922,24 +992,80 @@ class CallService {
 
   // ── Voice Session (1:1) ───────────────────────────────────────────
 
+  /// How long the capture side may deliver nothing before this device sends
+  /// silence in its place.
+  ///
+  /// Five frame intervals of 20 ms. A shorter gap is scheduling jitter of the
+  /// 5 ms tick against the device clock, which the peer's jitter buffer
+  /// absorbs; filling it would insert frames into live speech. A longer gap
+  /// is a capture side that is not delivering — and §17.4 ends a session
+  /// after 10 s without valid media frames, so a device that is alive must
+  /// not fall silent on the wire.
+  static const Duration kCaptureStallThreshold = Duration(milliseconds: 100);
+
+  /// The interval of the silence frames: the 20 ms of §17.1 (50 frames/s).
+  static const Duration kSilenceFrameInterval = Duration(milliseconds: 20);
+
+  /// The format silence is encoded in. No device is involved, so there is
+  /// no platform format to ask (I3/I4 bind what a DEVICE reported); 48 kHz
+  /// is Opus' own rate, and under the constant-bitrate cap of §17.1 the
+  /// frame is 70 B at every rate — the peer decodes it at its own.
+  static const VoiceFormat _silenceFormat = VoiceFormat(
+    sampleRate: 48000,
+    channels: 1,
+    frameSamples: 960,
+    frameBytes: 1920,
+  );
+
+  /// Runs from the start of the voice tick to its end; the time base of the
+  /// stall detection and of the silence cadence. Monotonic — a step of the
+  /// wall clock must not produce or suppress frames.
+  Stopwatch? _voiceClock;
+  int _lastCaptureUs = 0;
+  int _nextSilenceUs = 0;
+  VoiceCodec? _silenceCodec;
+  Uint8List? _silencePcm;
+  bool _silenceFailureLogged = false;
+
   Future<void> _startVoiceSession(CallSession session) async {
+    if (session.sharedSecret == null) return;
+    // THE SEND CADENCE STARTS WITH THE CALL, NOT WITH THE CAPTURE DEVICE.
+    // A device in a call always sends voice frames on cadence; when it
+    // cannot capture — no microphone permission (or its dialog still open),
+    // no voice session, a capture side that delivers nothing or is lost — it
+    // sends silence, exactly what a muted microphone sends (I6). Otherwise
+    // the peer's §17.4 loss rule would end a call whose other side is alive.
+    _voiceClock = Stopwatch()..start();
+    _lastCaptureUs = 0;
+    _nextSilenceUs = 0;
+    _silenceFailureLogged = false;
+    _captureTimer?.cancel();
+    _captureTimer = Timer.periodic(const Duration(milliseconds: 5), (_) {
+      _captureAndSend(session);
+    });
+
     if (Platform.isAndroid) {
       final granted = await AudioPermissions.requestRecordAudio();
       if (!granted) {
-        _log.warn('RECORD_AUDIO permission denied — call audio disabled');
+        _log.warn('RECORD_AUDIO permission denied — sending silence, the '
+            'peer does not hear this side');
         return;
       }
     }
     if (Platform.isAndroid) {
       await ForegroundServiceControl.promoteForCall();
     }
-    if (session.sharedSecret == null) return;
+    // The call may have ended while the permission dialog stood open; a
+    // voice session opened now would have nobody to close it.
+    if (session.state == CallState.ended) return;
     try {
       final lib = VoiceNativeLibrary.platform();
       final voiceSession = VoiceSession.open(library: lib);
       final format = voiceSession.format;
 
       _voiceSession = voiceSession;
+      _voiceReportLogger = VoiceReportLogger(
+          profileDir: _ctx.profileDir, callId: session.callIdHex);
       _captureCodec = VoiceCodec.fromFormat(format);
       _playbackCodec = VoiceCodec.fromFormat(format);
       _captureBuf = Int16List(format.frameSamples);
@@ -973,22 +1099,28 @@ class CallService {
       // platform bridge is wired (daemon, Linux, Windows).
       unawaited(onRequestAudioFocus?.call());
 
-      _captureTimer =
-          Timer.periodic(const Duration(milliseconds: 5), (_) {
-        _captureAndSend(session);
-      });
-
       _log.info('Voice session started (rate=${format.sampleRate}, '
           'channels=${format.channels}, frame=${format.frameSamples})');
     } catch (e) {
-      _log.error('Voice session start failed: $e');
-      _stopVoiceSession();
+      // The call stands and the tick keeps running: this device sends
+      // silence and names its state ([CallSession.captureUnavailable]).
+      _log.error('Voice session start failed: $e — sending silence, the '
+          'peer does not hear this side');
+      _closeVoiceBackend();
     }
   }
 
+  /// One tick of the voice cadence: the captured frame when there is one,
+  /// silence when the capture side has delivered nothing for
+  /// [kCaptureStallThreshold].
   void _captureAndSend(CallSession session) {
+    final clock = _voiceClock;
+    if (clock == null) return;
     final vs = _voiceSession;
-    if (vs == null) return;
+    if (vs == null) {
+      _sendSilenceIfDue(session, clock.elapsedMicroseconds);
+      return;
+    }
 
     // S367: drains VoiceSession.pollEvent() and applies RoutePolicy's route
     // switches — see VoiceEventDispatcher's file doc for why this belongs on
@@ -1003,7 +1135,15 @@ class CallService {
     }
 
     final status = vs.readCaptureFrameInto(_captureBuf!, timeoutMs: 0);
-    if (status != VoiceCaptureStatus.frame) return;
+    if (status != VoiceCaptureStatus.frame) {
+      // `timeout` between two frames is the normal case; `timeout` for longer
+      // than the threshold, or `closed` (capture device lost), is a capture
+      // side that does not deliver.
+      _sendSilenceIfDue(session, clock.elapsedMicroseconds);
+      return;
+    }
+    _lastCaptureUs = clock.elapsedMicroseconds;
+    _setCaptureUnavailable(session, false);
 
     try {
       final pcmBytes = _captureBuf!.buffer.asUint8List(
@@ -1034,10 +1174,49 @@ class CallService {
     }
   }
 
-  void _stopVoiceSession() {
-    _captureTimer?.cancel();
-    _captureTimer = null;
+  /// Sends one silence frame when the capture side has stalled and the
+  /// 20 ms cadence is due. The frame is Opus-encoded zeroed PCM — the same
+  /// kind, the same size class and the same cadence as a muted microphone
+  /// (§17.1; no new frame kind, no new size).
+  void _sendSilenceIfDue(CallSession session, int nowUs) {
+    if (nowUs - _lastCaptureUs < kCaptureStallThreshold.inMicroseconds) return;
+    if (!session.captureUnavailable) {
+      _setCaptureUnavailable(session, true);
+      _nextSilenceUs = nowUs;
+    }
+    if (nowUs < _nextSilenceUs) return;
+    _nextSilenceUs += kSilenceFrameInterval.inMicroseconds;
+    // No burst after a stalled event loop: missed frames are not made up.
+    if (_nextSilenceUs < nowUs) {
+      _nextSilenceUs = nowUs + kSilenceFrameInterval.inMicroseconds;
+    }
+    try {
+      final codec = _silenceCodec ??= VoiceCodec.fromFormat(_silenceFormat);
+      final pcm = _silencePcm ??= Uint8List(_silenceFormat.frameBytes);
+      _sendAudioFrame(session, codec.encode(pcm));
+    } catch (e) {
+      if (!_silenceFailureLogged) {
+        _silenceFailureLogged = true;
+        _log.error('Silence frame could not be encoded: $e — this side '
+            'sends no voice frames, the peer will end the call after 10 s '
+            '(§17.4)');
+      }
+    }
+  }
 
+  void _setCaptureUnavailable(CallSession session, bool unavailable) {
+    if (session.captureUnavailable == unavailable) return;
+    session.captureUnavailable = unavailable;
+    _log.info(unavailable
+        ? 'Capture unavailable — sending silence on cadence'
+        : 'Capture delivers again — sending the microphone');
+    onStateChanged?.call();
+  }
+
+  /// Closes the OS voice session and what hangs on it. The voice tick is
+  /// NOT stopped here: without a voice session it sends silence.
+  void _closeVoiceBackend() {
+    _writeVoiceReport();
     try {
       _voiceSession?.stop();
       _voiceSession?.close();
@@ -1053,6 +1232,39 @@ class CallService {
     _playbackCodec = null;
     _captureBuf = null;
     _jitterBuffer = null;
+  }
+
+  /// The verification report of the voice session that is about to close
+  /// (§17.5, ABI I11: "logged exactly once per call"): one line into the
+  /// profile's log, read at the END of the session — the under-/overrun
+  /// counters run since `open()` and say nothing before — and before
+  /// `stop()`, while the routes are still the ones the call ran on. The line
+  /// names the call id, the backend, the format, the effect states, the
+  /// routes and the counters; no peer, no content.
+  ///
+  /// Never load-bearing: a report that cannot be read or written must not
+  /// keep the session from closing.
+  void _writeVoiceReport() {
+    final vs = _voiceSession;
+    final logger = _voiceReportLogger;
+    _voiceReportLogger = null;
+    if (vs == null || logger == null) return;
+    try {
+      logger.logOnce(vs.getReport());
+    } catch (e) {
+      _log.warn('Voice verification report could not be written: $e');
+    }
+  }
+
+  void _stopVoiceSession() {
+    _captureTimer?.cancel();
+    _captureTimer = null;
+    _voiceClock = null;
+
+    _closeVoiceBackend();
+    _silenceCodec?.dispose();
+    _silenceCodec = null;
+    _silencePcm = null;
 
     onResetCallAudioModeAndroid?.call();
     // §10.4 "Session behaviour" (S367): release what onRequestAudioFocus
@@ -1082,21 +1294,135 @@ class CallService {
       _log.debug('Video call requested but no video engine factory wired '
           '— continuing audio-only');
       onVideoUnavailable?.call('Video not available (no video engine)');
+      // §17.5: the peer expects a picture in a video call; without a reason
+      // it would see the avatar and could not tell why. This build has no
+      // video path at all (the desktop daemon, §17.5 "desktop video calls
+      // remain audio-only") — the reason is known and is named (S399, owner
+      // C8), not `unspecified`.
+      _ownVideoUnavailable(session, CallVideoOffReason.notSupported);
       return;
     }
+    final dynamic engine;
     try {
-      final engine = createVideoEngine!(
+      engine = createVideoEngine!(
         session.sharedSecret!,
         (serializedFrame) => _sendVideoFrame(session, serializedFrame),
       );
-      _videoEngine = engine;
-      try {
-        (engine as dynamic).onKeyframeNeeded = sendKeyframeRequest;
-      } catch (_) {}
     } catch (e) {
       _log.error('Video engine start failed — continuing audio-only: $e');
       _videoEngine = null;
       onVideoUnavailable?.call('Video not available (codec error)');
+      // The factory threw while building the engine — the device has a
+      // video path (a factory exists), this attempt failed.
+      _ownVideoUnavailable(session, CallVideoOffReason.startFailed);
+      return;
+    }
+    _videoEngine = engine;
+    try {
+      (engine as dynamic).onKeyframeNeeded = sendKeyframeRequest;
+    } catch (_) {}
+    _hookRateShutdown(session, engine);
+    // THE SERVICE STARTS THE ENGINE, NOT THE FACTORY (S399, O-3). Until then
+    // `main.dart::_createVideoEngine` called `engine.start()` itself, and
+    // because `VideoEngine.start()` contains no `await` it ran to its end
+    // INSIDE the factory — a `VideoOpenRateUnachievable` fired
+    // `onVideoShutdown` before the hook above existed, and the peer never
+    // learned why there was no picture. Started here, the hook is in place.
+    final bool ok;
+    try {
+      ok = (await (engine as dynamic).start()) == true;
+    } catch (e) {
+      _log.error('Video engine start threw — continuing audio-only: $e');
+      _failedVideoStart(session, engine);
+      return;
+    }
+    if (!ok) _failedVideoStart(session, engine);
+  }
+
+  /// The engine did not come up. If the rate control already said why
+  /// (`bandwidthInsufficient` from the open), that stays the reason — a
+  /// second, vaguer one after it would overwrite the better one.
+  ///
+  /// Otherwise the reason is the one the engine names in `startFailure`
+  /// (S399, owner C8): no video path on this device -> `notSupported`,
+  /// anything else -> `startFailed`. An engine that names nothing (or throws
+  /// out of `start()`) still failed to start — `startFailed`, never
+  /// `unspecified`: the sender does know that much.
+  void _failedVideoStart(CallSession session, dynamic engine) {
+    if (!identical(_videoEngine, engine)) return;
+    final announced = _ownVideoAnnounced;
+    final reason = announced != null && !announced.sending
+        ? announced.reason
+        : _startFailureReason(engine);
+    _log.info('own video did not start in call '
+        '${session.callIdHex.substring(0, 8)} (${reason.name}) '
+        '— continuing audio-only');
+    _videoEngine = null;
+    _videoPaused = true;
+    if (_ownVideoAnnounced == null) {
+      _ownVideoState(session, false, reason);
+    }
+    onStateChanged?.call();
+  }
+
+  /// `dynamic` like the other engine members: `video_engine.dart` is not
+  /// imported here, and a test double may lack the field.
+  static CallVideoOffReason _startFailureReason(dynamic engine) {
+    Object? failure;
+    try {
+      failure = (engine as dynamic).startFailure;
+    } catch (_) {}
+    return failure == VideoStartFailure.unsupported
+        ? CallVideoOffReason.notSupported
+        : CallVideoOffReason.startFailed;
+  }
+
+  /// No video path at all in this video call: our own video is off (so the
+  /// own button says so, O-4) and the peer is told once.
+  void _ownVideoUnavailable(CallSession session, CallVideoOffReason reason) {
+    _videoPaused = true;
+    _ownVideoState(session, false, reason);
+  }
+
+  /// §17.5: "only once no preset fits anymore does the video stream end —
+  /// with a reason in `CALL_MEDIA_STATE`, not silently."
+  ///
+  /// CHAINED, not replaced: the factory in `main.dart` already set
+  /// `onVideoShutdown` (it clears the remote texture), and that must keep
+  /// running. `dynamic` for the same reason as `onKeyframeNeeded` above:
+  /// `video_engine.dart` is not imported here.
+  void _hookRateShutdown(CallSession session, dynamic engine) {
+    try {
+      final dynamic previous = (engine as dynamic).onVideoShutdown;
+      (engine as dynamic).onVideoShutdown = (dynamic reason, dynamic detail) {
+        if (previous != null) {
+          try {
+            previous(reason, detail);
+          } catch (e) {
+            _log.warn('onVideoShutdown (factory) threw: $e');
+          }
+        }
+        // Only for the engine and the call it belongs to — a late tick of a
+        // stopped engine must not report on the next call.
+        final call = callManager.currentCall;
+        if (!identical(_videoEngine, engine) ||
+            call == null ||
+            call.callIdHex != session.callIdHex ||
+            call.state != CallState.inCall) {
+          return;
+        }
+        _log.info('own video ended by the rate control: $detail');
+        // O-4: the engine muted itself; the own state follows, so the own
+        // "Video" button shows "off" and ONE tap switches it on again
+        // (before: two taps, the first announcing a `userDisabled` nobody
+        // chose).
+        _videoPaused = true;
+        _ownVideoState(
+            session, false, CallVideoOffReason.bandwidthInsufficient);
+        onStateChanged?.call();
+      };
+    } catch (e) {
+      _log.debug('onVideoShutdown hook not available on this engine: $e');
     }
   }
 
@@ -1108,25 +1434,37 @@ class CallService {
     }
     _videoEngine = null;
     _videoPaused = false;
+    _ownVideoAnnounced = null;
+    _videoReassembler = null;
+    _videoReassemblyCall = null;
   }
 
-  /// Whether outgoing video capture+send is currently paused (user toggle).
+  /// Whether our own video is off: paused by the user, ended by the rate
+  /// control, or never started in this video call (S399, O-4).
   bool get isVideoMuted => _videoPaused;
 
   /// Pause/resume outgoing video capture+send. No-op (with a debug log) if
   /// no video engine is active for the current call (audio-only call, or
-  /// video failed to start on a platform without capture/codec support).
+  /// video failed to start on a platform without capture/codec support) —
+  /// and then the state does NOT flip either: a button saying "Video" while
+  /// nothing can be sent would be the claim §17.5 exists to avoid.
   void toggleVideoMute() {
-    _videoPaused = !_videoPaused;
     final engine = _videoEngine;
     if (engine == null) {
       _log.debug('toggleVideoMute: no active video engine — no-op');
       return;
     }
+    _videoPaused = !_videoPaused;
     try {
       (engine as dynamic).muted = _videoPaused;
     } catch (e) {
       _log.debug('toggleVideoMute dispatch failed: $e');
+      return;
+    }
+    // §17.5: tell the peer — "video off" by choice, or on again.
+    final call = callManager.currentCall;
+    if (call != null && call.state == CallState.inCall && call.isVideo) {
+      _ownVideoState(call, !_videoPaused, CallVideoOffReason.userDisabled);
     }
   }
 
@@ -1171,12 +1509,15 @@ class CallService {
   /// 85 B that burst the class; since 06.09.2026 it carries 133 B and
   /// it would "only" be waste. The reason for leaving it out is
   /// the duplication, not the size.
-  void sendLiveMediaFrame({
+  ///
+  /// Returns whether Plane D accepted the frame — the video path counts a
+  /// frame as sent only when all its fragments were accepted (S399).
+  bool sendLiveMediaFrame({
     required CallSession session,
     required proto.MessageTypeV3 messageType,
     required Uint8List payload,
   }) {
-    if (session.state == CallState.ended) return;
+    if (session.state == CallState.ended) return false;
     final failure = callTransport.sendMedia(
       peerHex: session.peerNodeIdHex,
       kind: messageType == proto.MessageTypeV3.MTV3_CALL_VIDEO
@@ -1199,7 +1540,7 @@ class CallService {
             .frameClass
             .wireSize,
       );
-      return;
+      return true;
     }
     // 50 frames/s: a log line per frame would itself be the damage.
     // Reported is the FIRST failure per call, loudly, with reason.
@@ -1210,6 +1551,7 @@ class CallService {
           '(${failure.name}) — ${callTransport.mediaUnavailableReason ?? "—"}'
           '. Further frames of this call are silently discarded.');
     }
+    return false;
   }
 
   void _sendAudioFrame(CallSession session, Uint8List opusFrame) {
@@ -1299,13 +1641,58 @@ class CallService {
   /// Appendix B.2) so audio and video share one envelope implementation.
   /// Called from [VideoEngine.onVideoFrame] via the injected
   /// [createVideoEngine] factory.
+  ///
+  /// **Split to the class, counted only when sent** (§17.1, S399). A frame
+  /// larger than one D frame carries (1157 B, `DFrameClass.payloadCapacity`)
+  /// goes out as fragments ([splitVideoFrame]); the receiver puts them back
+  /// together in [_videoReassemblerFor]. `videoFramesSent` counts a frame
+  /// only when EVERY fragment was accepted — until S399 it counted every
+  /// frame the engine produced, including the ones Plane D refused as
+  /// `tooLarge`, and so claimed video that never left the device. When one
+  /// fragment is refused, the rest of that frame is not sent either: the
+  /// receiver could not use it.
   void _sendVideoFrame(CallSession session, Uint8List videoFrame) {
+    final fragments = splitVideoFrame(
+        videoFrame, DFrameKind.video.frameClass.payloadCapacity);
+    if (fragments.isEmpty) {
+      if (!session.mediaFailureLogged) {
+        session.mediaFailureLogged = true;
+        _log.error('Layer D: video frame of ${videoFrame.length} B needs more '
+            'than $kVideoMaxFragments fragments — not sent. Further '
+            'failures of this call are silently discarded.');
+      }
+      return;
+    }
+    for (final fragment in fragments) {
+      final sent = sendLiveMediaFrame(
+        session: session,
+        messageType: proto.MessageTypeV3.MTV3_CALL_VIDEO,
+        payload: fragment,
+      );
+      if (!sent) return;
+    }
     session.videoFramesSent++;
-    sendLiveMediaFrame(
-      session: session,
-      messageType: proto.MessageTypeV3.MTV3_CALL_VIDEO,
-      payload: videoFrame,
-    );
+  }
+
+  /// The reassembly of the peer's video in the running 1:1 call (§17.1).
+  ///
+  /// One per call, keyed by the [CallSession] object, dropped in
+  /// [_stopVideoEngine]. Exists even when this device has no video engine:
+  /// `videoFramesReceived` counts whole frames, and so does the
+  /// [onVideoFrameReceived] tap.
+  VideoFrameReassembler _videoReassemblerFor(CallSession call) {
+    final current = _videoReassembler;
+    if (current != null && identical(_videoReassemblyCall, call)) {
+      return current;
+    }
+    final fresh = VideoFrameReassembler()
+      // A keyframe that did not arrive whole: ask for a new one, the same
+      // request the engine sends when its decoder cannot start (§17.5).
+      // No resend of the lost fragments — live media is never re-requested.
+      ..onKeyframeLost = sendKeyframeRequest;
+    _videoReassembler = fresh;
+    _videoReassemblyCall = call;
+    return fresh;
   }
 
   void sendKeyframeRequest() {

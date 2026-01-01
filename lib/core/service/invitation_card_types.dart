@@ -63,6 +63,11 @@ const int kInvitationExpiryUnlimited = 0xFFFFFFFF;
 /// §15.12: „standing invitations per node — max. 10".
 const int kInvitationStandingCap = 10;
 
+/// §12.4: "Until such invitation data can be made, the device shows a
+/// waiting indicator — at most 30 s." The same value as mycelium's
+/// `kWayInWaitAtMost`; this file knows no network, so it carries its own.
+const Duration kInvitationWayInWait = Duration(seconds: 30);
+
 /// An issued card, as the UI shows it.
 class InvitationCard {
   const InvitationCard({
@@ -72,7 +77,16 @@ class InvitationCard {
     required this.kind,
     required this.expiryUnixSeconds,
     this.faceToFace = false,
+    this.wayIn = false,
   });
+
+  /// §12.4: the invitation data carry a way in from the open network — an
+  /// own address whose reachability is evidenced, or the verified invitation
+  /// neighbour holding the invitation's code (`mycelium/lib/invitation_way_in
+  /// .dart`). Only then is the card shown at once; without it the UI waits
+  /// ([ICleonaService.awaitInvitationWayIn]) and then offers it anyway,
+  /// labelled "same W/LAN only".
+  final bool wayIn;
 
   /// §15.5 "Automatic acceptance, for two paths only": the card was issued
   /// for personal handover (QR shown, NFC). Then [text] is EMPTY — the same
@@ -89,8 +103,8 @@ class InvitationCard {
   /// §15.6: `cleona:1:<base64url>` — the line to copy.
   final String text;
 
-  /// §15.2: the packed card, 90–380 B — the content of the QR code
-  /// ("90–380 B binary") and of the NFC record.
+  /// §15.2: the packed card, 91–413 B — the content of the QR code
+  /// ("91–413 B binary", §15.11) and of the NFC record.
   final Uint8List packed;
 
   final InvitationKind kind;
@@ -107,6 +121,7 @@ class InvitationCard {
         'kind': kind.name,
         'expiry': expiryUnixSeconds,
         if (faceToFace) 'faceToFace': true,
+        if (wayIn) 'wayIn': true,
       };
 
   /// Throws [FormatException] if a mandatory field is missing — showing half
@@ -131,6 +146,7 @@ class InvitationCard {
       kind: kind,
       expiryUnixSeconds: expiry,
       faceToFace: j['faceToFace'] == true,
+      wayIn: j['wayIn'] == true,
     );
   }
 }
@@ -208,7 +224,10 @@ enum InvitationReadError {
   wrongVersion,
   badCharacters,
   wrongChannel,
-  expired;
+  expired,
+
+  /// A `cleona:2:` line whose signature does not verify (T-a, §15.6).
+  altered;
 
   static InvitationReadError? byName(String? n) {
     for (final e in values) {
@@ -223,6 +242,11 @@ enum InvitationRedeemOutcome {
   /// The request is out; the contact only stands once the inviter accepts
   /// (§12.5, §15.1 "asks the user, user accepts").
   requestSent,
+
+  /// Out-of-band invitation (S405 F-1): the request is saved, but no way
+  /// carried it and no post box took it yet — it goes out again at the next
+  /// edge (D-44). Not an error (§12.2).
+  requestResting,
 
   /// The card was not readable or was rejected before any packet;
   /// [InvitationRedeemResult.readError] names the finding.
@@ -239,6 +263,11 @@ enum InvitationRedeemOutcome {
 
   /// The delivery layer is not attached (yet).
   notConnected,
+
+  /// A fresh install that has not decided yet (§13.0, D-40) read the card
+  /// only to look for its recovery bundle at the card's addresses; nothing
+  /// was sent in the identity's name.
+  searchedOnly,
 
   /// Every other failure; `detail` names it for the log.
   failed;
@@ -340,28 +369,42 @@ class StandingInvitation {
 /// [items] is `null` if the list could not be read — that is NOT "no
 /// invitations" and gets a sentence of its own.
 class StandingInvitationsResult {
-  const StandingInvitationsResult(this.items, {this.notConnected = false});
+  const StandingInvitationsResult(this.items,
+      {this.notConnected = false, this.closedFaceToFace = const []});
   const StandingInvitationsResult.unavailable({this.notConnected = false})
-      : items = null;
+      : items = null,
+        closedFaceToFace = const [];
 
   final List<StandingInvitation>? items;
   final bool notConnected;
 
+  /// §15.3 "lives 60 s" (S406-QR2 2A): identifiers of the face-to-face
+  /// invitations the SERVICE closed in its current run — 60 s after showing
+  /// without a redemption, or at its start because they were never shown.
+  /// Not standing any more, so not in [items]; the view reads it to say why
+  /// the code it shows disappeared (and not mistake a redemption for it).
+  final List<String> closedFaceToFace;
+
   Map<String, dynamic> toJson() => {
         if (items != null) 'items': items!.map((i) => i.toJson()).toList(),
         'notConnected': notConnected,
+        if (closedFaceToFace.isNotEmpty) 'closedFaceToFace': closedFaceToFace,
       };
 
   static StandingInvitationsResult fromJson(Map<String, dynamic> j) {
     final raw = j['items'];
     final nc = j['notConnected'] == true;
     if (raw is! List) return StandingInvitationsResult.unavailable(notConnected: nc);
+    final closed = j['closedFaceToFace'];
     return StandingInvitationsResult(
       raw
           .whereType<Map<String, dynamic>>()
           .map(StandingInvitation.fromJson)
           .toList(growable: false),
       notConnected: nc,
+      closedFaceToFace: closed is List
+          ? closed.whereType<String>().toList(growable: false)
+          : const [],
     );
   }
 }

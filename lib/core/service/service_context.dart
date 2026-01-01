@@ -84,14 +84,8 @@ abstract class ServiceContext {
     // leg so the caller can retransmit the identical packet without
     // re-running the inner crypto pipeline (see [SendLeg]).
     List<SendLeg>? outLegs,
-    // Key overrides for non-contact group/channel members whose KEM keys
-    // were received via GROUP_INVITE but who are not in _contacts.
-    // When set, these take priority over the contact-record lookup so
-    // that transitive members (invited by another admin) can be reached.
-    Uint8List? recipientX25519PkOverride,
-    Uint8List? recipientMlKemPkOverride,
-    // Ed25519 PK override for L3 mailbox anchor (S&F/Erasure).
-    Uint8List? recipientEd25519PkOverride,
+    // No key overrides (B-3, S398, E6; v4_2 §22.5.1): a co-member who is not
+    // a contact is reached as a group pair (§4.3), found by the UserID.
   });
 
   void saveChannels();

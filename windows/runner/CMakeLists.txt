@@ -132,6 +132,52 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Copying cleona_video.dll into Windows bundle"
 )
 
+# === cleona-play.exe (sound player the daemon starts per sound) ===
+# Built from windows/cleona_play/ (libogg + libvorbis from pinned Xiph
+# sources, output through winmm), copied next to cleona.exe:
+# notification_sound_service.dart starts `<bundleDir>\cleona-play.exe`, and
+# the MSVC runtime DLLs it needs are bundled in the same directory. Without
+# it every sound is silent on Windows -- the verification below fails the
+# build when it is missing (-DEXPECTED_PROGRAMS).
+add_subdirectory("${CMAKE_SOURCE_DIR}/cleona_play" "${CMAKE_BINARY_DIR}/cleona_play_build")
+add_dependencies(${BINARY_NAME} cleona-play)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona-play>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona-play.exe into Windows bundle"
+)
+# The player must decode every sound the bundle ships (decode only, no
+# output device needed) -- see windows/cleona_play/check_sounds.cmake.
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DPLAYER=$<TARGET_FILE:cleona-play>
+            -DSOUNDS_DIR=${CMAKE_SOURCE_DIR}/../assets/sounds
+            -P "${CMAKE_SOURCE_DIR}/cleona_play/check_sounds.cmake"
+    COMMENT "Decoding every bundled sound with cleona-play.exe"
+    VERBATIM
+)
+
+# === Third-party license texts (S403) ===================================
+# cleona-play.exe statically links the pinned libogg/libvorbis sources (see
+# assets/licenses/INDEX.txt), so their BSD-3-Clause texts ship with the
+# bundle. Copied into a `licenses/` folder next to the executables, the same
+# POST_BUILD pattern as the copies above. The Flutter assets carry the same
+# texts into the GUI bundle (pubspec.yaml); this is the side the GUI does not
+# own. make_directory first: `cmake -E copy` does not create the destination
+# path, and the Release directory is not cleared between builds.
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${BINARY_NAME}>/licenses"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/../assets/licenses/libogg.txt"
+            "$<TARGET_FILE_DIR:${BINARY_NAME}>/licenses/libogg.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/../assets/licenses/libvorbis.txt"
+            "$<TARGET_FILE_DIR:${BINARY_NAME}>/licenses/libvorbis.txt"
+    COMMENT "Copying Xiph license texts into Windows bundle"
+)
+
 # Copy native DLLs (libsodium, liboqs, libzstd) to the build output directory.
 # libsodium comes out of the provisioned MSVC package when cleona_pow resolved
 # one (same archive as libsodium.lib — see native/cleona_pow/CMakeLists.txt);
@@ -278,6 +324,7 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
           -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll
+          -DEXPECTED_PROGRAMS=cleona-play.exe
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

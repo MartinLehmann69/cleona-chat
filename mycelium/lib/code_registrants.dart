@@ -9,10 +9,12 @@
 /// them the recipient named. Each fixed neighbour therefore gets its own
 /// [Registrant]: what one of them has received says nothing about another.
 ///
-/// No packet of its own, as before: the pieces ride in packets that go to
-/// the fixed neighbour anyway (cover stream, keep-alive), and only at an
-/// edge while the cover stream is stopped as a filler (§3.1,
-/// `CodeRoute.edge`).
+/// The pieces travel as `0x24` packets of their own, at the edges of §8.1
+/// only (`CodeRoute.edge`, `code_registration_send.dart`; F-B). What a
+/// neighbour has received is kept by its [Neighbour.id], not by its first
+/// address: when a `0x25` from another address of the same node moves that
+/// address to the front, the node has the codes all the same, and the list
+/// is not sent again.
 library;
 
 import 'dart:io';
@@ -44,7 +46,7 @@ class Registrants {
     for (final n in fixed) {
       if (!n.has(target.$1, target.$2)) continue;
       final r = _last = _by.putIfAbsent(n.id, _make);
-      return r.next(n.key, today);
+      return r.next('${n.id}', today);
     }
     _last = null;
     return null;

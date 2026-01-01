@@ -1,9 +1,12 @@
+import 'package:cleona/core/calls/plane_d_host.dart';
 import 'package:cleona/core/service/mycelium_seam.dart';
+import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/update/data_port_http.dart';
 import 'package:cleona/core/util/host_interfaces.dart';
+import 'package:cleona/core/platform/process_hardening.dart';
 import 'package:mycelium/host.dart';
+import 'package:mycelium/node_post_box.dart' show NodePostBox;
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -17,9 +20,11 @@ import 'package:cleona/core/identity/identity_remote_deletion.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/ipc/ipc_probe.dart';
+import 'package:cleona/core/ipc/ipc_secret.dart';
 import 'package:cleona/core/ipc/ipc_server.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/log/log_redaction.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/util/local_addresses.dart'
     show dialableLocalAddresses, isRealNetworkChange;
 import 'package:cleona/core/tray/native_tray.dart';
@@ -27,8 +32,10 @@ import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
+import 'package:cleona/core/calendar/reminder_text.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
-import 'package:cleona/core/service/notification_sound_service.dart' show VibrationType;
+import 'package:cleona/core/calendar/sync/caldav_server_setting.dart';
+import 'package:cleona/core/platform/desktop_notifier.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
@@ -108,6 +115,11 @@ String? _processNameOf(int targetPid) {
 /// Cleona service daemon — runs independently of the GUI.
 /// One daemon, one port, one node — all identities active simultaneously.
 void main(List<String> args) {
+  // Architecture §23.10: live build on Linux disables core dumps and
+  // cross-process memory access. Done before any key material is loaded.
+  hardenLinuxProcessMemory(context: 'daemon');
+
+
   // Captured for the zone error handler: CLogger.get without profileDir
   // buffers NOTHING (key `daemon:null`, no file sink) — an uncaught error
   // logged that way is lost when the GUI drains the daemon's stderr
@@ -153,7 +165,7 @@ void main(List<String> args) {
           final otherName = _processNameOf(otherPid);
           final ownName = _processNameOf(pid);
           if (otherName != null && ownName != null && otherName == ownName) {
-            stderr.writeln(
+            RedactedConsole.err(
               'ERROR: Cleona daemon already running (PID $otherPid). '
               'Stop the running process first before starting a new one.');
             log.info('Daemon PID $otherPid is still alive — exiting.');
@@ -187,7 +199,7 @@ void main(List<String> args) {
     try {
       lockRaf = lockFile.openSync(mode: FileMode.write);
     } on FileSystemException catch (e) {
-      stderr.writeln('ERROR: Cannot open lock file ${lockFile.path}: '
+      RedactedConsole.err('ERROR: Cannot open lock file ${lockFile.path}: '
           '${e.osError?.message ?? e.message}');
       log.info('Lock file open failed: $e — exiting.');
       await CLogger.flushAll();
@@ -197,7 +209,7 @@ void main(List<String> args) {
       await lockRaf.lock(FileLock.exclusive);
       lockRaf.writeStringSync('$pid\n');
     } on FileSystemException {
-      stderr.writeln(
+      RedactedConsole.err(
         'ERROR: Another Cleona daemon holds the lock file. '
         'Stop the running process first before starting a new one.');
       log.info('Another Cleona daemon already holds the lock — exiting.');
@@ -237,7 +249,7 @@ void main(List<String> args) {
       try {
         _machineGlobalLockRaf = globalLock.openSync(mode: FileMode.write);
       } on FileSystemException catch (e) {
-        stderr.writeln('ERROR: Cannot open machine-global lock $globalLockPath: '
+        RedactedConsole.err('ERROR: Cannot open machine-global lock $globalLockPath: '
             '${e.osError?.message ?? e.message}');
         log.info('Machine-global lock open failed: $e — exiting.');
         await CLogger.flushAll();
@@ -247,7 +259,7 @@ void main(List<String> args) {
         await _machineGlobalLockRaf!.lock(FileLock.exclusive);
         _machineGlobalLockRaf!.writeStringSync('$pid\n');
       } on FileSystemException {
-        stderr.writeln(
+        RedactedConsole.err(
           'ERROR: Another Cleona daemon is already running on this machine '
           '(machine-global lock $globalLockPath held). One daemon per machine; '
           'use --ignore-single-instance (beta only) for lab multi-instance.');
@@ -277,9 +289,11 @@ void main(List<String> args) {
     // (there was none) and did NOT DELETE the port file, because the
     // deletion lay in the `catch` branch. Permanent lock-out.
     //
-    // Now the endpoint is QUERIED: authenticated `ping` with the token
-    // from the same port file, the answer must be `{'pong': true}`
-    // (`cleonaIpcEndpointAnswers`). A foreign listener does not answer.
+    // Now the endpoint is QUERIED (`cleonaIpcEndpointAnswers`): since S403
+    // with the open hello of the protected exchange — a Cleona daemon
+    // answers it with its own hello, a foreign listener does not. (Until
+    // S403: an authenticated `ping` with the token from the port file; the
+    // token is gone, §22.1.)
     // Why no PID check: Guard 0 above already leaves the process when a
     // live PID with the same process name exists, the conjunction would
     // be dead code — and the job of Guard 2 is precisely the daemon that
@@ -292,7 +306,7 @@ void main(List<String> args) {
     // single-instance promise (both proven in a run on Windows on 06.09.),
     // and a false "taken" locks the user out permanently.
     if (Platform.isWindows) {
-      // Windows: TCP loopback — check port file (format: port:token)
+      // Windows: TCP loopback — check port file (the port number, §22.1)
       final portFile = File('${config.baseDir}/cleona.port');
       if (portFile.existsSync()) {
         String? content;
@@ -304,10 +318,9 @@ void main(List<String> args) {
         final endpoint = parseCleonaPortFile(content);
         final proven = endpoint == null
             ? false
-            : await cleonaIpcEndpointAnswers(
-                port: endpoint.port, token: endpoint.token);
+            : await cleonaIpcEndpointAnswers(port: endpoint.port);
         if (proven) {
-          stderr.writeln(
+          RedactedConsole.err(
             'ERROR: Another Cleona daemon owns the IPC endpoint on TCP port '
             '${endpoint.port}. Stop the running process first.');
           log.info('Cleona daemon answered ping on TCP port '
@@ -329,7 +342,7 @@ void main(List<String> args) {
             0,
           );
           testSock.destroy();
-          stderr.writeln(
+          RedactedConsole.err(
             'ERROR: Another daemon is listening on IPC socket. '
             'Stop the running process first.');
           log.info('Another daemon is listening on socket, exiting.');
@@ -398,7 +411,7 @@ void main(List<String> args) {
         probe.close();
         // Port was free — we can proceed
       } on SocketException {
-        stderr.writeln(
+        RedactedConsole.err(
           'ERROR: UDP port $probePort already in use. '
           'Stop the running process first.');
         log.info('Port $probePort already in use (orphaned daemon?), exiting.');
@@ -491,7 +504,7 @@ void main(List<String> args) {
       CLogger.disableConsole('zone');
     }
     if (CLogger.consoleEnabled) {
-      try { stderr.writeln(msg); } catch (_) { CLogger.disableConsole('zone'); }
+      try { RedactedConsole.err(msg); } catch (_) { CLogger.disableConsole('zone'); }
     }
     try {
       final log = CLogger.get('daemon', profileDir: zoneLogBaseDir);
@@ -563,6 +576,43 @@ class _MultiServiceDaemon {
   final Map<String, IdentityContext> _contexts = {}; // nodeIdHex → context
   IpcServer? _ipcServer;
   ReminderService? _reminderService;
+
+  /// §22.6 "notifications via `notify-send`/D-Bus" — Linux only. Windows
+  /// (toast) and macOS have no backend yet; there a service posts nothing.
+  late final DesktopNotifier? _desktopNotifier = Platform.isLinux
+      ? DesktopNotifier(
+          warn: log.warn,
+          appName: NetworkSecret.channel == NetworkChannel.beta
+              ? 'Cleona Beta'
+              : 'Cleona Chat')
+      : null;
+
+  /// Language of the text this process words itself — how long until a
+  /// reminded event starts: that of the operating system until the GUI
+  /// reports its own (the same edge as the tray, `onUiLocale`).
+  String _notificationLocale = trayLocaleCode();
+
+  /// One way for incoming messages and due reminders (§22.8 "What a system
+  /// notification shows"): the title and the text the service decided on —
+  /// the same two the Android notification gets — go to the desktop's
+  /// notification service over the session bus, and nowhere else. A later
+  /// notification under the same identifier (a conversation, a reminder)
+  /// replaces the earlier one.
+  void _bindDesktopNotifications(CleonaService service) {
+    final notifier = _desktopNotifier;
+    if (notifier == null) return;
+    service.onPostDesktopNotification = (title, body, notificationId) =>
+        notifier.post(summary: title, body: body, key: notificationId);
+  }
+
+  /// How long until the event starts, for the notification of a reminder
+  /// that fires [minutesBefore] it — in the words the event editor uses for
+  /// the same reminder, in [_notificationLocale].
+  String _reminderLeadText(int minutesBefore) {
+    final (:key, :count) = reminderOffsetText(minutesBefore);
+    final text = trayTranslate(key, _notificationLocale);
+    return count == null ? text : text.replaceAll('{count}', '$count');
+  }
   CalDAVServer? _caldavServer;
   Timer? _statusTimer;
   Timer? _networkPollTimer; // Windows-only: 30s poll fallback for network changes
@@ -785,8 +835,9 @@ class _MultiServiceDaemon {
     // there, and a node without `node_keys.enc` would not be reachable.
     //
     // S387: `node_keys.enc` no longer has a reader with the V4.1 node. The
-    // key stays — it now protects `mycelium/host.enc` and
-    // `mycelium/post_box.enc` (`hostKey`), the same class.
+    // key stays — it is the key of the device database (`hostKey`), which
+    // holds the node's own state since S403 (`hostRecordsIn`), the same
+    // class.
     final masterSeedForHost = masterSeed;
     // Held for the network-change edge of the port mapping (task D),
     // which lies in a separate method (`_startNetworkMonitor`).
@@ -867,6 +918,7 @@ class _MultiServiceDaemon {
       },
       isNew: (a, b) => UpdateChecker(log: log).isNewer(a, b),
       report: log.info,
+      expect: (svc, manifest) => svc.updateTargetExpect(manifest),
     );
 
     // Create and start a CleonaService for each identity
@@ -890,6 +942,7 @@ class _MultiServiceDaemon {
       // before is called along by it.
       _bindIdentityToTray(ctx.userIdHex, service);
       _bindRemoteDeletion(ctx.userIdHex, service);
+      _bindDesktopNotifications(service);
       // Update callbacks BEFORE startService(): the start reports a
       // cached manifest itself. Sequence (S387): manifest →
       // collect automatically → `ready` → banner in the GUI → click →
@@ -954,11 +1007,21 @@ class _MultiServiceDaemon {
       baseDir: config.baseDir,
       key: hostKey(config.baseDir, masterSeedForHost),
       port: nodePort,
+      // Lane 3 (§21.3.3, D-30, D-32): desktop 1 GB, phone 100 MB.
+      bulkCacheBytes: bulkCacheBytesForPlatform(),
+      bulkClass: bulkClassForPlatform(),
+      bulkServeAllowed: bulkServeAllowedNow,
       report: log.info,
+      traceReport: log.trace, // beta diagnosis: log file only (S406)
     );
     _host = host;
+    // Plane D (§17, S398-W2): the call frames use this host's one data port
+    // (§11.1), beside its shell (§17.1). Until S398 only `attachV41` did
+    // this, and it has no caller — every call was rejected.
+    planeDAttach(host, _services.values, report: log.info);
     // The moment "start" (S388): ONE service per process carries the update.
-    attachUpdateToService(host, _services.values.first, report: log.info);
+    attachUpdateToService(host, _services.values.first,
+        moment: (m) => _updateManifestAsk(moment: m), report: log.info);
     log.info('mycelium host started on port ${host.port}, '
         '${host.mailboxes.length} mailbox(es)');
 
@@ -1004,6 +1067,17 @@ class _MultiServiceDaemon {
       services: _services,
       socketPath: socketPath,
       defaultIdentityId: primaryCtx.userIdHex,
+      // §22.1: the secret of the connection, from the device database —
+      // read at every connection, so that a database the watchdog created
+      // anew (and its new secret) applies from the next connection on.
+      connectionSecret: () {
+        final seed = _masterSeedForHost;
+        if (seed == null) {
+          throw StateError('no master seed — the device database, and with '
+              'it the secret of the connection, cannot be opened');
+        }
+        return ipcConnectionSecretForDaemon(config.baseDir, seed);
+      },
       profileDir: config.baseDir,
     );
     ipcServer.onCreateIdentity = _createIdentityAtRuntime;
@@ -1036,6 +1110,22 @@ class _MultiServiceDaemon {
     ipcServer.onUiLocale = (code) {
       log.info('Tray language from the GUI: $code');
       tray.setLocale(code);
+      _notificationLocale = code;
+    };
+    // ── OPENING THE WINDOW ASKS THE POST BOX (V4.2 §8.2, S403) ───────────
+    //
+    // "Once at start; again when the network changes; again when the user
+    // opens the application." The edge is the server's (no window to be
+    // seen -> a window to be seen); ONE round of questions, no timer. The
+    // counterpart of the life-cycle edge in `main.dart` — which is also a
+    // moment of the update (§26.5.4 "when the user opens the application"):
+    // the manifest is asked and the known target retried (S406-UPDPKG P5;
+    // until S406 the daemon's surface opening was no update moment,
+    // S406-UPD2 finding B-6).
+    ipcServer.onUserInterfaceOpened = () {
+      final w = _host;
+      if (w != null) unawaited(w.node.collect());
+      unawaited(_updateManifestAsk(moment: 'app opened'));
     };
     await ipcServer.start();
     _ipcServer = ipcServer;
@@ -1168,7 +1258,8 @@ class _MultiServiceDaemon {
     // Socket + profile watchdog: periodic integrity check for critical files.
     // (1) IPC socket: if deleted externally (e.g. by a test script), new IPC
     //     connections silently fail. Recreate on the same path.
-    // (2) identities.json + master_seed keyring: if the profile directory is
+    // (2) the device database (the list of identities, S403) + master_seed
+    //     keyring: if the profile directory is
     //     rm'd while the daemon is running (e.g. E2E cleanup racing against
     //     systemd Restart=always), the daemon continues from RAM but loses all
     //     on-disk identity data. On next restart → "Keine Identitaeten". The
@@ -1225,11 +1316,13 @@ class _MultiServiceDaemon {
     // Without it an identity created at runtime would be mute, without
     // an error appearing anywhere.
     serviceRegister(host, service);
+    planeDRegister(host, service, report: log.info);
 
     // §22.9: BEFORE `addService`, otherwise the IPC server does not chain our
     // edge — see the reasoning in `_bindIdentityToTray`.
     _bindIdentityToTray(ctx.userIdHex, service);
     _bindRemoteDeletion(ctx.userIdHex, service);
+    _bindDesktopNotifications(service);
 
     // Update IPC server
     _ipcServer?.addService(ctx.userIdHex, service);
@@ -1489,24 +1582,11 @@ class _MultiServiceDaemon {
   // faked here: there is no dummy that logs "successful".
 
   void _checkProfileIntegrity(IdentityManager mgr, List<Identity> identities) {
-    // S368: the name on disk is `identities.json.enc` — the same
-    // file, one suffix more. If the plain-text name still stood here,
-    // the guard would fire every 30 s, see "deleted" and rewrite
-    // the file every time. Not harmful, but a check that
-    // is never right is no check.
-    final idFile = File('${config.baseDir}/identities.json.enc');
-    if (!idFile.existsSync()) {
-      log.warn('PROFILE WATCHDOG: identities.json.enc deleted externally — '
-          're-persisting ${identities.length} identities from RAM');
-      try {
-        Directory(config.baseDir).createSync(recursive: true);
-        mgr.saveIdentities(identities);
-        log.info('PROFILE WATCHDOG: identities.json.enc restored');
-      } catch (e) {
-        log.error('PROFILE WATCHDOG: failed to restore identities.json.enc: $e');
-      }
-    }
-
+    // THE SEED FIRST (S403): the device database below opens only under a
+    // key derived from it. In the other order a profile whose keyring lies
+    // inside the deleted directory (file fallback, Windows) could not get
+    // its list back in this round — the write would fail for want of a key
+    // that the next lines only then restore.
     if (KeyringService.isInitialized) {
       final firstCtx = _contexts.values.firstOrNull;
       if (firstCtx != null && firstCtx.masterSeed != null) {
@@ -1521,6 +1601,26 @@ class _MultiServiceDaemon {
             log.error('PROFILE WATCHDOG: failed to restore master_seed: $e');
           }
         }
+      }
+    }
+
+    // S403: the list of identities lies in the device database
+    // (`device.db`); until then it was the file `identities.json.enc`, and
+    // this check asked for that name. A check for a name nothing writes
+    // would fire every 30 s and rewrite the list every time.
+    //
+    // `saveIdentities` goes through `DeviceStore.at`, which drops the
+    // handle of the deleted file and creates the database anew — without
+    // that, the list would be written into a file no path leads to.
+    if (!DeviceStore.present(config.baseDir)) {
+      log.warn('PROFILE WATCHDOG: device.db deleted externally — '
+          're-persisting ${identities.length} identities from RAM');
+      try {
+        Directory(config.baseDir).createSync(recursive: true);
+        mgr.saveIdentities(identities);
+        log.info('PROFILE WATCHDOG: device.db restored');
+      } catch (e) {
+        log.error('PROFILE WATCHDOG: failed to restore device.db: $e');
       }
     }
   }
@@ -1557,7 +1657,9 @@ class _MultiServiceDaemon {
     // renewal timer otherwise keeps the Dart VM alive, independently of the
     // wire that `stop()` closes right after.
     if (_host != null) await portMappingLayDown(_host!);
-    _host?.stop();
+    // Plane D off before the wire closes (S398-W2).
+    if (_host != null) await planeDDetach(_host!, _services.values);
+    if (_host != null) await hostStop(_host!); // lane 2 clocks, then the host
     _host = null;
 
     for (final service in _services.values) {
@@ -1671,8 +1773,10 @@ class _MultiServiceDaemon {
     }
 
     reminderService.onReminderDue = (identityId, reminder) {
-      log.info('Reminder due: ${reminder.title} (identity=$identityId, '
-          '${reminder.minutesBefore}min before event)');
+      // The event's identifier, not its title: the title is what the
+      // notification shows, and that is "not written to a log" (§22.8).
+      log.info('Reminder due: event ${reminderLogName(reminder.eventId)} '
+          '(identity=$identityId, ${reminder.minutesBefore}min before event)');
       final service = _services[identityId];
       if (service == null) return;
 
@@ -1680,20 +1784,14 @@ class _MultiServiceDaemon {
       service.onCalendarReminderDue?.call(
           reminder.eventId, reminder.title, reminder.minutesBefore);
 
-      // 2. System notification (Android + desktop). Reuses the same
-      //    MethodChannel bridge as incoming messages, so reminders fire even
-      //    when the app is in the background or only the daemon is running.
-      final body = reminder.minutesBefore > 0
-          ? 'In ${reminder.minutesBefore} min'
-          : 'Jetzt';
+      // 2. System notification, sound and vibration (§18.1.6) — with only
+      //    the daemon running, too. The service hands it to the same
+      //    platform way as an incoming message; in this process that is the
+      //    desktop notifier (`_bindDesktopNotifications`). §22.8: "A
+      //    reminder shows the event's title and how long until it starts."
       final notificationId = 'reminder:${reminder.eventId}:${reminder.eventStart}';
-      unawaited(service.onPostNotificationAndroid
-              ?.call(reminder.title, body, notificationId) ??
-          Future.value());
-
-      // 3. Notification sound + short vibrate (daemon-local PipeWire / Android haptics).
-      unawaited(service.notificationSound.playMessageSound());
-      unawaited(service.notificationSound.vibrate(VibrationType.message));
+      service.notifyReminderDue(reminder.title,
+          _reminderLeadText(reminder.minutesBefore), notificationId);
     };
     final initialCalendars = getCalendars();
     reminderService.start(initialCalendars, calendarGetter: getCalendars);
@@ -1712,44 +1810,33 @@ class _MultiServiceDaemon {
 
   // ── Local CalDAV server (§23.8.7) ───────────────────────────────────
 
-  static const String _caldavConfigFilename = 'caldav_server.json';
+  /// Config of the local CalDAV server. The daemon writes this back
+  /// whenever the user changes it. Reader and writer of the setting — one
+  /// row of the device database since S403: `caldav_server_setting.dart`.
+  CalDavServerSetting? _caldavConfig;
 
-  /// Config of the local CalDAV server. The daemon writes this back to
-  /// disk whenever the user changes it.
-  _CalDAVServerConfig? _caldavConfig;
+  /// The key of the device database the setting lies in: the host's
+  /// (`hostKey`), like the port mapping — the server belongs to the device,
+  /// not to an identity.
+  /// `_masterSeedForHost` is set before the first caller runs: the start
+  /// reaches `_startLocalCalDAVServer` after the host is up, and the IPC
+  /// handlers are wired after that.
+  Uint8List get _caldavKey => hostKey(config.baseDir, _masterSeedForHost);
 
-  /// Read (or create) the local CalDAV server config.
-  _CalDAVServerConfig _loadCalDAVServerConfig() {
-    final path = '${config.baseDir}/$_caldavConfigFilename';
-    final f = File(path);
-    if (f.existsSync()) {
-      try {
-        final json = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
-        return _CalDAVServerConfig(
-          enabled: json['enabled'] as bool? ?? false,
-          port: json['port'] as int? ?? CalDAVServer.defaultPort,
-          token: json['token'] as String? ?? '',
-        );
-      } catch (e) {
-        log.warn('Invalid $path, resetting: $e');
-      }
-    }
-    return _CalDAVServerConfig(
-      enabled: false,
-      port: CalDAVServer.defaultPort,
-      token: '',
-    );
-  }
+  /// Read the local CalDAV server config; without a stored one, the
+  /// default (off, no token). A file an earlier build left is not read —
+  /// the start has removed it (`superseded_device_files.dart`).
+  CalDavServerSetting _loadCalDAVServerConfig() => calDavServerSettingLoad(
+        config.baseDir,
+        _caldavKey,
+        defaultPort: CalDAVServer.defaultPort,
+        warn: log.warn,
+      );
 
   void _saveCalDAVServerConfig() {
     final cfg = _caldavConfig;
     if (cfg == null) return;
-    final path = '${config.baseDir}/$_caldavConfigFilename';
-    File(path).writeAsStringSync(jsonEncode({
-      'enabled': cfg.enabled,
-      'port': cfg.port,
-      'token': cfg.token,
-    }));
+    calDavServerSettingStore(config.baseDir, _caldavKey, cfg);
   }
 
   /// Generate a random 32-hex-char token (128 bits of entropy).
@@ -1993,7 +2080,7 @@ class _MultiServiceDaemon {
           // before that the old neighbourhood still applies.
           unawaited(w.networkChanged().catchError((Object e) {
             log.warn('mycelium network change failed: $e');
-          }).then((_) => _updateManifestAsk()));
+          }).then((_) => _updateManifestAsk(moment: 'network change')));
           // The port mapping at the same edge (§7.3) — NOT awaited,
           // for the same reason as at start (RFC 6886 backoff).
           unawaited(() async {
@@ -2070,7 +2157,7 @@ class _MultiServiceDaemon {
           if (w != null) {
             unawaited(w.networkChanged().catchError((Object e) {
               log.warn('mycelium network change failed: $e');
-            }).then((_) => _updateManifestAsk()));
+            }).then((_) => _updateManifestAsk(moment: 'network change')));
             // The port mapping at the same edge (§7.3) — NOT
             // awaited, for the same reason as at start
             // (RFC 6886 backoff).
@@ -2126,9 +2213,9 @@ class _MultiServiceDaemon {
 
   /// A moment after M1+ (S388). Only the service with an update carrier asks
   /// (`attachUpdateToService`); for the others the call is empty — no packet.
-  Future<void> _updateManifestAsk() async {
+  Future<void> _updateManifestAsk({required String moment}) async {
     for (final s in _services.values) {
-      await s.updateManifestAsk();
+      await s.updateManifestAsk(moment: moment);
     }
     // E-9 (package 10 = A, S389): the same retry as in `main.dart`,
     // at the same edges. No timer, no deadline (§1.2, working rule 5);
@@ -2351,17 +2438,6 @@ Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void>
   }
 }
 
-class _CalDAVServerConfig {
-  bool enabled;
-  int port;
-  String token;
-  _CalDAVServerConfig({
-    required this.enabled,
-    required this.port,
-    required this.token,
-  });
-}
-
 class _DaemonConfig {
   final String baseDir; // ~/.cleona
   final int? port;
@@ -2458,7 +2534,7 @@ _DaemonConfig _parseArgs(List<String> args) {
         // Fail closed instead of fail silent, BEFORE any resource creation (lock,
         // log, directory) — `_parseArgs` runs at the very beginning of
         // `main()`.
-        stderr.writeln(
+        RedactedConsole.err(
             'FATAL: unknown switch "${flat[i]}" — daemon does NOT '
             'start.\n'
             'Supported: --base-dir --port --name --icon --public-ip '
@@ -2495,7 +2571,7 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
   final mgr = IdentityManager(baseDir: config.baseDir);
   final identities = mgr.loadIdentities();
   if (identities.isEmpty) {
-    stderr.writeln('ERROR: No identities found in ${config.baseDir}');
+    RedactedConsole.err('ERROR: No identities found in ${config.baseDir}');
     exit(1);
   }
   final Identity activeId;
@@ -2505,7 +2581,7 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
         id.displayName.toLowerCase() == sel ||
         (id.nodeIdHex != null && id.nodeIdHex!.toLowerCase().startsWith(sel)));
     if (match.isEmpty) {
-      stderr.writeln('ERROR: No identity matching "${config.identitySelector}"');
+      RedactedConsole.err('ERROR: No identity matching "${config.identitySelector}"');
       exit(1);
     }
     activeId = match.first;
@@ -2574,6 +2650,13 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
     createdAtMs: DateTime.now().millisecondsSinceEpoch,
   );
 
+  // NOT redacted, deliberately: this is the program's OUTPUT, not a log line
+  // — `--export-contact-seed` prints the seed URI that lab scripts read
+  // (`scripts/update-bootstrap-seed.sh`, `scripts/lib/e2e-lab-state.sh`).
+  // Pseudonymised addresses and name would make it unusable. It only runs
+  // when invoked by hand with that switch, never under the GUI's stdio
+  // redirection. Exception listed in
+  // `test/smoke/smoke_stderr_goes_through_redaction.dart`.
   stdout.writeln(seed.toUri());
   exit(0);
 }

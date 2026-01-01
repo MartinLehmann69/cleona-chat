@@ -290,23 +290,6 @@ class HdWallet {
     ]));
   }
 
-  // ── Linked-Device Delegation (§7.1 LD-1) ─────────────────────────────
-
-  /// Derive a per-device delegated Ed25519 sig keypair for a Linked Device.
-  /// Deterministic: same (masterSeed, deviceId) always yields the same keys.
-  static ({Uint8List publicKey, Uint8List secretKey}) deriveDelegatedEd25519(
-    Uint8List masterSeed,
-    Uint8List deviceId,
-  ) {
-    final sodium = SodiumFFI();
-    final info = Uint8List.fromList([
-      ...'cleona-deleg-ed25519-v1'.codeUnits,
-      ...deviceId,
-    ]);
-    final seed = sodium.hkdfSha256(masterSeed, info: info, length: 32);
-    return sodium.generateEd25519KeyPairFromSeed(seed);
-  }
-
   // -- Invitation line (§15.3.1) ---------------------------------------
   //
   // §15.3.1 writes it as two HKDF stages:
@@ -332,7 +315,8 @@ class HdWallet {
   /// The prefix of the first stage. Its own domain, collides with no
   /// existing one: the other master-seed-fed derivations of this file
   /// carry `cleona-ed25519-`, `cleona-mldsa-`, `cleona-mlkem-`,
-  /// `cleona-file-enc-`, `cleona-shared-file-enc-v1`, `cleona-deleg-*`.
+  /// `cleona-file-enc-`, `cleona-shared-file-enc-v1` (and, until S398,
+  /// the delegation labels `cleona-deleg-*` — not to be reused).
   static const String kInviteRootInfoPrefix = 'cleona-invite-root-v1';
 
   /// The prefix of the second stage.
@@ -407,19 +391,5 @@ class HdWallet {
       ..add(Uint8List.fromList(kInviteKeyInfoPrefix.codeUnits))
       ..add(_be64(index));
     return sodium.hkdfSha256(inviteRoot, info: info.toBytes(), length: 32);
-  }
-
-  /// Derive the HKDF seed for deterministic ML-DSA-65 delegation keygen.
-  /// The actual keypair generation requires OQS_SIG_keypair_derand (LD-2).
-  static Uint8List deriveDelegatedMlDsaSeed(
-    Uint8List masterSeed,
-    Uint8List deviceId,
-  ) {
-    final sodium = SodiumFFI();
-    final info = Uint8List.fromList([
-      ...'cleona-deleg-mldsa-v1'.codeUnits,
-      ...deviceId,
-    ]);
-    return sodium.hkdfSha256(masterSeed, info: info, length: 64);
   }
 }

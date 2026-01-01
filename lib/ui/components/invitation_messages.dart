@@ -38,6 +38,7 @@ String invitationReadErrorText(AppLocale l, InvitationReadError e,
         'own': invitationChannelName(own),
       }),
     InvitationReadError.expired => l.get('card_err_expired'),
+    InvitationReadError.altered => l.get('card_err_altered'),
   };
 }
 
@@ -54,6 +55,7 @@ String invitationIssueRefusalText(AppLocale l, InvitationIssueRefusal r) =>
 String invitationRedeemText(AppLocale l, InvitationRedeemResult r) =>
     switch (r.outcome) {
       InvitationRedeemOutcome.requestSent => l.get('contact_request_sent'),
+      InvitationRedeemOutcome.requestResting => l.get('contact_request_resting'),
       InvitationRedeemOutcome.readError => invitationReadErrorText(
           l, r.readError ?? InvitationReadError.notFound,
           cardChannel: r.cardChannel),
@@ -62,6 +64,7 @@ String invitationRedeemText(AppLocale l, InvitationRedeemResult r) =>
         l.get('card_err_already_contact'),
       InvitationRedeemOutcome.noAnswer => l.get('card_err_no_answer'),
       InvitationRedeemOutcome.notConnected => l.get('card_not_connected'),
+      InvitationRedeemOutcome.searchedOnly => l.get('card_searched_only'),
       InvitationRedeemOutcome.failed => l.get('card_redeem_failed'),
     };
 

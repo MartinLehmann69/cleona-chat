@@ -32,6 +32,20 @@ final $typed_data.Uint8List addressTypeDescriptor = $convert.base64Decode(
     'ZfR0xPQkFMEAISDAoISVBWNl9VTEEQAxITCg9JUFY2X0xJTktfTE9DQUwQBBITCg9JUFY2X1NJ'
     'VEVfTE9DQUwQBQ==');
 
+@$core.Deprecated('Use keyRotationModeDescriptor instead')
+const KeyRotationMode$json = {
+  '1': 'KeyRotationMode',
+  '2': [
+    {'1': 'KEY_ROTATION_MODE_UNSPECIFIED', '2': 0},
+    {'1': 'KEY_ROTATION_MODE_TAGS_VALID', '2': 1},
+  ],
+};
+
+/// Descriptor for `KeyRotationMode`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List keyRotationModeDescriptor = $convert.base64Decode(
+    'Cg9LZXlSb3RhdGlvbk1vZGUSIQodS0VZX1JPVEFUSU9OX01PREVfVU5TUEVDSUZJRUQQABIgCh'
+    'xLRVlfUk9UQVRJT05fTU9ERV9UQUdTX1ZBTElEEAE=');
+
 @$core.Deprecated('Use videoOffReasonDescriptor instead')
 const VideoOffReason$json = {
   '1': 'VideoOffReason',
@@ -39,6 +53,8 @@ const VideoOffReason$json = {
     {'1': 'VIDEO_OFF_REASON_UNSPECIFIED', '2': 0},
     {'1': 'VIDEO_OFF_REASON_USER_DISABLED', '2': 1},
     {'1': 'VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT', '2': 2},
+    {'1': 'VIDEO_OFF_REASON_NOT_SUPPORTED', '2': 3},
+    {'1': 'VIDEO_OFF_REASON_START_FAILED', '2': 4},
   ],
 };
 
@@ -46,7 +62,8 @@ const VideoOffReason$json = {
 final $typed_data.Uint8List videoOffReasonDescriptor = $convert.base64Decode(
     'Cg5WaWRlb09mZlJlYXNvbhIgChxWSURFT19PRkZfUkVBU09OX1VOU1BFQ0lGSUVEEAASIgoeVk'
     'lERU9fT0ZGX1JFQVNPTl9VU0VSX0RJU0FCTEVEEAESKwonVklERU9fT0ZGX1JFQVNPTl9CQU5E'
-    'V0lEVEhfSU5TVUZGSUNJRU5UEAI=');
+    'V0lEVEhfSU5TVUZGSUNJRU5UEAISIgoeVklERU9fT0ZGX1JFQVNPTl9OT1RfU1VQUE9SVEVEEA'
+    'MSIQodVklERU9fT0ZGX1JFQVNPTl9TVEFSVF9GQUlMRUQQBA==');
 
 @$core.Deprecated('Use twinSyncTypeDescriptor instead')
 const TwinSyncType$json = {
@@ -67,6 +84,10 @@ const TwinSyncType$json = {
     {'1': 'ROTATION_APPROVAL_REQUEST', '2': 12},
     {'1': 'ROTATION_APPROVAL_RESPONSE', '2': 13},
     {'1': 'TWIN_IDENTITY_DELETED', '2': 17},
+    {'1': 'DELIVERY_MIRROR', '2': 18},
+    {'1': 'KEM_ROTATED', '2': 19},
+    {'1': 'RECONCILE', '2': 20},
+    {'1': 'GROUP_LEFT', '2': 21},
   ],
   '4': [
     {'1': 14, '2': 14},
@@ -83,7 +104,8 @@ final $typed_data.Uint8List twinSyncTypeDescriptor = $convert.base64Decode(
     '9DSEFOR0VEEAcSFAoQU0VUVElOR1NfQ0hBTkdFRBAIEhMKD0RFVklDRV9BTk5PVU5DRRAJEhIK'
     'DkRFVklDRV9SRU5BTUVEEAoSFwoTVFdJTl9ERVZJQ0VfUkVWT0tFRBALEh0KGVJPVEFUSU9OX0'
     'FQUFJPVkFMX1JFUVVFU1QQDBIeChpST1RBVElPTl9BUFBST1ZBTF9SRVNQT05TRRANEhkKFVRX'
-    'SU5fSURFTlRJVFlfREVMRVRFRBARIgQIDhAOIgQIDxAPIgQIEBAQ');
+    'SU5fSURFTlRJVFlfREVMRVRFRBAREhMKD0RFTElWRVJZX01JUlJPUhASEg8KC0tFTV9ST1RBVE'
+    'VEEBMSDQoJUkVDT05DSUxFEBQSDgoKR1JPVVBfTEVGVBAVIgQIDhAOIgQIDxAPIgQIEBAQ');
 
 @$core.Deprecated('Use devicePlatformDescriptor instead')
 const DevicePlatform$json = {
@@ -434,6 +456,7 @@ const GroupInviteV3$json = {
     {'1': 'membership_hash', '3': 8, '4': 1, '5': 12, '10': 'membershipHash'},
     {'1': 'membership_sig_ed25519', '3': 9, '4': 1, '5': 12, '10': 'membershipSigEd25519'},
     {'1': 'membership_sig_ml_dsa', '3': 10, '4': 1, '5': 12, '10': 'membershipSigMlDsa'},
+    {'1': 'pair_seeds', '3': 11, '4': 3, '5': 11, '6': '.cleona.GroupPairSeed', '10': 'pairSeeds'},
   ],
 };
 
@@ -446,7 +469,8 @@ final $typed_data.Uint8List groupInviteV3Descriptor = $convert.base64Decode(
     'dXBEZXNjcmlwdGlvbhIpChBtZW1iZXJzaGlwX2Vwb2NoGAcgASgEUg9tZW1iZXJzaGlwRXBvY2'
     'gSJwoPbWVtYmVyc2hpcF9oYXNoGAggASgMUg5tZW1iZXJzaGlwSGFzaBI0ChZtZW1iZXJzaGlw'
     'X3NpZ19lZDI1NTE5GAkgASgMUhRtZW1iZXJzaGlwU2lnRWQyNTUxORIxChVtZW1iZXJzaGlwX3'
-    'NpZ19tbF9kc2EYCiABKAxSEm1lbWJlcnNoaXBTaWdNbERzYQ==');
+    'NpZ19tbF9kc2EYCiABKAxSEm1lbWJlcnNoaXBTaWdNbERzYRI0CgpwYWlyX3NlZWRzGAsgAygL'
+    'MhUuY2xlb25hLkdyb3VwUGFpclNlZWRSCXBhaXJTZWVkcw==');
 
 @$core.Deprecated('Use groupMemberV3Descriptor instead')
 const GroupMemberV3$json = {
@@ -458,6 +482,10 @@ const GroupMemberV3$json = {
     {'1': 'ed25519_public_key', '3': 4, '4': 1, '5': 12, '10': 'ed25519PublicKey'},
     {'1': 'x25519_public_key', '3': 5, '4': 1, '5': 12, '10': 'x25519PublicKey'},
     {'1': 'ml_kem_public_key', '3': 6, '4': 1, '5': 12, '10': 'mlKemPublicKey'},
+    {'1': 'address', '3': 7, '4': 1, '5': 12, '10': 'address'},
+    {'1': 'address_sig_ed25519', '3': 8, '4': 1, '5': 12, '10': 'addressSigEd25519'},
+    {'1': 'address_sig_ml_dsa', '3': 9, '4': 1, '5': 12, '10': 'addressSigMlDsa'},
+    {'1': 'neighbours', '3': 10, '4': 1, '5': 12, '10': 'neighbours'},
   ],
 };
 
@@ -467,7 +495,37 @@ final $typed_data.Uint8List groupMemberV3Descriptor = $convert.base64Decode(
     'UYAiABKAlSC2Rpc3BsYXlOYW1lEhIKBHJvbGUYAyABKAlSBHJvbGUSLAoSZWQyNTUxOV9wdWJs'
     'aWNfa2V5GAQgASgMUhBlZDI1NTE5UHVibGljS2V5EioKEXgyNTUxOV9wdWJsaWNfa2V5GAUgAS'
     'gMUg94MjU1MTlQdWJsaWNLZXkSKQoRbWxfa2VtX3B1YmxpY19rZXkYBiABKAxSDm1sS2VtUHVi'
-    'bGljS2V5');
+    'bGljS2V5EhgKB2FkZHJlc3MYByABKAxSB2FkZHJlc3MSLgoTYWRkcmVzc19zaWdfZWQyNTUxOR'
+    'gIIAEoDFIRYWRkcmVzc1NpZ0VkMjU1MTkSKwoSYWRkcmVzc19zaWdfbWxfZHNhGAkgASgMUg9h'
+    'ZGRyZXNzU2lnTWxEc2ESHgoKbmVpZ2hib3VycxgKIAEoDFIKbmVpZ2hib3Vycw==');
+
+@$core.Deprecated('Use groupPairSeedDescriptor instead')
+const GroupPairSeed$json = {
+  '1': 'GroupPairSeed',
+  '2': [
+    {'1': 'member_id', '3': 1, '4': 1, '5': 12, '10': 'memberId'},
+    {'1': 'seed', '3': 2, '4': 1, '5': 12, '10': 'seed'},
+  ],
+};
+
+/// Descriptor for `GroupPairSeed`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List groupPairSeedDescriptor = $convert.base64Decode(
+    'Cg1Hcm91cFBhaXJTZWVkEhsKCW1lbWJlcl9pZBgBIAEoDFIIbWVtYmVySWQSEgoEc2VlZBgCIA'
+    'EoDFIEc2VlZA==');
+
+@$core.Deprecated('Use groupJoinDescriptor instead')
+const GroupJoin$json = {
+  '1': 'GroupJoin',
+  '2': [
+    {'1': 'group_id', '3': 1, '4': 1, '5': 12, '10': 'groupId'},
+    {'1': 'member', '3': 2, '4': 1, '5': 11, '6': '.cleona.GroupMemberV3', '10': 'member'},
+  ],
+};
+
+/// Descriptor for `GroupJoin`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List groupJoinDescriptor = $convert.base64Decode(
+    'CglHcm91cEpvaW4SGQoIZ3JvdXBfaWQYASABKAxSB2dyb3VwSWQSLQoGbWVtYmVyGAIgASgLMh'
+    'UuY2xlb25hLkdyb3VwTWVtYmVyVjNSBm1lbWJlcg==');
 
 @$core.Deprecated('Use groupMembershipResyncRequestDescriptor instead')
 const GroupMembershipResyncRequest$json = {
@@ -658,178 +716,6 @@ final $typed_data.Uint8List identityDeletedNotificationDescriptor = $convert.bas
     'EoDFIRaWRlbnRpdHlFZDI1NTE5UGsSIgoNZGVsZXRlZF9hdF9tcxgCIAEoBFILZGVsZXRlZEF0'
     'TXMSIQoMZGlzcGxheV9uYW1lGAMgASgJUgtkaXNwbGF5TmFtZQ==');
 
-@$core.Deprecated('Use restoreBroadcastDescriptor instead')
-const RestoreBroadcast$json = {
-  '1': 'RestoreBroadcast',
-  '2': [
-    {'1': 'old_node_id', '3': 1, '4': 1, '5': 12, '10': 'oldNodeId'},
-    {'1': 'new_node_id', '3': 2, '4': 1, '5': 12, '10': 'newNodeId'},
-    {'1': 'new_ed25519_pk', '3': 3, '4': 1, '5': 12, '10': 'newEd25519Pk'},
-    {'1': 'new_x25519_pk', '3': 4, '4': 1, '5': 12, '10': 'newX25519Pk'},
-    {'1': 'new_ml_kem_pk', '3': 5, '4': 1, '5': 12, '10': 'newMlKemPk'},
-    {'1': 'new_ml_dsa_pk', '3': 6, '4': 1, '5': 12, '10': 'newMlDsaPk'},
-    {'1': 'display_name', '3': 7, '4': 1, '5': 9, '10': 'displayName'},
-    {'1': 'timestamp', '3': 8, '4': 1, '5': 4, '10': 'timestamp'},
-    {'1': 'signature', '3': 9, '4': 1, '5': 12, '10': 'signature'},
-    {'1': 'signature_ml_dsa', '3': 10, '4': 1, '5': 12, '10': 'signatureMlDsa'},
-  ],
-};
-
-/// Descriptor for `RestoreBroadcast`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreBroadcastDescriptor = $convert.base64Decode(
-    'ChBSZXN0b3JlQnJvYWRjYXN0Eh4KC29sZF9ub2RlX2lkGAEgASgMUglvbGROb2RlSWQSHgoLbm'
-    'V3X25vZGVfaWQYAiABKAxSCW5ld05vZGVJZBIkCg5uZXdfZWQyNTUxOV9waxgDIAEoDFIMbmV3'
-    'RWQyNTUxOVBrEiIKDW5ld194MjU1MTlfcGsYBCABKAxSC25ld1gyNTUxOVBrEiEKDW5ld19tbF'
-    '9rZW1fcGsYBSABKAxSCm5ld01sS2VtUGsSIQoNbmV3X21sX2RzYV9waxgGIAEoDFIKbmV3TWxE'
-    'c2FQaxIhCgxkaXNwbGF5X25hbWUYByABKAlSC2Rpc3BsYXlOYW1lEhwKCXRpbWVzdGFtcBgIIA'
-    'EoBFIJdGltZXN0YW1wEhwKCXNpZ25hdHVyZRgJIAEoDFIJc2lnbmF0dXJlEigKEHNpZ25hdHVy'
-    'ZV9tbF9kc2EYCiABKAxSDnNpZ25hdHVyZU1sRHNh');
-
-@$core.Deprecated('Use restoreResponseDescriptor instead')
-const RestoreResponse$json = {
-  '1': 'RestoreResponse',
-  '2': [
-    {'1': 'phase', '3': 1, '4': 1, '5': 13, '10': 'phase'},
-    {'1': 'contacts', '3': 2, '4': 3, '5': 11, '6': '.cleona.ContactEntry', '10': 'contacts'},
-    {'1': 'messages', '3': 3, '4': 3, '5': 11, '6': '.cleona.StoredMessage', '10': 'messages'},
-    {'1': 'groups', '3': 4, '4': 3, '5': 11, '6': '.cleona.RestoreGroupInfo', '10': 'groups'},
-    {'1': 'channels', '3': 5, '4': 3, '5': 11, '6': '.cleona.RestoreChannelInfo', '10': 'channels'},
-  ],
-};
-
-/// Descriptor for `RestoreResponse`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreResponseDescriptor = $convert.base64Decode(
-    'Cg9SZXN0b3JlUmVzcG9uc2USFAoFcGhhc2UYASABKA1SBXBoYXNlEjAKCGNvbnRhY3RzGAIgAy'
-    'gLMhQuY2xlb25hLkNvbnRhY3RFbnRyeVIIY29udGFjdHMSMQoIbWVzc2FnZXMYAyADKAsyFS5j'
-    'bGVvbmEuU3RvcmVkTWVzc2FnZVIIbWVzc2FnZXMSMAoGZ3JvdXBzGAQgAygLMhguY2xlb25hLl'
-    'Jlc3RvcmVHcm91cEluZm9SBmdyb3VwcxI2CghjaGFubmVscxgFIAMoCzIaLmNsZW9uYS5SZXN0'
-    'b3JlQ2hhbm5lbEluZm9SCGNoYW5uZWxz');
-
-@$core.Deprecated('Use restoreGroupInfoDescriptor instead')
-const RestoreGroupInfo$json = {
-  '1': 'RestoreGroupInfo',
-  '2': [
-    {'1': 'group_id', '3': 1, '4': 1, '5': 12, '10': 'groupId'},
-    {'1': 'name', '3': 2, '4': 1, '5': 9, '10': 'name'},
-    {'1': 'description', '3': 3, '4': 1, '5': 9, '10': 'description'},
-    {'1': 'owner_node_id_hex', '3': 4, '4': 1, '5': 9, '10': 'ownerNodeIdHex'},
-    {'1': 'members', '3': 5, '4': 3, '5': 11, '6': '.cleona.RestoreGroupMember', '10': 'members'},
-  ],
-};
-
-/// Descriptor for `RestoreGroupInfo`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreGroupInfoDescriptor = $convert.base64Decode(
-    'ChBSZXN0b3JlR3JvdXBJbmZvEhkKCGdyb3VwX2lkGAEgASgMUgdncm91cElkEhIKBG5hbWUYAi'
-    'ABKAlSBG5hbWUSIAoLZGVzY3JpcHRpb24YAyABKAlSC2Rlc2NyaXB0aW9uEikKEW93bmVyX25v'
-    'ZGVfaWRfaGV4GAQgASgJUg5vd25lck5vZGVJZEhleBI0CgdtZW1iZXJzGAUgAygLMhouY2xlb2'
-    '5hLlJlc3RvcmVHcm91cE1lbWJlclIHbWVtYmVycw==');
-
-@$core.Deprecated('Use restoreGroupMemberDescriptor instead')
-const RestoreGroupMember$json = {
-  '1': 'RestoreGroupMember',
-  '2': [
-    {'1': 'node_id_hex', '3': 1, '4': 1, '5': 9, '10': 'nodeIdHex'},
-    {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
-    {'1': 'role', '3': 3, '4': 1, '5': 9, '10': 'role'},
-    {'1': 'ed25519_pk', '3': 4, '4': 1, '5': 12, '10': 'ed25519Pk'},
-    {'1': 'x25519_pk', '3': 5, '4': 1, '5': 12, '10': 'x25519Pk'},
-    {'1': 'ml_kem_pk', '3': 6, '4': 1, '5': 12, '10': 'mlKemPk'},
-  ],
-};
-
-/// Descriptor for `RestoreGroupMember`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreGroupMemberDescriptor = $convert.base64Decode(
-    'ChJSZXN0b3JlR3JvdXBNZW1iZXISHgoLbm9kZV9pZF9oZXgYASABKAlSCW5vZGVJZEhleBIhCg'
-    'xkaXNwbGF5X25hbWUYAiABKAlSC2Rpc3BsYXlOYW1lEhIKBHJvbGUYAyABKAlSBHJvbGUSHQoK'
-    'ZWQyNTUxOV9waxgEIAEoDFIJZWQyNTUxOVBrEhsKCXgyNTUxOV9waxgFIAEoDFIIeDI1NTE5UG'
-    'sSGgoJbWxfa2VtX3BrGAYgASgMUgdtbEtlbVBr');
-
-@$core.Deprecated('Use restoreChannelInfoDescriptor instead')
-const RestoreChannelInfo$json = {
-  '1': 'RestoreChannelInfo',
-  '2': [
-    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
-    {'1': 'name', '3': 2, '4': 1, '5': 9, '10': 'name'},
-    {'1': 'description', '3': 3, '4': 1, '5': 9, '10': 'description'},
-    {'1': 'owner_node_id_hex', '3': 4, '4': 1, '5': 9, '10': 'ownerNodeIdHex'},
-    {'1': 'members', '3': 5, '4': 3, '5': 11, '6': '.cleona.RestoreChannelMember', '10': 'members'},
-    {'1': 'is_adult', '3': 6, '4': 1, '5': 8, '10': 'isAdult'},
-  ],
-};
-
-/// Descriptor for `RestoreChannelInfo`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreChannelInfoDescriptor = $convert.base64Decode(
-    'ChJSZXN0b3JlQ2hhbm5lbEluZm8SHQoKY2hhbm5lbF9pZBgBIAEoDFIJY2hhbm5lbElkEhIKBG'
-    '5hbWUYAiABKAlSBG5hbWUSIAoLZGVzY3JpcHRpb24YAyABKAlSC2Rlc2NyaXB0aW9uEikKEW93'
-    'bmVyX25vZGVfaWRfaGV4GAQgASgJUg5vd25lck5vZGVJZEhleBI2CgdtZW1iZXJzGAUgAygLMh'
-    'wuY2xlb25hLlJlc3RvcmVDaGFubmVsTWVtYmVyUgdtZW1iZXJzEhkKCGlzX2FkdWx0GAYgASgI'
-    'Ugdpc0FkdWx0');
-
-@$core.Deprecated('Use restoreChannelMemberDescriptor instead')
-const RestoreChannelMember$json = {
-  '1': 'RestoreChannelMember',
-  '2': [
-    {'1': 'node_id_hex', '3': 1, '4': 1, '5': 9, '10': 'nodeIdHex'},
-    {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
-    {'1': 'role', '3': 3, '4': 1, '5': 9, '10': 'role'},
-    {'1': 'ed25519_pk', '3': 4, '4': 1, '5': 12, '10': 'ed25519Pk'},
-    {'1': 'x25519_pk', '3': 5, '4': 1, '5': 12, '10': 'x25519Pk'},
-    {'1': 'ml_kem_pk', '3': 6, '4': 1, '5': 12, '10': 'mlKemPk'},
-  ],
-};
-
-/// Descriptor for `RestoreChannelMember`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List restoreChannelMemberDescriptor = $convert.base64Decode(
-    'ChRSZXN0b3JlQ2hhbm5lbE1lbWJlchIeCgtub2RlX2lkX2hleBgBIAEoCVIJbm9kZUlkSGV4Ei'
-    'EKDGRpc3BsYXlfbmFtZRgCIAEoCVILZGlzcGxheU5hbWUSEgoEcm9sZRgDIAEoCVIEcm9sZRId'
-    'CgplZDI1NTE5X3BrGAQgASgMUgllZDI1NTE5UGsSGwoJeDI1NTE5X3BrGAUgASgMUgh4MjU1MT'
-    'lQaxIaCgltbF9rZW1fcGsYBiABKAxSB21sS2VtUGs=');
-
-@$core.Deprecated('Use contactEntryDescriptor instead')
-const ContactEntry$json = {
-  '1': 'ContactEntry',
-  '2': [
-    {'1': 'node_id', '3': 1, '4': 1, '5': 12, '10': 'nodeId'},
-    {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
-    {'1': 'ed25519_pk', '3': 3, '4': 1, '5': 12, '10': 'ed25519Pk'},
-    {'1': 'x25519_pk', '3': 4, '4': 1, '5': 12, '10': 'x25519Pk'},
-    {'1': 'ml_kem_pk', '3': 5, '4': 1, '5': 12, '10': 'mlKemPk'},
-    {'1': 'ml_dsa_pk', '3': 6, '4': 1, '5': 12, '10': 'mlDsaPk'},
-    {'1': 'profile_picture', '3': 7, '4': 1, '5': 12, '10': 'profilePicture'},
-    {'1': 'description', '3': 8, '4': 1, '5': 9, '10': 'description'},
-  ],
-};
-
-/// Descriptor for `ContactEntry`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List contactEntryDescriptor = $convert.base64Decode(
-    'CgxDb250YWN0RW50cnkSFwoHbm9kZV9pZBgBIAEoDFIGbm9kZUlkEiEKDGRpc3BsYXlfbmFtZR'
-    'gCIAEoCVILZGlzcGxheU5hbWUSHQoKZWQyNTUxOV9waxgDIAEoDFIJZWQyNTUxOVBrEhsKCXgy'
-    'NTUxOV9waxgEIAEoDFIIeDI1NTE5UGsSGgoJbWxfa2VtX3BrGAUgASgMUgdtbEtlbVBrEhoKCW'
-    '1sX2RzYV9waxgGIAEoDFIHbWxEc2FQaxInCg9wcm9maWxlX3BpY3R1cmUYByABKAxSDnByb2Zp'
-    'bGVQaWN0dXJlEiAKC2Rlc2NyaXB0aW9uGAggASgJUgtkZXNjcmlwdGlvbg==');
-
-@$core.Deprecated('Use storedMessageDescriptor instead')
-const StoredMessage$json = {
-  '1': 'StoredMessage',
-  '2': [
-    {'1': 'message_id', '3': 1, '4': 1, '5': 12, '10': 'messageId'},
-    {'1': 'sender_id', '3': 2, '4': 1, '5': 12, '10': 'senderId'},
-    {'1': 'recipient_id', '3': 3, '4': 1, '5': 12, '10': 'recipientId'},
-    {'1': 'conversation_id', '3': 4, '4': 1, '5': 9, '10': 'conversationId'},
-    {'1': 'timestamp', '3': 5, '4': 1, '5': 4, '10': 'timestamp'},
-    {'1': 'ui_message_type', '3': 6, '4': 1, '5': 5, '10': 'uiMessageType'},
-    {'1': 'payload', '3': 7, '4': 1, '5': 12, '10': 'payload'},
-  ],
-};
-
-/// Descriptor for `StoredMessage`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List storedMessageDescriptor = $convert.base64Decode(
-    'Cg1TdG9yZWRNZXNzYWdlEh0KCm1lc3NhZ2VfaWQYASABKAxSCW1lc3NhZ2VJZBIbCglzZW5kZX'
-    'JfaWQYAiABKAxSCHNlbmRlcklkEiEKDHJlY2lwaWVudF9pZBgDIAEoDFILcmVjaXBpZW50SWQS'
-    'JwoPY29udmVyc2F0aW9uX2lkGAQgASgJUg5jb252ZXJzYXRpb25JZBIcCgl0aW1lc3RhbXAYBS'
-    'ABKARSCXRpbWVzdGFtcBImCg91aV9tZXNzYWdlX3R5cGUYBiABKAVSDXVpTWVzc2FnZVR5cGUS'
-    'GAoHcGF5bG9hZBgHIAEoDFIHcGF5bG9hZA==');
-
 @$core.Deprecated('Use callInviteDescriptor instead')
 const CallInvite$json = {
   '1': 'CallInvite',
@@ -981,6 +867,7 @@ const KeyRotation$json = {
     {'1': 'new_ml_kem_pk', '3': 2, '4': 1, '5': 12, '10': 'newMlKemPk'},
     {'1': 'rotation_timestamp', '3': 3, '4': 1, '5': 4, '10': 'rotationTimestamp'},
     {'1': 'signature', '3': 4, '4': 1, '5': 12, '10': 'signature'},
+    {'1': 'mode', '3': 9, '4': 1, '5': 14, '6': '.cleona.KeyRotationMode', '10': 'mode'},
   ],
 };
 
@@ -988,7 +875,8 @@ const KeyRotation$json = {
 final $typed_data.Uint8List keyRotationDescriptor = $convert.base64Decode(
     'CgtLZXlSb3RhdGlvbhIiCg1uZXdfeDI1NTE5X3BrGAEgASgMUgtuZXdYMjU1MTlQaxIhCg1uZX'
     'dfbWxfa2VtX3BrGAIgASgMUgpuZXdNbEtlbVBrEi0KEnJvdGF0aW9uX3RpbWVzdGFtcBgDIAEo'
-    'BFIRcm90YXRpb25UaW1lc3RhbXASHAoJc2lnbmF0dXJlGAQgASgMUglzaWduYXR1cmU=');
+    'BFIRcm90YXRpb25UaW1lc3RhbXASHAoJc2lnbmF0dXJlGAQgASgMUglzaWduYXR1cmUSKwoEbW'
+    '9kZRgJIAEoDjIXLmNsZW9uYS5LZXlSb3RhdGlvbk1vZGVSBG1vZGU=');
 
 @$core.Deprecated('Use channelJoinRequestDescriptor instead')
 const ChannelJoinRequest$json = {
@@ -1741,6 +1629,263 @@ final $typed_data.Uint8List voicePayloadDescriptor = $convert.base64Decode(
     'IAEoCVISdHJhbnNjcmlwdExhbmd1YWdlEjMKFXRyYW5zY3JpcHRfY29uZmlkZW5jZRgEIAEoAl'
     'IUdHJhbnNjcmlwdENvbmZpZGVuY2U=');
 
+@$core.Deprecated('Use reconcilePacketDescriptor instead')
+const ReconcilePacket$json = {
+  '1': 'ReconcilePacket',
+  '2': [
+    {'1': 'codec', '3': 1, '4': 1, '5': 13, '10': 'codec'},
+    {'1': 'body', '3': 2, '4': 1, '5': 12, '10': 'body'},
+  ],
+};
+
+/// Descriptor for `ReconcilePacket`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcilePacketDescriptor = $convert.base64Decode(
+    'Cg9SZWNvbmNpbGVQYWNrZXQSFAoFY29kZWMYASABKA1SBWNvZGVjEhIKBGJvZHkYAiABKAxSBG'
+    'JvZHk=');
+
+@$core.Deprecated('Use reconcileFrameDescriptor instead')
+const ReconcileFrame$json = {
+  '1': 'ReconcileFrame',
+  '2': [
+    {'1': 'reconcile_id', '3': 1, '4': 1, '5': 12, '10': 'reconcileId'},
+    {'1': 'header', '3': 2, '4': 1, '5': 11, '6': '.cleona.ReconcileHeader', '9': 0, '10': 'header'},
+    {'1': 'manifest', '3': 3, '4': 1, '5': 11, '6': '.cleona.ReconcileManifest', '9': 0, '10': 'manifest'},
+    {'1': 'fetch', '3': 4, '4': 1, '5': 11, '6': '.cleona.ReconcileFetch', '9': 0, '10': 'fetch'},
+    {'1': 'deliver', '3': 5, '4': 1, '5': 11, '6': '.cleona.ReconcileDeliver', '9': 0, '10': 'deliver'},
+    {'1': 'progress', '3': 6, '4': 1, '5': 11, '6': '.cleona.ReconcileProgress', '9': 0, '10': 'progress'},
+    {'1': 'cancel', '3': 7, '4': 1, '5': 11, '6': '.cleona.ReconcileCancel', '9': 0, '10': 'cancel'},
+  ],
+  '8': [
+    {'1': 'kind'},
+  ],
+};
+
+/// Descriptor for `ReconcileFrame`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileFrameDescriptor = $convert.base64Decode(
+    'Cg5SZWNvbmNpbGVGcmFtZRIhCgxyZWNvbmNpbGVfaWQYASABKAxSC3JlY29uY2lsZUlkEjEKBm'
+    'hlYWRlchgCIAEoCzIXLmNsZW9uYS5SZWNvbmNpbGVIZWFkZXJIAFIGaGVhZGVyEjcKCG1hbmlm'
+    'ZXN0GAMgASgLMhkuY2xlb25hLlJlY29uY2lsZU1hbmlmZXN0SABSCG1hbmlmZXN0Ei4KBWZldG'
+    'NoGAQgASgLMhYuY2xlb25hLlJlY29uY2lsZUZldGNoSABSBWZldGNoEjQKB2RlbGl2ZXIYBSAB'
+    'KAsyGC5jbGVvbmEuUmVjb25jaWxlRGVsaXZlckgAUgdkZWxpdmVyEjcKCHByb2dyZXNzGAYgAS'
+    'gLMhkuY2xlb25hLlJlY29uY2lsZVByb2dyZXNzSABSCHByb2dyZXNzEjEKBmNhbmNlbBgHIAEo'
+    'CzIXLmNsZW9uYS5SZWNvbmNpbGVDYW5jZWxIAFIGY2FuY2VsQgYKBGtpbmQ=');
+
+@$core.Deprecated('Use reconcileHeaderDescriptor instead')
+const ReconcileHeader$json = {
+  '1': 'ReconcileHeader',
+  '2': [
+    {'1': 'cut_ms', '3': 1, '4': 1, '5': 3, '10': 'cutMs'},
+    {'1': 'part', '3': 2, '4': 1, '5': 13, '10': 'part'},
+    {'1': 'parts', '3': 3, '4': 1, '5': 13, '10': 'parts'},
+    {'1': 'chats', '3': 4, '4': 3, '5': 11, '6': '.cleona.ReconcileChat', '10': 'chats'},
+  ],
+};
+
+/// Descriptor for `ReconcileHeader`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileHeaderDescriptor = $convert.base64Decode(
+    'Cg9SZWNvbmNpbGVIZWFkZXISFQoGY3V0X21zGAEgASgDUgVjdXRNcxISCgRwYXJ0GAIgASgNUg'
+    'RwYXJ0EhQKBXBhcnRzGAMgASgNUgVwYXJ0cxIrCgVjaGF0cxgEIAMoCzIVLmNsZW9uYS5SZWNv'
+    'bmNpbGVDaGF0UgVjaGF0cw==');
+
+@$core.Deprecated('Use reconcileChatDescriptor instead')
+const ReconcileChat$json = {
+  '1': 'ReconcileChat',
+  '2': [
+    {'1': 'conv_id', '3': 1, '4': 1, '5': 12, '10': 'convId'},
+    {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
+    {'1': 'last_activity_ms', '3': 3, '4': 1, '5': 3, '10': 'lastActivityMs'},
+    {'1': 'is_group', '3': 4, '4': 1, '5': 8, '10': 'isGroup'},
+    {'1': 'is_channel', '3': 5, '4': 1, '5': 8, '10': 'isChannel'},
+    {'1': 'is_favorite', '3': 6, '4': 1, '5': 8, '10': 'isFavorite'},
+    {'1': 'unread_count', '3': 7, '4': 1, '5': 13, '10': 'unreadCount'},
+    {'1': 'config_json', '3': 8, '4': 1, '5': 12, '10': 'configJson'},
+    {'1': 'count', '3': 9, '4': 1, '5': 4, '10': 'count'},
+    {'1': 'oldest_ms', '3': 10, '4': 1, '5': 3, '10': 'oldestMs'},
+    {'1': 'bytes', '3': 11, '4': 1, '5': 4, '10': 'bytes'},
+  ],
+};
+
+/// Descriptor for `ReconcileChat`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileChatDescriptor = $convert.base64Decode(
+    'Cg1SZWNvbmNpbGVDaGF0EhcKB2NvbnZfaWQYASABKAxSBmNvbnZJZBIhCgxkaXNwbGF5X25hbW'
+    'UYAiABKAlSC2Rpc3BsYXlOYW1lEigKEGxhc3RfYWN0aXZpdHlfbXMYAyABKANSDmxhc3RBY3Rp'
+    'dml0eU1zEhkKCGlzX2dyb3VwGAQgASgIUgdpc0dyb3VwEh0KCmlzX2NoYW5uZWwYBSABKAhSCW'
+    'lzQ2hhbm5lbBIfCgtpc19mYXZvcml0ZRgGIAEoCFIKaXNGYXZvcml0ZRIhCgx1bnJlYWRfY291'
+    'bnQYByABKA1SC3VucmVhZENvdW50Eh8KC2NvbmZpZ19qc29uGAggASgMUgpjb25maWdKc29uEh'
+    'QKBWNvdW50GAkgASgEUgVjb3VudBIbCglvbGRlc3RfbXMYCiABKANSCG9sZGVzdE1zEhQKBWJ5'
+    'dGVzGAsgASgEUgVieXRlcw==');
+
+@$core.Deprecated('Use reconcileManifestDescriptor instead')
+const ReconcileManifest$json = {
+  '1': 'ReconcileManifest',
+  '2': [
+    {'1': 'fetch_id', '3': 1, '4': 1, '5': 12, '10': 'fetchId'},
+    {'1': 'chats', '3': 2, '4': 3, '5': 11, '6': '.cleona.ReconcileManifestChat', '10': 'chats'},
+  ],
+};
+
+/// Descriptor for `ReconcileManifest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileManifestDescriptor = $convert.base64Decode(
+    'ChFSZWNvbmNpbGVNYW5pZmVzdBIZCghmZXRjaF9pZBgBIAEoDFIHZmV0Y2hJZBIzCgVjaGF0cx'
+    'gCIAMoCzIdLmNsZW9uYS5SZWNvbmNpbGVNYW5pZmVzdENoYXRSBWNoYXRz');
+
+@$core.Deprecated('Use reconcileManifestChatDescriptor instead')
+const ReconcileManifestChat$json = {
+  '1': 'ReconcileManifestChat',
+  '2': [
+    {'1': 'conv_id', '3': 1, '4': 1, '5': 12, '10': 'convId'},
+    {'1': 'entries', '3': 2, '4': 3, '5': 11, '6': '.cleona.ReconcileEntry', '10': 'entries'},
+    {'1': 'complete', '3': 3, '4': 1, '5': 8, '10': 'complete'},
+  ],
+};
+
+/// Descriptor for `ReconcileManifestChat`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileManifestChatDescriptor = $convert.base64Decode(
+    'ChVSZWNvbmNpbGVNYW5pZmVzdENoYXQSFwoHY29udl9pZBgBIAEoDFIGY29udklkEjAKB2VudH'
+    'JpZXMYAiADKAsyFi5jbGVvbmEuUmVjb25jaWxlRW50cnlSB2VudHJpZXMSGgoIY29tcGxldGUY'
+    'AyABKAhSCGNvbXBsZXRl');
+
+@$core.Deprecated('Use reconcileEntryDescriptor instead')
+const ReconcileEntry$json = {
+  '1': 'ReconcileEntry',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 12, '10': 'id'},
+    {'1': 'ts_ms', '3': 2, '4': 1, '5': 3, '10': 'tsMs'},
+    {'1': 'sender', '3': 3, '4': 1, '5': 12, '10': 'sender'},
+    {'1': 'type', '3': 4, '4': 1, '5': 13, '10': 'type'},
+    {'1': 'size', '3': 5, '4': 1, '5': 13, '10': 'size'},
+  ],
+};
+
+/// Descriptor for `ReconcileEntry`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileEntryDescriptor = $convert.base64Decode(
+    'Cg5SZWNvbmNpbGVFbnRyeRIOCgJpZBgBIAEoDFICaWQSEwoFdHNfbXMYAiABKANSBHRzTXMSFg'
+    'oGc2VuZGVyGAMgASgMUgZzZW5kZXISEgoEdHlwZRgEIAEoDVIEdHlwZRISCgRzaXplGAUgASgN'
+    'UgRzaXpl');
+
+@$core.Deprecated('Use reconcileFetchDescriptor instead')
+const ReconcileFetch$json = {
+  '1': 'ReconcileFetch',
+  '2': [
+    {'1': 'fetch_id', '3': 1, '4': 1, '5': 12, '10': 'fetchId'},
+    {'1': 'kind', '3': 2, '4': 1, '5': 14, '6': '.cleona.ReconcileFetch.Kind', '10': 'kind'},
+    {'1': 'conv_ids', '3': 3, '4': 3, '5': 12, '10': 'convIds'},
+    {'1': 'before_ms', '3': 4, '4': 1, '5': 3, '10': 'beforeMs'},
+    {'1': 'ids', '3': 5, '4': 3, '5': 12, '10': 'ids'},
+    {'1': 'newest', '3': 6, '4': 1, '5': 13, '10': 'newest'},
+    {'1': 'window', '3': 7, '4': 1, '5': 13, '10': 'window'},
+    {'1': 'since_ms', '3': 8, '4': 1, '5': 3, '10': 'sinceMs'},
+  ],
+  '4': [ReconcileFetch_Kind$json],
+};
+
+@$core.Deprecated('Use reconcileFetchDescriptor instead')
+const ReconcileFetch_Kind$json = {
+  '1': 'Kind',
+  '2': [
+    {'1': 'MANIFEST', '2': 0},
+    {'1': 'MESSAGES', '2': 1},
+    {'1': 'NEWEST', '2': 2},
+    {'1': 'SINCE', '2': 3},
+  ],
+};
+
+/// Descriptor for `ReconcileFetch`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileFetchDescriptor = $convert.base64Decode(
+    'Cg5SZWNvbmNpbGVGZXRjaBIZCghmZXRjaF9pZBgBIAEoDFIHZmV0Y2hJZBIvCgRraW5kGAIgAS'
+    'gOMhsuY2xlb25hLlJlY29uY2lsZUZldGNoLktpbmRSBGtpbmQSGQoIY29udl9pZHMYAyADKAxS'
+    'B2NvbnZJZHMSGwoJYmVmb3JlX21zGAQgASgDUghiZWZvcmVNcxIQCgNpZHMYBSADKAxSA2lkcx'
+    'IWCgZuZXdlc3QYBiABKA1SBm5ld2VzdBIWCgZ3aW5kb3cYByABKA1SBndpbmRvdxIZCghzaW5j'
+    'ZV9tcxgIIAEoA1IHc2luY2VNcyI5CgRLaW5kEgwKCE1BTklGRVNUEAASDAoITUVTU0FHRVMQAR'
+    'IKCgZORVdFU1QQAhIJCgVTSU5DRRAD');
+
+@$core.Deprecated('Use reconcileDeliverDescriptor instead')
+const ReconcileDeliver$json = {
+  '1': 'ReconcileDeliver',
+  '2': [
+    {'1': 'fetch_id', '3': 1, '4': 1, '5': 12, '10': 'fetchId'},
+    {'1': 'messages', '3': 2, '4': 3, '5': 11, '6': '.cleona.ReconcileMessage', '10': 'messages'},
+    {'1': 'too_large', '3': 3, '4': 3, '5': 12, '10': 'tooLarge'},
+    {'1': 'held', '3': 4, '4': 3, '5': 12, '10': 'held'},
+    {'1': 'deleted', '3': 5, '4': 3, '5': 12, '10': 'deleted'},
+    {'1': 'expired', '3': 6, '4': 3, '5': 11, '6': '.cleona.ReconcileExpired', '10': 'expired'},
+    {'1': 'complete', '3': 7, '4': 1, '5': 8, '10': 'complete'},
+    {'1': 'seq', '3': 8, '4': 1, '5': 13, '10': 'seq'},
+    {'1': 'round_end', '3': 9, '4': 1, '5': 8, '10': 'roundEnd'},
+  ],
+};
+
+/// Descriptor for `ReconcileDeliver`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileDeliverDescriptor = $convert.base64Decode(
+    'ChBSZWNvbmNpbGVEZWxpdmVyEhkKCGZldGNoX2lkGAEgASgMUgdmZXRjaElkEjQKCG1lc3NhZ2'
+    'VzGAIgAygLMhguY2xlb25hLlJlY29uY2lsZU1lc3NhZ2VSCG1lc3NhZ2VzEhsKCXRvb19sYXJn'
+    'ZRgDIAMoDFIIdG9vTGFyZ2USEgoEaGVsZBgEIAMoDFIEaGVsZBIYCgdkZWxldGVkGAUgAygMUg'
+    'dkZWxldGVkEjIKB2V4cGlyZWQYBiADKAsyGC5jbGVvbmEuUmVjb25jaWxlRXhwaXJlZFIHZXhw'
+    'aXJlZBIaCghjb21wbGV0ZRgHIAEoCFIIY29tcGxldGUSEAoDc2VxGAggASgNUgNzZXESGwoJcm'
+    '91bmRfZW5kGAkgASgIUghyb3VuZEVuZA==');
+
+@$core.Deprecated('Use reconcileExpiredDescriptor instead')
+const ReconcileExpired$json = {
+  '1': 'ReconcileExpired',
+  '2': [
+    {'1': 'conv_id', '3': 1, '4': 1, '5': 12, '10': 'convId'},
+    {'1': 'count', '3': 2, '4': 1, '5': 13, '10': 'count'},
+  ],
+};
+
+/// Descriptor for `ReconcileExpired`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileExpiredDescriptor = $convert.base64Decode(
+    'ChBSZWNvbmNpbGVFeHBpcmVkEhcKB2NvbnZfaWQYASABKAxSBmNvbnZJZBIUCgVjb3VudBgCIA'
+    'EoDVIFY291bnQ=');
+
+@$core.Deprecated('Use reconcileMessageDescriptor instead')
+const ReconcileMessage$json = {
+  '1': 'ReconcileMessage',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 12, '10': 'id'},
+    {'1': 'conv_id', '3': 2, '4': 1, '5': 12, '10': 'convId'},
+    {'1': 'sender', '3': 3, '4': 1, '5': 12, '10': 'sender'},
+    {'1': 'ts_ms', '3': 4, '4': 1, '5': 3, '10': 'tsMs'},
+    {'1': 'type', '3': 5, '4': 1, '5': 13, '10': 'type'},
+    {'1': 'outgoing', '3': 6, '4': 1, '5': 8, '10': 'outgoing'},
+    {'1': 'status', '3': 7, '4': 1, '5': 9, '10': 'status'},
+    {'1': 'text', '3': 8, '4': 1, '5': 9, '10': 'text'},
+    {'1': 'extra_json', '3': 9, '4': 1, '5': 12, '10': 'extraJson'},
+  ],
+};
+
+/// Descriptor for `ReconcileMessage`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileMessageDescriptor = $convert.base64Decode(
+    'ChBSZWNvbmNpbGVNZXNzYWdlEg4KAmlkGAEgASgMUgJpZBIXCgdjb252X2lkGAIgASgMUgZjb2'
+    '52SWQSFgoGc2VuZGVyGAMgASgMUgZzZW5kZXISEwoFdHNfbXMYBCABKANSBHRzTXMSEgoEdHlw'
+    'ZRgFIAEoDVIEdHlwZRIaCghvdXRnb2luZxgGIAEoCFIIb3V0Z29pbmcSFgoGc3RhdHVzGAcgAS'
+    'gJUgZzdGF0dXMSEgoEdGV4dBgIIAEoCVIEdGV4dBIdCgpleHRyYV9qc29uGAkgASgMUglleHRy'
+    'YUpzb24=');
+
+@$core.Deprecated('Use reconcileProgressDescriptor instead')
+const ReconcileProgress$json = {
+  '1': 'ReconcileProgress',
+  '2': [
+    {'1': 'fetch_id', '3': 1, '4': 1, '5': 12, '10': 'fetchId'},
+    {'1': 'received', '3': 2, '4': 1, '5': 13, '10': 'received'},
+    {'1': 'delivered', '3': 3, '4': 3, '5': 12, '10': 'delivered'},
+  ],
+};
+
+/// Descriptor for `ReconcileProgress`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileProgressDescriptor = $convert.base64Decode(
+    'ChFSZWNvbmNpbGVQcm9ncmVzcxIZCghmZXRjaF9pZBgBIAEoDFIHZmV0Y2hJZBIaCghyZWNlaX'
+    'ZlZBgCIAEoDVIIcmVjZWl2ZWQSHAoJZGVsaXZlcmVkGAMgAygMUglkZWxpdmVyZWQ=');
+
+@$core.Deprecated('Use reconcileCancelDescriptor instead')
+const ReconcileCancel$json = {
+  '1': 'ReconcileCancel',
+};
+
+/// Descriptor for `ReconcileCancel`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileCancelDescriptor = $convert.base64Decode(
+    'Cg9SZWNvbmNpbGVDYW5jZWw=');
+
 @$core.Deprecated('Use twinSyncEnvelopeDescriptor instead')
 const TwinSyncEnvelope$json = {
   '1': 'TwinSyncEnvelope',
@@ -1750,6 +1895,7 @@ const TwinSyncEnvelope$json = {
     {'1': 'timestamp', '3': 3, '4': 1, '5': 4, '10': 'timestamp'},
     {'1': 'sync_type', '3': 4, '4': 1, '5': 14, '6': '.cleona.TwinSyncType', '10': 'syncType'},
     {'1': 'payload', '3': 5, '4': 1, '5': 12, '10': 'payload'},
+    {'1': 'delivery_id', '3': 6, '4': 1, '5': 12, '10': 'deliveryId'},
   ],
 };
 
@@ -1758,7 +1904,7 @@ final $typed_data.Uint8List twinSyncEnvelopeDescriptor = $convert.base64Decode(
     'ChBUd2luU3luY0VudmVsb3BlEhcKB3N5bmNfaWQYASABKAxSBnN5bmNJZBIbCglkZXZpY2VfaW'
     'QYAiABKAxSCGRldmljZUlkEhwKCXRpbWVzdGFtcBgDIAEoBFIJdGltZXN0YW1wEjEKCXN5bmNf'
     'dHlwZRgEIAEoDjIULmNsZW9uYS5Ud2luU3luY1R5cGVSCHN5bmNUeXBlEhgKB3BheWxvYWQYBS'
-    'ABKAxSB3BheWxvYWQ=');
+    'ABKAxSB3BheWxvYWQSHwoLZGVsaXZlcnlfaWQYBiABKAxSCmRlbGl2ZXJ5SWQ=');
 
 @$core.Deprecated('Use deviceRecordDescriptor instead')
 const DeviceRecord$json = {
@@ -1792,11 +1938,16 @@ const KeyRotationBroadcast$json = {
     {'1': 'new_ml_dsa_pk', '3': 2, '4': 1, '5': 12, '10': 'newMlDsaPk'},
     {'1': 'new_x25519_pk', '3': 3, '4': 1, '5': 12, '10': 'newX25519Pk'},
     {'1': 'new_ml_kem_pk', '3': 4, '4': 1, '5': 12, '10': 'newMlKemPk'},
-    {'1': 'old_signature_ed25519', '3': 5, '4': 1, '5': 12, '10': 'oldSignatureEd25519'},
-    {'1': 'new_signature_ed25519', '3': 6, '4': 1, '5': 12, '10': 'newSignatureEd25519'},
     {'1': 'approval_tokens', '3': 7, '4': 3, '5': 11, '6': '.cleona.RotationApprovalToken', '10': 'approvalTokens'},
     {'1': 'pre_rotation_device_count', '3': 8, '4': 1, '5': 13, '10': 'preRotationDeviceCount'},
+    {'1': 'mode', '3': 9, '4': 1, '5': 14, '6': '.cleona.KeyRotationMode', '10': 'mode'},
+    {'1': 'emergency', '3': 10, '4': 1, '5': 8, '10': 'emergency'},
   ],
+  '9': [
+    {'1': 5, '2': 6},
+    {'1': 6, '2': 7},
+  ],
+  '10': ['old_signature_ed25519', 'new_signature_ed25519'],
 };
 
 /// Descriptor for `KeyRotationBroadcast`. Decode as a `google.protobuf.DescriptorProto`.
@@ -1804,11 +1955,11 @@ final $typed_data.Uint8List keyRotationBroadcastDescriptor = $convert.base64Deco
     'ChRLZXlSb3RhdGlvbkJyb2FkY2FzdBIkCg5uZXdfZWQyNTUxOV9waxgBIAEoDFIMbmV3RWQyNT'
     'UxOVBrEiEKDW5ld19tbF9kc2FfcGsYAiABKAxSCm5ld01sRHNhUGsSIgoNbmV3X3gyNTUxOV9w'
     'axgDIAEoDFILbmV3WDI1NTE5UGsSIQoNbmV3X21sX2tlbV9waxgEIAEoDFIKbmV3TWxLZW1Qax'
-    'IyChVvbGRfc2lnbmF0dXJlX2VkMjU1MTkYBSABKAxSE29sZFNpZ25hdHVyZUVkMjU1MTkSMgoV'
-    'bmV3X3NpZ25hdHVyZV9lZDI1NTE5GAYgASgMUhNuZXdTaWduYXR1cmVFZDI1NTE5EkYKD2FwcH'
-    'JvdmFsX3Rva2VucxgHIAMoCzIdLmNsZW9uYS5Sb3RhdGlvbkFwcHJvdmFsVG9rZW5SDmFwcHJv'
-    'dmFsVG9rZW5zEjkKGXByZV9yb3RhdGlvbl9kZXZpY2VfY291bnQYCCABKA1SFnByZVJvdGF0aW'
-    '9uRGV2aWNlQ291bnQ=');
+    'JGCg9hcHByb3ZhbF90b2tlbnMYByADKAsyHS5jbGVvbmEuUm90YXRpb25BcHByb3ZhbFRva2Vu'
+    'Ug5hcHByb3ZhbFRva2VucxI5ChlwcmVfcm90YXRpb25fZGV2aWNlX2NvdW50GAggASgNUhZwcm'
+    'VSb3RhdGlvbkRldmljZUNvdW50EisKBG1vZGUYCSABKA4yFy5jbGVvbmEuS2V5Um90YXRpb25N'
+    'b2RlUgRtb2RlEhwKCWVtZXJnZW5jeRgKIAEoCFIJZW1lcmdlbmN5SgQIBRAGSgQIBhAHUhVvbG'
+    'Rfc2lnbmF0dXJlX2VkMjU1MTlSFW5ld19zaWduYXR1cmVfZWQyNTUxOQ==');
 
 @$core.Deprecated('Use calendarReminderOffsetDescriptor instead')
 const CalendarReminderOffset$json = {

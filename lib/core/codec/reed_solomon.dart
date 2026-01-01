@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cleona/core/log/clogger.dart';
@@ -212,6 +213,132 @@ class ReedSolomon {
   static Uint8List decodeWithParams(
       Map<int, Uint8List> fragments, int originalSize, int n, int k) {
     return ReedSolomon.withParams(n, k).decode(fragments, originalSize);
+  }
+
+  /// Streaming file encode: writes fragments byte-identical to [encode] to
+  /// [outputPaths] — without ever holding the input, the padding or the
+  /// fragment set in memory (S404: the bootstrap daemon was OOM-killed at
+  /// 515.7 MB peak seeding a 200 MB APK because [encode] pads a full copy
+  /// and builds all N fragments at once).
+  ///
+  /// [outputPaths] receives the first `outputPaths.length` fragments (the
+  /// caller stores the first `maxFragments`, capped at N); parity fragments
+  /// beyond that are computed only where a written fragment needs them.
+  /// The input is processed in column windows of [window] bytes — for each
+  /// window the k data-fragment slices are read from the file (zero-filled
+  /// past the file end, the padding of [encode]), appended to their output
+  /// files, and folded into the parity windows. Peak memory is
+  /// O(k * window): the k data window buffers plus one parity window.
+  ///
+  /// Returns the fragment size (`ceil(fileLength / k) * k / k`) — the padded
+  /// length each written fragment carries.
+  int encodeFileStreaming({
+    required String inputPath,
+    required List<String> outputPaths,
+    int window = defaultWindowSize,
+  }) {
+    if (window < 1) throw ArgumentError('window must be >= 1, got $window');
+    if (outputPaths.isEmpty) {
+      throw ArgumentError('outputPaths must not be empty');
+    }
+    if (outputPaths.length > n) {
+      throw ArgumentError(
+          'outputPaths must have at most n=$n entries, got ${outputPaths.length}');
+    }
+
+    final storeCount = outputPaths.length;
+    final file = File(inputPath);
+    if (!file.existsSync()) {
+      throw FileSystemException('input file not found', inputPath);
+    }
+    final len = file.lengthSync();
+    final paddedLen = ((len + k - 1) ~/ k) * k;
+    final fragSize = paddedLen ~/ k;
+
+    final outputs = <RandomAccessFile>[];
+    try {
+      for (final path in outputPaths) {
+        outputs.add(File(path).openSync(mode: FileMode.write));
+      }
+      // Empty input: encode() returns k+m zero-length fragments, the files
+      // created above are the same zero-length fragments.
+      if (fragSize == 0) return 0;
+
+      final input = file.openSync();
+      try {
+        // Window buffer per data fragment, reused across windows.
+        final dataWindows = List.generate(k, (_) => Uint8List(window));
+        final parityWindow = Uint8List(window);
+        for (var c = 0; c < fragSize; c += window) {
+          final w = min(window, fragSize - c);
+
+          // Data fragment i, window [c, c+w): read the slice from the file,
+          // clamp at the file length and zero-fill the rest (the padding
+          // of encode()).
+          for (var i = 0; i < k; i++) {
+            final buf = dataWindows[i];
+            var read = 0;
+            final start = i * fragSize + c;
+            if (start < len) {
+              final want = min(w, len - start);
+              input.setPositionSync(start);
+              while (read < want) {
+                final got = input.readIntoSync(buf, read, want);
+                if (got <= 0) break;
+                read += got;
+              }
+            }
+            for (var t = read; t < w; t++) {
+              buf[t] = 0;
+            }
+            if (i < storeCount) outputs[i].writeFromSync(buf, 0, w);
+          }
+
+          // Parity fragments: same fold as in encode(), byte j of parity
+          // fragment p = XOR over i of gfMul(frag_i[j], coeff(p, i)).
+          for (var p = 0; p < m; p++) {
+            final outIdx = k + p;
+            if (outIdx >= storeCount) continue;
+            for (var t = 0; t < w; t++) {
+              parityWindow[t] = 0;
+            }
+            for (var i = 0; i < k; i++) {
+              final coeff = _cauchyCoeff(p, i);
+              final data = dataWindows[i];
+              for (var t = 0; t < w; t++) {
+                parityWindow[t] ^= _mulTable[coeff << 8 | data[t]];
+              }
+            }
+            outputs[outIdx].writeFromSync(parityWindow, 0, w);
+          }
+        }
+      } finally {
+        input.closeSync();
+      }
+    } finally {
+      for (final o in outputs) {
+        o.flushSync();
+        o.closeSync();
+      }
+    }
+    return fragSize;
+  }
+
+  /// 256x256 GF(256) multiplication table, built once from [_gfMul] —
+  /// identical results by construction, one lookup instead of the
+  /// 8-iteration loop per byte. Only [encodeFileStreaming] uses it: its
+  /// parity pass touches every input byte once per parity fragment, and
+  /// the fragment windows are the hot loop there.
+  static final Uint16List _mulTable = _buildMulTable();
+
+  static Uint16List _buildMulTable() {
+    final table = Uint16List(256 * 256);
+    for (var a = 0; a < 256; a++) {
+      for (var b = 0; b < 256; b++) {
+        table[a << 8 | b] = _gfMul(a, b);
+      }
+    }
+    return table;
   }
 
   /// GF(256) multiplication using AES polynomial (x^8 + x^4 + x^3 + x + 1).

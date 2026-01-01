@@ -454,8 +454,16 @@ final class BootstrapPrekeys implements PrekeySource {
   static const bool oneTimePrekeysWired = true;
 
   /// Draws the next prekey — or visibly falls back.
-  void advance(String peer) {
-    _usingFallback = !oneTimePrekeysWired || !pool.advance(peer);
+  ///
+  /// [now] is the caller's clock and travels on to the draw
+  /// (`PeerPrekeys.take`). The switch in front of the draw
+  /// (`stackStale(peer, now)` in `sendFrame`) and the draw itself must read
+  /// THE SAME clock: without it the draw read the wall clock while the
+  /// switch read the time handed in, and a stack the switch held for fresh
+  /// was counted as a stale draw (S401).
+  void advance(String peer, {DateTime? now}) {
+    _usingFallback =
+        !oneTimePrekeysWired || !pool.advance(peer, now: now);
     if (_usingFallback) {
       fallbackCount++;
       _fellBackFor.add(peer);
@@ -1175,7 +1183,7 @@ final class V41Host {
 
     final anchor = (management || stackDead) ? anchorSource : null;
     if (anchor == null) {
-      prekeys.advance(peer);
+      prekeys.advance(peer, now: now);
       // DRAWN IS CHANGED. The draw takes a prekey from
       // [theirs]; if that is not saved, the sender seals against it a second time
       // after a crash, and the receiver has
@@ -1290,7 +1298,7 @@ final class V41Host {
     // `x25519PublicFor` would read the state of the LAST served counterpart. For
     // a pseudo counterpart the supply is always empty, so the fallback
     // reliably takes effect — and `fallbackCount` counts it, as it should.
-    prekeys.advance(peer);
+    prekeys.advance(peer, now: now);
     final certified = Uint8List(V41Kind.senderMacBytes + frame.length)
       ..setRange(0, V41Kind.senderMacBytes, v41SenderMac(kAb: kInv, frame: frame))
       ..setRange(V41Kind.senderMacBytes,

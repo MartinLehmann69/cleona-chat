@@ -232,7 +232,7 @@ class BinaryRendezvousManager {
     //
     //   Price of the switch. `deriveBinaryNostrSecretKey` takes as ikm the
     //   NETWORK SECRET and as info only `hex(deviceId)` — the epoch is
-    //   NOT in it (`rendezvous_secret.dart:168-178`). The signing key
+    //   NOT in it (`rendezvous_secret.dart:122-132`). The signing key
     //   thus survives every tag rotation. On the relay side there would arise a
     //   device pseudonym stable over the lifetime of the network secret
     //   under a NETWORK-WIDE shared tag: the relay operator could

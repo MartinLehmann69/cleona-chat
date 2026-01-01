@@ -265,10 +265,23 @@ final class CallCandidate {
 /// destination-dependent port allocation. And it is without consequence where it contributes
 /// nothing: the prediction only runs from round `kPlainRounds` = 15, i.e.
 /// only if the mapped address has not carried by then.
+///
+/// ── THE MIRROR UNDER 4.2: [mirrored] (S398-W2) ──────────────────────────
+///
+/// [observed] is the mirror of the link-layer handshake (flight 2). Under
+/// 4.2 the data port belongs to the delivery layer, and its mirror is the
+/// public address a neighbour outside the own segment reported
+/// ("how do I look from there", `mycelium/lib/node_outside.dart`) — the
+/// same finding §17.3 names ("learns its external address from the sync
+/// that is already running anyway"), from the other carrier. It comes in
+/// as [mirrored], already as [CallCandidate]s with [CallCandidate.fromMirror]
+/// set, and takes the place of [observed] in the order: after the local
+/// and the mapped ones. Both may be given; duplicates count once.
 Future<List<CallCandidate>> ownCallCandidates({
   required int ownPort,
-  required ObservedAddressBook observed,
+  ObservedAddressBook? observed,
   EntryAddress? mapped,
+  List<CallCandidate> mirrored = const [],
   Future<List<String>> Function()? localAddresses,
 }) async {
   final out = <CallCandidate>[];
@@ -299,9 +312,10 @@ Future<List<CallCandidate>> ownCallCandidates({
           Uint8List.fromList(addr.rawAddress), wasMapped.port));
     }
   }
-  for (final o in observed.allCandidates) {
+  for (final o in observed?.allCandidates ?? const <ObservedAddress>[]) {
     add(CallCandidate.fromObserved(o));
   }
+  mirrored.forEach(add);
 
   if (out.length > kMaxCallCandidates) {
     return out.sublist(0, kMaxCallCandidates);

@@ -62,7 +62,16 @@ extension GroupsRead on Group {
     if (inside.length < beforeSig) throw GroupsError('does not open');
     var p = 0;
     final found = cut(inside, p, p += kGroupsIdentifierLength);
-    final sender = Address.outBytes(cut(inside, p, p += Address.length));
+    // No chain travels in a group message: a rotated sender is believed only
+    // with the keys this member already holds for it ([senderAccept] below,
+    // after the signatures) — it learns them from the sender's envelopes.
+    final Address sender;
+    try {
+      sender = Address.outBytes(cut(inside, p, p += Address.length),
+          proven: true);
+    } on EnvelopeBroken {
+      throw GroupsError('does not open');
+    }
     final dsaLength = ByteData.sublistView(inside).getUint16(p, Endian.big);
     p += 2;
     final edSig = cut(inside, p, p += 64);
@@ -78,6 +87,11 @@ extension GroupsRead on Group {
     final oqs = OqsFFI()..init();
     if (!sodium.verifyEd25519(signed, edSig, sender.ed25519Pk) ||
         !oqs.mlDsaVerify(signed, dsaSig, sender.mlDsaPk)) {
+      throw GroupsError('does not open');
+    }
+    try {
+      senderAccept(me.book, sender, chainAllowed: false);
+    } on EnvelopeBroken {
       throw GroupsError('does not open');
     }
     // The own message already lies in [sent]: the sender is not a

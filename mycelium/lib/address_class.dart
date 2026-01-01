@@ -26,10 +26,20 @@ import 'package:mycelium/memory.dart' show Contact;
 import 'package:mycelium/card.dart' show Card;
 import 'package:mycelium/card_address.dart' show CardAddress, Routes;
 import 'package:mycelium/node_helpers.dart' show outTheSegment;
+import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
+import 'package:mycelium/own_segment.dart' show inOwnSegment;
 
-/// Whether [a] lies in the own segment from the view of THIS node.
-bool _inSegment(CardAddress a) =>
-    outTheSegment(InternetAddress.fromRawAddress(a.address));
+/// Whether [a] is a private address that lies in the own segment from the
+/// view of THIS node — step 1 (§7.2; S405 V6: the private address of a
+/// foreign segment is neither step 1 nor step 2, it is discarded).
+bool _inSegment(CardAddress a) {
+  final ip = InternetAddress.fromRawAddress(a.address);
+  return outTheSegment(ip) && inOwnSegment(ip);
+}
+
+/// Whether [a] is reachable from the open network — step 2 (§7.3).
+bool _open(CardAddress a) =>
+    fromOutsideReachable(InternetAddress.fromRawAddress(a.address));
 
 /// The first address from [addresses] that [fits] — the issuer's order
 /// is its recommendation, and it is followed as long as it is
@@ -49,7 +59,7 @@ CardAddress? _first(
 /// §8.2 carries.
 Routes routesFromCard(Card k) => (
       lan: _first(k.ownAddresses, _inSegment),
-      public: _first(k.ownAddresses, (a) => !_inSegment(a)),
+      public: _first(k.ownAddresses, _open),
       neighbour: k.neighbourAddress,
     );
 
@@ -69,8 +79,12 @@ Routes routesToContact(Contact k) {
   final proof = k.lastSeen;
   final outCard = k.cardsAddresses;
   return (
-    lan: proof ?? _first(outCard, _inSegment),
-    public: _first(outCard, (a) => !_inSegment(a)),
+    // The evidence wins where it is usable from here — in the own segment
+    // or reachable from the open network (S405 V6).
+    lan: (proof != null && (_inSegment(proof) || _open(proof)))
+        ? proof
+        : _first(outCard, _inSegment),
+    public: _first(outCard, _open),
     neighbour: k.neighbours.firstOrNull, // the first of the peer's fixed ones
   );
 }

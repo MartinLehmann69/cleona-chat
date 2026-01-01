@@ -1,31 +1,24 @@
 // Android share target (bug #U16). Kotlin stashes the ACTION_SEND payload,
 // we drain it via MethodChannel and show a contact picker.
 //
-// ── THE LINE ABOUT THE TWO-STAGE TRANSFER IS GONE (02.09.2026) ──────
-//
-// Here it said: "sendMediaMessage internally triggers two-stage at >256KB
-// (docs/MESSAGING.md)". The two-stage path fell with the CUT of 31.08.,
-// and so did the 256 KB — the lower limit of the media lanes
-// lies at 32 KB (§9.3, `kFountainWorthwhileBytes`). A comment that
-// describes a torn-down path is worse than none.
-//
-// ── AND THERE IS NO MODE QUESTION ANY MORE (S389) ────────────────────────
+// ── ONE QUESTION PER FILE, NO MODE QUESTION ──────────────────────────────
 //
 // This path is a FULL send path, not a side entrance: what comes in via
-// "Share" goes out through the same `sendMediaMessage` as a
-// file from the chat. Until S389 the same consent dialog as
-// in the chat stood here — triggered by the chat being set to high-secure. The
-// switch is gone (§12.1: "No per-chat setting, no explanatory dialog,
-// no switch"), and thus also its trigger. What §24.4.5 demands at this place
-// instead stands as finding B-M2 in
-// `mycelium/berichte/S389-BAU-MODUS.md`.
+// "Share" goes out through the same `sendMediaMessage` as a file from the
+// chat, and a file that takes a media lane is asked for through the same
+// gate (`mediaLaneConsentFor`, §9.4 "Consent", §24.4.5). There is no
+// per-chat switch that triggers it (§12.1): the size of the file does —
+// below 256 KB it is one message (lane 1), from there on a media lane
+// (`laneChoose`, §9.4).
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/deep_link_receiver.dart';
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/media_consent_dialog.dart';
 
 class ShareReceiver {
   static const _channel = MethodChannel('chat.cleona/share');
@@ -62,16 +55,31 @@ class ShareReceiver {
       if (raw == null) return true;
       final text = (raw['text'] as String?) ?? '';
       final files = ((raw['files'] as List?) ?? const []).cast<String>();
+      // S401: the shared files are COPIES the Android side laid into the
+      // app's cache (`cacheDir/shared_in`) — plaintext of what is about to
+      // become a message. [promptAndSend] deletes them when the operation
+      // is over. What a process death in between left behind goes here,
+      // ONCE per process: at this edge the pending share has just been
+      // handed over, so a file in that directory that is neither in it nor
+      // in a share still being asked about belongs to no operation.
+      _inFlight.addAll(files);
+      if (!_leftoversCleared) {
+        _leftoversCleared = true;
+        TransientFiles.sweepSharedIn(keep: _inFlight);
+      }
       if (text.isEmpty && files.isEmpty) return true;
       // V4.2 §15.2: "one line of text … for pasting into a chat, a mail, a
       // note". Whoever SHARES such a line from another program with Cleona
       // wants to redeem it, not forward it to a contact.
       // Plain text only: with files it stays the usual share path.
-      if (files.isEmpty && text.contains('cleona:1:')) {
+      // Both line forms: `cleona:1:` (card) and `cleona:2:` (card + keys,
+      // proposal E) — the only form an issuer hands out since then.
+      if (files.isEmpty &&
+          (text.contains('cleona:1:') || text.contains('cleona:2:'))) {
         DeepLinkReceiver.handleInvitationText(contextProvider(), service, text);
         return true;
       }
-      await _promptAndSend(contextProvider(), service, text, files);
+      await promptAndSend(contextProvider(), service, text, files);
     } catch (e) {
       // Named instead of swallowed (S372, channel 1) — share reception must
       // still never break the app start, that is why it stays a
@@ -80,6 +88,33 @@ class ShareReceiver {
     }
     return true;
   }
+
+  /// The contact picker and the sending of a drained share payload. Public
+  /// for widget tests only: the way in is [drainPending].
+  ///
+  /// S401: THE ONE PLACE AT WHICH A SHARED-IN FILE GOES. However this ends
+  /// — sent, no contact chosen, the question declined, no contacts at all —
+  /// the operation is over and the copies in the app's cache have no
+  /// purpose any more. `sendMediaMessage` has returned by then, i.e. the
+  /// service has read the file and laid the attachment down sealed.
+  @visibleForTesting
+  static Future<void> promptAndSend(
+    BuildContext ctx, ICleonaService service, String text, List<String> files,
+  ) async {
+    try {
+      await _promptAndSend(ctx, service, text, files);
+    } finally {
+      for (final path in files) {
+        TransientFiles.discardSurface(path);
+      }
+      _inFlight.removeAll(files);
+    }
+  }
+
+  /// Shared-in files of a share that is still being asked about; the
+  /// start-edge sweep in [drainPending] leaves them alone.
+  static final Set<String> _inFlight = {};
+  static bool _leftoversCleared = false;
 
   static Future<void> _promptAndSend(
     BuildContext ctx, ICleonaService service, String text, List<String> files,
@@ -105,25 +140,24 @@ class ShareReceiver {
       ),
     );
     if (nodeIdHex == null) return;
+    var handedOver = text.isNotEmpty;
     if (text.isNotEmpty) await service.sendTextMessage(nodeIdHex, text);
     for (final path in files) {
-      if (!File(path).existsSync()) continue;
+      final file = File(path);
+      if (!file.existsSync()) continue;
       // conversationId == nodeIdHex for DMs; the lane choice goes by
-      // SIZE (§9.4), not by a mode.
-      //
-      // NO CONSENT QUESTION AT THIS PLACE ANY MORE (S389). Here
-      // the question was asked when the chat was set to high-secure — i.e. only
-      // when the user had flipped the switch from §12.1 that must not
-      // exist. With the switch its condition falls, and
-      // with it the special handling for a missing window: without a
-      // dialog this path no longer needs `ctx.mounted`.
-      //
-      // §24.4.5 demands consent per transfer as soon as a
-      // file takes a media lane; that it is missing today stands as
-      // finding B-M2 in `mycelium/berichte/S389-BAU-MODUS.md` — with the
-      // measurement that the bulk lane has no transport in 4.2 anyway.
-      await service.sendMediaMessage(nodeIdHex, path);
+      // SIZE (§9.4), not by a mode. A file that takes a media lane is asked
+      // for, per file, through the same gate as a file from the chat
+      // (§9.4 "Consent", §24.4.5); without a yes it is not sent. Without a
+      // window nothing can be asked, so the rest stays unsent.
+      if (!ctx.mounted) break;
+      final consent = await mediaLaneConsentFor(ctx,
+          length: file.lengthSync(), isGroup: false);
+      if (consent == null) continue;
+      await service.sendMediaMessage(nodeIdHex, path, consent: consent);
+      handedOver = true;
     }
+    if (!handedOver) return;
     final label = contacts.firstWhere((c) => c.nodeIdHex == nodeIdHex, orElse: () => contacts.first).displayName;
     messenger?.showSnackBar(SnackBar(
         content: Text('Sent to $label.')));

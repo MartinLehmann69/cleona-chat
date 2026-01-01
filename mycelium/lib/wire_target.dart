@@ -73,6 +73,8 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:mycelium/own_segment.dart' show inOwnSegment;
+
 /// Largest payload of a UDP packet over IPv4: 65535 minus IP header (20)
 /// minus UDP header (8). Measured (S389 case M, S390 reproduced): 65507 B
 /// go through, 65508 B yield errno 90 and close the socket.
@@ -160,6 +162,13 @@ String? impossibleTarget(InternetAddress target, int targetPort, int payload) {
   } else if (r.isNotEmpty && r[0] == 0xFF) {
     return '${target.address} — a group address carries no post '
         '(§11.1: the call has its own socket)';
+  }
+  // §7.2, owner decision 06.10.2026 (S405 V6): a private target is written
+  // to only when it lies in the own segment, otherwise discarded
+  // (`own_segment.dart`).
+  if (!inOwnSegment(asAddressKind(target))) {
+    return '${target.address} — a private address outside the own segment '
+        '(§7.2): not reachable from here, discarded';
   }
   return null;
 }

@@ -49,6 +49,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/card_address.dart';
+import 'package:mycelium/forward_build.dart';
 import 'package:mycelium/forward_detour.dart';
 import 'package:mycelium/pair.dart' show kCodeLength;
 import 'package:mycelium/kinds.dart' as kinds;
@@ -105,6 +106,10 @@ class Forwarder {
 
   final Send send;
 
+  /// Whether the transmissions waiting for [target] have reached their bound
+  /// (§20.2) for a packet of [bytes] — then `0x21` instead (§8.1, 2).
+  final bool Function(InternetAddress target, int port, int bytes) full;
+
   /// A code of this device: the content, still sealed.
   final void Function(Uint8List content, InternetAddress from, int fromPort)?
       onTarget;
@@ -132,6 +137,7 @@ class Forwarder {
   int passed = 0;
   int detours = 0;
   int unknown = 0;
+  int refused = 0; // 0x21 because the row to the next hop is full (§20.2)
   int searchFurther = 0;
   int searchThrottled = 0;
 
@@ -144,6 +150,7 @@ class Forwarder {
     NextStep? Function(CardAddress next, InternetAddress from, int fromPort)?
         nextStep,
     bool Function(InternetAddress from, int fromPort)? registered,
+    bool Function(InternetAddress target, int port, int bytes)? full,
     this.onTarget,
     this.onSuchTarget,
     this.onUnknown,
@@ -154,6 +161,7 @@ class Forwarder {
   })  : neighbours = neighbours ?? (() => const []),
         isSelf = isSelf ?? ((_, __) => false),
         registered = registered ?? ((_, __) => false),
+        full = full ?? ((_, __, ___) => false),
         nextStep = nextStep ?? _asItIs;
 
   static NextStep _asItIs(CardAddress n, InternetAddress _, int __) => (
@@ -161,38 +169,19 @@ class Forwarder {
         detour: false
       );
 
-  static void _codeCheck(Uint8List code) {
-    if (code.length != kCodeLength) {
-      throw ArgumentError('Code must have $kCodeLength B, has ${code.length}');
-    }
-  }
-
-  static Uint8List _withCode(int kind, int hopCount, Uint8List code, Uint8List content) {
-    _codeCheck(code);
-    if (hopCount < 0 || hopCount > 0xFF) {
-      throw ArgumentError('Hop count must be between 0 and 255, was $hopCount');
-    }
-    return (BytesBuilder(copy: false)
-          ..addByte(kind)
-          ..addByte(hopCount)
-          ..add(code)
-          ..add(content))
-        .toBytes();
-  }
-
-  /// `0x20` — pass on under [code].
+  /// `0x20` — pass on under [code] (layout: `forward_build.dart`).
   static Uint8List build(
           {required Uint8List code,
           required Uint8List content,
           int hopCount = kStartHopCount}) =>
-      _withCode(kinds.kForward, hopCount, code, content);
+      codePacket(kinds.kForward, hopCount, code, content);
 
   /// `0x23` — where are you.
   static Uint8List buildWhereAreYou(
           {required Uint8List code,
           required Uint8List content,
           int hopCount = kStartHopCountSearch}) =>
-      _withCode(kinds.kWhereAreYou, hopCount, code, content);
+      codePacket(kinds.kWhereAreYou, hopCount, code, content);
 
   /// `0x22` — hand [inner] (a `0x20`) to each of [next] (1–3).
   static Uint8List buildDetour(List<CardAddress> next, Uint8List inner,
@@ -200,13 +189,7 @@ class Forwarder {
       detourBuild(next, inner, hopCount: hopCount);
 
   /// `0x21` — unknown to me.
-  static Uint8List buildUnknownCode(Uint8List code) {
-    _codeCheck(code);
-    return (BytesBuilder(copy: false)
-          ..addByte(kinds.kUnknownCode)
-          ..add(code))
-        .toBytes();
-  }
+  static Uint8List buildUnknownCode(Uint8List code) => unknownCodePacket(code);
 
   /// Feeds in an incoming packet. `true` if it was a kind
   /// of this file.
@@ -243,21 +226,24 @@ class Forwarder {
       onTarget?.call(content, from, fromPort);
       return;
     }
-    if (!_firstTimes(content)) return;
     if (hopCount == 0) return;
     final device = codeSearch(code);
     if (device == null) {
+      // Answered, NOT remembered (S398 N-1b): its repetition after the
+      // registration must pass. Each copy costs at most one 0x21.
       unknown++;
       report?.call('0x20: code ${_short(code)} not registered here — 0x21 '
           'to ${from.address}:$fromPort');
       send(buildUnknownCode(code), from, fromPort);
       return;
     }
+    final further = build(code: code, content: content, hopCount: hopCount - 1);
+    if (full(device.address, device.port, further.length)) return _refuse('0x20', code, from, fromPort);
+    if (!_firstTimes(content)) return;
     passed++;
     report?.call('0x20: code ${_short(code)} handed to its device '
         '${device.address.address}:${device.port}');
-    send(build(code: code, content: content, hopCount: hopCount - 1),
-        device.address, device.port);
+    send(further, device.address, device.port);
   }
 
   void _onDetour(Uint8List packet, InternetAddress from, int fromPort) {
@@ -274,19 +260,22 @@ class Forwarder {
       return;
     }
     final next = detourSpread(d.next, registered(from, fromPort));
-    if (next.isEmpty || !_firstTimes(inner)) return;
+    if (next.isEmpty) return;
     final code = _cut(inner, 2, _kHeaderCode);
-    _detourFrom[_hex(code)] = (from: (address: from, port: fromPort), at: now());
-    detours++;
     // A code registered HERE means this node is a fixed neighbour of the
     // recipient (§8.1: a device registers only with its own) — even when
     // the sender names it by an address [isSelf] cannot know (S394: a port
     // forward's public IPv4 while the sender reaches it by IPv6). It is
-    // handled here AND still handed to the next addresses, so a device that
-    // moved loses nothing; a copy that comes back is dropped by the loop
-    // guard. Handled here at most once per packet.
+    // handled here AND still handed on, so a device that moved loses nothing.
+    // BEFORE the loop guard (S398 N-1b): a node holding the code only since
+    // the first copy takes the repetition; an own code per copy (the message
+    // layer drops the second, §9.2), a device's is guarded in [_onCode].
     var here = _heldHere(inner);
     if (here) _onCode(inner, from, fromPort);
+    if (!_firstTimes(inner)) return;
+    _detourFrom[_hex(code)] = (from: (address: from, port: fromPort), at: now());
+    detours++;
+    var handed = 0, noRoom = 0;
     for (final n in next) {
       final target = InternetAddress.fromRawAddress(n.address);
       if (isSelf(target, n.port)) {
@@ -306,9 +295,23 @@ class Forwarder {
               "family within hop count $hopCount) to " : "handed on to "}'
           '${target.address}:${n.port}$via (${next.length}/${d.next.length})');
       if (on == null) continue;
-      send(on.detour ? buildDetour([n], inner, hopCount: hopCount - 1) : inner,
-          on.target.address, on.target.port);
+      final p = on.detour ? buildDetour([n], inner, hopCount: hopCount - 1) : inner;
+      if (full(on.target.address, on.target.port, p.length)) {
+        noRoom++; // the row to that next hop is full (§20.2)
+        continue;
+      }
+      handed++;
+      send(p, on.target.address, on.target.port);
     }
+    if (handed == 0 && !here && noRoom > 0) _refuse('0x22', code, from, fromPort);
+  }
+
+  /// §8.1, 2: the row to the next hop is full (§20.2) — an open refusal,
+  /// never a silent loss; not remembered, so that a later copy passes.
+  void _refuse(String what, Uint8List code, InternetAddress from, int fromPort) {
+    refused++;
+    report?.call('$what: code ${_short(code)} — the row to the next hop is full (§20.2), 0x21 to ${from.address}:$fromPort');
+    send(buildUnknownCode(code), from, fromPort);
   }
 
   /// Is the code of the inner `0x20` [inner] registered with this node?

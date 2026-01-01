@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/identity/identity_context.dart';
+import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/storage/message_store.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
@@ -11,12 +12,16 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/log/log_redaction.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/link/data_port.dart';
 
-/// Thrown when identities.json is corrupt but identity directories exist on
-/// disk — distinct from an empty-but-valid list (e.g. after last delete).
+/// Thrown when the list of identities cannot be read although a device
+/// database lies in the profile — it does not open (no master seed, another
+/// key, damaged), or a row of the list does not decode. Distinct from an
+/// empty-but-valid list (e.g. after the last delete, or no database at
+/// all). The name stems from the time the list was a file.
 class IdentitiesFileCorruptException implements Exception {
   IdentitiesFileCorruptException(this.message);
   final String message;
@@ -53,16 +58,6 @@ class Identity {
   bool isAdult;
   /// Opt-in: participate in channel moderation jury (only visible if isAdult).
   bool reviewEnabled;
-  /// §7.1.3 (P2): true iff this identity was created via seed-phrase restore
-  /// AND the user told the restore screen they still have another device
-  /// running with this identity ("additional device", not "device
-  /// replacement"). Gates `IdentityPublisher._isPrimaryDevice` — while this
-  /// is true, the device does not publish an AuthManifest (it would collide
-  /// with the still-running original device under the single `SHA-256("auth"
-  /// + userId)` DHT slot). Cleared implicitly once the device pairs and
-  /// becomes `isLinkedDevice`; always false for freshly-created identities
-  /// (never set outside the restore flow).
-  bool restoreAwaitingPairing;
 
   /// §13 (S382): true iff this identity came into existence via the
   /// recovery path — on a fresh installation the user did NOT create a
@@ -81,22 +76,11 @@ class Identity {
   /// `beginHarvest` resets the counter on every attach, this repeated on
   /// every restart.
   ///
-  /// ── WHY A FIELD OF ITS OWN AND NOT [restoreAwaitingPairing] ──────
-  ///
-  /// The two answer DIFFERENT questions, and merging them would mean
-  /// making the same error once more — a field with two meanings is the
-  /// next proxy.
-  ///
-  ///   [restoreAwaitingPairing]  "there is ANOTHER device under this
-  ///                             phrase" -> device set change (§14.4),
-  ///                             NOT a recovery case
-  ///   [restoredFromPhrase]      "this identity came from the phrase"
-  ///
-  /// The RECOVERY CASE is the combination: created from the phrase AND no
-  /// other device. Exactly then — and only then — must the data from the
-  /// chats with contacts, groups and channels be fetched back. If there
-  /// is another device, they come from there (§14.4), and the search
-  /// would be wasted traffic.
+  /// The marker answers only "this identity came from the phrase". Whether
+  /// another device exists under the same phrase is decided by the
+  /// enrolment (D-39/D-40, `cleona_service_enrolment.dart`); the former
+  /// second marker for it (`restoreAwaitingPairing`, V3 pairing) fell in
+  /// S398 P1.
   ///
   /// IS DELETED as soon as it has fulfilled its purpose — see
   /// `beginRecoveryBundleHarvestIfLost`. A marker that stands forever
@@ -114,7 +98,6 @@ class Identity {
     this.skinId,
     this.isAdult = false,
     this.reviewEnabled = true,
-    this.restoreAwaitingPairing = false,
     this.restoredFromPhrase = false,
   }) : _displayName = displayName {
     LogRedaction.registerName(displayName);
@@ -131,7 +114,6 @@ class Identity {
         if (skinId != null) 'skinId': skinId,
         if (isAdult) 'isAdult': true,
         if (!reviewEnabled) 'reviewEnabled': false,
-        if (restoreAwaitingPairing) 'restoreAwaitingPairing': true,
         if (restoredFromPhrase) 'restoredFromPhrase': true,
       };
 
@@ -146,7 +128,6 @@ class Identity {
         skinId: json['skinId'] as String?,
         isAdult: json['isAdult'] as bool? ?? false,
         reviewEnabled: json['reviewEnabled'] as bool? ?? true,
-        restoreAwaitingPairing: json['restoreAwaitingPairing'] as bool? ?? false,
         restoredFromPhrase: json['restoredFromPhrase'] as bool? ?? false,
       );
 }
@@ -204,9 +185,6 @@ class IdentityManager {
   IdentityManager({String? baseDir})
       : baseDir = baseDir ?? AppPaths.dataDir;
 
-  /// The LOGICAL path. On disk lies `identities.json.enc` —
-  /// [FileEncryption] appends the suffix itself, as everywhere else.
-  String get _identitiesFile => '$baseDir/identities.json';
   // S368: here stood `_crimsonDismissedFlagFile`,
   // `crimsonMigrationShouldShow` and `dismissCrimsonBanner`. They found
   // identities with `skinId == 'crimson'` — an appearance that no longer
@@ -217,91 +195,109 @@ class IdentityManager {
   // version. With the three members the marker
   // `crimson_migration_dismissed.flag` falls as well.
 
-  // -- WHY THIS FILE NO LONGER LIES IN PLAINTEXT (S368) ----------
+  // ── WHERE THE LIST OF IDENTITIES LIVES (S403) ───────────────────────────
   //
-  // Measured on a freshly created profile on 05.09.2026
-  // (`/tmp/s368-frisch`, 284 B after one daemon run):
+  // In the device database, `<baseDir>/device.db` (v4_2 §4.5.2, §4.5.3 form
+  // 2, §21.4.1, D-51; `device_store.dart`): one row per identity in the
+  // area `identities`, and in the area `device` the highest HD index ever
+  // assigned, the data port of the device and the identity shown last.
+  // Until S403 these were the files `identities.json.enc` and
+  // `last_profile.json.enc`; nothing reads them any more, and the start
+  // removes them (`removeSupersededDeviceFiles`).
   //
-  //     {"version":2,"maxHdIndex":0,"identities":[{"id":"identity-1",
-  //      "displayName":"Alice",
-  //      "profileDir":"/tmp/s368-frisch/identities/identity-1",
-  //      "port":34260,"createdAt":"2026-09-05T19:14:01.819484",
-  //      "nodeIdHex":"851ce1b88f5c89d4afed36fb1b77769adff0698575a70f0f0b
-  //      ae2347eb8b1187","hdIndex":0}]}
+  // What the list carries, and why it never lay open since S368: the name
+  // entered by the user next to `nodeIdHex` — the identifier under which
+  // this device appears in the network — plus the data port, the creation
+  // time, the absolute profile path, the number of identities held and,
+  // via the highest HD index, the number ever held. From a disk image alone
+  // that would pin the wire identifier onto a human.
   //
-  // The name entered by the user stands next to `nodeIdHex` - the
-  // identifier under which this device appears in the network (byte for
-  // byte the same one that the creation run outputs as "Identity
-  // User-ID"). Plus the data port, the creation time, the absolute
-  // profile path (i.e. the login name), the number of identities held and
-  // via `maxHdIndex` the number ever held. From a disk image alone this
-  // pins the wire identifier onto a human.
+  // THE UNLOCK CHAIN IS STRAIGHT, NOT CIRCULAR. The list carries the
+  // `hdIndex`, and `deriveFileEncKey(masterSeed, hdIndex)` opens the
+  // database of an identity — so the list cannot lie IN that database. The
+  // key of the device database takes exactly one argument, the seed, and
+  // the seed lies in the keyring:
   //
-  // -- 4.5.3 JUSTIFIES THE PLACE, NOT THE PLAINTEXT ----------------
+  //     keyring -> masterSeed -> deriveSharedFileEncKey -> device.db
+  //       -> hdIndex -> deriveFileEncKey(seed, hdIndex) -> messages.db
   //
-  // The leading architecture document (`Cleona_Chat_Architecture_v4_1.md`;
-  // read on 05.09.2026 on branch `v4/knoten-host`, l. 908-925 - the file
-  // does not lie in THIS working tree) lists `identities.json` among the
-  // files that "cannot move into a database because they hold what one
-  // needs to open one". That is right and answers a DIFFERENT question:
-  // the file carries the `hdIndex`, and `deriveFileEncKey(masterSeed,
-  // hdIndex)` opens `messages.db`. So it could not lie IN the storage -
-  // that would be a ring.
-  //
-  // WHAT THE SAME SECTION EXPLICITLY REQUIRES, and what the state found
-  // VIOLATED: form 2 there reads "Structured
-  // configuration state stays in **individually encrypted** JSON files
-  // per identity (`FileEncryption`)" - and `identities.json` is one of
-  // them. The plaintext was thus not a documented state but a violation
-  // of the leading document. A change to it is therefore NOT necessary
-  // for this work.
-  //
-  // But a ring exists only against the IDENTITY-BOUND key. The
-  // device-wide `deriveSharedFileEncKey(masterSeed)` takes exactly one
-  // argument, and that is the seed (`hd_wallet.dart:231-237`) - no
-  // `hdIndex`, so no identity, so no list. And `loadMasterSeed()`
-  // (`:209-247`) reads exclusively the keyring or a legacy storage;
-  // `identities.json` does not occur in its body. The unlock chain is
-  // thus straight, not circular:
-  //
-  //     keyring -> masterSeed -> deriveSharedFileEncKey
-  //       -> identities.json.enc -> hdIndex
-  //       -> deriveFileEncKey(seed, hdIndex) -> messages.db
-  //
-  // The same class as `device_keys.bin.enc`, `node_keys.enc` and the
-  // entry stock, which all already lie under this key.
-  //
-  // NO MIGRATION. `FirstStartWipe` deletes a profile without the V4.1
-  // marker at start; no plaintext is READ here in order to continue
-  // writing it. That `FileEncryption.readJsonFile` has a generic
-  // plaintext branch is behaviour of this class for ALL files and is not
-  // specifically exploited here.
+  // BOTH PROGRAMS OPEN IT. On the desktop the GUI creates the seed and the
+  // first identity and records which identity it shows; the daemon reads
+  // the list and writes to it (port, name, deletion). Every method below
+  // that reads and then writes does so in ONE transaction of the device
+  // database, so that a change of the other program made in between is
+  // neither overwritten nor lost.
 
-  /// The envelope for `identities.json` — device-wide (K2), derived from
-  /// the master seed.
-  ///
-  /// `null` means: this profile has no master seed (yet). That is **not an
-  /// operating case with identities**: `generateSeedPhrase()` or
-  /// `restoreFromPhrase()` store the seed BEFORE `createIdentity` writes
-  /// the file for the first time (`setup_screen.dart`,
-  /// `scripts/init_profile.dart`, `guiOrder` in the guard). Before the
-  /// seed the file does not exist, and then nothing is needed here.
-  FileEncryption? _identitiesEnvelopeOrNull() {
+  /// The key of the device database, or `null` if this profile has no
+  /// master seed (yet). That is **not an operating case with identities**:
+  /// `generateSeedPhrase()` or `restoreFromPhrase()` store the seed BEFORE
+  /// `createIdentity` writes for the first time (`setup_screen.dart`,
+  /// `scripts/init_profile.dart`). Before the seed there is no device
+  /// database, and then nothing is needed here.
+  Uint8List? _deviceKeyOrNull() {
     final seed = loadMasterSeed();
-    if (seed == null) return null;
-    return FileEncryption(
-        baseDir: baseDir, key: HdWallet.deriveSharedFileEncKey(seed));
+    return seed == null ? null : HdWallet.deriveSharedFileEncKey(seed);
   }
 
-  /// Does any version of the file lie on disk? Checked are the ciphertext
-  /// and its two sidecars (aborted atomic write) as well as a plaintext
-  /// version — that no longer arises in this state, but may still lie in
-  /// a developer profile.
-  bool get _identitiesFilePresent =>
-      File('$_identitiesFile.enc').existsSync() ||
-      File('$_identitiesFile.enc.tmp').existsSync() ||
-      File('$_identitiesFile.enc.old').existsSync() ||
-      File(_identitiesFile).existsSync();
+  /// The device database for a READER: `null` where none lies. A database
+  /// that lies there and cannot be opened — no master seed, another key, a
+  /// damaged file — THROWS: "no database" would read as "no identities",
+  /// and the first-start path would lay a new profile over an existing one.
+  DeviceStore? _deviceStoreIfPresent() {
+    if (!DeviceStore.present(baseDir)) return null;
+    final key = _deviceKeyOrNull();
+    if (key == null) {
+      throw IdentitiesFileCorruptException(
+          'device.db lies in $baseDir, but there is no master seed that '
+          'opens it (keyring empty and no old store) — use seed phrase '
+          'to restore');
+    }
+    try {
+      return DeviceStore.atIfPresent(baseDir, key);
+    } on DeviceStoreException catch (e) {
+      throw IdentitiesFileCorruptException(
+          'device.db in $baseDir does not open ($e) — use seed phrase '
+          'to restore');
+    }
+  }
+
+  /// The device database for a WRITER — created if it is not there.
+  /// [what] names the state for the error text.
+  DeviceStore _deviceStoreForWrite(String what) {
+    Directory(baseDir).createSync(recursive: true);
+    final key = _deviceKeyOrNull();
+    if (key == null) {
+      // There is NO falling back to a file or to another key. Whoever
+      // lands here has violated the order (first store the seed, then
+      // create the identity).
+      throw StateError(
+          'No master seed in $baseDir — $what cannot be stored: the device '
+          'database opens only under a key derived from the seed. First '
+          'generateSeedPhrase()/restoreFromPhrase(), then createIdentity().');
+    }
+    return DeviceStore.at(baseDir, key);
+  }
+
+  /// Reads the list, changes it with [change] and writes it back — in ONE
+  /// transaction of the device database.
+  void _changeIdentities(void Function(List<Identity> identities) change) {
+    _deviceStoreForWrite('the list of identities').transaction(() {
+      final identities = loadIdentities();
+      change(identities);
+      saveIdentities(identities);
+    });
+  }
+
+  /// The order of the list: by the number in the id (`identity-N`), which
+  /// only ever grows ([_nextIdentityNum]) — the order of creation. The
+  /// first entry is the one the start paths treat as the primary identity.
+  static int _byCreation(Identity a, Identity b) {
+    int number(Identity i) =>
+        int.tryParse(RegExp(r'(\d+)$').firstMatch(i.id)?.group(1) ?? '') ??
+        (1 << 62);
+    final byNumber = number(a).compareTo(number(b));
+    return byNumber != 0 ? byNumber : a.id.compareTo(b.id);
+  }
 
   // ── THE STAMP BELONGS TO THE WRITER (S368) ─────────────────
   //
@@ -336,10 +332,11 @@ class IdentityManager {
   // would be at the symptom: there is at least a second creation place
   // (`main.dart:3582`, `createAndSwitchIdentity`) and every future one.
   // The cause is that the FIRST V4.1 writer of the profile directory did
-  // not stamp it. These four methods ARE this writer: they create
+  // not stamp it. These four methods ARE this writer: they created
   // `master_seed.json(.enc)`, `seed_phrase.json(.enc)`, `db.key` and
-  // `identities.json` — exactly the evidence by which the deletion path
-  // recognises legacy holdings.
+  // `identities.json` then, and create the keyring's files and `device.db`
+  // today — exactly the evidence by which the deletion path recognises an
+  // existing profile.
   //
   // **Explicitly NOT in [saveIdentities].** That method also runs on
   // `setSkinId`, `setActiveIdentity` and on port self-healing. On a REAL
@@ -430,7 +427,7 @@ class IdentityManager {
     // decryption failed (user-switch, session issue). Returning null here
     // would silently trigger new random key generation → identity loss.
     if (Platform.isWindows && File('$baseDir/master_seed.dpapi').existsSync()) {
-      stderr.writeln('[IdentityManager] FATAL: master_seed.dpapi exists but '
+      RedactedConsole.err('[IdentityManager] FATAL: master_seed.dpapi exists but '
           'DPAPI decryption failed and no file fallback available — '
           'refusing to continue with null seed (would cause identity loss)');
       throw StateError('master_seed.dpapi unreadable — identity would be lost');
@@ -487,10 +484,10 @@ class IdentityManager {
       if (!f.existsSync()) continue;
       try {
         f.deleteSync();
-        stderr.writeln('[IdentityManager] INFO: $name$suffix removed — the '
+        RedactedConsole.err('[IdentityManager] INFO: $name$suffix removed — the '
             'keyring holds the content (S368, target state since 3.2.2)');
       } catch (e) {
-        stderr.writeln('[IdentityManager] WARNING: $name$suffix could not '
+        RedactedConsole.err('[IdentityManager] WARNING: $name$suffix could not '
             'be removed: $e');
       }
     }
@@ -511,7 +508,7 @@ class IdentityManager {
       final phraseBytes = Uint8List.fromList(words.join(' ').codeUnits);
       final stored = KeyringService.instance.store('seed_phrase', phraseBytes);
       if (!stored) {
-        stderr.writeln('[IdentityManager] WARNING: keyring store failed '
+        RedactedConsole.err('[IdentityManager] WARNING: keyring store failed '
             'for seed_phrase — using file fallback');
       }
       if (stored) {
@@ -541,7 +538,7 @@ class IdentityManager {
     // keyring or nowhere.
     final fileEnc = FileEncryption.legacyOrNull(baseDir);
     if (fileEnc == null) {
-      stderr.writeln('[IdentityManager] WARNING: keyring refused the seed '
+      RedactedConsole.err('[IdentityManager] WARNING: keyring refused the seed '
           'phrase and this profile has no legacy key — the 24 words are NOT '  // V3-TOUCH-OK: legacy key fallback, normative in v4_1 §4.5.3 (db.key is one of the six files that never move into the database)
           'written to disk (S368: no plaintext key is created for them).');
       return;
@@ -867,65 +864,70 @@ class IdentityManager {
     return bytes;
   }
 
-  /// Load all identities. Recovers from .tmp/.old sidecars if canonical
-  /// is missing or corrupt.
+  /// Load all identities, in the order of their creation — from the device
+  /// database (area `identities`).
   List<Identity> loadIdentities() {
-    if (!_identitiesFilePresent) {
-      // -- HERE STOOD `_migrateFromSingleProfile()` (S368) --------------
+    // No device database: no profile, no identities. The reader does not
+    // create one. A database that lies there and does not open THROWS
+    // ([_deviceStoreIfPresent]).
+    //
+    // NO `const []`: `createIdentity` appends to exactly this list. An
+    // unmodifiable list made the creation of the FIRST identity fail with
+    // "Cannot add to an unmodifiable list" — measured on 05.09.2026,
+    // before there ever was a profile.
+    //
+    // NO TAKEOVER (S403): a profile that still carries the file
+    // `identities.json.enc` of an earlier build and no device database has,
+    // for this method, no identities. This line reads no earlier format
+    // (CLAUDE.md "Linien"); the start removes the file.
+    final store = _deviceStoreIfPresent();
+    if (store == null) {
+      // ── A PROFILE THE FIRST START HAS YET TO DELETE IS NOT "EMPTY" ────
       //
-      // The single-profile path from V3: if `identities.json` was missing,
-      // an identity was reconstructed from `last_profile.json` +
-      // `<profileDir>/keys.json` (PLAINTEXT JSON, both) and written away.
-      // That is a takeover of a legacy profile, and V4.1 has none
-      // (owner invariant, repeated six times). It was not reachable any
-      // more anyway: `FirstStartWipe` deletes a profile without the V4.1
-      // marker as the FIRST line of `initCrypto`, and a profile WITH the
-      // marker no longer has a V3 single-profile layout.
-      //
-      // No replacement, no dummy: no profile, no identities.
-      //
-      // NO `const []`: `createIdentity` appends to exactly this list
-      // (`identities.add(identity)`, `:979`). An unmodifiable list made
-      // the creation of the FIRST identity fail with "Cannot add to an
-      // unmodifiable list" — measured on 05.09.2026, before there ever was
-      // a profile.
+      // A directory without the mark of this line but with evidence of a
+      // profile (`FirstStartWipe`) holds data of an earlier line. It is
+      // not read — and it must not read as "no identities" either: on the
+      // desktop the GUI asks this question BEFORE the daemon has run the
+      // deletion path, and on `[]` it would show the first-start setup,
+      // whose first step stamps the mark. The deletion path would then
+      // never fire, and the earlier line's data — and its seed in the
+      // keyring — would stay for good. (Until S403 the same case threw
+      // because the old list file lay there unreadable; the statement is
+      // kept, without asking for that file's name.)
+      if (!FirstStartWipe.isV41Profile(baseDir) &&
+          FirstStartWipe.hasLegacyProfileEvidence(baseDir)) {
+        throw IdentitiesFileCorruptException(
+            'the profile in $baseDir stems from an earlier line and is not '
+            'read; the next start of the service deletes it (first-start '
+            'deletion, §21.4)');
+      }
       return <Identity>[];
     }
-    final envelope = _identitiesEnvelopeOrNull();
-    if (envelope == null) {
-      // The file is there, the seed is not. Here it must NOT silently
-      // continue: `[]` would mean "no identities", and the first-start
-      // path would lay a new profile over an existing one.
-      // The same answer as for a damaged ciphertext - the recovery path,
-      // visibly.
+
+    final List<Identity> identities;
+    final Map<String, Map<String, dynamic>> device;
+    try {
+      device = store.loadArea(DeviceStore.areaDevice);
+      identities = [
+        for (final row in store.loadArea(DeviceStore.areaIdentities).values)
+          Identity.fromJson(row),
+      ]..sort(_byCreation);
+    } catch (e) {
+      // A row that does not decode. The same answer as for a database that
+      // does not open — the recovery path, visibly, never an empty list.
       throw IdentitiesFileCorruptException(
-          'identities.json.enc lies in $baseDir, but there is no '
-          'master seed that opens the device-wide envelope '
-          '(keyring empty and no old store) — use seed phrase '
-          'to restore');
-    }
-    final json = envelope.readJsonFile(_identitiesFile);
-    if (json == null) {
-      final idDir = Directory('$baseDir/identities');
-      if (idDir.existsSync() &&
-          idDir.listSync().whereType<Directory>().any(
-              (d) => d.path.contains('identity-'))) {
-        throw IdentitiesFileCorruptException(
-            'identities.json corrupt but identity directories exist '
-            'on disk — use seed phrase to restore');
-      }
-      return [];
+          'the list of identities in device.db of $baseDir is not readable '
+          '($e) — use seed phrase to restore');
     }
     // The device port, if already drawn (S374). If it is missing,
     // [deviceDataPort] draws it on first access — there is no takeover
     // from `identity.port`, because there are no legacy profiles (owner
     // 07.09.2026).
-    final gp = json['dataPort'] as int?;
+    final gp = device[DeviceStore.keyDataPort]?['v'] as int?;
     if (gp != null && gp > 0) _deviceDataPort = gp;
-    final list = json['identities'] as List<dynamic>? ?? [];
-    final identities = list.map((e) => Identity.fromJson(e as Map<String, dynamic>)).toList();
-    // Restore high-water-mark: v2+ stores it explicitly, v1 computes from list
-    final storedMax = json['maxHdIndex'] as int?;
+    // The high-water mark: stored explicitly; a database that does not
+    // carry it yet has it computed from the list.
+    final storedMax = device[DeviceStore.keyMaxHdIndex]?['v'] as int?;
     if (storedMax != null) {
       _maxHdIndex = storedMax;
     } else {
@@ -957,8 +959,8 @@ class IdentityManager {
   ///
   /// The port change propagates like any other one: peers relearn the node
   /// through discovery and the address broadcast. Doing this at load time
-  /// (rather than at bind time) keeps `identities.json` and the per-profile
-  /// `port` file consistent before anything reads them.
+  /// (rather than at bind time) keeps the stored list consistent before
+  /// anything reads it.
   void _healDiscoveryPortCollisions(List<Identity> identities) {
     var healed = false;
     for (final identity in identities) {
@@ -984,36 +986,40 @@ class IdentityManager {
     if (healed) saveIdentities(identities);
   }
 
-  /// Atomically save identities list (tmp+rename, sidecar-recovery on read).
+  /// Saves the list of identities: [identities] IS the list afterwards — an
+  /// identity that is not in it is removed. One transaction of the device
+  /// database; a caller that read the list in order to change it runs both
+  /// inside [_changeIdentities].
   void saveIdentities(List<Identity> identities) {
-    Directory(baseDir).createSync(recursive: true);
-    // Update high-water-mark from current identity list
-    for (final id in identities) {
-      if (id.hdIndex != null && id.hdIndex! > _maxHdIndex) {
-        _maxHdIndex = id.hdIndex!;
+    final store = _deviceStoreForWrite('the list of identities');
+    store.transaction(() {
+      // The high-water mark never falls: neither below what the database
+      // holds (another program may have assigned an index meanwhile) nor
+      // below the list.
+      final stored =
+          store.entry(DeviceStore.areaDevice, DeviceStore.keyMaxHdIndex)?['v']
+              as int?;
+      if (stored != null && stored > _maxHdIndex) _maxHdIndex = stored;
+      for (final id in identities) {
+        if (id.hdIndex != null && id.hdIndex! > _maxHdIndex) {
+          _maxHdIndex = id.hdIndex!;
+        }
       }
-    }
-    final envelope = _identitiesEnvelopeOrNull();
-    if (envelope == null) {
-      // There is NO falling back to a plaintext write - exactly that way
-      // out WAS the finding. Whoever lands here has violated the order
-      // (first store seed, then create identity).
-      throw StateError(
-          'No master seed in $baseDir — "identities.json" could only '
-          'have been written in plaintext, and that has been forbidden since '
-          'S368. First generateSeedPhrase()/restoreFromPhrase(), '
-          'then createIdentity().');
-    }
-    envelope.writeJsonFile(_identitiesFile, {
-      'version': 2,
-      'maxHdIndex': _maxHdIndex,
-      // ── THE DATA PORT LIES AT THE TOP LEVEL (S374) ───────────
+      store.replaceArea(DeviceStore.areaIdentities,
+          {for (final id in identities) id.id: id.toJson()});
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyMaxHdIndex,
+          {'v': _maxHdIndex});
+      // ── THE DATA PORT LIES NEXT TO THE LIST (S374) ───────────
       //
       // Because it belongs to the DEVICE and not to an identity — §11,
-      // "The drawn port is stable per device". It deliberately stands NEXT
-      // TO the list and not in its entries.
-      'dataPort': _deviceDataPort,
-      'identities': identities.map((e) => e.toJson()).toList(),
+      // "The drawn port is stable per device". It deliberately stands in a
+      // row of its own and not in the entries. A manager that knows no
+      // port (it never read and never drew) leaves the stored one alone.
+      final port = _deviceDataPort;
+      if (port != null && port > 0) {
+        store.putEntry(
+            DeviceStore.areaDevice, DeviceStore.keyDataPort, {'v': port});
+      }
     });
   }
 
@@ -1034,39 +1040,48 @@ class IdentityManager {
   /// port of the whole device; whoever created a second produced a port
   /// value that nobody bound.
   ///
-  /// ── WHY NOT INTO THE ENCRYPTED STORAGE ──────────────────────
+  /// ── WHY NOT INTO THE DATABASE OF AN IDENTITY ─────────────────
   ///
-  /// Obvious, because since S366 almost everything lies there — and
-  /// nevertheless wrong: `MessageStore` is explicitly ONE STORAGE PER
-  /// IDENTITY (§21.4), and its own header justifies why there is no shared
-  /// one ("a shared one would have to lie under the device-wide key and
-  /// would thus give up the separation that `deriveFileEncKey`
-  /// establishes"). A device-wide value cannot lie there without either
-  /// being duplicated — i.e. today's problem — or giving up that
-  /// separation.
+  /// `MessageStore` is explicitly ONE STORAGE PER IDENTITY (§21.4), and
+  /// its own header justifies why there is no shared one ("a shared one
+  /// would have to lie under the device-wide key and would thus give up
+  /// the separation that `deriveFileEncKey` establishes"). A device-wide
+  /// value cannot lie there without either being duplicated — the problem
+  /// above — or giving up that separation.
   ///
-  /// `identities.json`, by contrast, is already device-wide, already
-  /// encrypted and already an object with a top level
-  /// (`version`, `maxHdIndex`). The port goes there — no new file, no new
-  /// format, no new key.
+  /// It lies in the device database (S403), in a row of its own next to
+  /// the list of identities (`DeviceStore.keyDataPort`); until S403 it was
+  /// a top-level field of `identities.json.enc`.
   ///
   /// NO TAKEOVER FROM LEGACY PROFILES (owner, 07.09.2026): V4.1 has no
   /// working predecessor version, the profiles are created anew before the
-  /// next test anyway. If the field is missing, it is drawn.
+  /// next test anyway. If the value is missing, it is drawn.
   int? _deviceDataPort;
 
   /// The port of this device — drawn at initial setup, unchanged
   /// afterwards.
   ///
-  /// Reads the persisted number; if there is none, it is drawn ONCE and
-  /// written along at the next `saveIdentities`.
+  /// Reads the persisted number — from the device database, also for a
+  /// manager that never loaded the list; if there is none, it is drawn
+  /// ONCE and written along at the next `saveIdentities`.
   int get deviceDataPort {
-    var p = _deviceDataPort;
+    var p = _deviceDataPort ?? _storedDataPort();
     if (p == null || p <= 0) {
       p = DataPort.drawDataPort();
-      _deviceDataPort = p;
     }
-    return p;
+    return _deviceDataPort = p;
+  }
+
+  /// The port the device database holds, or `null` — no database, none
+  /// drawn yet, or a database this process cannot open (then
+  /// [loadIdentities] is the one that says so).
+  int? _storedDataPort() {
+    try {
+      return _deviceStoreIfPresent()
+          ?.entry(DeviceStore.areaDevice, DeviceStore.keyDataPort)?['v'] as int?;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// In-flight PQ keygen started by [preWarmPqKeys]. Picked up by
@@ -1105,15 +1120,8 @@ class IdentityManager {
 
   /// Create a new identity. Uses HD-Wallet index if master seed exists.
   /// Async because PQ keygen runs in a background isolate (ANR prevention).
-  ///
-  /// [restoreAwaitingPairing] (§7.1.3, P2): pass `true` only from the
-  /// seed-phrase restore flow when the user said they still have another
-  /// device running with this identity. Defaults to `false` — fresh
-  /// installs and manually-added identities are always Primary from the
-  /// start, this parameter must never flip for those paths.
   Future<Identity> createIdentity(String displayName,
-      {bool restoreAwaitingPairing = false,
-      bool restoredFromPhrase = false}) async {
+      {bool restoredFromPhrase = false}) async {
     // First writer of the profile directory — see [_stampV41Profile].
     // Without this line the daemon would delete, at the next
     // `initCrypto`, the identity that comes into existence here.
@@ -1126,9 +1134,10 @@ class IdentityManager {
     // device (§11); [deviceDataPort] draws it ONCE at initial setup and
     // returns the same one afterwards. The identity only carries it along
     // so that the remaining readers stay unchanged — authoritative is the
-    // value at the top level of `identities.json`.
+    // device's own row in the device database (`DeviceStore.keyDataPort`).
     final port = deviceDataPort;
 
+    CLogger.reviveProfile(profileDir); // S405 A-5: numbers are reused
     Directory(profileDir).createSync(recursive: true);
 
   // ── `<profileDir>/port` IS GONE (S366) ──────────────────────────────
@@ -1136,10 +1145,9 @@ class IdentityManager {
   // Here stood `File('$profileDir/port').writeAsStringSync('$port')`.
   // Re-measured on 04.09.2026 against this branch, over `lib/`, `bin/`,
   // `test/`, `scripts/`, `docs/`, `android/`, `.github/` and in all
-  // languages: the file had FIVE writers and ZERO readers. The port is
-  // held in `identities.json` (`saveIdentities` writes it,
-  // `loadIdentities` reads it back) — and from there `_startAllInner`
-  // also fetches it (`service_daemon.dart:534`, `identities.first.port`).
+  // languages: the file had FIVE writers and ZERO readers. The port was
+  // held in `identities.json` (since S403: in the device database;
+  // `saveIdentities` writes it, `loadIdentities` reads it back).
   // The file was a maintained duplicate that was never consulted.
   //
   // NOT TO BE CONFUSED with `<baseDir>/cleona.port` — that is the IPC
@@ -1170,27 +1178,53 @@ class IdentityManager {
       port: port,
       createdAt: DateTime.now(),
       hdIndex: hdIndex,
-      restoreAwaitingPairing: restoreAwaitingPairing,
       restoredFromPhrase: restoredFromPhrase,
     );
 
-    identities.add(identity);
-    saveIdentities(identities);
+    _addIdentity(identity);
     return identity;
+  }
+
+  /// Enters ONE new identity into the device database: its row, the
+  /// high-water mark and the port.
+  ///
+  /// NOT `saveIdentities(list)`: the list the caller holds was read BEFORE
+  /// the key generation, which takes seconds (15–30 s on slow hardware).
+  /// Written back as a whole, it would undo whatever the other program
+  /// changed in that time — a renamed identity, a deleted one. One row
+  /// touches nothing else.
+  ///
+  /// If a row of this id is there already, another program created an
+  /// identity in the same seconds and drew the same number. That is named,
+  /// not overwritten.
+  void _addIdentity(Identity identity) {
+    final store = _deviceStoreForWrite('the new identity');
+    store.transaction(() {
+      if (store.entry(DeviceStore.areaIdentities, identity.id) != null) {
+        throw StateError(
+            'An identity "${identity.id}" was entered into the device '
+            'database of $baseDir while this one was being created — '
+            'not overwriting it. Create the identity again.');
+      }
+      final stored =
+          store.entry(DeviceStore.areaDevice, DeviceStore.keyMaxHdIndex)?['v']
+              as int?;
+      if (stored != null && stored > _maxHdIndex) _maxHdIndex = stored;
+      final hd = identity.hdIndex;
+      if (hd != null && hd > _maxHdIndex) _maxHdIndex = hd;
+      store.putEntry(
+          DeviceStore.areaIdentities, identity.id, identity.toJson());
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyMaxHdIndex,
+          {'v': _maxHdIndex});
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyDataPort,
+          {'v': deviceDataPort});
+    });
   }
 
   /// Create an identity at a specific HD-Wallet index (§6.4.3 registry recovery).
   /// Unlike [createIdentity], this targets an exact [hdIndex] instead of auto-incrementing.
-  ///
-  /// [restoreAwaitingPairing] (§7.1.3, P2): the caller (registry recovery /
-  /// restore-index-probing, both only ever reached from the seed-phrase
-  /// restore flow) forwards the same choice the user made for the primary
-  /// identity — every identity recovered in the same restore run describes
-  /// the same physical device and the same "additional device vs. lost
-  /// device" fact.
   Future<Identity> createIdentityAtIndex(int hdIndex, String displayName,
-      {bool restoreAwaitingPairing = false,
-      bool restoredFromPhrase = false}) async {
+      {bool restoredFromPhrase = false}) async {
     // First writer of the profile directory — see [_stampV41Profile].
     _stampV41Profile();
     final identities = loadIdentities();
@@ -1204,6 +1238,7 @@ class IdentityManager {
     // identity (S374, §11).
     final port = deviceDataPort;
 
+    CLogger.reviveProfile(profileDir); // S405 A-5: numbers are reused
     Directory(profileDir).createSync(recursive: true);
     // `<profileDir>/port` is dropped — reasoning at [createIdentity].
 
@@ -1217,12 +1252,10 @@ class IdentityManager {
       port: port,
       createdAt: DateTime.now(),
       hdIndex: hdIndex,
-      restoreAwaitingPairing: restoreAwaitingPairing,
       restoredFromPhrase: restoredFromPhrase,
     );
 
-    identities.add(identity);
-    saveIdentities(identities);
+    _addIdentity(identity);
     return identity;
   }
 
@@ -1351,17 +1384,21 @@ class IdentityManager {
 
   /// Delete an identity and its profile directory.
   void deleteIdentity(String id) {
-    final identities = loadIdentities();
-    final identity = identities.cast<Identity?>().firstWhere(
-      (i) => i!.id == id,
-      orElse: () => null,
-    );
-    identities.removeWhere((i) => i.id == id);
-    saveIdentities(identities);
+    Identity? identity;
+    _changeIdentities((identities) {
+      identity = identities.cast<Identity?>().firstWhere(
+            (i) => i!.id == id,
+            orElse: () => null,
+          );
+      identities.removeWhere((i) => i.id == id);
+    });
 
     // Remove profile directory
-    if (identity != null) {
-      final dir = Directory(identity.profileDir);
+    final removed = identity;
+    if (removed != null) {
+      final dir = Directory(removed.profileDir);
+      // S405 A-5: the logger must not recreate the directory afterwards.
+      CLogger.retireProfile(removed.profileDir);
       if (dir.existsSync()) {
         dir.deleteSync(recursive: true);
       }
@@ -1370,38 +1407,38 @@ class IdentityManager {
 
   /// Rename an identity.
   void renameIdentity(String id, String newName) {
-    final identities = loadIdentities();
-    for (final identity in identities) {
-      if (identity.id == id) {
-        identity.displayName = newName;
-        break;
+    _changeIdentities((identities) {
+      for (final identity in identities) {
+        if (identity.id == id) {
+          identity.displayName = newName;
+          break;
+        }
       }
-    }
-    saveIdentities(identities);
+    });
   }
 
   /// Set the skin for an identity.
   void setSkinId(String id, String? skinId) {
-    final identities = loadIdentities();
-    for (final identity in identities) {
-      if (identity.id == id) {
-        identity.skinId = skinId;
-        break;
+    _changeIdentities((identities) {
+      for (final identity in identities) {
+        if (identity.id == id) {
+          identity.skinId = skinId;
+          break;
+        }
       }
-    }
-    saveIdentities(identities);
+    });
   }
 
   /// Set the isAdult flag for an identity.
   void setIsAdult(String id, bool isAdult) {
-    final identities = loadIdentities();
-    for (final identity in identities) {
-      if (identity.id == id) {
-        identity.isAdult = isAdult;
-        break;
+    _changeIdentities((identities) {
+      for (final identity in identities) {
+        if (identity.id == id) {
+          identity.isAdult = isAdult;
+          break;
+        }
       }
-    }
-    saveIdentities(identities);
+    });
   }
 
   /// Update the port for ALL identities (shared single port).
@@ -1419,44 +1456,44 @@ class IdentityManager {
           'as data port (§4.5.2 invariant)');
       return;
     }
-    final identities = loadIdentities();
-    // FIRST the device value — since S374 it is the authoritative one
-    // (§11). The entries are pulled along so that no reader sees a
-    // deviating number; but they are no longer the source.
-    _deviceDataPort = newPort;
-    for (final identity in identities) {
-      identity.port = newPort;
-    }
-    saveIdentities(identities);
+    _changeIdentities((identities) {
+      // FIRST the device value — since S374 it is the authoritative one
+      // (§11). The entries are pulled along so that no reader sees a
+      // deviating number; but they are no longer the source.
+      _deviceDataPort = newPort;
+      for (final identity in identities) {
+        identity.port = newPort;
+      }
+    });
   }
 
   /// Set the reviewEnabled flag for an identity.
   void setReviewEnabled(String id, bool enabled) {
-    final identities = loadIdentities();
-    for (final identity in identities) {
-      if (identity.id == id) {
-        identity.reviewEnabled = enabled;
-        break;
+    _changeIdentities((identities) {
+      for (final identity in identities) {
+        if (identity.id == id) {
+          identity.reviewEnabled = enabled;
+          break;
+        }
       }
-    }
-    saveIdentities(identities);
+    });
   }
 
   /// Reset all identities to the default skin.
   void resetAllSkins({String? defaultSkinId}) {
-    final identities = loadIdentities();
-    for (final identity in identities) {
-      identity.skinId = defaultSkinId;
-    }
-    saveIdentities(identities);
+    _changeIdentities((identities) {
+      for (final identity in identities) {
+        identity.skinId = defaultSkinId;
+      }
+    });
   }
 
-  /// Get active identity (from `last_profile.json.enc`).
+  /// Get active identity — the one the GUI showed last, from the device
+  /// database (area `device`, [DeviceStore.keyActiveIdentity]).
   Identity? getActiveIdentity() {
     try {
-      final envelope = _identitiesEnvelopeOrNull();
-      if (envelope == null) return null;
-      final json = envelope.readJsonFile(_lastProfileFile);
+      final json = _deviceStoreIfPresent()
+          ?.entry(DeviceStore.areaDevice, DeviceStore.keyActiveIdentity);
       if (json == null) return null;
       final profileDir = json['profileDir'] as String?;
       final nodeIdHex = json['nodeIdHex'] as String?;
@@ -1482,36 +1519,19 @@ class IdentityManager {
     }
   }
 
-  /// The LOGICAL path of the memo file for the most recently chosen
-  /// identity. On disk: `last_profile.json.enc`.
-  String get _lastProfileFile => '$baseDir/last_profile.json';
-
   /// Set active identity.
   ///
-  /// -- WHY THIS FILE IS SEALED AS WELL (S368) -------------------
+  /// ONE row of the device database. It says WHICH identity is meant and
+  /// nothing about it: the profile path and, once known, `nodeIdHex` —
+  /// the two values [getActiveIdentity] finds the identity by. Until S403
+  /// this was the file `last_profile.json.enc`, which also repeated the
+  /// display name and the port; no reader ever took them from there.
   ///
-  /// It carries EXACTLY THE SAME link as `identities.json`, only for the
-  /// active identity: `displayName` next to `nodeIdHex`, plus `port` and
-  /// the absolute profile path. Sealing `identities.json` and leaving this
-  /// one open would not have closed the finding, only shifted it from one
-  /// file name to the other — the guard searches for the BYTES of the
-  /// display name, not for names, and would have found it.
-  ///
-  /// The same device-wide key (K2): it is not identity-bound — after all,
-  /// it is only what says WHICH identity is meant.
+  /// The same device-wide key: the note is not identity-bound.
   void setActiveIdentity(Identity identity) {
-    Directory(baseDir).createSync(recursive: true);
-    final envelope = _identitiesEnvelopeOrNull();
-    if (envelope == null) {
-      throw StateError(
-          'No master seed in $baseDir — "last_profile.json" could only '
-          'have been written in plaintext (S368 forbidden). '
-          'There is no active identity without a seed.');
-    }
-    envelope.writeJsonFile(_lastProfileFile, {
+    _deviceStoreForWrite('the active identity')
+        .putEntry(DeviceStore.areaDevice, DeviceStore.keyActiveIdentity, {
       'profileDir': identity.profileDir,
-      'displayName': identity.displayName,
-      'port': identity.port,
       if (identity.nodeIdHex != null) 'nodeIdHex': identity.nodeIdHex,
     });
   }

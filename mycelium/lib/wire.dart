@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/link_io/native_send_path.dart';
 
+import 'package:mycelium/wire_counters.dart';
+export 'package:mycelium/wire_counters.dart' show WireCounters;
 import 'package:mycelium/wire_target.dart';
 import 'package:mycelium/own_address.dart' show usableIpv6Present;
 
@@ -28,9 +32,11 @@ abstract interface class PacketRoute {
 /// Two UDP sockets on THE SAME port number, one per address type (§11.1:
 /// „sockets | one IPv4, one IPv6, both bound to the same port number",
 /// „Both sockets carry the same traffic"). Packet out, packet in. That is
-/// everything this file will ever do. No queue, no clock,
-/// no cap, no acknowledgement, no encryption — whoever needs that
-/// builds it ONE level higher and leaves this file alone.
+/// everything this file will ever do. No clock, no cap, no acknowledgement,
+/// no encryption — whoever needs that builds it ONE level higher and leaves
+/// this file alone. The one queue in here is the receive queue of §11.1
+/// „Reading." (see [_Side.subscribe]): it holds what was read and not yet
+/// processed, and it evicts nothing (§20.2, D-44).
 ///
 /// The only thing besides packets that belongs in here is the care for the
 /// sockets themselves — because apart from this file nobody has them. Which targets
@@ -60,6 +66,9 @@ class Wire implements PacketRoute {
   /// [_Side.againOpen]) needs it again.
   void Function(Uint8List packet, InternetAddress from, int fromPort)? _onPacket;
   bool _to = false;
+
+  /// What went out and came in on both sockets (§25.5, `wire_counters.dart`).
+  final WireCounters counters = WireCounters();
 
   Wire._(this._report);
 
@@ -203,8 +212,10 @@ class Wire implements PacketRoute {
     // the NIC (S397-1, pktmon). v4_2 §27: the data port sends through the
     // native shim on Windows.
     final n = side.native;
-    if (n != null) return n.send(z.address, targetPort, packet) == packet.length;
-    return side.sock.send(packet, z, targetPort) == packet.length;
+    final ok = (n != null ? n.send(z.address, targetPort, packet)
+        : side.sock.send(packet, z, targetPort)) == packet.length;
+    if (ok) counters.sent(packet.length);
+    return ok;
   }
 
   /// Calls [onPacket] for every arriving packet — from both sockets,
@@ -237,6 +248,13 @@ class Wire implements PacketRoute {
   }
 }
 
+/// Packets processed per event-loop turn (§11.1 „Reading.": „processes
+/// afterwards, in batches"). Between two batches the event loop runs once,
+/// so the next read event drains the socket before more work is done.
+/// Measured (S398 drain proposal, variant „drainturn", batches of 32): 0
+/// re-request rounds for 367 parts between two processes.
+const int kReceiveBatch = 32;
+
 /// One side of the wire: a socket, the address to which it is bound,
 /// and the care for it. Present twice, once per address type.
 ///
@@ -267,18 +285,75 @@ class _Side {
     sock.close();
   }
 
+  /// Read, not yet processed. It lives on the side, not on the socket:
+  /// [againOpen] replaces the socket and the queue carries on.
+  final Queue<Datagram> _read = ListQueue();
+
+  /// A batch is scheduled for the next event-loop turn.
+  bool _batchDue = false;
+
+  /// §11.1 „Reading.": at every read event the socket is read until
+  /// empty, and only then processed — in batches of [kReceiveBatch], one
+  /// batch per event-loop turn, and the socket is emptied again before
+  /// every batch. Without that second read, 3 of 30 bursts of 367 parts
+  /// still lost 10–42 parts in the kernel (S399 probe, two processes):
+  /// read events queued behind a batch arrived too late. With it: 0 of 30.
+  ///
+  /// Until S399 each read event took ONE datagram and processed it in the
+  /// same handler (shell: AEAD open; splitter: sort in). A burst of 367
+  /// parts filled the 212 992-B kernel buffer faster than that, and the
+  /// kernel dropped 100–144 of them (`RcvbufErrors` rose by exactly the
+  /// missing count, `smoke_burst_loss`); a re-request round had to bring
+  /// back what the node itself had been too slow to read.
+  ///
+  /// Nothing is evicted and nothing is dropped: the queue is bounded by
+  /// the flow of the senders (§11.3, §20.2). `Timer.run` is no clock —
+  /// it yields the event loop once and is scheduled only while the queue
+  /// is not empty.
   void subscribe() {
     sock.listen((e) {
       if (e != RawSocketEvent.read) return;
-      final g = sock.receive();
-      if (g == null) return;
-      // [asAddressKind]: what comes in as `::ffff:a.b.c.d` goes up as the
-      // four bytes behind it. As measured, the IPv4 socket got the
-      // IPv4 traffic, so the form never occurred — that is not promised,
-      // and above it the neighbour list and four address keys depend on it.
-      _d._onPacket
-          ?.call(Uint8List.fromList(g.data), asAddressKind(g.address), g.port);
+      _drain();
+      _schedule();
     }, onError: error);
+  }
+
+  /// Reads [sock] until `receive()` returns nothing. On a socket that
+  /// [againOpen] has just closed `receive()` returns null.
+  void _drain() {
+    for (var g = sock.receive(); g != null; g = sock.receive()) {
+      _d.counters.received(g.data.length);
+      _read.add(g);
+    }
+  }
+
+  void _schedule() {
+    if (_batchDue || _read.isEmpty) return;
+    _batchDue = true;
+    Timer.run(_batch);
+  }
+
+  void _batch() {
+    _batchDue = false;
+    // The wire is closed for good ([Wire.close]): nobody above takes
+    // packets any more.
+    if (_d._to) return _read.clear();
+    _drain();
+    try {
+      for (var i = 0; i < kReceiveBatch && _read.isNotEmpty; i++) {
+        final g = _read.removeFirst();
+        // [asAddressKind]: what comes in as `::ffff:a.b.c.d` goes up as the
+        // four bytes behind it. As measured, the IPv4 socket got the
+        // IPv4 traffic, so the form never occurred — that is not promised,
+        // and above it the neighbour list and four address keys depend on it.
+        _d._onPacket
+            ?.call(Uint8List.fromList(g.data), asAddressKind(g.address), g.port);
+      }
+    } finally {
+      // A throwing handler above must not leave the rest of the queue
+      // waiting for the next read event.
+      _schedule();
+    }
   }
 
   /// The operating system error for an earlier throw.

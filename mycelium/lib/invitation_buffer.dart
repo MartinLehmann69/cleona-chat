@@ -70,6 +70,14 @@ abstract interface class WaitingRequest {
   /// Its one-time answer code (16 B, proposal M) — under it the
   /// acceptance goes to [neighbour].
   Uint8List? get answerCode;
+
+  /// The requester's 31 public day keys by UTC day (proposal E) — the answer
+  /// goes under its day value, and the contact keeps them.
+  Map<int, Uint8List> get dayKeys;
+
+  /// It came out of a post box (proposal E): [origin] is the holder's
+  /// address — no evidence, never a way back.
+  bool get collected;
 }
 
 /// A request loaded from memory: the same four values, but
@@ -88,6 +96,10 @@ class LoadedRequest implements WaitingRequest {
   final CardAddress? neighbour;
   @override
   final Uint8List? answerCode;
+  @override
+  final Map<int, Uint8List> dayKeys;
+  @override
+  final bool collected;
 
   LoadedRequest({
     required this.who,
@@ -96,6 +108,8 @@ class LoadedRequest implements WaitingRequest {
     this.introduction,
     this.neighbour,
     this.answerCode,
+    this.dayKeys = const {},
+    this.collected = false,
   });
 }
 

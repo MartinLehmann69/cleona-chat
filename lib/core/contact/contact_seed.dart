@@ -547,7 +547,8 @@ abstract class ContactSeedDataSource {
   /// The V4.1 way for this are the entry records, and the
   /// RECEIVE side of this bridge has stood since S356
   /// (`addPeersFromContactSeed` -> `personEntryHints`, §11.3 stage
-  /// "human"). This here is its send side.
+  /// "human"). This here is its send side. That receive side was removed
+  /// in S399 (P1 part C): in 4.2 nothing read `personEntryHints`.
   List<EntrySeedCandidate> get entrySeedCandidates;
 
   List<String> get localIps;

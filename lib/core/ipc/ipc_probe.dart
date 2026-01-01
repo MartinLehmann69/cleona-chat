@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
-import 'package:cleona/core/ipc/ipc_messages.dart';
+import 'package:cleona/core/ipc/ipc_channel.dart';
 
 /// Asks an IPC endpoint WHETHER A CLEONA DAEMON SITS THERE — instead of
 /// only asking whether anything is listening there.
@@ -47,43 +46,46 @@ import 'package:cleona/core/ipc/ipc_messages.dart';
 /// AND `cleona.pid` from outside. There the endpoint is the only
 /// remaining witness — so one must QUESTION it.
 ///
-/// The question is asked with the token from the same port file and the
-/// side-effect-free `ping` (`ipc_server.dart`, answer
-/// `{'pong': true}`). A foreign listener does not answer that.
+/// ── THE QUESTION SINCE S403 ──────────────────────────────────────────
+///
+/// Until S403 it was an authenticated `ping` with the token from the port
+/// file. The token is gone (§22.1: `cleona.port` carries the port number
+/// only), and every connection begins with the protected exchange
+/// (`ipc_channel.dart`). Its first step is open: the client sends a hello
+/// with 32 fresh random bytes, and a Cleona daemon — and only one —
+/// answers with a hello of the same version and 32 random bytes of its own.
+/// That answers "is this a Cleona daemon?" without the secret, which guard
+/// 2 does not have at that moment (it runs before the keyring is opened). A
+/// foreign listener does not speak the hello; one that merely echoes what
+/// it gets sends back OUR random bytes and is recognised by that.
 
 /// An endpoint read from `cleona.port`.
 class CleonaPortFile {
   final int port;
 
-  /// The auth token. `null` if the file carries none — then the endpoint
-  /// cannot be questioned (the IPC server disconnects unauthenticated
-  /// connections), and the caller must treat that as "not confirmed",
-  /// not as "occupied".
-  final String? token;
-
-  const CleonaPortFile(this.port, this.token);
+  const CleonaPortFile(this.port);
 }
 
-/// Splits the content of `cleona.port` (`"<port>:<token>"`).
+/// Reads the content of `cleona.port`: the port number and nothing else
+/// (§22.1). The `<port>:<token>` of an earlier build is no port file of
+/// this line — there is no way back to it — and yields `null` like any
+/// other content that is not a port number.
 ///
 /// Returns `null` for everything that does not yield a valid port number
 /// — an unreadable port file is no evidence of a running daemon.
 CleonaPortFile? parseCleonaPortFile(String? contents) {
   if (contents == null) return null;
-  final parts = contents.trim().split(':');
-  if (parts.isEmpty) return null;
-  final port = int.tryParse(parts[0]);
+  final port = int.tryParse(contents.trim());
   if (port == null || port <= 0 || port > 65535) return null;
-  final token = parts.length > 1 && parts[1].isNotEmpty ? parts[1] : null;
-  return CleonaPortFile(port, token);
+  return CleonaPortFile(port);
 }
 
 /// Does a Cleona IPC server sit on `127.0.0.1:[port]`?
 ///
-/// `true` only if the endpoint answers an authenticated `ping` with a
-/// well-formed `IpcResponse` of the same request number and `pong: true`.
-/// Every other outcome — no connection established, silence, foreign
-/// chatter, timeout, missing token — yields `false`.
+/// `true` only if the endpoint answers the open hello of the protected
+/// exchange with a hello of the same version and random bytes other than
+/// ours. Every other outcome — no connection established, silence, foreign
+/// chatter, an echo, timeout — yields `false`.
 ///
 /// `false` explicitly means "NOT CONFIRMED", not "nobody there". The
 /// caller bears the burden of this distinction; in the daemon's latch it
@@ -94,15 +96,9 @@ CleonaPortFile? parseCleonaPortFile(String? contents) {
 /// "free" is caught by the two latches in front.
 Future<bool> cleonaIpcEndpointAnswers({
   required int port,
-  required String? token,
   Duration timeout = const Duration(seconds: 2),
   InternetAddress? address,
 }) async {
-  // Without a token the endpoint cannot be questioned: the IPC server
-  // discards every unauthenticated connection, so a real daemon would look
-  // exactly like a foreign listener.
-  if (token == null) return false;
-
   Socket? sock;
   try {
     sock = await Socket.connect(
@@ -110,7 +106,7 @@ Future<bool> cleonaIpcEndpointAnswers({
       port,
     ).timeout(timeout);
 
-    final operation = Random().nextInt(0x7fffffff);
+    final ours = IpcHello.freshNonce();
     final answer = Completer<bool>();
     final buffer = StringBuffer();
 
@@ -119,29 +115,14 @@ Future<bool> cleonaIpcEndpointAnswers({
         if (answer.isCompleted) return;
         buffer.write(piece);
         final text = buffer.toString();
-        final lines = text.split('\n');
-        // The last element is the incomplete remainder.
-        buffer
-          ..clear()
-          ..write(lines.removeLast());
-        for (final line in lines) {
-          if (line.trim().isEmpty) continue;
-          try {
-            final msg = parseIpcMessage(line);
-            // Events may lie in between (the server sends them
-            // unsolicited); what is sought is the answer to OUR ping.
-            if (msg is IpcResponse &&
-                msg.id == operation &&
-                msg.success &&
-                msg.data['pong'] == true) {
-              if (!answer.isCompleted) answer.complete(true);
-              return;
-            }
-          } catch (_) {
-            // Not a Cleona frame — keep reading, do not discard at once:
-            // a real server could theoretically put something in front.
-          }
+        final at = text.indexOf('\n');
+        if (at < 0) return;
+        final theirs = IpcHello.parse(text.substring(0, at).trim());
+        var echo = theirs != null;
+        for (var i = 0; echo && i < ours.length; i++) {
+          if (theirs![i] != ours[i]) echo = false;
         }
+        answer.complete(theirs != null && !echo);
       },
       onError: (_) {
         if (!answer.isCompleted) answer.complete(false);
@@ -152,8 +133,7 @@ Future<bool> cleonaIpcEndpointAnswers({
       cancelOnError: true,
     );
 
-    sock.write('${jsonEncode({'type': 'auth', 'token': token})}\n');
-    sock.write(IpcRequest(id: operation, command: 'ping').toJsonLine());
+    sock.write('${IpcHello.line(ours)}\n');
     await sock.flush();
 
     return await answer.future.timeout(timeout, onTimeout: () => false);

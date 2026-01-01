@@ -1,7 +1,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/crypto/file_encryption.dart' show FileEncryption;
+import 'package:mycelium/device_records.dart';
 import 'package:mycelium/pair.dart' show kCodeLength;
 
 /// The disk under the post box: what a holder holds FOR OTHERS,
@@ -25,10 +26,9 @@ import 'package:mycelium/pair.dart' show kCodeLength;
 /// file format. This file knows no packet, no neighbour and no
 /// kind; [DepositRecord.content] stays opaque to it throughout.
 ///
-/// Encrypted and atomic writing is done by [FileEncryption] (`.enc.tmp` +
-/// rename) — the same tool and the same handwriting as in
-/// `memory.dart`, not a second way of doing the same. Folder and
-/// key come from outside; no key is derived here.
+/// WHERE the bytes lie is handed in ([DeviceRecords], S403): in the app a
+/// row of the device database (V4.2 §4.5.3 form 2), in probes the encrypted
+/// file of [FileEncryption]. No key is derived here.
 ///
 /// ── FILE LAYOUT ───────────────────────────────────────────────────────
 /// ```
@@ -110,10 +110,6 @@ class _Reader {
   }
 }
 
-/// [FileEncryption] appends `.enc` itself; on disk therefore lies
-/// `briefkasten.enc` (briefly while writing: `.enc.tmp`).
-const String _fileName = 'post_box';
-
 /// Version 2 (S391, proposal M): records lie under the 16-B day value
 /// instead of under the 32-B identifier. An OLDER version is discarded —
 /// file deleted, result empty (4.2: no migration, the old stock
@@ -128,25 +124,21 @@ const int _version = 2;
 const int kIdLength = 8;
 const int kValueLength = kCodeLength;
 
-/// The encrypted storage file of a holder.
+/// The storage of a holder: ONE record, [kRecordPostBox] — in the app a row
+/// of the device database (V4.2 §4.5.3 form 2, `device_records.dart`).
 class PostBoxDisk {
-  final FileEncryption _enc;
-  final String _path;
+  final DeviceRecords _records;
 
-  PostBoxDisk._(this._enc, this._path);
+  /// Reads nothing yet.
+  PostBoxDisk.on(this._records);
 
-  /// Sets up the disk in [directory]; [key] is passed through unchanged to
-  /// [FileEncryption]. Creates the folder, reads nothing yet.
-  static PostBoxDisk open(Directory directory, Uint8List key) {
-    directory.createSync(recursive: true);
-    return PostBoxDisk._(
-      FileEncryption(baseDir: directory.path, key: key),
-      '${directory.path}/$_fileName',
-    );
-  }
+  /// [PostBoxDisk.on] the encrypted file `post_box.enc` in [directory];
+  /// [key] is passed through unchanged to [FileEncryption].
+  static PostBoxDisk open(Directory directory, Uint8List key) =>
+      PostBoxDisk.on(FileDeviceRecords(directory, key));
 
-  /// The path without `.enc` — for reports and probes.
-  String get path => _path;
+  /// Where the record lies — for reports and probes.
+  String get path => _records.where(kRecordPostBox);
 
   /// Reads the records back, oldest first, and in doing so leaves out everything
   /// that was stored BEFORE [limit].
@@ -160,27 +152,21 @@ class PostBoxDisk {
   /// cannot be read, this method throws [DepositError] instead of
   /// silently continuing with half the stock.
   List<DepositRecord> load({required DateTime limit}) {
-    // The side files count too: [FileEncryption.readBinaryFile] recovers
-    // from them what a crash in the middle of writing left lying around.
-    final there = File('$_path.enc').existsSync() ||
-        File('$_path.enc.tmp').existsSync() ||
-        File('$_path.enc.old').existsSync();
-    if (!there) return <DepositRecord>[];
-    final bytes = _enc.readBinaryFile(_path);
+    // [DeviceRecords.holds] counts what a broken write left as well.
+    if (!_records.holds(kRecordPostBox)) return <DepositRecord>[];
+    final bytes = _records.read(kRecordPostBox);
     if (bytes == null) {
-      throw DepositError('$_path.enc exists, but cannot be read '
-          '— wrong key or damaged file');
+      throw DepositError('$path exists, but cannot be read '
+          '— wrong key or damaged record');
     }
     return _decode(bytes, limit);
   }
 
-  /// Writes [records] encrypted and atomically (`FileEncryption.
-  /// writeBinaryFile`: first `.enc.tmp`, then renamed). A crash
-  /// between both steps leaves the previous `briefkasten.enc`
-  /// intact — there is never an intermediate version under the canonical
-  /// name.
+  /// Writes [records] as a whole ([DeviceRecords.write]): a crash in the
+  /// middle leaves the previous stock intact — there is never an
+  /// intermediate version.
   void save(Iterable<DepositRecord> records) =>
-      _enc.writeBinaryFile(_path, _encode(records));
+      _records.write(kRecordPostBox, _encode(records));
 
   Uint8List _encode(Iterable<DepositRecord> records) {
     final list = records.toList();
@@ -236,12 +222,9 @@ class PostBoxDisk {
     }
   }
 
-  /// Old stock of an earlier version: gone, together with side files.
+  /// Old stock of an earlier version: gone, with what a broken write left.
   List<DepositRecord> _drop() {
-    for (final ending in const ['.enc', '.enc.tmp', '.enc.old']) {
-      final f = File('$_path$ending');
-      if (f.existsSync()) f.deleteSync();
-    }
+    _records.remove(kRecordPostBox);
     return <DepositRecord>[];
   }
 }

@@ -119,6 +119,10 @@ message GroupInviteV3 {
   bytes membership_hash = 8;          // SHA-256(epoch || groupId || sorted members)
   bytes membership_sig_ed25519 = 9;   // 64 bytes, over membership_hash
   bytes membership_sig_ml_dsa = 10;   // ~3300 bytes, over membership_hash
+  // B-3 (v4_2 §4.3, §16.2.2, D-36): in the leg to each member, the `s_AB` of
+  // that member with every co-member that is not the inviter. Per leg,
+  // outside the membership hash.
+  repeated GroupPairSeed pair_seeds = 11;
 }
 message GroupMemberV3 {
   bytes node_id = 1;
@@ -127,6 +131,25 @@ message GroupMemberV3 {
   bytes ed25519_public_key = 4;
   bytes x25519_public_key = 5;
   bytes ml_kem_public_key = 6;
+  // B-3 (§16.2.2): the member's address as the member itself signed it on
+  // joining — all four public keys, key state, rotation chain (mycelium
+  // `group_member.dart`). Full entries travel only for members new to the
+  // receiver; empty otherwise.
+  bytes address = 7;
+  bytes address_sig_ed25519 = 8;
+  bytes address_sig_ml_dsa = 9;
+  bytes neighbours = 10;        // its fixed neighbours as the inviter knows them
+}
+// B-3 (§4.3): the pair secret seed of the receiver with one co-member.
+message GroupPairSeed {
+  bytes member_id = 1;
+  bytes seed = 2;               // s_AB, 32 bytes
+}
+// B-3 (§16.2.2): the explicit join — the joiner's own, self-signed entry,
+// to the member who invited it.
+message GroupJoin {
+  bytes group_id = 1;
+  GroupMemberV3 member = 2;
 }
 // GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
 message GroupMembershipResyncRequest {
@@ -207,87 +230,12 @@ message IdentityDeletedNotification {
   string display_name = 3;
 }
 // ── Restore ────────────────────────────────────────────────────────────
-
-message RestoreBroadcast {
-  bytes old_node_id = 1;
-  bytes new_node_id = 2;
-  bytes new_ed25519_pk = 3;
-  bytes new_x25519_pk = 4;
-  bytes new_ml_kem_pk = 5;
-  bytes new_ml_dsa_pk = 6;
-  string display_name = 7;
-  uint64 timestamp = 8;
-  bytes signature = 9;           // signed with old Ed25519 key (proves ownership)
-  bytes signature_ml_dsa = 10;   // H-2: hybrid — signed with old ML-DSA-65 key (PQ proof; absent on pre-H-2 senders)
-}
-message RestoreResponse {
-  uint32 phase = 1;              // 1=contacts, 2=recent messages, 3=full history
-  repeated ContactEntry contacts = 2;
-  repeated StoredMessage messages = 3;
-  repeated RestoreGroupInfo groups = 4;
-  repeated RestoreChannelInfo channels = 5;
-}
-message RestoreGroupInfo {
-  bytes group_id = 1;
-  string name = 2;
-  string description = 3;
-  string owner_node_id_hex = 4;
-  repeated RestoreGroupMember members = 5;
-}
-message RestoreGroupMember {
-  string node_id_hex = 1;
-  string display_name = 2;
-  string role = 3;               // "owner", "admin", "member"
-  bytes ed25519_pk = 4;
-  bytes x25519_pk = 5;
-  bytes ml_kem_pk = 6;
-}
-message RestoreChannelInfo {
-  bytes channel_id = 1;
-  string name = 2;
-  string description = 3;
-  string owner_node_id_hex = 4;
-  repeated RestoreChannelMember members = 5;
-  // NSFW rating. Without this field the restore path could not carry the flag
-  // at all, so a recovered channel always fell back to the ChannelInfo
-  // constructor default. Per architecture §9.2.2 a channel marked not safe for
-  // minors is invisible to identities without the isAdult flag, so losing the
-  // flag on recovery would expose an adult channel to exactly those users.
-  // Field 6 is additive: old senders leave it unset and new readers see the
-  // protobuf default false, which is the pre-existing behaviour.
-  bool is_adult = 6;
-}
-message RestoreChannelMember {
-  string node_id_hex = 1;
-  string display_name = 2;
-  string role = 3;               // "owner", "admin", "subscriber"
-  bytes ed25519_pk = 4;
-  bytes x25519_pk = 5;
-  bytes ml_kem_pk = 6;
-}
-message ContactEntry {
-  bytes node_id = 1;
-  string display_name = 2;
-  bytes ed25519_pk = 3;
-  bytes x25519_pk = 4;
-  bytes ml_kem_pk = 5;
-  bytes ml_dsa_pk = 6;
-  bytes profile_picture = 7;
-  string description = 8;
-}
-message StoredMessage {
-  bytes message_id = 1;
-  bytes sender_id = 2;
-  bytes recipient_id = 3;
-  string conversation_id = 4;
-  uint64 timestamp = 5;
-  // V3 (2026-05-05 Wave 7): UI-tag carrying `UiMessageType.wireValue` (sequential
-  // 0..N, see lib/core/service/service_types.dart). Detached from the V2
-  // `MessageType` wire enum so RESTORE_RESPONSE no longer drags V2-numbering
-  // into the inner-frame payload.
-  int32 ui_message_type = 6;
-  bytes payload = 7;             // encrypted
-}
+// Here stood the payloads of the V3 restore path (`RestoreBroadcast`,
+// `RestoreResponse` with `ContactEntry`, `StoredMessage`,
+// `RestoreGroupInfo`/`-Member`, `RestoreChannelInfo`/`-Member`). Removed
+// with the path in S398 (finding R-1); the message types 30 and 31 are
+// reserved in `transport_v3.proto`. Message names are not wire numbers, so
+// nothing needs reserving here.
 // ── Calls ──────────────────────────────────────────────────────────────
 
 message CallInvite {
@@ -607,11 +555,28 @@ message CallRejoin {
 }
 // ── Key Rotation ───────────────────────────────────────────────────────
 
+// V4.2 §4.5.4 "The announcement must carry the mode the sender should use
+// for follow-ups": whether the recipient's tags for this pair are still
+// valid for the new keys. Carried by BOTH rotation notices (`KeyRotation`,
+// `KeyRotationBroadcast`) under the SAME field number 9, so the one
+// dispatcher that parses every notice as `KeyRotationBroadcast` reads it
+// for both. Signed with the rest of the body.
+enum KeyRotationMode {
+  // Never valid: a notice without a mode is rejected (no default).
+  KEY_ROTATION_MODE_UNSPECIFIED = 0;
+  // `K_AB` and the codes derived from it stay valid: `K_AB` hangs on the
+  // founding keys (§4.3, §15.2) and survives every rotation (§4.5.4). The
+  // recipient re-derives nothing; only the KEM material is new.
+  KEY_ROTATION_MODE_TAGS_VALID = 1;
+}
+
 message KeyRotation {
   bytes new_x25519_pk = 1;
   bytes new_ml_kem_pk = 2;
   uint64 rotation_timestamp = 3;
   bytes signature = 4;           // signed with identity key
+  // Same number as `KeyRotationBroadcast.mode` — see `KeyRotationMode`.
+  KeyRotationMode mode = 9;
 }
 // ── Channel Join Request ──────────────────────────────────────────────
 
@@ -872,6 +837,19 @@ enum VideoOffReason {
   // text — never the same state as USER_DISABLED, and never a black picture
   // with no explanation.
   VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT = 2;
+  // The sender's device has no video path at all: no capture or encode
+  // path (CLEONA_VIDEO_ERR_UNSUPPORTED, no video backend library), or a
+  // build without a video engine — the desktop daemon (§17.5 "desktop video
+  // calls remain audio-only"). A property of the device, not of the call or
+  // the link: a better connection does not change it. S399 (owner C8: "the
+  // reason is not unknown — name it").
+  VIDEO_OFF_REASON_NOT_SUPPORTED          = 3;
+  // The sender's device can do video, but it could not be started in this
+  // call (CLEONA_VIDEO_ERR_BACKEND: camera busy, codec init refused,
+  // allocation; or another failure while opening/starting the pipeline).
+  // Retryable in principle. Deliberately NOT "camera unavailable": the
+  // backend does not tell a busy camera from a refused codec.
+  VIDEO_OFF_REASON_START_FAILED           = 4;
 }
 // The sender's own media state inside a call (§10.6). Sent whenever the
 // sender's own video starts or stops, and never on the peer's behalf (I12).
@@ -1130,7 +1108,172 @@ enum TwinSyncType {
   // device with an older state does not know it — what it then does is
   // measured and documented in `_handleTwinSyncV3`.
   TWIN_IDENTITY_DELETED = 17;
+
+  // §14.7 Type 18, §14.2, D-37 (E5): a delivery from a contact, mirrored by
+  // the own device that collected it to the other own devices. Payload: the
+  // contact's ApplicationFrameV3 as received. The other devices show it as
+  // if they had received it and do not acknowledge it again.
+  DELIVERY_MIRROR = 18;
+
+  // §14.7 Type 19, §4.5.4, D-40 (E7 = b1): the routine KEM rotation of the
+  // identity. The one rotating device places the new generation's secret
+  // keys (X25519 + ML-KEM-768) with its time to each other own device before
+  // announcing to contacts; the receiving device takes it as its current
+  // generation and opens the cells it parked. Payload: JSON (`x25519Pk`,
+  // `x25519Sk`, `mlKemPk`, `mlKemSk` as hex, `at` in Unix ms).
+  KEM_ROTATED = 19;
+
+  // §14.7 Type 20, §14.6.3, D-42: the initial reconciliation of a newly
+  // enrolled own device — header, manifest block, fetch, deliver, progress,
+  // cancel; device-scoped. Payload: ReconcilePacket.
+  RECONCILE = 20;
+
+  // §14.7 Type 21 (S403, owner decision 03.10.2026 V1 = A), §16.2.2: the
+  // identity left a group — group identifier and the membership epoch at
+  // leaving. The receiving device removes the conversation and sets the
+  // same mark; a post the leaving device discarded is not forwarded to the
+  // other own devices. Payload: JSON (`group` as hex, `epoch`).
+  GROUP_LEFT = 21;
 }
+
+// ── §14.6.3 Type 20 RECONCILE (D-42) ─────────────────────────────────────
+// The manifest-and-pull machinery of §13.5.2 on the own-device line.
+// `lib/core/service/reconcile_wire.dart` is the one place that packs it.
+
+// The payload of a Type-20 TwinSyncEnvelope. §1.3: compressed before the
+// seal where zstd-3 gains at least 10 % (the rule of §4.5.3).
+message ReconcilePacket {
+  uint32 codec = 1;  // 0 = raw, 1 = zstd
+  bytes body = 2;    // a ReconcileFrame
+}
+
+message ReconcileFrame {
+  bytes reconcile_id = 1;  // 16 B, drawn by the source for one reconciliation
+  oneof kind {
+    ReconcileHeader header = 2;
+    ReconcileManifest manifest = 3;
+    ReconcileFetch fetch = 4;
+    ReconcileDeliver deliver = 5;
+    ReconcileProgress progress = 6;
+    ReconcileCancel cancel = 7;
+  }
+}
+
+// What the handover does not carry (§14.6.3): the conversation list with
+// its per-chat configuration and, per conversation, the count and size of
+// the history the source holds before the cut. Split into parts.
+message ReconcileHeader {
+  int64 cut_ms = 1;   // the acceptance time: newer messages arrive by mirroring
+  uint32 part = 2;
+  uint32 parts = 3;
+  repeated ReconcileChat chats = 4;
+}
+
+message ReconcileChat {
+  bytes conv_id = 1;
+  string display_name = 2;
+  int64 last_activity_ms = 3;
+  bool is_group = 4;
+  bool is_channel = 5;
+  bool is_favorite = 6;
+  uint32 unread_count = 7;
+  bytes config_json = 8;  // the conversation's `extra` (config, notifications)
+  uint64 count = 9;       // messages the source holds before the cut
+  int64 oldest_ms = 10;
+  uint64 bytes = 11;      // size hint of that history (text + extra)
+}
+
+// §13.5.2 phase 2: one entry per message, without the body.
+message ReconcileManifest {
+  bytes fetch_id = 1;
+  repeated ReconcileManifestChat chats = 2;
+}
+
+message ReconcileManifestChat {
+  bytes conv_id = 1;
+  repeated ReconcileEntry entries = 2;  // newest first
+  bool complete = 3;  // no older entry of this chat follows for this fetch
+}
+
+message ReconcileEntry {
+  bytes id = 1;
+  int64 ts_ms = 2;
+  bytes sender = 3;
+  uint32 type = 4;
+  uint32 size = 5;  // size hint of the record
+}
+
+// The new device asks; one open fetch per source (§20.2). A repeat after a
+// restart carries the same fetch_id, a reissue after 7 days a new one.
+message ReconcileFetch {
+  enum Kind {
+    MANIFEST = 0;  // entries of conv_ids (all when empty) older than before_ms
+    MESSAGES = 1;  // the records of ids
+    NEWEST = 2;    // the newest `newest` records of each of conv_ids
+    // §9.5 (D-48), between the two parties of a pair: what the party asked
+    // wrote itself in the scope of the pair, written or changed since 14
+    // days before since_ms.
+    SINCE = 3;
+  }
+  bytes fetch_id = 1;
+  Kind kind = 2;
+  repeated bytes conv_ids = 3;
+  int64 before_ms = 4;  // 0 = up to the cut
+  repeated bytes ids = 5;
+  uint32 newest = 6;
+  uint32 window = 7;    // packets the new device takes this round
+  int64 since_ms = 8;   // SINCE: the moment of the requester's last collection (§8.2)
+}
+
+// §13.5.2 phase 3: the records, newest first.
+message ReconcileDeliver {
+  bytes fetch_id = 1;
+  repeated ReconcileMessage messages = 2;
+  repeated bytes too_large = 3;  // ids that fit no packet — named, not dropped
+  // §9.5 (answer to a SINCE fetch), first packet of the answer:
+  repeated bytes held = 4;     // identifiers of the requester's messages the party holds from that time
+  repeated bytes deleted = 5;  // identifiers of the party's own messages deleted in that time
+  repeated ReconcileExpired expired = 6;  // §21.5.3: own messages that expired unacknowledged
+  // §9.5: the packets of an answer are numbered from 0; `round_end` closes a
+  // round (at most 4 packets, §20.2), `complete` the answer.
+  bool complete = 7;
+  uint32 seq = 8;
+  bool round_end = 9;
+}
+
+// §21.5.3, §9.5: how many of the party's own messages in one conversation of
+// the pair's scope expired there before they were acknowledged — the number,
+// nothing of their content. conv_id empty: the conversation of the pair.
+message ReconcileExpired {
+  bytes conv_id = 1;
+  uint32 count = 2;
+}
+
+// A record in the store's form: the columns and `extra` as JSON.
+message ReconcileMessage {
+  bytes id = 1;
+  bytes conv_id = 2;
+  bytes sender = 3;
+  int64 ts_ms = 4;
+  uint32 type = 5;
+  bool outgoing = 6;
+  string status = 7;
+  string text = 8;
+  bytes extra_json = 9;
+}
+
+// The recipient's progress report: the source fills again only on it
+// (§14.6.3). It stands in for the receipt a twin sync does not carry (D-37).
+message ReconcileProgress {
+  bytes fetch_id = 1;
+  uint32 received = 2;
+  // §9.5 "reports the messages as delivered": identifiers of the answering
+  // party's messages the requester holds now — taken from the packets this
+  // report covers, or held before.
+  repeated bytes delivered = 3;
+}
+
+message ReconcileCancel {}
 enum DevicePlatform {
   PLATFORM_UNKNOWN = 0;
   PLATFORM_ANDROID = 1;
@@ -1145,6 +1288,11 @@ message TwinSyncEnvelope {
   uint64 timestamp = 3;            // Unix milliseconds
   TwinSyncType sync_type = 4;
   bytes payload = 5;               // Type-specific protobuf
+  // DELIVERY_MIRROR only (§20.2): the 8-byte delivery identifier of the
+  // delivery that carried the mirrored frame, so the twin checks and
+  // keeps it in the same received memory as the device that received
+  // it first. Not written by any other type.
+  bytes delivery_id = 6;
 }
 message DeviceRecord {
   bytes device_id = 1;             // UUID (16 bytes), generated once on first launch
@@ -1161,11 +1309,21 @@ message KeyRotationBroadcast {
   bytes new_ml_dsa_pk = 2;         // ML-DSA-65 public key
   bytes new_x25519_pk = 3;         // 32 bytes — new X25519 public key
   bytes new_ml_kem_pk = 4;         // ML-KEM-768 public key
-  bytes old_signature_ed25519 = 5; // Signature with OLD key (proves ownership)
-  bytes new_signature_ed25519 = 6; // Signature with NEW key (proves new identity)
+  // S398 (proposal A, D-33): the Ed25519-only old/new signatures are gone —
+  // continuity is proven by the HYBRID rotation chain, which rides inside the
+  // seal of the envelope carrying this notice (§4.4.3, §4.5.4).
+  reserved 5, 6;
+  reserved "old_signature_ed25519", "new_signature_ed25519";
   // §7.5 Device Co-Authorization: Device-Sig countersigs from authorized devices
   repeated RotationApprovalToken approval_tokens = 7;
   uint32 pre_rotation_device_count = 8;
+  // §4.5.4 — see `KeyRotationMode`. Set BEFORE the two signatures are
+  // formed, so both cover it.
+  KeyRotationMode mode = 9;
+  // An Emergency Key Rotation (all four keys, §4.5.4) — set by
+  // `rotateIdentityKeys`; absent on the routine KEM notice, which the same
+  // dispatcher parses under this message.
+  bool emergency = 10;
 }
 // ── Calendar (§23) ─────────────────────────────────────────────────────
 

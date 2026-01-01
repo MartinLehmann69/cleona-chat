@@ -125,7 +125,10 @@ class MappingProbe {
           List<int>.generate(kIdentifierLength, (_) => _random.nextInt(256)));
       final echo = Completer<bool>();
       late final OutsideRoute route;
-      splitter = Splitter(shell, onShipment: (data, from, fromPort) {
+      // Silent like wire and shell above: the splitter's reports name the
+      // probed address and port, and a default report would print them
+      // unredacted to stderr, i.e. into daemon-stdio.log (S403 finding 2a).
+      splitter = Splitter(shell, report: (_) {}, onShipment: (data, from, fromPort) {
         if (data.isEmpty) return;
         if (data[0] == kinds.kEcho) {
           if (_same(data, identifier) && !echo.isCompleted) echo.complete(true);

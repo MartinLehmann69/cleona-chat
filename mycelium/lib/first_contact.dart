@@ -19,11 +19,13 @@
 ///  (4) receipt         ---------------->  sealed
 /// ```
 ///
+/// With a `cleona:2:` line (proposal E, `card_text.dart`) the bundle stands in
+/// the line: (0) and (1) fall away, and the request goes out at once — also
+/// into Bob's invitation post box while he is off (`node_join.dart`).
+///
 /// Packet (2) carries a visible proof of work before the envelope
-/// (`proof_of_work.dart`): type byte(1) + random value(8) + counter(8), only then
-/// the sealed envelope. Bob checks this header BEFORE he unseals —
-/// without it every junk request costs him opening a hybrid
-/// envelope.
+/// (`first_contact_wire.dart`). Bob checks this header BEFORE he unseals —
+/// without it every junk request costs him opening a hybrid envelope.
 ///
 /// [Join] — Alice's side — stands here. Bob's side ([Invitation]) stands
 /// in `first_contact_invitation.dart` and is re-exported from here;
@@ -38,23 +40,20 @@ import 'package:mycelium/first_contact_pair.dart';
 import 'package:mycelium/first_contact_plea.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/card_expiry.dart';
+import 'package:mycelium/first_contact_wire.dart';
 import 'package:mycelium/proof_of_work.dart';
 import 'package:mycelium/pair.dart' show firstContactCode;
 import 'package:mycelium/envelope.dart';
 import 'package:mycelium/introduction.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 
-/// Bob's side of first contact lies in a separate file, but is
-/// re-exported from here — every existing caller still imports only
-/// `package:mycelium/first_contact.dart` and finds [Invitation] there.
+/// Re-exported: Bob's side ([Invitation]), the introduction, the
+/// [ExpiryState] of [Join.cardsExpiry] and the request's wire codec — every
+/// caller still imports only `package:mycelium/first_contact.dart`.
 export 'package:mycelium/first_contact_invitation.dart';
-
-/// What a request and its answer say about the sender.
 export 'package:mycelium/introduction.dart';
-
-/// [Join.cardsExpiry] returns an [ExpiryState] — a
-/// public return type that the caller must be able to name.
 export 'package:mycelium/card_expiry.dart';
+export 'package:mycelium/first_contact_wire.dart';
 
 /// The five packets of first contact.
 enum PacketKind {
@@ -75,11 +74,6 @@ enum PacketKind {
   }
 }
 
-/// Length of the visible proof header before the envelope in packet (2):
-/// random value (8 B) + counter (8 B). The type byte before it does not count
-/// here — it is part of [withKind].
-const int proofOfWorkHeaderLength = ProofOfWork.randomValueLength + 8;
-
 /// Where a packet goes. The delivery itself is done by the caller.
 ///
 /// Applies to [Invitation] — the WAITING side. It always answers to the
@@ -87,22 +81,13 @@ const int proofOfWorkHeaderLength = ProofOfWork.randomValueLength + 8;
 typedef Send = void Function(Uint8List packet, CardAddress target);
 
 /// How a packet of the JOIN goes out — **without [Join] choosing an
-/// address**.
+/// address** (since S390: a card carries addresses for several steps, §7.1,
+/// §15.2; `node_join.dart` puts the packet on the ladder).
 ///
-/// Until S390 [Send] stood here, and [Join] picked its target
-/// itself (`oeffentlich ?? nachbar ?? lan`). Both were wrong: a
-/// card carries THREE addresses for THREE steps (§7.1, §15.2), and the
-/// neighbour address is no address of the peer at all — via it
-/// forwarding happens with `0x20` (§8.1). Whoever writes to it sends the
-/// join to a third party who is not the invitee.
-///
-/// [proof] is the address from which the packet just answered
-/// came in. It is EVIDENCE and beats every card address in the
-/// LAN role (`memory.dart`: evidence before claim); moreover it is
-/// the proof that the peer is ON at this moment — the
-/// post box (§8.2) then does not apply. `null` means: there is none
-/// — on the first packet, or if the answered one was passed on or fetched from a
-/// compartment and the sender address belongs to the third party.
+/// [proof] is the address from which the packet just answered came in —
+/// EVIDENCE, beats every card address in the LAN role, and proves the peer
+/// is ON (the post box, §8.2, then does not apply). `null`: there is none —
+/// the first packet, or the answered one was passed on or collected.
 typedef JoinSend = void Function(Uint8List packet, CardAddress? proof);
 
 /// What the caller learns when something worth reporting happens.
@@ -122,13 +107,9 @@ class Join {
   final JoinSend send;
   final Report? report;
 
-  /// What Alice writes about herself into the request (2) — name and greeting.
-  ///
-  /// Optional: if it stays null, the payload of the request is still the
-  /// bare code, byte for byte as before the introduction. Fields that are too long
-  /// throw NOT only when sending, but already when building the
-  /// [Introduction] — and once more at the recipient, because only its
-  /// check is a limit.
+  /// What Alice writes about herself into the request (2) — name and
+  /// greeting; optional. Too long throws when building the [Introduction]
+  /// and once more at the recipient, because only its check is a limit.
   final Introduction? introduction;
 
   final Uint8List _random;
@@ -138,6 +119,9 @@ class Join {
   final Uint8List answerCode;
   Uint8List? _pairRandom;
   Address? _counterpart;
+  int? _window;
+  Map<int, Uint8List> _counterpartDayKeys = const {};
+  List<CardAddress> _counterpartNeighbours = const [];
   CardAddress? _proof;
   Introduction? _counterpartIntroduction;
   bool _done = false;
@@ -159,13 +143,9 @@ class Join {
   Address? get counterpart => _counterpart;
 
   /// The network address from which a packet of THIS join last came —
-  /// the only EVIDENCE that this side has about the route to the peer
-  /// (§6.2). `null` as long as nothing came, or if the last packet
-  /// was passed on or fetched from a compartment.
-  ///
-  /// The caller remembers it with the freshly created contact as a proven
-  /// route. Until S390 it took an address from the CARD for that — a
-  /// claim at the place where `memory.dart` keeps evidence.
+  /// the only EVIDENCE about the route to the peer (§6.2); `null` if none
+  /// came or the last was passed on or collected. The caller keeps it with
+  /// the new contact as a proven route.
   CardAddress? get provenRoute => _proof;
 
   /// What Bob wrote about himself into the answer (3). Null as long as
@@ -175,6 +155,20 @@ class Join {
   /// `s_AB` from the acceptance (proposal M) — set only with [done].
   Uint8List? get pairRandom => _pairRandom;
 
+  /// The issuer's day keys and fixed neighbours from the acceptance
+  /// (proposal E) — set only with [done]; the caller keeps them with the
+  /// contact.
+  Map<int, Uint8List> get counterpartDayKeys => _counterpartDayKeys;
+  List<CardAddress> get counterpartNeighbours => _counterpartNeighbours;
+
+  /// When the request (2) went out: its time window (proposal E) — the
+  /// caller keeps it as the moment its own day keys were handed over.
+  int? get requestWindow => _window;
+
+  /// The bundle from a `cleona:2:` line, checked against the card in the
+  /// constructor; `null` for a card alone.
+  final Address? lineBundle;
+
   /// What the clock says about the scanned card — information, not a
   /// decision. This class does NOT reject an expired card:
   /// the grace period lies with the issuer (`invitation.dart`
@@ -183,15 +177,38 @@ class Join {
   ExpiryState get cardsExpiry =>
       card.expiryStateAt(DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
+  /// [lineBundle]: the address a `cleona:2:` line carries (`bundle.dart`
+  /// `lineBundleAddress`). It must match the card's fingerprint — the same
+  /// check as for the bundle (1); otherwise [FirstContactError].
+  /// [answerCode]: only for a join restored from disk ([resume]).
   Join({
     required this.me,
     required this.card,
     required this.send,
     this.report,
     this.introduction,
+    this.lineBundle,
+    Uint8List? answerCode,
     Random? random,
   })  : _random = _randomBytes(16, random),
-        answerCode = _randomBytes(16, random);
+        answerCode = answerCode ?? _randomBytes(16, random) {
+    final l = lineBundle;
+    if (l != null && !card.matchesIdentifier(l.identifier)) {
+      throw FirstContactError(
+          'Bundle of the line does not match the fingerprint of the card');
+    }
+  }
+
+  /// A join restored after a restart (proposal E): its request (2) went out
+  /// in [window] to [counterpart]; it now waits only for the answer (3).
+  /// Sends nothing. [counterpart] must match the card like any bundle.
+  void resume(Address counterpart, int window) {
+    if (!card.matchesIdentifier(counterpart.identifier)) {
+      throw FirstContactError('restored join: address does not match the card');
+    }
+    _counterpart = counterpart;
+    _window = window;
+  }
 
   /// Whether [packet] is the bundle (1) for THIS join — recognised by the 16
   /// random bytes that only this join has drawn. Changes nothing.
@@ -223,8 +240,15 @@ class Join {
     }
   }
 
-  /// Packet (0): request bundle. Contains NO identity.
+  /// Packet (0): request bundle. Contains NO identity. With a line the
+  /// bundle is already here: straight to the request (2) (proposal E).
   void start() {
+    if (lineBundle case final l?) {
+      _counterpart = l;
+      report?.call('Bundle from the line — it is the right one');
+      _request();
+      return;
+    }
     final neighbour = pairHook[me]?.ownNeighbour();
     final p = BytesBuilder()
       ..addByte(PacketKind.bundlePlea.code)
@@ -281,37 +305,25 @@ class Join {
     // Before, it would be the claim of an arbitrary sender.
     _proof = origin;
     report?.call('Bundle checked — it is the right one');
+    _request();
+  }
 
-    // Packet (2): the request. Before the sealed envelope stands a
-    // visible proof of work for Bob's code, with the difficulty from
-    // his card — Bob checks it BEFORE he unseals.
+  /// Packet (2): proof of work for Bob's code with the difficulty from his
+  /// card (Bob checks it BEFORE he unseals), then sealed: code, answer code
+  /// and own fixed neighbour (proposal M), own day keys (proposal E), the
+  /// introduction — without it Bob would decide without knowing who asks.
+  void _request() {
     report?.call('computing the proof of work…');
-    final (randomValue, counter) =
-        ProofOfWork.generate(card.code, card.difficulty);
-
-    // Payload: code, behind it — if there is one — the introduction.
-    // Without it Bob would see nothing but a key address and would have to
-    // decide without knowing who is asking.
-    // Proposal M: behind it answer code and own fixed neighbour.
-    final hook = pairHook[me];
-    final content = requestContentBuild(
-        card.code, answerCode, hook?.ownNeighbour(), introduction);
-    final envelope = Envelope.seal(
-      plaintext: content,
-      recipient: _counterpart!,
-      sender: me,
-    );
-
-    final header = Uint8List(proofOfWorkHeaderLength)
-      ..setRange(0, ProofOfWork.randomValueLength, randomValue);
-    ByteData.sublistView(header)
-        .setUint64(ProofOfWork.randomValueLength, counter, Endian.little);
-    final rest = Uint8List(header.length + envelope.length)
-      ..setRange(0, header.length, header)
-      ..setRange(header.length, header.length + envelope.length, envelope);
-
-    report?.call('request sent (${envelope.length} B sealed)');
-    final request = withKind(PacketKind.request, rest);
+    final w = _window = ProofOfWork.windowNow();
+    final request = requestBuild(
+        card: card,
+        me: me,
+        counterpart: _counterpart!,
+        answerCode: answerCode,
+        neighbour: pairHook[me]?.ownNeighbour(),
+        introduction: introduction,
+        window: w);
+    report?.call('request sent (${request.length} B)');
     send(request, _proof);
     _underCode(request);
   }
@@ -352,9 +364,11 @@ class Join {
     // throws and does NOT let the contact come about: the limit applies
     // even when the other side is the inviting one.
     // Proposal M: without s_AB it is no acceptance — throws, no contact.
-    final acceptance = acceptanceContentRead(content);
+    final acceptance = acceptanceContentRead(content, dayOfWindow(_window!));
     _counterpartIntroduction = acceptance.self;
     _pairRandom = acceptance.sAB;
+    _counterpartDayKeys = acceptance.dayKeys;
+    _counterpartNeighbours = acceptance.neighbours;
     _done = true;
     final receipt = Envelope.seal(
       plaintext: Uint8List.fromList([1]),
@@ -380,18 +394,5 @@ Uint8List withKind(PacketKind s, Uint8List rest) {
 
 Uint8List _randomBytes(int n, Random? r) {
   final q = r ?? Random.secure();
-  final b = Uint8List(n);
-  for (var i = 0; i < n; i++) {
-    b[i] = q.nextInt(256);
-  }
-  return b;
-}
-
-/// Byte-wise comparison. Needed by both sides, therefore not private.
-bool bytesEqual(Uint8List x, Uint8List y) {
-  if (x.length != y.length) return false;
-  for (var i = 0; i < x.length; i++) {
-    if (x[i] != y[i]) return false;
-  }
-  return true;
+  return Uint8List.fromList([for (var i = 0; i < n; i++) q.nextInt(256)]);
 }

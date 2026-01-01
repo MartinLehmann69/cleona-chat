@@ -78,34 +78,21 @@ const int kStripeLength = kStripeWidth * kBlock; // 7168
 /// does NOT belong to lane 1 any more.
 const int kInlineLimit = 256 * 1024;
 
-/// Cap for lane 2, in B — `C` from §9.4.
+/// Cap for lane 2, in B — `C` from §9.4: 25 MB of payload (D-14, D-1).
 ///
 /// **What `C` is:** the upper limit for the volume of ONE streamed
-/// transfer. It protects neither the sender nor the recipient,
-/// but the consenting neighbour through which the pieces run: above
-/// `C` the transfer takes lane 3, even if both sides are online
-/// and a volunteer would be available (`v42/kap/ch09.md:101-104`).
+/// transfer. It protects neither the sender nor the recipient, but the
+/// volunteer through which the pieces run (§17.6, RL-7): above `C` the
+/// transfer takes lane 3, even if both sides are online and a volunteer
+/// would be available. 25,000,000 B, not 25 MiB — the size at which §9.4
+/// computes 3,488 stripes. The volunteer's own cap is the same number
+/// (`stream_frame.dart` `kStreamCap`): one origin.
 ///
-/// **The 0 is a placeholder, not a computed result and not an error.**
-/// Re-measured on 14.09.2026: `v42/kap/ch09.md:81` lists `C` in the
-/// parameter table explicitly as **open** — "the streamed lane stays
-/// disabled until it is set". The number is thus an open
-/// owner decision, and the 0 is the state "not yet
-/// decided", not a value. 0 was chosen because [laneChoose] checks with
-/// `capC > 0`: a cap not set switches the lane off,
-/// instead of accidentally opening it for every length.
-///
-/// **What lane 2 still lacks besides `C`** (likewise measured 14.09.2026,
-/// against `berichte/P10-medien.md:27`, which says "only the cap `C`"): the
-/// lane has no sequence of its own in the tree. There is no packet kind with
-/// which a neighbour is asked or consents (`kinds.dart` knows in the
-/// media range exactly 0x50 and 0x51), and nobody determines [bothOnline]
-/// or [volunteerThere] — both are default `false` and have in the
-/// whole tree no caller that sets them. Setting `C` alone would
-/// thus change nothing yet. What lies HERE and carries is the choice:
-/// [laneChoose] delivers lane 2 with a passed-in `capC`
-/// and is checkable exactly that way (see `test/smoke_media.dart`).
-const int kCapC = 0;
+/// [laneChoose] checks `capC > 0`, so a caller that passes 0 still switches
+/// the lane off; [bothOnline] and [volunteerThere] come from the app's
+/// cascade (§17.6 "Cascade and windows"): the recipient's request arrived,
+/// and a volunteer candidate exists (S398-P3b).
+const int kCapC = 25000000;
 
 /// From the registry, not set here — three modules had
 /// already given themselves the same number once. Public because
@@ -132,7 +119,7 @@ class MediaBroken implements Exception {
   final String reason;
   MediaBroken(this.reason);
   @override
-  String toString() => 'MedienKaputt: $reason';
+  String toString() => 'MediaBroken: $reason';
 }
 
 ReedSolomon? _rsBetween;
@@ -204,6 +191,57 @@ Uint8List objectFromPieces(Map<int, Map<int, Uint8List>> per, int length) {
         _rs.decode(there, kStripeLength));
   }
   return Uint8List.fromList(Uint8List.sublistView(full, 0, length));
+}
+
+/// Head of the lane 1 container: object length (u32 BE) + SHA-256 of the object.
+const int kInlineHeader = 4 + 32;
+
+/// Lane 1 (§9.4 "Reed-Solomon striped, placed like any other packet"):
+/// the whole object as ONE message body — length, checksum, then every
+/// piece of [stripeForm] back to back, [kBlock] B each. The message
+/// carries its own seal, so the pieces need no header of their own.
+Uint8List inlineContainer(Uint8List object) {
+  if (object.length >= kInlineLimit) {
+    throw ArgumentError('${object.length} B is not lane 1 (limit $kInlineLimit B)');
+  }
+  final pieces = object.isEmpty ? const <Uint8List>[] : stripeForm(object);
+  final c = Uint8List(kInlineHeader + pieces.length * kBlock);
+  ByteData.sublistView(c).setUint32(0, object.length, Endian.big);
+  c.setRange(4, kInlineHeader, SodiumFFI().sha256(object));
+  for (var i = 0; i < pieces.length; i++) {
+    c.setRange(kInlineHeader + i * kBlock, kInlineHeader + (i + 1) * kBlock, pieces[i]);
+  }
+  return c;
+}
+
+/// The reverse of [inlineContainer]. Throws [MediaBroken] on a wrong
+/// length, an object that cannot be assembled or a checksum mismatch —
+/// never returns bytes that are not the sent object.
+Uint8List inlineObject(Uint8List container) {
+  if (container.length < kInlineHeader) {
+    throw MediaBroken('container of ${container.length} B has no head');
+  }
+  final length = ByteData.sublistView(container).getUint32(0, Endian.big);
+  if (length >= kInlineLimit) {
+    throw MediaBroken('object length $length B is not lane 1');
+  }
+  final expected = kInlineHeader + pieceNumber(length) * kBlock;
+  if (container.length != expected) {
+    throw MediaBroken('container is ${container.length} B, $expected B expected '
+        'for an object of $length B');
+  }
+  final per = <int, Map<int, Uint8List>>{};
+  for (var i = 0; i < pieceNumber(length); i++) {
+    final from = kInlineHeader + i * kBlock;
+    (per[i ~/ kPiecesPerStripe] ??= {})[i % kPiecesPerStripe] =
+        Uint8List.sublistView(container, from, from + kBlock);
+  }
+  final object = objectFromPieces(per, length);
+  final sum = SodiumFFI().sha256(object);
+  for (var i = 0; i < 32; i++) {
+    if (sum[i] != container[4 + i]) throw MediaBroken('checksum does not match');
+  }
+  return object;
 }
 
 Uint8List _announcementPacket(Uint8List identifier, int length, Uint8List sum) {

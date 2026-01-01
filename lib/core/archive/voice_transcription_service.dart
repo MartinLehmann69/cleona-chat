@@ -18,6 +18,7 @@ import 'package:cleona/core/archive/voice_transcription_types.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart';
 import 'package:cleona/core/media/media_store.dart';
 import 'package:cleona/core/media/media_vault.dart';
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/storage/message_store.dart';
 
@@ -77,6 +78,17 @@ class VoiceTranscriptionService {
   /// Current download status.
   ModelDownloadStatus _downloadStatus = ModelDownloadStatus.idle;
   ModelDownloadStatus get downloadStatus => _downloadStatus;
+
+  /// Progress of the running or last download (0.0 - 1.0). Held here so
+  /// that a surface in another process can ask for it (S405, A-6) instead
+  /// of only hearing [onDownloadProgress].
+  double _downloadProgress = 0.0;
+  double get downloadProgress => _downloadProgress;
+
+  void _reportProgress(double p) {
+    _downloadProgress = p;
+    onDownloadProgress?.call(p);
+  }
 
   /// Whether the whisper library is available (independent of model).
   bool get isWhisperAvailable => _whisper != null;
@@ -225,6 +237,14 @@ class VoiceTranscriptionService {
     _processQueue();
   }
 
+  /// The message is deleted (§21.5.2): its transcript and lifecycle entry
+  /// leave memory and the store.
+  void forget(String messageId) {
+    final hadText = _transcriptions.remove(messageId) != null;
+    final hadState = _lifecycles.remove(messageId) != null;
+    if (hadText || hadState) _persistMessage(messageId);
+  }
+
   /// Retrieve transcription for a message.
   VoiceTranscription? getTranscription(String messageId) =>
       _transcriptions[messageId];
@@ -348,7 +368,13 @@ class VoiceTranscriptionService {
   /// OGG/MP3/AAC → WAV (16kHz, Mono, PCM16).
   /// Linux: via ffmpeg. Android: via MediaCodec MethodChannel.
   Future<Uint8List?> _convertToWav(String inputPath) async {
-    final outputPath = '$profileDir/tmp_whisper_${DateTime.now().millisecondsSinceEpoch}.wav';
+    // The WAV is the DECODED voice message — plaintext for the length of
+    // this conversion. It lies in the identity's transient directory
+    // (owner-only), is deleted in the `finally` below, and what a crash in
+    // between leaves is cleared at the next start of this identity
+    // (`TransientFiles`, `CleonaService.startService`).
+    final outputPath = TransientFiles.pathIn(profileDir,
+        'whisper_${DateTime.now().millisecondsSinceEpoch}.wav');
     try {
       Uint8List? result;
       if (platformAudioDecoder != null) {
@@ -449,7 +475,7 @@ class VoiceTranscriptionService {
 
     _downloadStatus = ModelDownloadStatus.downloading;
     onDownloadStatusChanged?.call(_downloadStatus);
-    onDownloadProgress?.call(0.0);
+    _reportProgress(0.0);
 
     final url = WhisperFFI.modelUrl(size);
     final targetPath = WhisperFFI.modelPath(size);
@@ -484,7 +510,7 @@ class VoiceTranscriptionService {
         sink.add(chunk);
         received += chunk.length;
         if (expectedSize > 0) {
-          onDownloadProgress?.call(received / expectedSize);
+          _reportProgress(received / expectedSize);
         }
       }
       await sink.close();
@@ -507,7 +533,7 @@ class VoiceTranscriptionService {
 
       _downloadStatus = ModelDownloadStatus.completed;
       onDownloadStatusChanged?.call(_downloadStatus);
-      onDownloadProgress?.call(1.0);
+      _reportProgress(1.0);
 
       // Mark the freshly downloaded model as available (loaded per-job in
       // the worker isolate, never resident in the main isolate).

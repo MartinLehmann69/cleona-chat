@@ -84,6 +84,11 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final colorScheme = Theme.of(context).colorScheme;
+    // `null` = the delivery layer has no direction-split number (mycelium,
+    // S405 A-2): the two tiles and the reachability line are left out —
+    // a 0 there would be a claim (§25.2 rule 4).
+    final syncPartnersOutbound = widget.service.syncPartnersOutbound;
+    final syncPartnersInbound = widget.service.syncPartnersInbound;
 
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -158,18 +163,20 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         ),
         // §25.4: the partner counts SEPARATED by direction — smaller, but
         // fully visible.
-        _StatTile(
-          icon: Icons.north_east,
-          label: locale.get('stats_sync_partners_outbound'),
-          value: '${widget.service.syncPartnersOutbound}',
-          trailing: const Icon(Icons.chevron_right, size: 18),
-          onTap: () => showConnectionSheet(context, widget.service),
-        ),
-        _StatTile(
-          icon: Icons.south_west,
-          label: locale.get('stats_sync_partners_inbound'),
-          value: '${widget.service.syncPartnersInbound}',
-        ),
+        if (syncPartnersOutbound != null)
+          _StatTile(
+            icon: Icons.north_east,
+            label: locale.get('stats_sync_partners_outbound'),
+            value: '$syncPartnersOutbound',
+            trailing: const Icon(Icons.chevron_right, size: 18),
+            onTap: () => showConnectionSheet(context, widget.service),
+          ),
+        if (syncPartnersInbound != null)
+          _StatTile(
+            icon: Icons.south_west,
+            label: locale.get('stats_sync_partners_inbound'),
+            value: '$syncPartnersInbound',
+          ),
         // §25.4: what the incoming number MEANS — "states how much the
         // node contributes for others; a precondition for inbound calls".
         // As a subordinate line under the number, not as its own traffic light: the
@@ -178,16 +185,17 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // reachable" is the normal case behind CGNAT/DS-Lite, not an
         // error. Therefore deliberately `onSurfaceVariant` and no
         // error colour (decision variant C, 2026-08-30).
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: Text(
-            '${locale.get(widget.service.syncPartnersInbound > 0 ? 'reach_inbound_yes' : 'reach_inbound_no')}'
-            ' \u2014 ${locale.get('reach_inbound_explain')}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
+        if (syncPartnersInbound != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              '${locale.get(syncPartnersInbound > 0 ? 'reach_inbound_yes' : 'reach_inbound_no')}'
+              ' \u2014 ${locale.get('reach_inbound_explain')}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+            ),
           ),
-        ),
         // §25.4 lists the DATA-SAVING MODE as a metric of this section
         // ("Data-saving mode | §22.6, §5.4 | active/inactive"), and
         // §24.4.2 turns it into the requirement: "a visible state, not a
@@ -342,8 +350,13 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         _StatTile(
           icon: Icons.remove_circle_outline,
           label: locale.get('stats_store_evicted'),
-          value: '${_stats.storedEvicted + _stats.blindEvicted}',
-          color: (_stats.storedEvicted + _stats.blindEvicted) > 0
+          // S398-W4: + the lane 3 bulk cache — §21.3.3 no. 4 names the
+          // delivery layer AND bulk.
+          value: '${_stats.storedEvicted + _stats.blindEvicted + _stats.bulkEvicted}',
+          color: (_stats.storedEvicted +
+                      _stats.blindEvicted +
+                      _stats.bulkEvicted) >
+                  0
               ? Colors.orange
               : null,
           note: locale.get('stats_store_evicted_note'),

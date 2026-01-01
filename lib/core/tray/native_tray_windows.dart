@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/readiness_names.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 
@@ -614,7 +615,7 @@ class NativeTrayWindows {
       return true;
     } catch (e) {
       _logger?.call('warn', 'NativeTrayWindows init failed: $e');
-      try { stderr.writeln('NativeTrayWindows init failed: $e'); } catch (_) {}
+      try { RedactedConsole.err('NativeTrayWindows init failed: $e'); } catch (_) {}
       return false;
     }
   }

@@ -211,7 +211,10 @@ class OpenCheck {
       final nonce = Uint8List.fromList(
           List<int>.generate(kIdentifierLength, (_) => _random.nextInt(256)));
       final arrived = Completer<bool>();
-      splitter = Splitter(shell, onShipment: (data, from, fromPort) {
+      // Silent like wire and shell above: the splitter's reports name the
+      // probed address and port, and a default report would print them
+      // unredacted to stderr, i.e. into daemon-stdio.log (S403 finding 2a).
+      splitter = Splitter(shell, report: (_) {}, onShipment: (data, from, fromPort) {
         if (data.length == 1 + kIdentifierLength &&
             data[0] == kinds.kOpen &&
             _same(data, 1, nonce) &&

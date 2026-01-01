@@ -5,7 +5,6 @@ import 'package:collection/collection.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/identity/device_delegation.dart';
 import 'package:cleona/main.dart' show CleonaAppState;
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
@@ -28,11 +27,21 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
   /// does not also subscribe to the raw service callbacks).
   Timer? _ticker;
 
+  /// The holder of the service's single `onStateChanged` slot before this
+  /// screen opened — on the desktop the app's `notifyListeners`
+  /// (`main.dart`). Chained while the screen is open and given back in
+  /// [dispose]; without that the home screen stops redrawing after one
+  /// visit here (S398, lab B-4b, finding B-1). Same pattern as
+  /// `connection_sheet.dart`.
+  void Function()? _previousOnStateChanged;
+
   @override
   void initState() {
     super.initState();
     _refresh();
+    _previousOnStateChanged = widget.service.onStateChanged;
     widget.service.onStateChanged = () {
+      _previousOnStateChanged?.call();
       if (mounted) _refresh();
     };
     // §7.1 LD-2 / §7.5: this screen reads the pending-pairing /
@@ -55,6 +64,7 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
 
   @override
   void dispose() {
+    widget.service.onStateChanged = _previousOnStateChanged;
     _ticker?.cancel();
     super.dispose();
   }
@@ -219,10 +229,16 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           title: Text(locale.get('device_key_rotation_confirm_title')),
-          content: Column(
+          content: SingleChildScrollView(
+           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // §4.5.4 (E-A12, E-A3): after the rotation the 24 words alone
+              // restore superseded keys — the recovery bundle is required;
+              // standing invitations are revoked.
+              Text(locale.get('device_key_rotation_bundle_required')),
+              const SizedBox(height: 12),
               Text(locale.tr('device_key_rotation_type_confirm', {
                 'word': confirmWord,
               })),
@@ -236,6 +252,7 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
                 ),
               ),
             ],
+           ),
           ),
           actions: [
             TextButton(
@@ -263,54 +280,16 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
-  /// §7.1 LD-10: confirmation dialog for the pairing request
-  void _showPairingDialog() {
-    final locale = AppLocale.read(context);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        icon: Icon(Icons.link, color: Theme.of(ctx).colorScheme.primary, size: 48),
-        title: Text(locale.get('linked_device_request_pairing')),
-        content: Text(locale.get('linked_device_pair_request_body')),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(locale.get('cancel')),
-          ),
-          FilledButton(
-            onPressed: () async {
-              Navigator.of(ctx).pop();
-              final sent = await widget.service.sendDevicePairRequest();
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(locale.get(
-                    sent ? 'linked_device_request_sent' : 'linked_device_rejected',
-                  ))),
-                );
-              }
-            },
-            child: Text(locale.get('linked_device_request_pairing')),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _capabilityLabel(AppLocale locale, int cap) {
-    switch (cap) {
-      case DeviceDelegation.capSendMessages: return locale.get('linked_device_cap_send');
-      case DeviceDelegation.capManageContacts: return locale.get('linked_device_cap_contacts');
-      case DeviceDelegation.capManageGroups: return locale.get('linked_device_cap_groups');
-      case DeviceDelegation.capManageChannels: return locale.get('linked_device_cap_channels');
-      default: return '?';
-    }
-  }
-
-  Widget _buildLinkedDeviceStatusSection(BuildContext context) {
+  /// B-4b (§14.6.1, D-39): "Add another device" — the 24-hour enrolment
+  /// window, and its end while it is open. Behind the E7 lock the button
+  /// says "not available yet" and does nothing. There is no primary
+  /// device (§14.4): the V3 status section (Primary/Linked, delegation
+  /// certificate) is gone.
+  Widget _buildEnrolmentSection(BuildContext context) {
     final locale = AppLocale.read(context);
     final theme = Theme.of(context);
-    final status = widget.service.linkedDeviceStatus;
-
+    final view = widget.service.enrolmentView;
+    final until = view.windowUntil;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
@@ -318,239 +297,60 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
         children: [
           Row(
             children: [
-              Icon(
-                status.isLinkedDevice ? Icons.link : Icons.security,
-                color: status.isExpired
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.primary,
-              ),
+              Icon(Icons.add_link, color: theme.colorScheme.primary),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  locale.get('linked_device_status_title'),
-                  style: theme.textTheme.titleSmall,
-                ),
+                child: Text(locale.get('enrol_add_device'),
+                    style: theme.textTheme.titleSmall),
               ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            locale.get(status.isLinkedDevice
-                ? 'linked_device_status_linked'
-                : 'linked_device_status_primary'),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            locale.get(view.available
+                ? 'enrol_add_device_subtitle'
+                : 'enrol_not_available'),
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
-
-          if (status.hasCert) ...[
-            const SizedBox(height: 12),
-
-            // Capabilities
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                for (final cap in [
-                  DeviceDelegation.capSendMessages,
-                  DeviceDelegation.capManageContacts,
-                  DeviceDelegation.capManageGroups,
-                  DeviceDelegation.capManageChannels,
-                ])
-                  Chip(
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
-                    label: Text(
-                      _capabilityLabel(locale, cap),
-                      style: theme.textTheme.labelSmall,
-                    ),
-                    backgroundColor: status.capabilities & cap != 0
-                        ? theme.colorScheme.primaryContainer
-                        : theme.colorScheme.surfaceContainerHighest,
-                    side: BorderSide.none,
-                  ),
-              ],
+          const SizedBox(height: 8),
+          if (until == null)
+            OutlinedButton.icon(
+              key: const Key('enrol_window_open'),
+              onPressed: view.available
+                  ? () async {
+                      final ok = await widget.service.enrolmentWindowOpen();
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text(locale.get(ok
+                              ? 'enrol_window_opened'
+                              : 'enrol_not_available'))));
+                      setState(() {});
+                    }
+                  : null,
+              icon: const Icon(Icons.add_link, size: 16),
+              label: Text(locale.get('enrol_add_device')),
+            )
+          else ...[
+            Text(
+              locale.tr('enrol_window_open_until', {
+                'time': '${until.day}.${until.month}.${until.year} '
+                    '${until.hour.toString().padLeft(2, '0')}:'
+                    '${until.minute.toString().padLeft(2, '0')}'
+              }),
+              style: theme.textTheme.bodyMedium,
             ),
             const SizedBox(height: 8),
-
-            // Expiry
-            if (status.maxValidUntilMs > 0) ...[
-              Row(
-                children: [
-                  Icon(
-                    status.isExpired
-                        ? Icons.error_outline
-                        : status.expiresWithin7Days
-                            ? Icons.warning_amber_rounded
-                            : Icons.timer_outlined,
-                    size: 16,
-                    color: status.isExpired
-                        ? theme.colorScheme.error
-                        : status.expiresWithin7Days
-                            ? Colors.orange
-                            : theme.colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    status.isExpired
-                        ? locale.get('linked_device_cert_expired')
-                        : locale.tr('linked_device_status_expires',
-                            {'date': status.expiryDate}),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: status.isExpired
-                          ? theme.colorScheme.error
-                          : status.expiresWithin7Days
-                              ? Colors.orange
-                              : theme.colorScheme.onSurfaceVariant,
-                      fontWeight: status.isExpired || status.expiresWithin7Days
-                          ? FontWeight.bold
-                          : null,
-                    ),
-                  ),
-                  if (!status.isExpired && status.daysRemaining >= 0) ...[
-                    const SizedBox(width: 8),
-                    Text(
-                      locale.tr('linked_device_days_remaining',
-                          {'days': '${status.daysRemaining}'}),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ] else
-              Text(
-                locale.get('linked_device_status_no_expiry'),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-
-            // Renew button (visible when expiring soon or expired)
-            if (status.expiresWithin7Days || status.isExpired) ...[
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final ok = await widget.service.requestDelegationRenewal();
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(locale.get(
-                      ok ? 'linked_device_renewal_sent' : 'linked_device_renewal_failed',
-                    ))),
-                  );
-                },
-                icon: const Icon(Icons.refresh, size: 16),
-                label: Text(locale.get('linked_device_renew_now')),
-              ),
-            ],
-          ],
-
-          // §7.1: request pairing. The normal path for every secondary device —
-          // it is set up via seed phrase and registers here with the
-          // primary, which issues delegation keys to it (§7.1.1).
-          //
-          // NO `_devices.length > 1` guard: a device that is not yet
-          // paired by definition knows only itself. The old
-          // condition thus hid the button precisely on the devices
-          // for which it was built — pairing could never be triggered
-          // via this screen.
-          if (!status.isLinkedDevice) ...[
-            const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: _showPairingDialog,
-              icon: const Icon(Icons.link, size: 16),
-              label: Text(locale.get('linked_device_request_pairing')),
-            ),
-            Text(
-              locale.get('linked_device_request_pairing_subtitle'),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              key: const Key('enrol_window_cancel'),
+              onPressed: () async {
+                await widget.service.enrolmentWindowCancel();
+                if (context.mounted) setState(() {});
+              },
+              icon: const Icon(Icons.link_off, size: 16),
+              label: Text(locale.get('enrol_window_cancel')),
             ),
           ],
-        ],
-      ),
-    );
-  }
-
-  String _formatReceivedAt(BuildContext context, int receivedAtMs) {
-    final locale = AppLocale.read(context);
-    final date = DateTime.fromMillisecondsSinceEpoch(receivedAtMs);
-    final formatted = '${date.day}.${date.month}.${date.year} '
-        '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
-    return locale.tr('pending_request_received_at', {'date': formatted});
-  }
-
-  /// §7.1 LD-2: persistent list of pairing requests still waiting for a
-  /// decision — the catch-up counterpart to the live dialog in
-  /// [showIncomingPairRequestDialog], for requests that arrived while this
-  /// screen (or the whole GUI) was not open to show it.
-  Widget _buildPendingPairingSection(BuildContext context, CleonaAppState appState) {
-    final pending = appState.pendingPairRequests;
-    if (pending.isEmpty) return const SizedBox.shrink();
-    final locale = AppLocale.read(context);
-    final theme = Theme.of(context);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(locale.get('device_pending_pairing_section_title'),
-              style: theme.textTheme.titleSmall),
-          const SizedBox(height: 8),
-          for (final entry in pending)
-            Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(locale.get('device_pending_pairing_id_label'),
-                        style: theme.textTheme.labelSmall),
-                    SelectableText(entry['deviceIdHex'] as String,
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-                    const SizedBox(height: 4),
-                    Text(_formatReceivedAt(context, entry['receivedAtMs'] as int),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant)),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Icon(Icons.warning_amber_rounded,
-                            size: 14, color: theme.colorScheme.error),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(locale.get('device_pending_pairing_verify_hint'),
-                              style: theme.textTheme.bodySmall),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: FilledButton(
-                        onPressed: () async {
-                          final deviceIdHex = entry['deviceIdHex'] as String;
-                          final ok = await widget.service.approvePairRequest(deviceIdHex);
-                          if (!context.mounted) return;
-                          await context.read<CleonaAppState>().refreshPendingSecurityRequests();
-                          if (!context.mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                            content: Text(locale.get(ok
-                                ? 'device_pending_pairing_approved_snack'
-                                : 'device_pending_pairing_failed_snack')),
-                          ));
-                        },
-                        child: Text(locale.get('accept')),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
         ],
       ),
     );
@@ -790,11 +590,9 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
           children: [
             const SizedBox(height: 8),
 
-            _buildPendingPairingSection(context, appState),
             _buildPendingRotationSection(context, appState),
             _buildLockoutSection(context),
-            if (appState.pendingPairRequests.isNotEmpty ||
-                appState.pendingRotationApprovals.isNotEmpty)
+            if (appState.pendingRotationApprovals.isNotEmpty)
               const Divider(height: 24),
 
             // Device list
@@ -909,9 +707,9 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
                 ),
               ),
 
-            // §7.1 Linked-Device status (LD-9/LD-10/LD-11)
+            // B-4b (§14.6.1): add another device over the 24 words
             const Divider(height: 32),
-            _buildLinkedDeviceStatusSection(context),
+            _buildEnrolmentSection(context),
 
             // Key Rotation section
             const Divider(height: 32),

@@ -121,7 +121,7 @@ extension DeviceSetAnnouncementOps on CleonaService {
         deviceNodeId: Uint8List.fromList(identity.deviceNodeId),
         deviceEd25519Pk: Uint8List.fromList(bundle.sig.ed25519PublicKey),
         deviceMlDsaPk: Uint8List.fromList(bundle.sig.mlDsaPublicKey),
-        isPrimary: !identity.isLinkedDevice,
+        isPrimary: true,
       ),
     ];
   }

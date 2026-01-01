@@ -90,10 +90,13 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:mycelium/code_registration.dart' show newDevicesCode;
-import 'package:mycelium/memory_enforcer.dart' show legacyDataClear;
+import 'package:mycelium/device_records.dart';
 import 'package:mycelium/memory_invitation.dart' show MemoryError, Reader;
+
+// Whoever opens the host's memory hands in where it lies.
+export 'package:mycelium/device_records.dart'
+    show DeviceRecords, FileDeviceRecords;
 import 'package:mycelium/card_address.dart'
     show
         addressRead,
@@ -105,9 +108,6 @@ import 'package:mycelium/card_address.dart'
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/neighbourhood_contacts.dart' show kContactSeats;
 import 'package:mycelium/pair.dart' show kCodeLength;
-
-/// [FileEncryption] itself appends `.enc`: on disk `wirt.enc`.
-const String _fileName = 'host';
 
 /// The current version of the host file — public for the smoke of the
 /// enforcer, which would otherwise have to pin a number.
@@ -123,8 +123,9 @@ const int kPortFrom = 20000;
 const int kPortUntil = 60000;
 
 class HostMemory {
-  final FileEncryption _enc;
-  final String _path;
+  /// Where the record lies ([kRecordHost]) — in the app the device
+  /// database (V4.2 §4.5.3 form 2), see `device_records.dart`.
+  final DeviceRecords _records;
   int? _ownPort;
   Uint8List? _devicesCode;
   bool _devicesCodeFresh = false;
@@ -142,47 +143,52 @@ class HostMemory {
   /// §11.9: whether source 4 (external address entries) is on. Default on.
   bool outsideSourceOn = true;
 
-  HostMemory._(this._enc, this._path);
+  HostMemory._(this._records);
 
-  /// Loads what lies in [directory], or creates an empty one. Something unreadable
+  /// [within] on the encrypted file `host.enc` in [directory].
+  static HostMemory open(Directory directory, Uint8List key) =>
+      within(FileDeviceRecords(directory, key));
+
+  /// Loads what lies in [records], or creates an empty one. Something unreadable
   /// (wrong key, truncated, foreign version) throws
   /// [MemoryError] instead of delivering a half instance.
-  static HostMemory open(Directory directory, Uint8List key) {
-    directory.createSync(recursive: true);
-    final path = '${directory.path}/$_fileName';
-    final enc = FileEncryption(baseDir: directory.path, key: key);
-    final g = HostMemory._(enc, path);
-    if (File('$path.enc').existsSync()) {
-      final bytes = enc.readBinaryFile(path);
+  static HostMemory within(DeviceRecords records) {
+    final g = HostMemory._(records);
+    if (records.holds(kRecordHost)) {
+      final bytes = records.read(kRecordHost);
       if (bytes == null) {
-        throw MemoryError('$path.enc exists, but cannot be '
-            'read — wrong key or damaged file');
+        throw MemoryError('${records.where(kRecordHost)} exists, but cannot '
+            'be read — wrong key or damaged record');
       }
       g._decode(bytes);
     }
     return g;
   }
 
-  /// Like [open], but first clears away legacy data of a foreign version
+  /// [clearedWithin] on the encrypted file `host.enc` in [directory].
+  static HostMemory clearedOpen(Directory directory, Uint8List key,
+          {void Function(String)? report}) =>
+      clearedWithin(FileDeviceRecords(directory, key), report: report);
+
+  /// Like [within], but first clears away legacy data of a foreign version
   /// and rescues the fixed port in doing so (§11.1). That is the path that
-  /// `hostStart` takes; [open] stays strict and does not judge.
+  /// `Host.start` takes; [within] stays strict and does not judge.
   ///
-  /// The reasoning for both stands in `memory_enforcer.dart`.
-  static HostMemory clearedOpen(
-    Directory directory,
-    Uint8List key, {
-    void Function(String)? report,
-  }) {
+  /// The reasoning for both stands in `memory_enforcer.dart`: only a
+  /// record of another version goes; one that cannot be read stays, and
+  /// [within] throws.
+  static HostMemory clearedWithin(DeviceRecords records,
+      {void Function(String)? report}) {
     int? rescued;
-    legacyDataClear(
-      directory: directory,
-      fileName: _fileName,
-      runningVersion: _version,
-      key: key,
-      report: report,
-      beforeTheDelete: (old) => rescued = _portFromHeader(old),
-    );
-    final g = open(directory, key);
+    final old = records.read(kRecordHost);
+    if (old != null && old.isNotEmpty && old[0] != _version) {
+      rescued = _portFromHeader(old);
+      records.remove(kRecordHost);
+      report?.call('mycelium: ${records.where(kRecordHost)} carried version '
+          '${old[0]}, running is $_version — old stock removed, the node '
+          'starts empty instead of not at all');
+    }
+    final g = within(records);
     final port = rescued;
     if (port != null && g._ownPort == null) {
       g._ownPort = port;
@@ -269,8 +275,8 @@ class HostMemory {
     return relaysFromCards.join('\n') != before;
   }
 
-  /// Writes encrypted and atomically (`.enc.tmp`, then renamed).
-  void save() => _enc.writeBinaryFile(_path, _encode());
+  /// Replaces the record as a whole (see [DeviceRecords.write]).
+  void save() => _records.write(kRecordHost, _encode());
 
   Uint8List _encode() {
     final b = BytesBuilder()..addByte(_version);

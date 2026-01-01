@@ -1156,7 +1156,7 @@ class UpnpIgdClient {
         serviceType: best.serviceType,
       );
     } catch (e) {
-      log?.call('Geraetebeschreibung: $e');
+      log?.call('device description: $e');
       return null;
     } finally {
       client.close(force: true);

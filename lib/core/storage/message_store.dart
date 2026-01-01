@@ -24,14 +24,18 @@
 //     10 %. That is where the large values lie.
 // That is the same rule as in `FileEncryption`, only at column level.
 
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
-import 'package:cleona/core/codec/compression.dart';
 import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/storage/encrypted_store.dart';
+
+// The lower bound of the SQLite version lived in this file until S403 and
+// is imported from here in many places.
+export 'package:cleona/core/storage/encrypted_store.dart'
+    show kMinSqliteVersion;
 
 /// Schema version. Kept in `PRAGMA user_version`; an upgrade is
 /// a deliberate action, not a side effect.
@@ -43,13 +47,14 @@ import 'package:cleona/core/log/clogger.dart';
 ///     `entry_key`, `data`, `data_zstd`; S393, CLAUDE.md rule 11). A store
 ///     of schema 2 is rejected, not converted: 4.2 has no conversion
 ///     path, the profile is created anew.
-const int kMessageStoreSchemaVersion = 3;
-
-/// Lower bound of the SQLite version. **Normative** (§21.4): CVE-2026-11822
-/// and CVE-2026-11824 are memory errors in FTS5, fixed in
-/// 3.53.2/3.53.3. The store refuses to open on an older version
-/// — otherwise the assurance from §21.4 carries nothing.
-const String kMinSqliteVersion = '3.53.3';
+/// 4 — `received_ids`: the identifiers of the deliveries this identity
+///     has received, one slim row per 8-byte identifier — no sender, no
+///     arrival time, no cap, kept for as long as the identity exists
+///     (§20.2; owner decision 02.10.2026, V-1 = B, V-2 = b, V-3 = a,
+///     V-4). The received rows of the delivery history of an earlier
+///     build are taken over into it once, idempotently, by
+///     `DeliveryHistoryStore`.
+const int kMessageStoreSchemaVersion = 4;
 
 class MessageStoreException implements Exception {
   final String message;
@@ -58,32 +63,22 @@ class MessageStoreException implements Exception {
   String toString() => 'MessageStoreException: $message';
 }
 
-/// HOW THE LIBRARY GETS INTO THE PROCESS. Not via `DynamicLibrary`
-/// as with libsodium: `package:sqlite3` since 3.5 compiles the source
-/// itself via a build hook, and `pubspec.yaml` points it to our
-/// vendored amalgamation together with the switches that §4.5.3 and §21.4
-/// assure (`SQLITE_TEMP_STORE=3`, `SQLITE_SECURE_DELETE`). Thus there is
-/// exactly ONE place where the store library is described, and
-/// it applies to all five platforms. `native/cleona_store/` keeps
-/// its own CMake alongside — not for the app, but for the
-/// gate with the reverse probe, which must be able to run without Dart.
-
 /// An encrypted store. **One per identity** (§21.4): a
 /// shared one would have to lie under the device-wide key and would thus give
 /// up the separation that `deriveFileEncKey` establishes.
-class MessageStore {
-  final Database _db;
-  final CLogger _log;
-
-  MessageStore._(this._db, this._log);
+///
+/// How the file is opened, the state table and the compression of its
+/// values are shared with the device database and live in
+/// [EncryptedStore] (S403); the tables for messages and conversations and
+/// their full-text index exist only here.
+class MessageStore extends EncryptedStore {
+  MessageStore._(super.db, super.log);
 
   /// Opens (or creates) the store under [path].
   ///
   /// [key] are the **raw 32 bytes** from
-  /// `HdWallet.deriveFileEncKey(masterSeed, hdIndex)`. It is passed
-  /// as `PRAGMA hexkey`, not as `PRAGMA key`: `key` expects a
-  /// passphrase and derives from it; our key is already
-  /// seed-derived, a second derivation on top would bring nothing.
+  /// `HdWallet.deriveFileEncKey(masterSeed, hdIndex)`
+  /// ([EncryptedStore.openDatabase]).
   static MessageStore open(String path, Uint8List key, {CLogger? logger}) {
     // `profileDir` is mandatory, not decoration: without it `CLogger` keeps the
     // lines only in the ring and writes to NO file — a store whose
@@ -93,64 +88,17 @@ class MessageStore {
         CLogger.get('MessageStore',
             profileDir: File(path).parent.path);
 
-    if (key.length != 32) {
-      throw MessageStoreException(
-          'key must be 32 bytes, got ${key.length}');
-    }
-
-    _assertSqliteVersion();
-
-    final db = sqlite3.open(path);
+    final db = EncryptedStore.openDatabase(path, key,
+        fail: MessageStoreException.new);
     try {
-      // Order is load-bearing: the key MUST come before every other
-      // statement, otherwise SQLite creates the file unencrypted.
-      db.execute("PRAGMA hexkey = '${_hex(key)}';");
-
-      // First real query — it fails if the key does not
-      // match. Without it one would only find out on the first read.
-      db.select('SELECT count(*) FROM sqlite_master;');
-
-      db.execute('PRAGMA journal_mode = WAL;');
-      db.execute('PRAGMA foreign_keys = ON;');
-      db.execute('PRAGMA synchronous = FULL;');
-
       final store = MessageStore._(db, log);
       store._migrate();
       return store;
     } catch (e) {
       db.close();
-      if (e.toString().contains('file is not a database')) {
-        throw const MessageStoreException(
-            'wrong key, or the file is not a Cleona store');
-      }
       rethrow;
     }
   }
-
-  /// §21.4 normative: FTS5 below 3.53.3 carries two known
-  /// memory errors. The store does not open there.
-  static void _assertSqliteVersion() {
-    final v = sqlite3.version.libVersion;
-    if (_compareVersions(v, kMinSqliteVersion) < 0) {
-      throw MessageStoreException(
-          'SQLite $v is below the required $kMinSqliteVersion '
-          '(CVE-2026-11822 / CVE-2026-11824 in FTS5)');
-    }
-  }
-
-  static int _compareVersions(String a, String b) {
-    final pa = a.split('.').map(int.tryParse).toList();
-    final pb = b.split('.').map(int.tryParse).toList();
-    for (var i = 0; i < 3; i++) {
-      final x = (i < pa.length ? pa[i] : 0) ?? 0;
-      final y = (i < pb.length ? pb[i] : 0) ?? 0;
-      if (x != y) return x.compareTo(y);
-    }
-    return 0;
-  }
-
-  static String _hex(Uint8List b) =>
-      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 
   // ── Schema ────────────────────────────────────────────────────────
   //
@@ -160,7 +108,7 @@ class MessageStore {
   // threefold: in the row, in the primary key and in the index.
 
   void _migrate() {
-    final current = _db.select('PRAGMA user_version;').first.values.first as int;
+    final current = db.select('PRAGMA user_version;').first.values.first as int;
     if (current == kMessageStoreSchemaVersion) return;
     if (current > kMessageStoreSchemaVersion) {
       throw MessageStoreException(
@@ -175,7 +123,7 @@ class MessageStore {
           'nothing — create the profile anew');
     }
 
-    _db.execute('BEGIN;');
+    db.execute('BEGIN;');
     try {
       if (current < 1) {
         // `extra` carries the fields that are neither searched nor
@@ -183,7 +131,7 @@ class MessageStore {
         // notification choice) — the same construction as for `messages`.
         // Five individual columns for it would be five schema changes for
         // every new field; here it is none.
-        _db.execute('''
+        db.execute('''
           CREATE TABLE conversations(
             id             BLOB PRIMARY KEY,
             display_name   TEXT NOT NULL DEFAULT '',
@@ -197,7 +145,7 @@ class MessageStore {
             extra_zstd     INTEGER NOT NULL DEFAULT 0
           );
         ''');
-        _db.execute('''
+        db.execute('''
           CREATE TABLE messages(
             id           BLOB PRIMARY KEY,
             conv_id      BLOB NOT NULL
@@ -214,11 +162,11 @@ class MessageStore {
         ''');
         // The one query every chat build makes: the last N
         // of a conversation. Measured 0.08 ms at 150 000 messages.
-        _db.execute(
+        db.execute(
             'CREATE INDEX ix_msg_conv_ts ON messages(conv_id, ts DESC);');
         // Full-text index with external content: the index holds only the
         // tokens, the text stays in `messages`. No second text stock.
-        _db.execute('''
+        db.execute('''
           CREATE VIRTUAL TABLE messages_fts USING fts5(
             text, content='messages', content_rowid='rowid'
           );
@@ -226,18 +174,18 @@ class MessageStore {
         // The three triggers keep the index congruent. Without them
         // the search would find deleted messages and miss new ones —
         // an index that silently diverges is worse than none.
-        _db.execute('''
+        db.execute('''
           CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
             INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
           END;
         ''');
-        _db.execute('''
+        db.execute('''
           CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, text)
               VALUES ('delete', old.rowid, old.text);
           END;
         ''');
-        _db.execute('''
+        db.execute('''
           CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, text)
               VALUES ('delete', old.rowid, old.text);
@@ -246,80 +194,95 @@ class MessageStore {
         ''');
       }
       if (current < 2) {
-        // ── The state table ────────────────────────────────────────
-        //
-        // It replaces the individual JSON files per collection (contacts,
-        // polls, calendar, …). The gain is NOT "everything in one
-        // place", but the granularity: a change writes ONE row.
-        // The files were rewritten completely on every change —
-        // the same pattern that led to the quadratic curve for the messages,
-        // only on a small scale and in thirteen copies.
-        //
-        // `area` is the name of the superseded file without extension
-        // ('contacts', 'polls', …), `entry_key` the identifier within
-        // the collection. An area without a natural identifier (a
-        // single settings store) uses the key '_'.
-        //
-        // NO table of its own per collection: the collections differ
-        // only in name, not in form, and thirteen tables
-        // would be thirteen schema changes for every new collection.
-        _db.execute('''
-          CREATE TABLE state(
-            area        TEXT NOT NULL,
-            entry_key   TEXT NOT NULL,
-            data        BLOB NOT NULL,
-            data_zstd   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(area, entry_key)
+        // The state table — what it is and why it is ONE table stands at
+        // [EncryptedStore.createStateTable].
+        EncryptedStore.createStateTable(db);
+      }
+      if (current < 4) {
+        // The identifiers of received deliveries (§20.2, S403 decision 1):
+        // one slim row per 8-byte delivery identifier — the identifier
+        // mycelium draws per message, NOT the 16-byte app message id. No
+        // sender, no arrival time: the owner accepted the collision
+        // chance of the 8 bytes (V-2 = b) and wants no eviction (V-4) —
+        // the memory's span is "as long as the identity exists", not a
+        // number. `WITHOUT ROWID`: the table is its primary key, every
+        // read is one page hit, no second index exists to drift.
+        // The CHECK makes the 8 bytes a property of the schema, not of a
+        // caller's care (the guard of `smoke_received_ids_store.dart`
+        // probes exactly this).
+        db.execute('''
+          CREATE TABLE received_ids(
+            id BLOB NOT NULL PRIMARY KEY CHECK (length(id) = 8)
           ) WITHOUT ROWID;
         ''');
       }
-      _db.execute('PRAGMA user_version = $kMessageStoreSchemaVersion;');
-      _db.execute('COMMIT;');
-      _log.info('message store schema at $kMessageStoreSchemaVersion');
+      db.execute('PRAGMA user_version = $kMessageStoreSchemaVersion;');
+      db.execute('COMMIT;');
+      log.info('message store schema at $kMessageStoreSchemaVersion');
     } catch (e) {
-      _db.execute('ROLLBACK;');
+      db.execute('ROLLBACK;');
       rethrow;
     }
   }
 
-  // ── Compression of the `extra` column ─────────────────────────────
+  // ── The memory of received deliveries (§20.2) ────────────────────
   //
-  // The rule from §4.5.3: measure instead of guess. If zstd brings less than
-  // 10 %, the plaintext is stored and `extra_zstd` stays 0.
+  // THE STATEMENT, not an implementation detail: §20.2 keeps, per
+  // identity, the identifiers of received deliveries "against a second
+  // copy", with "none — kept as long as the identity exists" as their
+  // span and "nothing is evicted" as the explicit answer to every
+  // deadline. This table IS that memory — the capped ring of the
+  // process (`_processedMessageIds`, 4 096 entries) it replaces fell
+  // short of both: it forgot after 4 096 deliveries and lived only as
+  // long as the process wrote it out.
+  //
+  // The 8-byte identifier is the DELIVERY identifier mycelium draws per
+  // message (`mycelium/lib/message.dart`, `kIdentifierLength`); retries
+  // carry the same one. It is NOT the 16-byte app message id: an edit or
+  // a deletion travels under the identifier of its TARGET, and the
+  // memory keyed on the target would refuse the second edit. The
+  // collision chance of 8 bytes at one million kept identifiers is
+  // about 2.7 in a hundred million — accepted by the owner (V-2 = b):
+  // the worst case is one message shown twice, never one lost.
 
-  static const int _minCompressionGain = 10; // percent
+  /// The length a row of `received_ids` must have — the delivery
+  /// identifier of the layer below (`mycelium/lib/message.dart`,
+  /// `kIdentifierLength`). Kept here as the schema's own number so the
+  /// CHECK and this guard cannot drift apart; the layer below enforces
+  /// the same length at its entries.
+  static const int kReceivedIdLength = 8;
 
-  (Uint8List?, int) _packExtra(Map<String, dynamic>? extra) {
-    if (extra == null || extra.isEmpty) return (null, 0);
-    final raw = Uint8List.fromList(utf8.encode(jsonEncode(extra)));
-    if (raw.length < 128) return (raw, 0); // pointless below the frame size
-    final packed = ZstdCompression.instance.compress(raw, level: 3);
-    final gain = 100 - (packed.length * 100 ~/ raw.length);
-    if (gain < _minCompressionGain) return (raw, 0);
-    return (packed, 1);
+  /// Whether a delivery with this identifier was already received by
+  /// THIS identity (§20.2) — the memory against the second copy, for
+  /// the whole delivery layer AND the application: both ask the same
+  /// table through [DeliveryHistoryStore] and `HarvestEvent.deliveryId`.
+  bool receivedIdKnown(Uint8List id) {
+    _assertReceivedIdLength(id);
+    return db
+        .select('SELECT 1 FROM received_ids WHERE id = ?;', [id])
+        .isNotEmpty;
   }
 
-  Map<String, dynamic>? _unpackExtra(Object? blob, int flag) {
-    if (blob == null) return null;
-    final bytes = blob is Uint8List ? blob : Uint8List.fromList(blob as List<int>);
-    // AN EMPTY VALUE IS A VALUE. [putEntry] stores an empty map as a
-    // blob of LENGTH 0 (`blob ?? Uint8List(0)`), not as NULL —
-    // and `jsonDecode('')` threw a FormatException on it that flew OUT of
-    // [loadArea]. Thus not the one entry was unreadable,
-    // but the WHOLE AREA.
-    //
-    // Re-measured on 04.09.2026 at `80035a94`: two tombstones in
-    // `contacts_deleted` (there it says `const <String, dynamic>{}`) ->
-    // `countArea` = 2, `loadArea` throws. `_loadContacts` reads the
-    // tombstones BEFORE the contacts, catches the error and leaves
-    // `_contactsLoaded` at false — a profile with even ONE
-    // deleted contact would have shown no contacts at all
-    // after the restart.
-    if (bytes.isEmpty) return const <String, dynamic>{};
-    final raw =
-        flag == 1 ? ZstdCompression.instance.decompress(bytes) : bytes;
-    return jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
+  /// Remembers a received delivery identifier — idempotent: a second
+  /// keep of the same identifier is one row, not two. Nothing here ever
+  /// deletes a row; the span is the identity's, not a peer's (V-3 = a:
+  /// the identifiers of a deleted contact stay).
+  void receivedIdKeep(Uint8List id) {
+    _assertReceivedIdLength(id);
+    db.execute('INSERT OR IGNORE INTO received_ids(id) VALUES (?);', [id]);
   }
+
+  void _assertReceivedIdLength(Uint8List id) {
+    if (id.length != kReceivedIdLength) {
+      throw ArgumentError.value(id.length, 'id.length',
+          'a delivery identifier is $kReceivedIdLength bytes');
+    }
+  }
+
+  // The compression of the `extra` column is [packJson]/[unpackJson] of
+  // [EncryptedStore] — the same rule as for a value of the state table
+  // (§4.5.3: measure instead of guess; below 10 % gain the value is stored
+  // uncompressed and `extra_zstd` stays 0).
 
   // ── Writing ───────────────────────────────────────────────────────
 
@@ -334,8 +297,8 @@ class MessageStore {
     Uint8List? profilePicture,
     Map<String, dynamic>? extra,
   }) {
-    final (blob, flag) = _packExtra(extra);
-    _db.execute('''
+    final (blob, flag) = packJson(extra);
+    db.execute('''
       INSERT INTO conversations(id, display_name, last_activity, is_group,
                                 is_channel, is_favorite, unread_count,
                                 profile_picture, extra, extra_zstd)
@@ -361,7 +324,7 @@ class MessageStore {
   /// via [recentMessages], and exactly therein lies the gain: the start
   /// no longer depends on the number of messages.
   List<Map<String, Object?>> allConversations() {
-    final rows = _db.select(
+    final rows = db.select(
         'SELECT * FROM conversations ORDER BY last_activity DESC;');
     return rows
         .map((r) => {
@@ -373,7 +336,7 @@ class MessageStore {
               'isFavorite': (r['is_favorite'] as int) == 1,
               'unreadCount': r['unread_count'],
               'profilePicture': r['profile_picture'],
-              'extra': _unpackExtra(r['extra'], r['extra_zstd'] as int),
+              'extra': unpackJson(r['extra'], r['extra_zstd'] as int),
             })
         .toList();
   }
@@ -389,8 +352,8 @@ class MessageStore {
     String text = '',
     Map<String, dynamic>? extra,
   }) {
-    final (blob, flag) = _packExtra(extra);
-    _db.execute('''
+    final (blob, flag) = packJson(extra);
+    db.execute('''
       INSERT INTO messages(id, conv_id, sender, ts, type, status,
                            is_outgoing, text, extra, extra_zstd)
       VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -408,11 +371,14 @@ class MessageStore {
   /// Deletes a message. `SQLITE_SECURE_DELETE` is compiled in
   /// (§21.4) — the pages are overwritten, not only freed.
   void deleteMessage(Uint8List id) {
-    _db.execute('DELETE FROM messages WHERE id = ?;', [id]);
+    db.execute('DELETE FROM messages WHERE id = ?;', [id]);
   }
 
+  /// Deletes a conversation with every message of it: `ON DELETE CASCADE`
+  /// on `messages.conv_id` (`foreign_keys = ON`, see [open]), and the delete
+  /// trigger takes each message's words out of the full-text index.
   void deleteConversation(Uint8List id) {
-    _db.execute('DELETE FROM conversations WHERE id = ?;', [id]);
+    db.execute('DELETE FROM conversations WHERE id = ?;', [id]);
   }
 
   // ── Reading ───────────────────────────────────────────────────────
@@ -422,7 +388,7 @@ class MessageStore {
   /// 150 000 messages, independent of the total stock.
   List<Map<String, Object?>> recentMessages(Uint8List convId,
       {int limit = 50, int? beforeTs}) {
-    final rows = _db.select('''
+    final rows = db.select('''
       SELECT * FROM messages
        WHERE conv_id = ? ${beforeTs != null ? 'AND ts < ?' : ''}
        ORDER BY ts DESC LIMIT ?;
@@ -438,7 +404,7 @@ class MessageStore {
   /// this method superfluous. Whoever still calls it after that brings back the
   /// memory peak that the whole rebuild is meant to remove.
   List<Map<String, Object?>> messagesOf(Uint8List convId) {
-    final rows = _db.select(
+    final rows = db.select(
         'SELECT * FROM messages WHERE conv_id = ? ORDER BY ts ASC;', [convId]);
     return rows.map(_row).toList();
   }
@@ -448,7 +414,7 @@ class MessageStore {
   /// as soon as it no longer lay completely in memory.
   List<Map<String, Object?>> search(String query, {int limit = 100}) {
     if (query.trim().isEmpty) return const [];
-    final rows = _db.select('''
+    final rows = db.select('''
       SELECT m.* FROM messages_fts f
         JOIN messages m ON m.rowid = f.rowid
        WHERE messages_fts MATCH ?
@@ -471,7 +437,7 @@ class MessageStore {
         'status': r['status'],
         'isOutgoing': (r['is_outgoing'] as int) == 1,
         'text': r['text'],
-        'extra': _unpackExtra(r['extra'], r['extra_zstd'] as int),
+        'extra': unpackJson(r['extra'], r['extra_zstd'] as int),
       };
 
   /// Only for the guard: which row holds its `extra` compressed,
@@ -479,7 +445,7 @@ class MessageStore {
   /// that the values come back — and they would do that even if the
   /// compression rule did not apply at all (proxy instead of statement).
   Map<int, int> debugExtraFlags() {
-    final rows = _db.select('SELECT ts, extra_zstd FROM messages;');
+    final rows = db.select('SELECT ts, extra_zstd FROM messages;');
     return {
       for (final r in rows) r['ts'] as int: r['extra_zstd'] as int,
     };
@@ -489,7 +455,7 @@ class MessageStore {
   /// the conversation list needs for display — the start does not have to
   /// load the whole history for it.
   Map<String, Object?>? lastMessageOf(Uint8List convId) {
-    final rows = _db.select(
+    final rows = db.select(
         'SELECT * FROM messages WHERE conv_id = ? ORDER BY ts DESC LIMIT 1;',
         [convId]);
     return rows.isEmpty ? null : _row(rows.first);
@@ -498,14 +464,154 @@ class MessageStore {
   /// A single message by its identifier — regardless of whether
   /// its conversation is currently in memory.
   Map<String, Object?>? messageById(Uint8List id) {
-    final rows = _db.select('SELECT * FROM messages WHERE id = ?;', [id]);
+    final rows = db.select('SELECT * FROM messages WHERE id = ?;', [id]);
     return rows.isEmpty ? null : _row(rows.first);
   }
 
   /// Number of messages of a conversation, without loading them.
-  int countMessagesOf(Uint8List convId) => _db.select(
+  int countMessagesOf(Uint8List convId) => db.select(
       'SELECT count(*) c FROM messages WHERE conv_id = ?;',
       [convId]).first['c'] as int;
+
+  // ── The initial reconciliation (§14.6.3, §13.5.2) ─────────────────
+  //
+  // A deleted message keeps its row with an empty text and `isDeleted` in
+  // `extra` (`deleteMessage` of the service). "Deleted is deleted"
+  // (§13.5.2): such a row is announced to nobody. Only rows with an empty
+  // text are opened to tell — media rows are the others among them.
+
+  /// Fixed part of a record's size hint besides text and `extra`: the
+  /// identifiers, timestamp and flags as the wire carries them.
+  static const int _kRecordFixed = 64;
+
+  bool _isDeletedRow(Row r) {
+    if ((r['text'] as String).isNotEmpty || r['extra'] == null) return false;
+    final e = unpackJson(r['extra'], r['extra_zstd'] as int);
+    return e?['isDeleted'] == true;
+  }
+
+  /// The manifest of [convId] (§13.5.2 phase 2): one entry per message
+  /// strictly before the key ([beforeTs], [beforeId]) — `ts` DESC, `id`
+  /// DESC, so that equal timestamps page without loss — at most [limit],
+  /// deleted messages omitted. The next page starts at the last entry.
+  List<({Uint8List id, int ts, Uint8List? sender, int type, int size})>
+      manifestPage(Uint8List convId,
+          {required int beforeTs, Uint8List? beforeId, int limit = 570}) {
+    final out =
+        <({Uint8List id, int ts, Uint8List? sender, int type, int size})>[];
+    var ts = beforeTs;
+    var id = beforeId;
+    while (out.length < limit) {
+      final rows = db.select('''
+        SELECT id, ts, sender, type, text, extra, extra_zstd,
+               length(CAST(text AS BLOB)) + ifnull(length(extra), 0) AS size
+          FROM messages
+         WHERE conv_id = ? AND ${id == null ? 'ts < ?' : '(ts < ? OR (ts = ? AND id < ?))'}
+         ORDER BY ts DESC, id DESC LIMIT ?;
+      ''', [convId, ts, if (id != null) ...[ts, id], limit - out.length]);
+      if (rows.isEmpty) break;
+      for (final r in rows) {
+        if (_isDeletedRow(r)) continue;
+        out.add((
+          id: r['id'] as Uint8List,
+          ts: r['ts'] as int,
+          sender: r['sender'] as Uint8List?,
+          type: r['type'] as int,
+          size: (r['size'] as int) + _kRecordFixed,
+        ));
+      }
+      ts = rows.last['ts'] as int;
+      id = rows.last['id'] as Uint8List;
+    }
+    return out;
+  }
+
+  /// The rows of [ids] that are present, in no particular order (§13.5.2
+  /// phase 3). Queried in slices below SQLite's variable limit.
+  List<Map<String, Object?>> messagesByIds(List<Uint8List> ids) {
+    const slice = 500;
+    final out = <Map<String, Object?>>[];
+    for (var i = 0; i < ids.length; i += slice) {
+      final part = ids.sublist(i, i + slice < ids.length ? i + slice : ids.length);
+      final rows = db.select(
+          'SELECT * FROM messages WHERE id IN '
+          '(${List.filled(part.length, '?').join(',')});',
+          part);
+      out.addAll(rows.map(_row));
+    }
+    return out;
+  }
+
+  /// Inserts a record only when its identifier is not present — a pulled
+  /// record never overwrites what arrived meanwhile by mirroring (an edit,
+  /// a deletion, a read mark). `true` when it inserted.
+  bool insertMessageIfAbsent({
+    required Uint8List id,
+    required Uint8List convId,
+    Uint8List? sender,
+    required int ts,
+    int type = 0,
+    String status = '',
+    bool isOutgoing = false,
+    String text = '',
+    Map<String, dynamic>? extra,
+  }) {
+    final (blob, flag) = packJson(extra);
+    db.execute('''
+      INSERT INTO messages(id, conv_id, sender, ts, type, status,
+                           is_outgoing, text, extra, extra_zstd)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO NOTHING;
+    ''', [
+      id, convId, sender, ts, type, status,
+      isOutgoing ? 1 : 0, text, blob, flag,
+    ]);
+    return db.updatedRows == 1;
+  }
+
+  /// What the reconciliation header announces for [convId] (§14.6.3): the
+  /// messages before [beforeTs], their oldest timestamp and a size hint —
+  /// deleted messages not counted.
+  ({int count, int oldestTs, int bytes}) historyBefore(Uint8List convId,
+      {required int beforeTs}) {
+    final all = db.select('''
+      SELECT count(*) c, ifnull(min(ts), 0) oldest,
+             ifnull(sum(length(CAST(text AS BLOB)) + ifnull(length(extra), 0)), 0) b
+        FROM messages WHERE conv_id = ? AND ts < ?;
+    ''', [convId, beforeTs]).first;
+    var count = all['c'] as int;
+    var bytes = (all['b'] as int) + count * _kRecordFixed;
+    var oldest = all['oldest'] as int;
+    final empty = db.select('''
+      SELECT id, ts, text, extra, extra_zstd FROM messages
+       WHERE conv_id = ? AND ts < ? AND text = '' AND extra IS NOT NULL;
+    ''', [convId, beforeTs]);
+    final deletedTs = <int>[];
+    for (final r in empty) {
+      if (!_isDeletedRow(r)) continue;
+      count--;
+      bytes -= _kRecordFixed;
+      deletedTs.add(r['ts'] as int);
+    }
+    if (deletedTs.contains(oldest)) {
+      // The oldest row is deleted: the oldest one that is not.
+      oldest = 0;
+      for (var offset = 0; oldest == 0; offset += 100) {
+        final rows = db.select('''
+          SELECT ts, text, extra, extra_zstd FROM messages
+           WHERE conv_id = ? AND ts < ? ORDER BY ts ASC LIMIT 100 OFFSET ?;
+        ''', [convId, beforeTs, offset]);
+        if (rows.isEmpty) break;
+        for (final r in rows) {
+          if (!_isDeletedRow(r)) {
+            oldest = r['ts'] as int;
+            break;
+          }
+        }
+      }
+    }
+    return (count: count, oldestTs: oldest, bytes: bytes);
+  }
 
   // ── State: what used to be a file of its own per collection ───────
   //
@@ -525,67 +631,14 @@ class MessageStore {
   // Whoever in future adds a read path for old `.json.enc` files here
   // builds against a decision, not against a gap.
 
-  /// Writes ONE entry. That is the path that brings the granularity:
-  /// a change to a contact costs one row, not the whole
-  /// collection.
-  void putEntry(String area, String key, Map<String, dynamic> data) {
-    final (blob, flag) = _packExtra(data);
-    _db.execute('''
-      INSERT INTO state(area, entry_key, data, data_zstd)
-      VALUES(?,?,?,?)
-      ON CONFLICT(area, entry_key) DO UPDATE SET
-        data=excluded.data, data_zstd=excluded.data_zstd;
-    ''', [area, key, blob ?? Uint8List(0), flag]);
-  }
-
-  void removeEntry(String area, String key) {
-    _db.execute('DELETE FROM state WHERE area = ? AND entry_key = ?;',
-        [area, key]);
-  }
-
-  /// All entries of an area.
-  Map<String, Map<String, dynamic>> loadArea(String area) {
-    final rows = _db.select(
-        'SELECT entry_key, data, data_zstd FROM state WHERE area = ?;',
-        [area]);
-    final out = <String, Map<String, dynamic>>{};
-    for (final r in rows) {
-      final d = _unpackExtra(r['data'], r['data_zstd'] as int);
-      if (d != null) out[r['entry_key'] as String] = d;
-    }
-    return out;
-  }
-
-  /// Replaces a whole area in ONE transaction.
-  ///
-  /// For collections whose callers today call "save everything" and
-  /// for which the switch to individual writes is not worth it (a
-  /// few dozen entries). Whoever writes a GROWING collection this way
-  /// brings back the full write against which the table was built
-  /// — that is where [putEntry] belongs.
-  void replaceArea(String area, Map<String, Map<String, dynamic>> all) {
-    _db.execute('BEGIN;');
-    try {
-      _db.execute('DELETE FROM state WHERE area = ?;', [area]);
-      for (final e in all.entries) {
-        putEntry(area, e.key, e.value);
-      }
-      _db.execute('COMMIT;');
-    } catch (e) {
-      _db.execute('ROLLBACK;');
-      rethrow;
-    }
-  }
-
-  int countArea(String area) => _db.select(
-      'SELECT count(*) c FROM state WHERE area = ?;',
-      [area]).first['c'] as int;
+  // The entries themselves — `putEntry`, `removeEntry`, `areaKeys`,
+  // `loadArea`, `loadAreaPrefix`, `removeAreaPrefix`, `replaceArea`,
+  // `countArea` — are [EncryptedStore]'s: the device database keeps its
+  // state in the same table by the same statements (S403).
 
   int get messageCount =>
-      _db.select('SELECT count(*) c FROM messages;').first['c'] as int;
+      db.select('SELECT count(*) c FROM messages;').first['c'] as int;
 
   int get conversationCount =>
-      _db.select('SELECT count(*) c FROM conversations;').first['c'] as int;
-
-  void close() => _db.close();
+      db.select('SELECT count(*) c FROM conversations;').first['c'] as int;
 }

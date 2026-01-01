@@ -23,20 +23,31 @@ import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 const int kTwinSyncTypeFieldNumber = 4;
 
 /// Builds the twin envelope. Only derivation site.
+///
+/// [deliveryId] is only read by a [proto.TwinSyncType.DELIVERY_MIRROR]
+/// envelope: the 8-byte delivery identifier of the delivery that carried
+/// the mirrored frame, so the twin checks and keeps it in the same
+/// `received_ids` table (§20.2) as the device that received it first.
+/// `null` (every other type) writes the field not at all.
 Uint8List buildTwinSyncEnvelope({
   required Uint8List syncId,
   required Uint8List deviceId,
   required int timestampMs,
   required proto.TwinSyncType syncType,
   required Uint8List payload,
-}) =>
-    Uint8List.fromList((proto.TwinSyncEnvelope()
-          ..syncId = syncId
-          ..deviceId = deviceId
-          ..timestamp = Int64(timestampMs)
-          ..syncType = syncType
-          ..payload = payload)
-        .writeToBuffer());
+  Uint8List? deliveryId,
+}) {
+  final envelope = proto.TwinSyncEnvelope()
+    ..syncId = syncId
+    ..deviceId = deviceId
+    ..timestamp = Int64(timestampMs)
+    ..syncType = syncType
+    ..payload = payload;
+  if (deliveryId != null) {
+    envelope.deliveryId = deliveryId;
+  }
+  return Uint8List.fromList(envelope.writeToBuffer());
+}
 
 /// Did the envelope carry a type that THIS version does not know?
 ///

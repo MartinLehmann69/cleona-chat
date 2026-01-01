@@ -55,22 +55,12 @@ const int kAtMostStanding = 10;
 /// Grace period: this long after expiry the ISSUER still accepts a request
 /// that presents the code of this invitation.
 ///
-/// `v42/kap/ch15.md:262-266`: "A request placed while the code was valid
-/// can arrive later, because it may have travelled through a post box that
-/// holds packets for 7 days. The issuer therefore accepts requests bearing
-/// a given code until **expiry + 7 d**."
-///
-/// The number is not generosity but the flip side of the
-/// post box's holding period: a request that was sent on the last valid day
-/// and rested for seven days is meant exactly as
-/// it arrives. Without a grace period precisely the case would be rejected
-/// for which the post box was built.
-///
-/// It sits with the ISSUER, not with the joiner. The issuer
-/// alone knows how long it still listens; what stands in the card thereby stays
-/// honest — it promises the expiry, not the expiry plus
-/// seven days. That is why the reader's warning period stands as a separate
-/// constant in `card_expiry.dart` and not as a reference to this one.
+/// §15.3: "The issuer therefore accepts requests bearing a given code until
+/// **expiry + 7 d**" — the flip side of the post box's holding period: a
+/// request sent on the last valid day and rested seven days is meant exactly
+/// as it arrives. It sits with the ISSUER, who alone knows how long it still
+/// listens; the card promises the expiry, not expiry plus seven days (the
+/// reader's warning period is a separate constant in `card_expiry.dart`).
 const int kGracePeriodDays = 7;
 
 /// Seconds of the grace period.
@@ -83,10 +73,8 @@ const int kGracePeriodSeconds = kGracePeriodDays * 86400;
 const int kExpiryUnlimited = Card.expiryMax;
 
 /// How many bytes the label carries at most. **SUGGESTION, not a default
-/// from the document** — like `kAtMostRemembered`: §15.3 lists the label,
-/// but names no length. It must be a cap, because the value comes from the
-/// UI and ten invitations would otherwise make the file arbitrarily
-/// large.
+/// from the document** — §15.3 names no length; a cap, so ten invitations
+/// cannot make the file arbitrarily large.
 const int kLabelAtMostBytes = 64;
 
 class Invitation {
@@ -116,18 +104,30 @@ class Invitation {
   int _accepted = 0;
   bool _revoke = false;
 
-  /// The requests waiting for the user's decision (§12.5,
-  /// §15.4). They hang on the INVITATION and not beside it: §15.4 counts
-  /// "at most 20 per invitation", the revocation takes them along (B2), and with
-  /// the invitation they go to disk — until S389 they were gone after a
-  /// restart and the question to the user was lost (E-1).
+  /// The requests waiting for the user's decision (§12.5, §15.4) — on the
+  /// INVITATION: counted per invitation, revoked and saved with it (B2, E-1).
   final RequestBuffer requests = RequestBuffer();
 
   /// The neighbour address its card named (§15.2), `null` = none. Set once
-  /// on issuing, kept on disk — as long as the invitation stands, its
-  /// readers hold this address, and the fixed seat does not leave it for a
-  /// reachable one (S394 V6, `neighbourhood_seat.dart`).
+  /// on issuing, kept on disk — its readers hold this address, and the fixed
+  /// seat does not leave it for a reachable one (S394 V6).
   CardAddress? cardNeighbour;
+
+  /// When the front end showed this [inPerson] invitation (Unix ms), `null` =
+  /// not yet; on disk — §15.3 "lives 60 s" (`invitation_face_to_face.dart`).
+  int? shownAtMs;
+
+  /// The invitation's OWN key pair for sealing (X25519 + ML-KEM-768; owner
+  /// decision R-b, proposal E): drawn at random when issued, its public
+  /// halves in the card and the `cleona:2:` line, so a line outlives every
+  /// rotation of the identity's keys. Kept only while the record accepts —
+  /// [withdraw] drops it; on disk in `memory_first_contact.dart`.
+  ({Uint8List x25519Pk, Uint8List x25519Sk, Uint8List mlKemPk, Uint8List mlKemSk})?
+      kem;
+
+  /// The invitation box key pair `pk_inv`/`sk_inv` (§15.1, E-A4): random, kept
+  /// and dropped exactly like [kem] — never derived from the signing key.
+  ({Uint8List pk, Uint8List sk})? box;
 
   Invitation._({
     required this.code,
@@ -172,14 +172,9 @@ class Invitation {
     );
   }
 
-  /// Restores an ISSUED invitation from memory —
-  /// with its code, its expiry and its two counters (S388, ES-7/B3).
-  ///
-  /// The way back must lie here: the constructor is file-private,
-  /// and the two other paths draw a new code. Until S388 the
-  /// loaded invitation therefore stood as a second bundle next to this class
-  /// (`Identitaet.geladeneEinladungen`) — without revocation, without cap, without
-  /// answer on the wire.
+  /// Restores an ISSUED invitation from memory — with its code, its expiry
+  /// and its two counters (S388, ES-7/B3). The way back must lie here: the
+  /// constructor is file-private, and the two other paths draw a new code.
   static Invitation outSplit({
     required Uint8List code,
     required Kind kind,
@@ -192,6 +187,7 @@ class Invitation {
     String label = '',
     Iterable<WaitingRequest> waitingRequests = const [],
     CardAddress? cardNeighbour,
+    int? shownAtMs,
   }) {
     if (atMost < 1 || accepted < 0) {
       throw ArgumentError('atMost >= 1 and accepted >= 0, was '
@@ -209,6 +205,7 @@ class Invitation {
       .._accepted = accepted
       .._revoke = revoke
       ..cardNeighbour = cardNeighbour
+      ..shownAtMs = shownAtMs
       ..requests.adopt(waitingRequests);
   }
 
@@ -265,9 +262,12 @@ class Invitation {
       now > expiryUnixSeconds &&
       now <= expiryUnixSeconds + kGracePeriodSeconds;
 
-  /// The user revokes. For a distributed invitation that is the
-  /// actual tool: it is revoked as soon as the occasion is over.
-  void withdraw() => _revoke = true;
+  /// The user revokes — for a distributed invitation the actual tool. The
+  /// invitation's secret keys go with it ([kem]).
+  void withdraw() {
+    _revoke = true;
+    kem = box = null;
+  }
 
   /// Checks an incoming request. Returns null if it
   /// passes.

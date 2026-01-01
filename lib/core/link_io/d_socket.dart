@@ -58,8 +58,10 @@
 /// either test.
 ///
 /// **What is NOT built here.** The punch window (§17.3) itself, the address
-/// candidates, the port prediction, and the 10 s loss timeout. Those live in
-/// `lib/core/calls/punch_window.dart` and `address_candidates.dart`; this
+/// candidates, the port prediction, and the 10 s loss timeout. The first
+/// three live in `lib/core/calls/punch_window.dart` and
+/// `address_candidates.dart`, the loss timeout in
+/// `lib/core/calls/call_transport_v41.dart` (`watchMediaLoss`); this
 /// module carries only what a punch needs from the socket.
 ///
 /// **What S361 ADDED here, and why it belongs here and nowhere else.** A
@@ -81,8 +83,11 @@
 /// response (§17.4 + RFC 9000 §8.2, see [DSession.kMaxPathChallenges] for
 /// the derivation). The first entry has remained unchanged.
 ///
-/// [DSession.lastFrameAt] is exposed so the 10 s loss rule has something to
-/// read; `punch_window.dart` reads it, nothing else does yet.
+/// [DSession.lastFrameAt] is the time of the last AUTHENTICATED frame of any
+/// kind. Nothing in `lib/` reads it: the 10 s loss rule counts MEDIA frames
+/// and stamps them where the transport separates them from probes, path
+/// validation and control frames (`call_transport_v41.dart`), and the punch
+/// window reads [DSession.confirmedPath].
 library;
 
 import 'dart:async';
@@ -214,16 +219,17 @@ final class DSession {
   /// cost. The PRICE of path validation, measured instead of estimated.
   int pathValidationBytesSent = 0;
 
-  final UdpSocketSet _sockets;
+  final DDatagramSend _emit;
   final void Function(DCookie) _onClose;
   final _inbound = StreamController<DFrame>.broadcast();
 
   var _sendSeq = 0;
   var _closed = false;
 
-  /// When the last frame that **authenticated** arrived. Not "when the last
-  /// datagram arrived": §17.4's loss rule counts valid media frames, and a
-  /// forgery must not keep a dead session alive.
+  /// When the last frame that **authenticated** arrived — of any kind,
+  /// probes and path validation included. Not "when the last datagram
+  /// arrived": a forgery does not move it. §17.4's loss rule does not read
+  /// it (it counts media frames only, see the library comment).
   DateTime? lastFrameAt;
 
   /// When an authenticated frame last came over the CONFIRMED path —
@@ -251,7 +257,7 @@ final class DSession {
   DateTime? lastCarryingFrameAt;
 
   DSession._(
-    this._sockets,
+    this._emit,
     this._onClose, {
     required this.localCookie,
     required this.remoteCookie,
@@ -308,7 +314,7 @@ final class DSession {
     // of §17.1. The wrap is defined rather than left to overflow into a
     // negative int, which `sealDFrame` would then refuse.
     _sendSeq = (_sendSeq + 1) & 0xFFFFFFFF;
-    _sockets.send(frame, address, port);
+    _emit(frame, address, port);
     return frame.length;
   }
 
@@ -471,9 +477,26 @@ final class DSession {
   }
 }
 
+/// How a sealed D-frame reaches the wire: bytes, destination address,
+/// destination port. What it returns is ignored — a datagram the kernel
+/// refused is a lost frame, which Plane D already tolerates (§17.4 loss rule).
+typedef DDatagramSend = void Function(
+    Uint8List datagram, InternetAddress target, int targetPort);
+
 /// The cookie table of §17.4 and the demux branch that consults it.
+///
+/// **Two ways to reach the wire, one table (S398-W2).** [DSocket.new] sends
+/// through a link-layer [UdpSocketSet] — the construction the probes of the
+/// link layer use. [DSocket.onRoute] sends through any datagram path, and
+/// that is the 4.2 product path: the data port belongs to the delivery layer
+/// (`mycelium/lib/wire.dart`), and §11.1 gives a node exactly ONE socket "for
+/// everything: real packets, cover, calls". A second socket for Plane D would
+/// be the second port that §11.1 rules out. So the D-frames go out through the
+/// node's own wire, beside the shell and not through it (§17.1: "Media does
+/// **not** run in delivery cells"), and come in through [claim], which the
+/// same wire calls before the shell sees the datagram.
 final class DSocket {
-  final UdpSocketSet sockets;
+  final DDatagramSend _emit;
 
   /// Keyed on the 64-bit form of the cookie — see [DCookie] for why an `int`
   /// and not a string.
@@ -481,8 +504,15 @@ final class DSocket {
 
   final DateTime Function() _now;
 
-  DSocket({required this.sockets, DateTime Function()? now})
-      : _now = now ?? DateTime.now;
+  DSocket({required UdpSocketSet sockets, DateTime Function()? now})
+      : _emit = sockets.send,
+        _now = now ?? DateTime.now;
+
+  /// A cookie table that sends through [send] — the data port of the
+  /// delivery layer (§11.1), see the class comment.
+  DSocket.onRoute({required DDatagramSend send, DateTime Function()? now})
+      : _emit = send,
+        _now = now ?? DateTime.now;
 
   int get sessionCount => _sessions.length;
 
@@ -503,7 +533,7 @@ final class DSocket {
           'is already admitted');
     }
     final session = DSession._(
-      sockets,
+      _emit,
       _forget,
       localCookie: local,
       remoteCookie: remoteCookie,
@@ -543,12 +573,18 @@ final class DSocket {
   /// on a valid frame. That is the "no amplification surface" of §17.4, and
   /// it is measured as a byte count in `smoke_d_frame.dart`, not asserted
   /// here.
-  bool claim(LinkDatagram datagram) {
-    if (DFrameClass.ofWireSize(datagram.data.length) == null) return false;
-    final session = _sessions[DCookie.keyOf(datagram.data)];
+  bool claim(LinkDatagram datagram) =>
+      claimFrom(datagram.data, datagram.source, datagram.sourcePort);
+
+  /// [claim] for a datagram that did not come through a [UdpSocketSet] —
+  /// the delivery layer's wire hands over bytes, origin address and origin
+  /// port (`ReachabilityProof.beside`, S398-W2). Same three steps, same
+  /// silence.
+  bool claimFrom(Uint8List data, InternetAddress from, int fromPort) {
+    if (DFrameClass.ofWireSize(data.length) == null) return false;
+    final session = _sessions[DCookie.keyOf(data)];
     if (session == null) return false;
-    session._deliver(
-        datagram.data, _now(), datagram.source, datagram.sourcePort);
+    session._deliver(data, _now(), from, fromPort);
     return true;
   }
 

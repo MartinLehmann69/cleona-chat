@@ -56,6 +56,18 @@ android {
         }
     }
 
+    // S406-DELTA, owner decision 07.10.2026 E-D1 B (v4_2 §26.6.2): the Dart
+    // kernel of a debug/beta build is stored UNCOMPRESSED. Deflated, any
+    // change rewrites the compressed stream from the first changed byte on,
+    // and the update delta 4.2.1 -> 4.2.2 was 33.6 MB; stored, the same change
+    // is a few KB. Price: the APK grows by the deflate gain of this one entry
+    // (measured in the S406-DELTA session report). Release builds carry no
+    // kernel_blob.bin (AOT `lib/<abi>/libapp.so`, stored anyway), so the entry
+    // only matters for beta. Gate: scripts/check-apk-kernel-stored.sh.
+    androidResources {
+        noCompress += "kernel_blob.bin"
+    }
+
     packaging {
         // Exclude Vulkan validation layer (debug artifact, ~15 MB)
         jniLibs.excludes += "lib/*/libVkLayer_khronos_validation.so"

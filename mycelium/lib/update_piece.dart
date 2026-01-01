@@ -14,7 +14,7 @@
 /// ## Packet layout
 /// | Kind | Layout | Length |
 /// |---|---|---|
-/// | 0x70 request | kind, object 32, task 16 | 49 B |
+/// | 0x70 request | kind, object 32, task 16 [, count u16] | 49 / 51 B |
 /// | 0x71 task | kind, object 32, task 16 | 49 B |
 /// | 0x72 piece | kind, fountain block 1041 | 1042 B |
 /// | 0x73 none | kind, object 32 | 33 B |
@@ -23,10 +23,19 @@
 /// (`binHash`). Its first 8 B are the object identifier in the fountain block.
 /// 1042 B fit into ONE part packet (`split.dart`: 1188 B payload).
 ///
+/// ## The count (S406-UPDPKG, P7)
+/// A request may name how many pieces it wants ([pleaPacket] `count`, at
+/// most [kPiecesPerAnswerMax]) — never WHICH ones. The collector sizes it
+/// from the round trip it measured ([piecesPerAnswerFor]). A request without
+/// a count (49 B) gets [kPiecesPerAnswer]: the collector of an update is
+/// always the version still installed, so the request of every installed
+/// collector must keep its answer — a holder that answered it with more
+/// would feed it faster than it asks (it asks again after every 32).
+///
 /// ## The task
-/// A request (49 B) triggers up to [kPiecesPerAnswer] × 1042 B — to
+/// A request (51 B) triggers up to [kPiecesPerAnswerMax] × 1042 B — to
 /// a forged sender address that would be an amplification by roughly
-/// seven hundred times. The holder therefore delivers only to a source that
+/// twenty thousand times. The holder therefore delivers only to a source that
 /// returns its task, i.e. has RECEIVED it. Stateless:
 /// `SHA-256(Geheimnis ‖ IP ‖ Port ‖ Fenster ‖ Objekt)[0:16]`; the current
 /// and the previous window are valid. The same pattern as the task of the
@@ -51,18 +60,43 @@ typedef UpdateSend = void Function(Uint8List packet, UpdateNeighbour target);
 const int kObjectLength = 32;
 const int kTaskLength = 16;
 const int kPleaLength = 1 + kObjectLength + kTaskLength;
+const int kPleaWithCountLength = kPleaLength + 2;
 const int kNoLength = 1 + kObjectLength;
 const int kPiecePacketLength = 1 + kFountainBlockBytes;
 
-/// Pieces per answered request.
+/// Pieces per answered request that names no count — and the least a
+/// collector asks for.
 ///
-/// **Set PROVISIONALLY, not decided** — decision point in the
-/// report `berichte/S387-BAU-UPDATE.md`. Price: 32 × 1042 B = 33 KB per
-/// round from holder to assembler; a 30-MB object needs roughly 30 000
-/// pieces, i.e. roughly 950 rounds. Larger means fewer requests and
-/// larger bundles on the wire (loss with small receive buffers),
-/// smaller means more requests.
+/// S387 set 32 provisionally (32 × 1042 B = 33 KB per answer). Measured in
+/// the field 07.10.2026: ~60–90 kB/s over LTE, because the next request
+/// waits for the answer — one answer per round trip. 200 MB took ~48 min.
 const int kPiecesPerAnswer = 32;
+
+/// The most pieces one answer carries: 1024 × 1042 B ≈ 1.07 MB. With
+/// [kAnswerRate] that covers a round trip of up to ~1 s; beyond it the
+/// answer stops growing.
+const int kPiecesPerAnswerMax = 1024;
+
+/// The rate one answer per round trip is sized for: 1 MB/s.
+///
+/// One request, one answer, then the next request (§26.6.1 "the next
+/// request follows the arrival of the previous answer"): the rate is
+/// `N × 1024 B / (rtt + N × 1024 B / link)`. With `N = rate × rtt / 1024`
+/// that is `rate / (1 + rate / link)` — independent of the round trip. At
+/// 1 MB/s it reaches 500 kB/s on every link of at least 1 MB/s (8 Mbit/s)
+/// and 667 kB/s at 2 MB/s. The target is 500 kB/s over LTE (S406-UPDPKG,
+/// P7); a measurement in the field decides whether it holds (OPEN L-3).
+const int kAnswerRate = 1000 * 1000;
+
+/// Pieces to ask for with the measured round trip [rtt] (`null`: not
+/// measured yet → [kPiecesPerAnswer]).
+int piecesPerAnswerFor(Duration? rtt) {
+  if (rtt == null) return kPiecesPerAnswer;
+  final n = (kAnswerRate * rtt.inMicroseconds / 1e6 / 1024).ceil();
+  return n < kPiecesPerAnswer
+      ? kPiecesPerAnswer
+      : (n > kPiecesPerAnswerMax ? kPiecesPerAnswerMax : n);
+}
 
 /// Length of a task window. Provisional, as with the post box.
 const Duration kTasksWindow = Duration(minutes: 10);
@@ -85,9 +119,18 @@ Uint8List _withObject(int kind, Uint8List object, [Uint8List? task]) {
   return b.toBytes();
 }
 
-/// 0x70 — the first time with 16 zero bytes as task.
-Uint8List pleaPacket(Uint8List object, Uint8List task) =>
-    _withObject(kinds.kPiecePlea, object, task);
+/// 0x70 — the first time with 16 zero bytes as task. [count]: how many
+/// pieces the collector wants (see header); without it 49 B.
+Uint8List pleaPacket(Uint8List object, Uint8List task, {int? count}) {
+  final p = _withObject(kinds.kPiecePlea, object, task);
+  if (count == null) return p;
+  final c = count.clamp(1, 0xFFFF);
+  return (BytesBuilder()
+        ..add(p)
+        ..addByte(c >> 8)
+        ..addByte(c & 0xFF))
+      .toBytes();
+}
 
 /// 0x71.
 Uint8List taskPacket(Uint8List object, Uint8List task) =>
@@ -103,12 +146,18 @@ Uint8List piecePacket(FountainBlock block) => (BytesBuilder()
       ..add(block.toBytes()))
     .toBytes();
 
-/// Reads 0x70 and 0x71 (same layout). Wrong length: `null`.
-({Uint8List object, Uint8List task})? pleaOrTaskRead(Uint8List p) {
-  if (p.length != kPleaLength) return null;
+/// Reads 0x70 and 0x71 (same layout; only 0x70 may carry a count).
+/// Wrong length: `null`. [count] is `null` when none was named.
+({Uint8List object, Uint8List task, int? count})? pleaOrTaskRead(
+    Uint8List p) {
+  final counted = p.length == kPleaWithCountLength &&
+      p[0] == kinds.kPiecePlea;
+  if (p.length != kPleaLength && !counted) return null;
   return (
     object: Uint8List.fromList(p.sublist(1, 1 + kObjectLength)),
-    task: Uint8List.fromList(p.sublist(1 + kObjectLength)),
+    task: Uint8List.fromList(
+        p.sublist(1 + kObjectLength, 1 + kObjectLength + kTaskLength)),
+    count: counted ? (p[kPleaLength] << 8) | p[kPleaLength + 1] : null,
   );
 }
 

@@ -225,7 +225,9 @@ class Board {
       if (!_fresh(n, now)) continue;
       // The asker does not need itself.
       if (n.has(from, fromPort)) continue;
-      entries.add(AddressEntry.fromNeighbour(n, now, from));
+      final e = AddressEntry.fromNeighbour(n, now, from);
+      // §5.5: a loopback address answers only on the asker's own machine.
+      if (entryFor(e.address, from)) entries.add(e);
     }
     final b = BytesBuilder()
       ..addByte(kinds.kAnswerAnswer)

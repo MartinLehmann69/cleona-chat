@@ -109,6 +109,15 @@ class GroupCallManager {
     Uint8List payload,
   )? sendViaUser;
 
+  /// `major * 1000 + minor` of this build, carried in the group CALL_INVITE
+  /// — the same field and the same E5 gate as the 1:1 INVITE
+  /// ([CallManager.callerAppMajorMinor]). The receiver checks it BEFORE it
+  /// looks at `isGroupCall` (`CallService.handleCallInviteV3`); without it
+  /// the field is the proto3 default 0 and every group invitation was
+  /// rejected as "incompatible caller version 0" (measured S398-W2).
+  int _callerAppMajorMinor = 0;
+  set callerAppMajorMinor(int v) => _callerAppMajorMinor = v;
+
   // UI callbacks
   void Function(GroupCallInfo info)? onIncomingGroupCall;
   void Function(GroupCallInfo info)? onGroupCallStarted;
@@ -246,7 +255,8 @@ class GroupCallManager {
       final invite = proto.CallInvite()
         ..callId = callId
         ..isGroupCall = true
-        ..groupId = hexToBytes(groupIdHex);
+        ..groupId = hexToBytes(groupIdHex)
+        ..callerAppMajorMinor = _callerAppMajorMinor;
       final cookie = transport.newDCookie();
       session.localDCookies[member.nodeIdHex] = cookie;
       invite.callerDCookie = cookie;

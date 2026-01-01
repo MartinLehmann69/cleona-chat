@@ -33,34 +33,41 @@
 		<string>TAG</string>
 	</array>
 
-	<!-- §11 / `lib/core/tagline/lan_entry_wiring.dart:58`:
-	     `rufSock.joinMulticast(InternetAddress(kLanEntryMulticastV4))` on
-	     239.192.67.76 (`lan_entry.dart:276`), unconditional on every
-	     platform including iOS — cross-subnet LAN peer discovery. Without
-	     this entitlement, iOS refuses the join at the socket level; the
-	     call already fails NAMED rather than silently
-	     (`lan_entry_wiring.dart:58-64`: try/catch, logs "Multicast-Gruppe
-	     nicht beigetreten" and falls back to broadcast-only), so a missing
-	     or rejected grant degrades discovery to same-segment-only instead
-	     of breaking anything — see the session report for detail.
+	<!-- §7.2 / mycelium neighbour search: the app joins the multicast
+	     group 239.192.67.76 on call port 41341 at node start
+	     (`mycelium/lib/neighbours.dart:83`, the join itself at
+	     `mycelium/lib/neighbours_channel.dart:70`, opened from
+	     `mycelium/lib/node_call.dart:63` — iOS runs the same in-process
+	     node as every platform). Without this entitlement iOS refuses
+	     the join at the socket level; `neighbours_listener.dart` catches
+	     that and the search degrades to broadcast-only (§7.2: fall back
+	     to the wildcard address and continue — not an error), so a
+	     missing grant costs segment-wide group discovery, not the app.
 
-	     RESTRICTED entitlement: requires an explicit request to Apple
-	     (Developer portal, "Multicast Networking" additional capability),
-	     which Apple can decline. Add regardless of outcome, per Beschluss
-	     E-5: it either becomes true after approval, or the Xcode capability
-	     toggle is turned back off and this key removed again — a single,
-	     visible edit either way, not a silent gap. UNGEPRUEFT: no Apple
-	     device or Xcode available in this session; Apple DTS staff has
-	     stated this entitlement is not consulted on macOS (see the session
-	     report), so it is NOT added to macos/Runner/*.entitlements.
+	     The same entitlement covers the other group joins: the CalDAV
+	     auto-discovery joins mDNS 224.0.0.251 to receive answers for
+	     its `_caldav._tcp` / `_caldavs._tcp` queries
+	     (`lib/core/calendar/sync/caldav_discovery.dart:58`; without the
+	     grant it returns empty, caught and logged). Dormant:
+	     `lib/core/calls/lan_multicast.dart:64` joins ff02::c1e0:ca11
+	     for group-call media, but its only path,
+	     `MediaRelay.onSendMulticast`
+	     (`lib/core/calls/group_call_manager.dart:690`), currently
+	     falls back to unicast per child — the day it is wired it needs
+	     this entitlement too.
 
-	     S397 (25.09.2026, owner decision C): the key is REMOVED until Apple
-	     grants the capability. The release build (TestFlight signing) failed
-	     with "Provisioning profile 'Cleona Distribution' doesn't include the
-	     Multicast Networking capability"; the unsigned VERIFY build did not
-	     notice. The owner requests the grant in parallel; once granted, put
-	     back:  <key>com.apple.developer.networking.multicast</key><true/>
-	     Meanwhile iOS reaches devices in the same WLAN over the other ways
-	     of the ladder (public address, neighbour, post box). -->
+	     RESTRICTED entitlement: granted by Apple per request (portal,
+	     "Multicast Networking" additional capability, team 3YQ8UFCFU7).
+	     History: removed 25.09.2026 (owner decision C) because the
+	     release profile did not carry the capability, granted by Apple
+	     on 03.10.2026 and put back. NOT added to
+	     `macos/Runner/*.entitlements`: macOS does not consult this
+	     entitlement (Apple DTS), and the macOS app runs outside the
+	     sandbox (macos/Runner/Release.entitlements). The RELEASE gate in
+	     `.github/workflows/ios-build.yml` ("Install provisioning
+	     profile") fails the job when a key of this file is missing from
+	     the profile — the unsigned VERIFY build cannot see that. -->
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
 </dict>
 </plist>

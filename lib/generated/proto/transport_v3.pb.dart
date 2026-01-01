@@ -4415,6 +4415,8 @@ class ApplicationFrameV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? groupId,
     $fixnum.Int64? groupMembershipEpoch,
     $core.List<$core.int>? groupMembershipHash,
+    $core.List<$core.int>? afterFile,
+    $core.List<$core.int>? postId,
   }) {
     final $result = create();
     if (recipientUserId != null) {
@@ -4465,6 +4467,12 @@ class ApplicationFrameV3 extends $pb.GeneratedMessage {
     if (groupMembershipHash != null) {
       $result.groupMembershipHash = groupMembershipHash;
     }
+    if (afterFile != null) {
+      $result.afterFile = afterFile;
+    }
+    if (postId != null) {
+      $result.postId = postId;
+    }
     return $result;
   }
   ApplicationFrameV3._() : super();
@@ -4488,6 +4496,8 @@ class ApplicationFrameV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(17, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(18, _omitFieldNames ? '' : 'groupMembershipEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..a<$core.List<$core.int>>(19, _omitFieldNames ? '' : 'groupMembershipHash', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(20, _omitFieldNames ? '' : 'afterFile', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(21, _omitFieldNames ? '' : 'postId', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -4669,6 +4679,32 @@ class ApplicationFrameV3 extends $pb.GeneratedMessage {
   $core.bool hasGroupMembershipHash() => $_has(15);
   @$pb.TagNumber(19)
   void clearGroupMembershipHash() => clearField(19);
+
+  /// §9.4 "Nothing overtakes a file", D-34 (S398-W5): a message that waited at
+  /// the sender behind a file carries that file's identifier — the first 8
+  /// bytes of the file's message identifier on this leg. Empty otherwise.
+  @$pb.TagNumber(20)
+  $core.List<$core.int> get afterFile => $_getN(16);
+  @$pb.TagNumber(20)
+  set afterFile($core.List<$core.int> v) { $_setBytes(16, v); }
+  @$pb.TagNumber(20)
+  $core.bool hasAfterFile() => $_has(16);
+  @$pb.TagNumber(20)
+  void clearAfterFile() => clearField(20);
+
+  /// §16.2 "A group post carries one post identifier": 16 random bytes the
+  /// author draws per post and carries in every leg. A reaction, a quote and
+  /// a read mark name it; acknowledgement, delivery state and re-sending stay
+  /// with message_id, the identifier of the leg (§9.2). Empty for everything
+  /// that is not a group post.
+  @$pb.TagNumber(21)
+  $core.List<$core.int> get postId => $_getN(17);
+  @$pb.TagNumber(21)
+  set postId($core.List<$core.int> v) { $_setBytes(17, v); }
+  @$pb.TagNumber(21)
+  $core.bool hasPostId() => $_has(17);
+  @$pb.TagNumber(21)
+  void clearPostId() => clearField(21);
 }
 
 ///  ── KEM header v3 (Sec H-5 v2) ──────────────────────────────────────────

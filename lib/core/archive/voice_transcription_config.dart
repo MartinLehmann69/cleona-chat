@@ -71,6 +71,73 @@ class VoiceTranscriptionSettings {
       kTranscriptionSettingsArea, {kTranscriptionSettingsKey: toJson()});
 }
 
+/// What the transcription settings screen shows (§21.7), as the service
+/// that transcribes sees it — on Linux/Windows that is the daemon, so this
+/// crosses IPC as `transcription_status` (S405, A-6).
+///
+/// Carries no path and no secret: the model files stay where the daemon
+/// keeps them, the surface only learns WHICH sizes are present.
+class TranscriptionStatus {
+  /// The whisper.cpp library could be loaded (independent of a model).
+  final bool whisperAvailable;
+
+  /// The model file of the configured size was present when the service
+  /// started, or a download has completed since.
+  final bool modelLoaded;
+
+  /// Name of `ModelDownloadStatus` (`idle`, `downloading`, `completed`,
+  /// `failed`) — a name, not an index, because it crosses JSON.
+  final String downloadStatus;
+
+  /// 0.0 … 1.0 of the running or last download.
+  final double downloadProgress;
+
+  /// The names of the model sizes whose file is present.
+  final List<String> downloadedModels;
+
+  /// The three values the user chose ([VoiceTranscriptionSettings]).
+  final String language;
+  final String modelSize;
+  final int retentionDays;
+
+  const TranscriptionStatus({
+    required this.whisperAvailable,
+    required this.modelLoaded,
+    required this.downloadStatus,
+    required this.downloadProgress,
+    required this.downloadedModels,
+    required this.language,
+    required this.modelSize,
+    required this.retentionDays,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'whisperAvailable': whisperAvailable,
+        'modelLoaded': modelLoaded,
+        'downloadStatus': downloadStatus,
+        'downloadProgress': downloadProgress,
+        'downloadedModels': downloadedModels,
+        'language': language,
+        'modelSize': modelSize,
+        'retentionDays': retentionDays,
+      };
+
+  static TranscriptionStatus fromJson(Map<String, dynamic> j) =>
+      TranscriptionStatus(
+        whisperAvailable: j['whisperAvailable'] as bool? ?? false,
+        modelLoaded: j['modelLoaded'] as bool? ?? false,
+        downloadStatus: j['downloadStatus'] as String? ?? 'idle',
+        downloadProgress: (j['downloadProgress'] as num?)?.toDouble() ?? 0.0,
+        downloadedModels: [
+          for (final m in (j['downloadedModels'] as List? ?? const []))
+            if (m is String) m
+        ],
+        language: j['language'] as String? ?? 'auto',
+        modelSize: j['modelSize'] as String? ?? 'base',
+        retentionDays: (j['retentionDays'] as num?)?.toInt() ?? 30,
+      );
+}
+
 /// Whisper model size (determines quality and resource consumption).
 enum WhisperModelSize {
   /// ~40 MB, fast, acceptable quality.

@@ -810,6 +810,17 @@ class ArchiveManager {
     _persistMessage(messageId);
   }
 
+  /// The message has left the profile: its index record — share address,
+  /// preview images, pin — leaves memory and the store ("when the message
+  /// goes, it must go too", `ArchiveEntry.previewBytes`). The copy on the
+  /// share stays: it lies outside the profile, in the user's own storage.
+  void forget(String messageId) {
+    final hadEntry = _entries.remove(messageId) != null;
+    final hadPin = _pinned.remove(messageId) != null;
+    _statusMap.remove(messageId);
+    if (hadEntry || hadPin) _persistMessage(messageId);
+  }
+
   /// Whether a media item is pinned.
   bool isPinned(String messageId) => _pinned[messageId] ?? false;
 

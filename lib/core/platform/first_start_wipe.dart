@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cleona/core/crypto/keyring_service.dart';
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/app_version.dart' show kAppLine;
+import 'package:cleona/core/storage/device_store.dart';
 
 /// FIRST START WITHOUT V4.1 MARK: THE PROFILE IS DELETED, NOT READ.
 ///
@@ -49,13 +51,55 @@ import 'package:cleona/core/service/app_version.dart' show kAppLine;
 ///
 /// That is why there are two POSITIVE marks, and one suffices:
 ///   1. [markerFilename] — the explicit marker of this file.
-///   2. [nodeKeysFilename] — `node_keys.enc`, written by
-///      `lib/core/link/node_keys.dart` on the first start of every V4.1
-///      state. No V3 state ever wrote this file.
+///   2. [deviceStoreFilename] — `device.db`, the device database (v4_2
+///      §4.5.2, §4.5.3 form 2), written with the first identity and by the
+///      host at its first start. No V3 state and no build of this line
+///      before S403 ever wrote this file.
 ///
-/// The second mark carries the states that existed before the marker; the
-/// first carries the states in which the node never started (then
-/// `node_keys.enc` is missing). Checking both costs two `existsSync()`.
+/// The second mark carries a profile whose marker file is missing (a copy
+/// made without dot files, a deleted dot file); the first carries a
+/// profile whose device database went missing. Checking both costs two
+/// `existsSync()`.
+///
+/// ── THE SECOND MARK MOVED WITH THE HOST'S STATE (S403 step 3) ──────────
+///
+/// From S401 to S403 the second mark was `mycelium/host.enc`. Its content
+/// lies in the device database since (`DeviceStore.areaNode`), and
+/// `removeSupersededDeviceFiles` deletes the file at every start — a mark
+/// nobody writes is the trap of the next section. A directory that holds
+/// `mycelium/host.enc` and nothing of this line is therefore no longer
+/// kept: it stems from a build before S403 that never ran a later one, and
+/// its list of identities lay in files this line does not read
+/// (`kSupersededDeviceFiles`).
+///
+/// ── THE SECOND MARK WAS A FILE NOBODY WRITES (S401, 02.10.2026) ────────
+///
+/// Until S401 the second mark was `node_keys.enc`. Its only writer,
+/// `NodeKeys.loadOrCreate` (`lib/core/link/node_keys.dart`), has no caller
+/// in `lib/` or `bin/` (the last builder of a `NodeKeys` went with
+/// `f52286f1`), and the norm does not carry the file: v4_2 D-38 "Link keys
+/// live in memory only", and the
+/// profile layout of §4.5.2 does not name it. Measured on a real host
+/// (`smoke_first_start_host_mark`): a started node leaves
+/// `mycelium/host.enc` and no `node_keys.enc`.
+///
+/// The check therefore answered "no" for every profile of this line, and
+/// "two marks" was one: a profile that carried `identities.json.enc`,
+/// `messages.db` and the host's store but had lost `.v41_profile` was
+/// deleted completely at the next start — keyring included
+/// ([wipeKeyringSecrets]).
+///
+/// WHO WAS LET THROUGH (S401 to S403; the mark has moved since, see the
+/// section above). A directory with
+/// `mycelium/host.enc` and without the marker was kept. Only the host of
+/// this line writes that path (the directory was `myzel/` with `wirt.enc`
+/// before S393 and did not exist before S383), so what is kept is a
+/// profile this line reads anyway. A file `node_keys.enc` alone no longer
+/// keeps a profile: such a directory stems from a lab build before the
+/// marker existed (03.09.2026) that never ran a later one — it holds the
+/// collections as single files, a form this line does not read (the store
+/// carries them since S366), and such data is deleted, not read (the
+/// decision at the top of this file).
 ///
 /// ── CORRECTION (S368, 05.09.2026) ──────────────────────────────────
 ///
@@ -153,9 +197,14 @@ class FirstStartWipe {
   /// `KeyMigration` has kept proven since S106.
   static const String markerFilename = '.v41_profile';
 
-  /// The second, older marker — `node_keys.enc` in the profile root
-  /// directory (`lib/core/link/node_keys.dart`, `filenameStem`).
-  static const String nodeKeysFilename = 'node_keys.enc';
+  /// The second mark — the device database, `device.db` at the profile
+  /// root directory (S403 step 3). Until then it was the host's file
+  /// `mycelium/host.enc`; the host's state lies in the device database
+  /// since (`DeviceStore.areaNode`), and the enforcer
+  /// `removeSupersededDeviceFiles` removes that file. The name is tied to
+  /// its writer by `smoke_first_start_host_mark`, which starts the real
+  /// host and asks this class afterwards.
+  static const String deviceStoreFilename = kDeviceStoreFileName;
 
   /// The note for the UI. It arises AFTER the wipe (it lies
   /// itself in `baseDir`) and is read by the UI and afterwards
@@ -186,12 +235,17 @@ class FirstStartWipe {
   static bool hasMarker(String baseDir) =>
       File('$baseDir${Platform.pathSeparator}$markerFilename').existsSync();
 
-  static bool hasNodeKeys(String baseDir) =>
-      File('$baseDir${Platform.pathSeparator}$nodeKeysFilename').existsSync();
+  /// Did this line ever keep device state in this directory? Asks for the
+  /// device database ([deviceStoreFilename]) — written by the first
+  /// identity, and by the host at its first start.
+  static bool hasDeviceStore(String baseDir) =>
+      File('$baseDir${Platform.pathSeparator}$deviceStoreFilename')
+          .existsSync();
 
-  /// Does the directory carry a V4.1 marker? One suffices (see header).
+  /// Is the directory a profile of this line? One mark suffices (see
+  /// header).
   static bool isV41Profile(String baseDir) =>
-      hasMarker(baseDir) || hasNodeKeys(baseDir);
+      hasMarker(baseDir) || hasDeviceStore(baseDir);
 
   /// Files at the profile root directory whose mere existence proves an
   /// EXISTING profile.
@@ -217,6 +271,13 @@ class FirstStartWipe {
     'identities.json.enc',
     'last_profile.json',
     'last_profile.json.enc',
+    // S403: the device database carries the list of identities, the
+    // identity shown last and the device keys since then; the four names
+    // above and `device_keys.bin.enc` below stay as evidence of a profile
+    // an earlier build left. The same rule as on the switch to a
+    // ciphertext: the list must GROW ALONG, or a profile that only carries
+    // `device.db` would no longer be recognised as "existing".
+    kDeviceStoreFileName,
     // Seed and phrase, all four storage paths
     'master_seed.json',
     'master_seed.json.enc',
@@ -486,10 +547,10 @@ class FirstStartWipe {
       } catch (e) {
         // A backend that throws on deletion must not abort the start
         // — but it must not stay silent either.
-        stderr.writeln('[FirstStartWipe] keyring delete "$name" failed: $e');
+        RedactedConsole.err('[FirstStartWipe] keyring delete "$name" failed: $e');
       }
     }
-    stderr.writeln('[FirstStartWipe] keyring: ${removed.length} of '
+    RedactedConsole.err('[FirstStartWipe] keyring: ${removed.length} of '
         '${keyringSecretNames.length} entries deleted '
         '(${removed.isEmpty ? "none" : removed.join(",")})');
     if (report != null && removed.isNotEmpty) {
@@ -535,6 +596,15 @@ class FirstStartWipe {
           evidence: evidence, when: DateTime.now());
     }
 
+    // The device database may be OPEN in this process (S403): the GUI holds
+    // it from its first look at the list of identities, and the recovery
+    // path wipes from within the GUI. A handle that outlives the deletion
+    // would go on reading and writing a file no path leads to any more —
+    // the identity created right after the wipe would be written into it
+    // and be gone at the next start. On Windows the open file could not be
+    // deleted at all. So the handle goes first.
+    DeviceStore.release(baseDir);
+
     final deleted = <String>[];
     final failed = <String>[];
     final preserved = <String>[];
@@ -544,7 +614,7 @@ class FirstStartWipe {
     try {
       entries = dir.listSync(followLinks: false);
     } catch (e) {
-      stderr.writeln('[FirstStartWipe] cannot list $baseDir: $e');
+      RedactedConsole.err('[FirstStartWipe] cannot list $baseDir: $e');
       return WipeReport(
           reason: reason, deleted: const [], failed: const [], bytes: 0,
           evidence: evidence, when: DateTime.now());
@@ -569,11 +639,11 @@ class FirstStartWipe {
         bytes += size;
       } catch (e) {
         failed.add(name);
-        stderr.writeln('[FirstStartWipe] could not delete $name: $e');
+        RedactedConsole.err('[FirstStartWipe] could not delete $name: $e');
       }
     }
 
-    stderr.writeln('[FirstStartWipe] ${reason.name}: '
+    RedactedConsole.err('[FirstStartWipe] ${reason.name}: '
         '${deleted.length} entries deleted, ${failed.length} failed, '
         '${preserved.length} preserved (${preserved.join(",")}), '
         '$bytes bytes, evidence=${evidence.join(",")}');
@@ -636,7 +706,7 @@ class FirstStartWipe {
         'createdAt': DateTime.now().toIso8601String(),
       }));
     } catch (e) {
-      stderr.writeln('[FirstStartWipe] could not write marker: $e');
+      RedactedConsole.err('[FirstStartWipe] could not write marker: $e');
     }
   }
 
@@ -654,7 +724,7 @@ class FirstStartWipe {
       File('$baseDir${Platform.pathSeparator}$noticeFilename')
           .writeAsStringSync(jsonEncode(report.toJson()));
     } catch (e) {
-      stderr.writeln('[FirstStartWipe] could not write notice: $e');
+      RedactedConsole.err('[FirstStartWipe] could not write notice: $e');
     }
   }
 

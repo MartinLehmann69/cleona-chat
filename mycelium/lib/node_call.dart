@@ -7,6 +7,7 @@ import 'package:mycelium/node_helpers.dart'
     show hexFrom, shortFrom, interfaces, roll;
 import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 import 'package:mycelium/neighbours.dart' as nb;
+import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
 
 /// Open the call in the segment and carry its finds into the node.
 ///
@@ -28,7 +29,7 @@ Future<nb.Neighbours> neighbourSearchOpen(
   Node k, {
   required int dataPort,
   required void Function(String) report,
-  void Function()? onNewNeighbours,
+  void Function(InternetAddress address, int port)? onNewNeighbours,
 }) async {
   // Call D (S385): a NODE identifier, rolled anew each start, with no relation to
   // any identity. Until here the identifier of the
@@ -56,7 +57,7 @@ Future<nb.Neighbours> neighbourSearchOpen(
     if (!fresh) return;
     report('Neighbour found: ${shortFrom(identifier)} at '
         '${address.address}:$port');
-    onNewNeighbours?.call();
+    onNewNeighbours?.call(address, port);
   }
 
   final n = await nb.Neighbours.open(
@@ -72,7 +73,10 @@ Future<nb.Neighbours> neighbourSearchOpen(
     // the Ed25519 signature of this identity (S388, proposal C).
     sign: (identifier, data) {
       for (final i in k.identities) {
-        if (i.identifierHex == identifier) return i.postBox.signEd25519(data);
+        // D-40: a held identity answers nothing in its name.
+        if (i.identifierHex == identifier && !k.postHeld(i)) {
+          return i.postBox.signEd25519(data);
+        }
       }
       return null;
     },
@@ -106,7 +110,14 @@ Future<nb.Neighbours> neighbourSearchOpen(
 /// throw at a broadcast without permission closes the wire forever, in
 /// both directions (`wire_target.dart`). A port 0 even threw out of the
 /// constructor of `Neighbour` — in the middle of the join.
-bool neighbourAdd(Node k, List<int> ip, int port) {
+///
+/// S406 (§5.5, §11.8, §11.9, D-9): [confirmedAt] is when the hint's source
+/// last confirmed the address — the creation of an external record, the age
+/// of a board or cover entry. An address this node removed after two failed
+/// uses is admitted again only when [confirmedAt] lies AFTER the removal
+/// (`neighbour_dropped.dart`). Without [confirmedAt] (the answer to the
+/// neighbour call, the address in an invitation) the hint is always admitted.
+bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
   // S390: here stood `ip.length != 4` — „only IPv4 is remembered". That was
   // the SECOND door next to `Neighbourhood.possible`, and it leads the
   // sources 2 (call), 3 (card, via `Host.neighbourRemember`) and 4
@@ -124,7 +135,17 @@ bool neighbourAdd(Node k, List<int> ip, int port) {
     return false;
   }
   final known = k.neighbourhood.holding(a, port) != null;
+  final dropped = k.readiness.dropped;
+  if (!known &&
+      confirmedAt != null &&
+      dropped.stale(a, port, confirmedAt)) {
+    k.report('Neighbour hint ${a.address}:$port not admitted — removed after '
+        'two failed uses at ${dropped.removedAt(a, port)!.toIso8601String()}, '
+        'the hint is not newer (§11.8)');
+    return false;
+  }
   final fresh = k.neighbourhood.remember(a, port);
+  if (fresh) dropped.forget(a, port);
   // S394 V1 (§11.1): a hint in an address family without socket is neither
   // stored nor tried — measured 24.09.2026, Node1 without IPv6 admitted
   // IPv6 hints and tried them.

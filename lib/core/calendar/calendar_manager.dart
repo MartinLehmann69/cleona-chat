@@ -59,6 +59,19 @@ class CalendarManager {
   static const String kSettingsArea = 'calendar_settings';
   static const String _settingsKey = 'settings';
 
+  /// Area of the delete markers (§18.1.3 rule 3), one entry per `eventId`.
+  static const String kDeleteMarkersArea = 'calendar_delete_markers';
+
+  /// The `CALENDAR_DELETE`s taken from the wire, keyed by eventId. A marker
+  /// keeps a late cell of the one who deleted from bringing the event back.
+  ///
+  /// §18.1.3 rule 3: "The local delete marker (`eventId`, no content) is
+  /// kept for as long as the identity exists (§20.2): an update for that
+  /// event can still arrive at any later time, because a device that was
+  /// away asks for what it missed" (owner decision Z-1 = A, 02.10.2026).
+  /// No clock removes a marker; it falls with the identity's store.
+  final Map<String, CalendarDeleteMarker> deleteMarkers = {};
+
   void load() {
     final store = _store;
     if (store == null) { _loaded = true; return; } // Proxy mode
@@ -88,7 +101,35 @@ class CalendarManager {
     } catch (e) {
       _log.warn('Failed to load calendar settings: $e');
     }
+
+    try {
+      for (final entry in store.loadArea(kDeleteMarkersArea).entries) {
+        deleteMarkers[entry.key] = CalendarDeleteMarker.fromJson(entry.value);
+      }
+    } catch (e) {
+      _log.warn('Failed to load calendar delete markers: $e');
+    }
   }
+
+  // ── Delete markers (§18.1.3 rule 3) ────────────────────────────────────
+
+  /// Records that [deletedByHex] deleted [eventId]. The delete time is the
+  /// local arrival (§22.5.3); it is recorded, nothing is timed by it.
+  void markDeleted(String eventId, String deletedByHex, {DateTime? now}) {
+    final marker = CalendarDeleteMarker(
+      deletedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+      deletedByHex: deletedByHex,
+    );
+    deleteMarkers[eventId] = marker;
+    try {
+      _store?.putEntry(kDeleteMarkersArea, eventId, marker.toJson());
+    } catch (e) {
+      _log.warn('Failed to persist delete marker of $eventId: $e');
+    }
+  }
+
+  /// The marker of [eventId], or null when there is none.
+  CalendarDeleteMarker? deleteMarkerOf(String eventId) => deleteMarkers[eventId];
 
   /// Writes the ENTIRE stock of events.
   ///
@@ -194,9 +235,14 @@ class CalendarManager {
     bool? taskCompleted,
     int? taskPriority,
     List<String>? attendeeNodeIds,
+    int? creatorUpdatedAt,
   }) {
     final event = events[eventId];
     if (event == null) return false;
+
+    // The creator's `updatedAt` of a change taken from the wire (§18.1.3
+    // rule 2) is kept as sent; `updatedAt` below stays the local mark.
+    if (creatorUpdatedAt != null) event.creatorUpdatedAt = creatorUpdatedAt;
 
     if (title != null) event.title = title;
     if (description != null) event.description = description;
@@ -510,6 +556,26 @@ class FreeBusyBlockResult {
         if (title != null) 'title': title,
         if (location != null) 'location': location,
       };
+}
+
+/// The local marker of a `CALENDAR_DELETE` taken from the wire (§18.1.3
+/// rule 3): the delete time and who deleted.
+class CalendarDeleteMarker {
+  final int deletedAtMs; // Unix ms, local arrival of the delete
+  final String deletedByHex;
+
+  CalendarDeleteMarker({required this.deletedAtMs, required this.deletedByHex});
+
+  Map<String, dynamic> toJson() => {
+        'deletedAt': deletedAtMs,
+        'deletedBy': deletedByHex,
+      };
+
+  static CalendarDeleteMarker fromJson(Map<String, dynamic> json) =>
+      CalendarDeleteMarker(
+        deletedAtMs: json['deletedAt'] as int? ?? 0,
+        deletedByHex: json['deletedBy'] as String? ?? '',
+      );
 }
 
 /// Information about an upcoming reminder.

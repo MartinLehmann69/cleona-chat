@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:55648169985d, 2026-09-25). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:97aecab7e485, 2026-10-08). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -45,7 +45,7 @@
 | 12 | What the interface shows | per message, per connection, per invitation, network switches |
 | 13 | Identity recovery | seed phrase, recovery bundle, total loss — no guardians (§13.8) |
 | 14 | Multi-Device | device keys, delegation, revocation |
-| 15 | First contact & identity authorization | the card, the five packets, the KEX gate |
+| 15 | First contact & identity authorization | QR code, NFC exchange and out-of-band invitation, the five packets, the KEX gate |
 | 16 | Groups & Channels | private groups, public channels, moderation |
 | 17 | Calls | voice, video, group topology |
 | 18 | Calendar & Polls | events, recurrence, voting |
@@ -105,7 +105,8 @@ to block (§5, §9, §10). The threat model is stated in §2.
 ### 1.2 Core principles
 
 1. **Delivery works on its own.** A packet leaves the device the moment
-   it exists. Concealment runs beside the traffic and never carries a
+   it exists; the one wait is behind the previous transmission to the
+   same next hop, until the recipient holds it whole (§20.3). Concealment runs beside the traffic and never carries a
    message, an acknowledgement, or anything else a delivery waits for;
    stopping it — in a test build, not as a setting — leaves delivery
    and the arrival of updates intact. This is testable and
@@ -133,13 +134,16 @@ to block (§5, §9, §10). The threat model is stated in §2.
    and no session to lose (§4).
 
 6. **Coordinates are pairwise and minimal.** A node knows only what it
-   has observed itself: the addresses in a contact's card and the address
-   a packet actually arrived from. No third party is asked, and no third
-   party stores the answer (§6).
+   has observed itself: the addresses in a contact's invitation data and
+   the address a packet actually arrived from. No third party is asked,
+   and no third party stores the answer (§6).
 
-7. **The invitation depends on nothing.** A contact card is built from
-   the node's own keys and its local address. It is available at first
-   start, on a device that has never reached another node (§12.4).
+7. **An invitation is shown only when it can be redeemed.** An invitation
+   (QR code, NFC exchange, out-of-band) is built from the node's own keys
+   and addresses. It is shown once it carries a way in from the open
+   network — an own reachable address or a verified invitation neighbour;
+   otherwise the device waits at most 30 s and then says why, with the
+   same-W/LAN invitation as an explicit choice (§12.4).
 
 ### 1.3 How a message is delivered
 
@@ -176,7 +180,7 @@ the delivery moment follows platform policy.
 | The post box reports "left with three, acknowledged by two" — not an arithmetic guarantee of placement | §8.2 |
 | Beyond three forwarding hops a recipient is reachable only through the post box | §8.1 |
 | Three copies in the post box cost three times the storage of one | §8.2 |
-| A post box holds a packet for 7 days; after that it is gone | §8.2 |
+| A post box holds a packet for 7 days; after that it lies with its sender alone, and a recipient who was away longer asks for it on return | §8.2, §9.5 |
 
 None of these is a defect to be fixed later. They are the price of a
 network that delivers, and they are stated here so that no
@@ -228,8 +232,21 @@ always safe; linkability degrades gracefully under GPA approach.
 - **Arrival timing, hop-exit observation, delay/drop its own copies.**
   None of these reveal content or identity (§10).
 
+**Declared boundary — the compromised device.** Everything above
+concerns an adversary in the network. A device that runs hostile
+software with root or kernel rights is a different adversary, and no
+application can keep its content from it: the content is decrypted,
+displayed and typed on that device. Against it Cleona promises nothing
+about content. What Cleona does is narrower and is set out in §23.10:
+it closes the ways in that need no such rights, it keeps small what
+lies readable on the device, and it bounds what a compromise costs
+afterwards (device lock-out, §14.4; Emergency Key Rotation, §4.5.4).
+The device that is switched off and taken away is a third case,
+covered by encryption at rest (§21.8).
+
 The architecture is designed against the strong state and is honest
-about the GPA boundary (appendix B).
+about its two boundaries, the GPA and the compromised device
+(appendix B).
 
 ---
 
@@ -242,6 +259,11 @@ about the GPA boundary (appendix B).
 
 A packet leaves the device the moment it exists. It is not queued behind
 a timer, not scheduled into a slot, and not shaped by the cover stream.
+It waits in two cases only, both bounded in §20.2 and both ended by an
+edge, never by a tick: behind the previous transmission to the same next
+hop until the recipient holds that one whole (§11.3), and for the link to
+a neighbour where none stands yet (§11.6). Neither delays another
+recipient or another step of the ladder.
 The cover stream (§5) runs on its own clock and carries nothing a
 delivery depends on. It always runs (§5.1). It may carry pieces of the
 public update and address entries (§5.5); neither the update nor the
@@ -290,8 +312,10 @@ message exists
         first acknowledgement wins, the rest are cancelled
 ```
 
-Steps are attempted **together**, staggered by a few milliseconds, never
-one after the other. A slow step therefore costs nothing: it is
+Steps are attempted **together**, never one after the other: steps 1
+and 3 leave at once; step 4 leaves as soon as its proof of work (§8.2) is
+ready. A step is never paused, resumed or repeated; only the
+acknowledgement ends a sending. A slow step therefore costs nothing: it is
 overtaken, not waited for.
 
 ### 3.5 What this design does not provide
@@ -313,7 +337,7 @@ nothing conceals nothing either.
 The delivery layer uses these nouns and no others:
 
 **packet · part · address · neighbour · envelope · post box · code ·
-card · identifier**
+invitation data · identifier**
 
 A design that needs a further noun is too complex, and the new noun is
 the warning rather than the progress. This is normative: it bounds the
@@ -377,13 +401,20 @@ under point 2 below.
 **Properties of the derivation:**
 
 - **UserID as stable anchor.** The formula is the **founding**
-  derivation, computed once at identity creation. The UserID hangs off
-  the founding Ed25519 pubkey and does **not** change when the
-  underlying keys change: after an Emergency Key Rotation,
-  `userId ≠ SHA-256(kIdentityDomain ‖ current_pubkey)` holds —
-  continuity is carried by the dual-signed old→new proof that contacts
-  follow (§4.5.4, §14.5). The identifier survives device changes,
-  recovery, multi-device, and every rotation.
+  derivation, computed once at identity creation, and its result is the
+  **one identifier** of the identity: UserID, delivery identifier and
+  the fingerprint in the invitation data (§15.2) are this value. It hangs off the founding
+  Ed25519 **and ML-DSA-65** public keys and does **not** change when the
+  signing keys change: after an Emergency Key Rotation,
+  `userId ≠ SHA-256(kIdentityDomain ‖ current_ed25519_pk ‖ current_mldsa65_pk)`
+  holds. Every address therefore carries the identifier next to the
+  current keys, and a party accepts current keys that do not hash to the
+  identifier only with the rotation chain (§4.5.4) — from the founding
+  keys, or from keys it already holds for that identifier. The
+  identifier survives device changes, recovery, multi-device, and every
+  rotation. On the wire it appears only inside the seal (§4.3); outside
+  it, only the search call names it (§7.2), and the invitation data name it as their
+  fingerprint (§15.2).
 - **DeviceID is daemon-global under multi-identity.** A daemon hosting
   N identities has exactly **one** DeviceID, computed from the
   daemon-global device-sig key pair (§4.4.2) and independent of every
@@ -435,13 +466,11 @@ no confidentiality or authenticity property depends on it.
   encryption always covers only one relay relationship.** Link-level
   confidentiality is carried by the link layer (an Elligator2-encoded
   X25519 handshake on the outside, an ML-KEM-768 exchange on the
-  inside, link key = `KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss
-  [‖ static_ss])`). It is not an exception to sealing, but an
-  additional shell underneath it. The optional fourth term is the
-  **caller authentication** (§11): it is present exactly
-  when the callee already held the caller's entry record. Its presence
-  changes the length of the KDF input, so an authenticated and an
-  anonymous handshake can never produce the same key.
+  inside, link key = `KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)`).
+  It is not an exception to sealing, but an additional shell underneath
+  it (§11.6). The shell handshake is anonymous: it protects the cover,
+  not the content, and who the counterpart is, the envelope decides
+  (§4.3).
 
 **Elligator2 sourcing.** The link handshake needs the **uniform encoding
 of an existing X25519 public key**. libsodium's API does not deliver
@@ -493,8 +522,8 @@ cell — a placement carries 1,043 B of content, so not even an empty
 message would pass. The envelope of §3.2 implements the
 cadence above: the capsule is formed once per day and contact, and only
 the 32-byte X25519 ephemeral rides in the cell. Media does not go
-through this per-message capsule at all: the media lanes of §9.3 seal
-their blocks under a **transfer key** instead.
+through this per-message capsule at all: the media lanes of §9.4 seal
+their pieces under a **transfer key** instead.
 
 The domain-separation constants (salt, version stamp, acceptance set)
 live in `lib/core/crypto/per_message_kem.dart`. Normatively,
@@ -529,6 +558,12 @@ it. The price belongs in this paragraph rather than in a comment: until
 the first reply, each message carries **1,088 B extra** and splits into
 two cells rather than one. It is paid only where nobody answers.
 
+**One exception to sealing against the recipient's identity keys:** a
+first-contact request redeemed from the out-of-band line is sealed against the
+invitation's own key pair (§15.2); the issuer opens it with the key pair
+of the invitation the proof of work names (§15.5.1). The answer and
+everything after it use the identity keys.
+
 **The pair secret `K_AB` (normative).**
 
 ```
@@ -541,13 +576,36 @@ K_AB   = HKDF-SHA-256(dh_AB ‖ s_AB, salt = SHA-256("cleona-pair/v1"),
 returns sealed in its bundle (§15.5); both sides store it with the
 contact. `dh_AB` binds the secret to the founding keys, `s_AB` keeps it
 safe against a future quantum attacker who holds both public keys from
-cards. A contact forms `K_AB` alone and hands `s_AB` back during a
-restore (§13.5). The founding key is the identity's Ed25519 key; a change
-of the signing keys (emergency rotation) starts a new pair, as it starts a
-new identifier (§4.1).
+invitations. A contact forms `K_AB` alone and hands `s_AB` back during a
+restore (§13.5). The founding key is the identity's **founding** Ed25519
+key (§4.1), on both sides and also after an Emergency Key Rotation: the
+rotated side keeps deriving its founding secret key from the seed, and
+learns the other side's founding public key from the first key of its
+rotation chain (§4.5.4). `K_AB`, and with it every code, survives every
+rotation. **The price, named:** a party that holds a founding secret key
+*and* `s_AB` — a thief of the device state, not of the seed alone — keeps
+computing that pair's codes after an Emergency Key Rotation; it can tell
+when the pair is addressed on step 3, never what is sent. What lets a
+party collect or delete post — day keys (§8.2), invitation box keys
+(§15.1) — does not hang on the founding keys.
+
+**`s_AB` for co-members who are not contacts.** Where two members of a
+group or private channel (§16.2) are not contacts of each other, `s_AB`
+is drawn by the owner or admin whose invitation makes them co-members and
+travels, sealed, in the invitation leg to each of the two (§16.2.2); the
+formula above is unchanged. Where two members share more than one group
+that carries an `s_AB` for them, both use the one carried by the group
+with the smallest group identifier, so that both sides form the same
+`K_AB` whatever the order in which they joined. When that group ends for
+the pair, the next smallest takes its place; the pair's codes change with
+it. Such a pair is a **group pair**, not a
+contact (§12.5): it carries only the group types of §16.2.2, never takes
+a fixed seat (§5.2) and ends when no shared group carries it. **The
+price, named:** the inviter knows `s_AB` of the pair; against it the
+pair's codes rest on `dh_AB` alone. It never learns what is sent.
 
 **Codes.** `code(A→B, d) = first 16 B of HKDF(K_AB, "code" ‖ pk_A ‖ pk_B ‖ d)`,
-`d` = UTC day. A code names neither side and changes every day; two codes
+`d` = UTC day, `pk_A` and `pk_B` the founding Ed25519 keys. A code names neither side and changes every day; two codes
 of the same pair on different days cannot be linked without `K_AB`.
 
 **Wire format: no KEM header.** Packets handed on through neighbours
@@ -657,11 +715,10 @@ two.
 #### 4.4.2 Device-Sig Key Pair
 
 Authenticity exists exclusively inside the sealing. The device key pair
-carries exactly three responsibilities:
+carries exactly two responsibilities:
 
 | Responsibility of the device-sig key | Where |
 |---|---|
-| Carries the `DeviceDelegationCert` — travels with the cell, on first contact per device | §14.5 |
 | Countersigns device revocation and co-authorization quorums | §14.4/§14.5 |
 | Twin-sync attribution (“which of my devices") | §14.1 |
 
@@ -676,9 +733,7 @@ cryptographic randomness** and are **not** derived from the master
 seed. The reason: a seed compromise must not retroactively compromise
 older devices — neither for signatures (appearing as the device) nor
 for KEM material addressed to the device. The `m/device` branch is the
-documented exception to HD-wallet determinism (§4.5.1). For linked
-devices, the HKDF-derived sig subkey plus delegation certificate is
-added (§14, LD-1…LD-12).
+documented exception to HD-wallet determinism (§4.5.1).
 
 #### 4.4.3 Signature rule (normative)
 
@@ -688,11 +743,11 @@ added (§14, LD-1…LD-12).
 | Group leg (pairwise) | **none** | identical to 1:1 — groups are N ordinary 1:1 deliveries (E-22) |
 | Post in a large private channel (`K_C`, N > 16, §16.2.1) | **Ed25519** (64 B) | sender attribution among N receivers who all know `K_C` |
 | Public object space (§16: registrations, directory entries, cases, verdicts, tombstones) | **Ed25519** | the vote is an Ed25519 ring signature, the pseudonym key **must** be an Ed25519 curve point; a hybrid outer shell would secure a door next to a missing wall and would cost a factor of ~17 in storage |
-| `DeviceDelegationCert` (§14) | **hybrid** (Ed25519 + ML-DSA-65) | must be verifiable by third parties years later |
 | Key continuity proof / rotation announcement (§4.5.4, §15) | **hybrid** | ditto |
+| Out-of-band invitation `cleona:2:` — binding of the invitation keys (§15.6) | **Ed25519** (64 B) | checked once, by the requester at redemption, and protects nothing but the line in transit; no third party ever verifies it later, so the reason for hybrid above does not apply. A forgery would have to be made in real time, while the line is on its way — the only gap is an active quantum-capable attacker at that moment (§15.11). Hybrid would cost 3,373 B more and double the line |
 | Update manifest (maintainer key) | **hybrid** | ditto |
 | Plane D frames (§17.1) | **none** | AEAD under `call_key` carries per-frame authenticity |
-| Link handshake | **none** | authenticity from the hybrid link key — for the **callee** always (only the holder of the static secrets can complete it), for the **caller** whenever the callee held its entry record: the static-static X25519 term enters the link key, so a caller that only *claims* a position derives a different key and can open nothing (§11). Implicit, therefore still no signature |
+| Shell handshake (§4.2, §11.6) | **none** | anonymous by design: the shell protects the cover, not the content; authenticity of content comes from the envelope (§4.3) |
 
 **Two declarations that belong to this rule and must not disappear
 into a footnote:**
@@ -812,10 +867,11 @@ of all identities blends into one stream, diluted by decoys.
 
 **Identity discovery on restore.** A seed restore on a fresh device
 must recognize at which indices the user's identities sit. Every
-identity is derivable from the phrase; a **marker per identity** serves
-as the stop criterion while deriving, and the recovery bundle carries
-the identity indices along with their names explicitly (§13.3.2). A
-network lookup is not needed for this (§13.7).
+identity is derivable from the phrase; the device derives the indices in
+ascending order and asks for the recovery bundle of each, one index
+beyond the highest one found (§13.7), and each bundle names its own
+index, display name and `active` flag (§13.3.2). There is no directory
+of identities to look up (§13.7).
 
 #### 4.5.2 Key Storage on the Device
 
@@ -825,36 +881,45 @@ network lookup is not needed for this (§13.7).
 ~/.cleona/                     (Linux)   %APPDATA%/Cleona/   (Windows)
 files/.cleona/                 (Android, app-private)
 
-  master_seed.enc                        # keyring-encrypted
-  device_keys.enc                        # device sig + device KEM
-  node_keys.enc                          # L_node + E_node + static node KEM
-                                         #   node-level, identity-free,
-                                         #   must survive restart
+  device.db                              # the device database (§4.5.3, §21.4.1): the identities
+                                         #   with their HD index, the device keys, device-wide
+                                         #   settings, the secret of the daemon–GUI connection
+                                         #   (§22.1), and the node's own state: fixed port and
+                                         #   remembered neighbours (§11.1, §11.8), what this node
+                                         #   holds for others (§8.2), the key of the own address
+                                         #   record (§11.9)
+  mycelium/
+    bulk/                                # pieces held for others, lane 3 (§9.4, §21.3.3)
   identities/
     0/
-      identity_meta.json.enc             # display name, picture, settings
-      conversations.json.enc             # conversations and messages (§4.5.3)
-      contacts.json.enc                  # contacts (§4.5.3)
-      groups.json.enc  channels.json.enc # groups, channels (§4.5.3)
-      v41_entries.json  v41_ages.json    # entry store, peer ages (§11.1)
-      session_state.json.enc             # tag counter states per (pair, direction, epoch),
-                                         #   expectation window, prekey-pool state (§4.6),
-                                         #   shared-key wraps and transition window (§14.4),
-                                         #   liveness cache + last-harvest bookkeeping (§6)
-  relay_cache.json.enc                   # cached responsible-relay/liveness addresses (§6)
+      messages.db                        # the identity's database: messages, conversations,
+                                         #   contacts, groups, channels, settings (§4.5.3)
+      media/                             # attachments as <name>.cmenc (§4.5.3)
+      mycelium/                          # per identity: contacts' delivery state,
+                                         #   group pairs, first contact, parked cells
+      transient/                         # plaintext in transit, emptied at start (§23.10)
 ```
 
 **Key cascade:**
 
-1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc`
+1. The **OS keyring** holds the master seed and the 24 words
    — libsecret (Linux), DPAPI with round-trip probe (Windows),
    AndroidKeyStore with a biometric/device-code gate, Keychain
-   (macOS). Without an available keyring, the file-based fallback
-   kicks in (XSalsa20-Poly1305, key from `SHA-256(hostname + salt)`,
-   v2). The master seed and seed phrase are written twice, as
-   defense-in-depth against keyring loss (keyring + file).
-2. After daemon start, the **master seed** sits in RAM protected by
-   `sodium_mlock`.
+   (macOS). **Where the system has a keyring, it is binding:** the
+   master seed and the 24 words are written there only, not also to a
+   file. Only where the system has no keyring, or where the session
+   logs in automatically so that the keyring stays locked, the
+   file-based variant is used (XSalsa20-Poly1305, key from
+   `SHA-256(hostname + salt)`, v2); on its first start the application
+   then tells the user once which attack this allows — whoever can read
+   the disk can open the identity and every message. Every keyring call
+   is bounded in time; a locked keyring never makes the application
+   hang.
+2. After daemon start, the **master seed** sits in the process's
+   memory for as long as the process runs, because every key is derived
+   from it on demand (step 3). It is ordinary memory: not locked
+   against swapping, and readable by software that can read the process
+   (§23.10, B-31).
 3. The **HD-wallet derivation** (§4.5.1) generates everything else on
    demand.
 4. The **message-store key** is `deriveFileEncKey(master_seed,
@@ -875,13 +940,16 @@ the wrong length. The only exception is a 0-byte `db.key` with no
 profile data whatsoever (an aborted first write). The reason: silent
 regeneration is identity loss followed by unreadable files.
 
-**Memory hygiene:** `sodium_mlock` against swapping; active
-overwriting of private keys and every KEM intermediate value
-(DH-shared, KEM-shared, IKM, message key) via `sodium_memzero` /
-`fillRange(0)`; `SecureMemory` / `SecureKeyHolder`
-(`secure_memory.dart`); constant-time comparison on
-security-critical paths (`constant_time.dart`). Public keys sit on the
-normal heap.
+**Memory hygiene:** active overwriting of private keys and every KEM
+intermediate value (DH-shared, KEM-shared, IKM, message key) via
+`sodium_memzero` / `fillRange(0)`; `SecureMemory` / `SecureKeyHolder`
+(`secure_memory.dart`); constant-time comparison on security-critical
+paths (`constant_time.dart`). Key material is not held in locked
+memory: it lives as byte lists in the runtime's managed memory, which
+the runtime may move and the operating system may swap out.
+Overwriting shortens the time a secret is exposed. It does not protect
+against software that reads the process's memory, and on a device
+whose swap space is not encrypted, key material can reach the disk.
 
 **Profile watchdog:** the daemon's 30-second watchdog also checks
 whether critical profile files still exist and writes them back from
@@ -897,12 +965,18 @@ RAM. It protects against external deletion, not against attackers.
    journals**; no plaintext temporary file is produced at any point
    (`SQLITE_TEMP_STORE=3`, compiled in, not set at runtime). Details in
    §21.4.1.
-2. **Structured configuration state** stays in individually encrypted
-   JSON files per identity (`FileEncryption`), compressed as described
-   below. At least six files can never move into a database, because
-   they hold what is needed to open one: `master_seed.json`,
-   `seed_phrase.json`, `identities.json`, `db.key`, and the two
-   corresponding write paths.
+2. **State of the device rather than of one identity** lives in a
+   second database of the same build, the **device database**, under
+   `deriveSharedFileEncKey(master_seed)` (§21.4.1): the identities with
+   their HD index, the device keys, device-wide settings, the secret of
+   the daemon–GUI connection (§22.1), and the node's own state — fixed
+   port and neighbours, what it holds for others in its post box, the
+   key of its own address record. Configuration state of an identity
+   lives in that identity's database. Individually encrypted files
+   (`FileEncryption`) remain for the delivery layer's state per
+   identity (§4.5.2). What is needed before any database can be opened
+   is not a file at all: the master seed and the 24 words live in the
+   OS keyring (§4.5.2).
 3. **Media attachments** are stored as `<name>.cmenc` under a framed,
    streamed AEAD (`lib/core/crypto/media_cipher.dart`) and read through
    a decrypting reader on `127.0.0.1`
@@ -1004,14 +1078,24 @@ own outbox) sit under the DB key (§21.4).
 
 #### 4.5.4 Key Rotation
 
-**There are four clearly separated rotation types:**
+**There are three clearly separated rotation types:**
 
 | Type | What rotates | Trigger | Effect |
 |---|---|---|---|
-| **Node-key rotation** | `L_node` **together with** `E_node`, the static X25519 and the static ML-KEM-768 of the *node* (`node_keys.dart`, `rotate()`) | explicit, E-81 | new metric position (§9.1). Rotating `L_node` alone would make the rotation pointless — anyone collecting entry records would link the old and the new position by the identical remaining static keys, so all four keys rotate together. The **previous static set is retained for the 30-day overlap** and the responder tries it on flight 1, because a peer holding a pre-rotation entry record dials the old keys — without that the overlap would cover the MAC and fail at decapsulation |
 | **Routine KEM rotation** | X25519 + ML-KEM-768 of the identity | every **7 days** (`kKemRotationInterval`, `kem_generation.dart`; decided by `IdentityContext.needsRotation()`, checked at startup and every 6 h) | stage 3 of the FS ladder (§4.6) — kicks in only on total exhaustion of the prekey pool |
 | **Shared-key rotation** | the device set's everyday key, and from it `inbox_key`; on **lock-out**, additionally the user KEM key **and the identity sig keys** | every change to the device set, plus routine hygiene | §14.4 |
 | **Emergency Key Rotation** | **all** user keys (Ed25519, ML-DSA, X25519, ML-KEM) under the same UserID | suspected compromise | §14.5, continuity proof + device quorum |
+
+**Routine KEM rotation with more than one device.** Every device that
+finds the rotation due would otherwise draw its own random generation;
+contacts take the newer one and the other devices collect post they
+cannot open. So, with more than one device, the device that finds the
+rotation due at a collection edge rotates only if it has the smallest
+DeviceID of the set, or if the current generation is 14 days old; it
+places Type 19 `KEM_ROTATED` to each other device (§14.7) before
+announcing to contacts. A device that collects a cell it cannot open
+keeps it for up to 7 days (at most 100 cells) and opens it once the
+generation arrives; a cell that expires unopened is counted visibly.
 
 **Routine KEM rotation — retention of the previous keys.** The
 previous private KEM keys are retained after rotation
@@ -1026,9 +1110,9 @@ are separate and both are handled. `discardPreviousKeysIfExpired()`
 deletes them once the deadline expires.
 
 *Deadline (normative):* the retention deadline for the previous KEM keys
-is the **rotation interval itself — 7 days** (32 days for the 31-day TTL
-class). Exactly **one** previous generation is retained, which is what
-`previousX25519Sk` / `previousMlKemSk` hold.
+is the **rotation interval itself — 7 days**. Exactly **one** previous
+generation is retained, which is what `previousX25519Sk` /
+`previousMlKemSk` hold.
 
 **The trade named, and the price named rather than hidden.** A retention
 of 15 days would not fit together with the 7-day rotation interval and a
@@ -1061,29 +1145,69 @@ valid for the new keys, so a contact does not re-derive a stale path.
 keys, §4.3, §15.2), so the tag families are unaffected; what rotates is
 the KEM material the sealed payload is encrypted against.
 
-**Emergency Key Rotation.** The UserID is a stable anchor (§4.1);
-continuity is carried by a **dual-signed old→new proof** that the
-previous key pair lays over `newEd25519Pk ‖ newMlDsaPk`
+**Emergency Key Rotation.** The identifier is a stable anchor (§4.1):
+contacts keep the same contact, the same UserID and the same `K_AB`.
+Continuity is carried by the **rotation chain**: the founding signing
+keys, and per rotation one link in which the previous key pair signs
+`newEd25519Pk ‖ newMlDsaPk` with Ed25519 **and** ML-DSA-65
 (`identity_context.dart` `rotateIdentityFull()`,
-`rotationChain.add(StoredRotationLink(…))`). The chain is signed
-hybrid (§4.4.3, a long-lived verifiable artifact). In addition:
+`rotationChain.add(StoredRotationLink(…))`); the chain is hybrid (§4.4.3,
+a long-lived verifiable artifact). On the wire it is a count `n` (1 B, at
+most 32), the founding Ed25519 and ML-DSA-65 keys (1,984 B), and per link
+its two signatures (64 + 3,309 B) followed — except for the last link,
+whose keys are those of the address it accompanies — by the new keys
+(1,984 B): `1 + 5,357·n` B. A chain holds if the founding keys hash to
+the identifier, every link verifies under both signatures against its
+predecessor, and the last link ends at the address's signing keys.
 
-- **Distribution:** as a delivery of the 31-day TTL class, pairwise
-  to contacts, via twin sync to one's own devices. It goes through the
-  **mailbox (delivery stage 4)** by default (a rotation notice is not
-  latency-critical and should not be session-linkable); a direct or
-  relayed leg (stages 1–3) is permitted when the recipient is known
-  live and the sender accepts the linkability.
+- **Where the chain travels:** in the announcement; in **every envelope
+  to a contact until that contact's acknowledgement of an envelope that
+  carried it has arrived** (the rule of the day's capsule, §4.3); in the
+  key bundle and the out-of-band line of first contact (§15.2, §15.6) and in
+  request, answer and receipt. It travels inside the seal wherever there
+  is one. An address whose keys hash to its identifier carries no chain.
+- **What a receiver accepts:** the keys it holds for the identifier, or
+  keys a chain connects to them (without prior state: to the
+  identifier); it then replaces the stored keys, and every open own
+  message to that party is sealed again against the new address. Keys
+  that are an earlier link than the ones it holds are **superseded**: the
+  envelope is discarded without acknowledgement. A chain that does not
+  pass through the keys it holds is a **fork** — two successors of one
+  key; it is discarded and shown to the user as evidence that the old
+  keys are in other hands.
+- **What follows the current keys:** the day keys (§8.2) — sent again to
+  every contact at the rotation; the previous day keys are still
+  collected for 7 days, the retention of the previous KEM keys.
+  Invitation box keys are random (§15.1). Standing invitations are
+  revoked at the rotation (§15.3). Device secrets (the device code of
+  §8.1, node keys, device signing keys) are not part of it.
+- **Distribution:** pairwise to contacts as an ordinary message on the
+  ladder (§7.1), via twin sync to one's own devices (§14.7). Like any
+  message it lies in a post box for at most 7 days (§8.2); a contact it
+  did not reach in that time receives the chain with the next envelope
+  (above).
 - **Authorization (normative, closes security finding SR-1):** a
-  rotation is valid only with the signature of the previous key pair
+  rotation is valid only with the chain link of the previous key pair
   **and** the **device quorum** `max(2, ⌈N/2⌉)` of countersignatures
-  (§14.5) **and** a device-set shrink proof. The signature alone does
-  not authorize — otherwise possession of the seed would be enough to
-  rotate.
-- **`K_AB` survives every rotation**, because it is derived from the
-  **founding** keys (§4.3, §15.2). Contacts who missed the announcement
-  lose the encryption, but not addressability — they can keep computing
-  tags and get the announcement on the next harvest.
+  (§14.5) **and** a device-set shrink proof; at exactly one device the
+  quorum rule does not apply (§14.4). The signature alone does not
+  authorize — otherwise possession of the seed would be enough to
+  rotate. An identity whose founding secret key cannot be derived from
+  the seed on the rotating device does not rotate — `K_AB` would change
+  silently.
+- **`K_AB` survives every rotation** (§4.3). Contacts who missed the
+  announcement keep addressing: they receive the chain with the next
+  envelope and adopt it then. What they sealed against the old KEM keys
+  meanwhile opens for 7 days; their unacknowledged messages are sent
+  again once they hold the new address.
+- **The price, named.** Whoever holds the old keys can race the
+  announcement (a fork, shown, not resolved — only the device quorum
+  separates the two); toward a party that never held a later key the
+  founding keys can still present themselves as this identity; with
+  `s_AB` as well, the pair's codes stay computable (§4.3). After a
+  rotation the words alone restore superseded keys; the current state and
+  the chain come from the recovery bundle (§13.3.2), and the interface
+  says so at the rotation.
 
 **Contact verification and key-change detection.** Four levels per
 contact:
@@ -1092,7 +1216,7 @@ contact:
 |---|---|---|
 | `unverified` | contact exists, key authenticity never checked | default avatar, no badge |
 | `seen` | key material used successfully at least once | weak badge |
-| `verified` | camera scan with the other person present, or an NFC touch (§15.10) | green badge |
+| `verified` | camera scan with the other person present, or an NFC exchange (§15.10) | green badge |
 | `trusted` | explicitly marked as trustworthy by the user | double badge |
 
 Verification is attached to the **UserID** and survives device
@@ -1100,16 +1224,18 @@ changes. For `verified` and `trusted`,
 `verifiedKeyFingerprint = SHA-256(ed25519_user_pk)` is stored; if the
 received public key deviates from it, the key-change warning appears
 and the level falls back to `unverified` until the user actively
-re-verifies. **This explicitly holds even for a valid Emergency
-Rotation:** a correct chain proves that *someone with the old key*
-rotated, not that it was the rightful owner. The device quorum is a
-second piece of evidence (§14.5), but it does not replace the user's
-decision.
+re-verifies. **For a valid Emergency Rotation the rule of §14.4
+applies:** the level is retained only if the chain **and** the device
+quorum are present, and falls back otherwise, with a visible warning. A
+correct chain alone proves that *someone with the old key* rotated, not
+that it was the rightful owner; the device quorum is the second piece of
+evidence (§14.5).
 
-**Four deliveries can overwrite a stored public key:** restore response
-(§13), rotation announcement (above), contact request, and contact
-response (§15.4). The same rule applies to all four: **every path that
-overwrites a stored public key must trigger the check.**
+**Five deliveries can overwrite a stored public key:** restore response
+(§13), rotation announcement (above), any envelope carrying a rotation
+chain (above), contact request, and contact response (§15.4). The same
+rule applies to all five: **every path that overwrites a stored public
+key must trigger the check.**
 
 ### 4.6 Forward Secrecy: One-Time Prekey Pool
 
@@ -1140,10 +1266,9 @@ not be placed).
 
 **Assurance.** A seized device plus a fully archived relay holding may
 only expose the cells **not yet delivered**, not the traffic of the
-rotation window. The upper bound is **15 days** (32 days for the
-31-day administrative TTL class) and covers exclusively undelivered
-material — typically nothing, for an active conversation. It is the
-deliberately paid price for the delivery window.
+rotation window. The upper bound is **15 days** and covers exclusively
+undelivered material — typically nothing, for an active conversation.
+It is the deliberately paid price for the delivery window.
 
 **Construction.** One pool of one-time **X25519** key pairs per contact.
 The PQ half is deliberately *not* part of the pool: it is a single daily
@@ -1379,17 +1504,17 @@ keeps four mappings open without sending a single packet beyond cover:
 these four neighbours can reach it, forward to it (§8.1) and hold post for
 it (§8.2). The other neighbours are known addresses, not open paths.
 
-**The card's place is fixed.** It holds the neighbour the node's
-cards name (§15.2), for as long as any standing invitation (§15.3) names
+**The invitation neighbour's place is fixed.** It holds the neighbour the node's
+invitations name (§15.2), for as long as any standing invitation (§15.3) names
 it. It goes to a neighbour reachable from the open network — one confirmed
 under a public address (not private, not shared carrier space, not
 link-local) — whenever the node has one; a neighbour known only under a
 private address takes it only while there is no other, and gives it up at
 the next edge to a reachable one unless a standing invitation still names
-it. Otherwise the card's neighbour changes only when it is removed
-(§11.8); cards issued afterwards name the new one,
-and holders of older cards find the issuer through its publisher key
-(§15.2). **This place never goes to a contact's device:** the card
+it. Otherwise the invitation neighbour changes only when it is removed
+(§11.8); invitations issued afterwards name the new one,
+and holders of older invitations find the issuer through its publisher key
+(§15.2). **This place never goes to a contact's device:** the invitation
 travels to people not yet accepted and is passed on, and a contact's
 address in it would hand a friend's address to every reader.
 
@@ -1400,9 +1525,9 @@ any other neighbour — one such contact holds one place, more hold up to
 three. When a use of one fails and it is removed (§11.8), another contact
 that qualifies at that moment takes its place: an edge, not a tick. A
 contact the user has excluded (§15.10) never takes one. These contact
-places and the card's place are the node's **fixed neighbours**; they
+places and the invitation neighbour's place are the node's **fixed neighbours**; they
 hold its codes (§8.1) and they are the ones step 3 reaches it through.
-Where no contact qualifies, the card's neighbour is the only fixed
+Where no contact qualifies, the invitation neighbour is the only fixed
 neighbour. Places no contact holds are redrawn at every edge.
 
 Reachable means reachable by a stranger's neighbour: a phone behind
@@ -1535,7 +1660,6 @@ mapping the question has just opened.
 | `0x00` | fill |
 | `0x01` | an update piece (§26.6.1) |
 | `0x02` | address entries |
-| `0x03` | codes this node answers for (§8.1) — only in packets to the node's fixed neighbour |
 | `0x04` | keep-alive: the device code (§8.1) and an 8-byte random token — only in keep-alive packets (§8.1) |
 
 Address entries use the same codec as the board (§11.8a): the number of
@@ -1569,7 +1693,9 @@ The four rules below hold for both kinds of content alike.
    clock has drawn anyway.
 
 **What a node keeps.** Pieces of the node's own platform are stored and
-assembled automatically within the retention tier's budget (§22.6); once
+assembled automatically within the retention tier's budget (§22.6); the
+object of the node's own update target is exempt from the bulk-cache cap
+until it is installed or superseded (owner decision 07.10.2026); once
 all pieces are present the update is offered to the user (§26.6.1).
 Always-on nodes additionally keep a bounded cache of pieces for other
 platforms and offer them again under rule 2 — without that cache, spread
@@ -1588,9 +1714,10 @@ packets.
 | metered mobile data behind CGNAT, dual-stack | traffic + cover 1.73 MB + keep-alive 5.18 MB ≈ 6.9 MB with the defaults; ≈ 3.5 MB where IPv4 rests (§8.1). With the defaults the modem is woken every 30 s — about a third of the time awake at a 10 s inactivity timer, the price of being reachable; a longer measured interval or a resting IPv4 lowers it |
 | keep-alive measurement (§8.1) | ≈ 50 KB per network change, on the probe port and the data port |
 | board question and answer (§11.8a) | 2.4 KB per edge, plus 3.6 KB for the handshake with a new neighbour |
-| code registration (§8.1) | ≈ 6.4 KB/day per 200 contacts, inside packets already sent |
+| code registration (§8.1) | ≈ 67 KB/day per 200 contacts and 4 fixed neighbours: 28 pieces `0x24` and 28 acknowledgements `0x25`, only at the edges of §8.1 |
 | day keys for contacts (§8.2) | ≈ 1 KB per contact every 14 days, as ordinary messages |
-| message over the internet (§8.1) | 3 packets each way, acknowledgement included 6 |
+| message over the internet (§8.1) | 7 packets each way, acknowledgement included 14 (measured: message 7879 B, acknowledgement 7779 B) |
+| shell companion packet (§11.6) | 1 packet per single-packet sending to a counterpart silent for more than 2 s, at most once until it is heard again; none in idle |
 | where-are-you (§8.1, exception) | ≈ 1,000 packets, 1.2 MB per event, at most one per contact per hour |
 
 Every packet on the data port is 1200 B (§11), whatever it carries; a
@@ -1612,7 +1739,7 @@ that does not is not.
 **This is about people, not routers.** Whether a **contact** can be
 reached is never asked of a third party and never stored by one. The
 **addresses of devices** are a different matter: a device is a router,
-and where routers can be found travels openly as hints — in cards
+and where routers can be found travels openly as hints — in invitation data
 (§15.2), in the external records (§11.9), in cover (§5.5) and on the
 boards of reachable nodes (§11.8a). None of these says anything about a
 person, and none is trusted: an address is tried, and an address that
@@ -1624,7 +1751,7 @@ What it has observed itself — and, kept apart, hints it has not yet tried:
 
 | Source | Content |
 |---|---|
-| the card (§15.2) | up to four addresses of their own, in their order of preference; optionally the address of a neighbour that reaches them |
+| the invitation data (§15.2) | up to four addresses of their own, in their order of preference; optionally the address of a neighbour that reaches them |
 | received packets | the address a packet was actually seen from |
 | own attempts | which addresses worked, and when |
 | hints about devices | address entries from cover (§5.5), boards (§11.8a) and external records (§11.9) — used to find **neighbours**, never taken as a statement about a contact until an attempt succeeds |
@@ -1642,7 +1769,7 @@ A node keeps, per contact:
 |---|---|---|
 | `lastSeenAddress` | typed address + port | from the most recent received packet; type (1) + address (4/16) + port (2), so an IPv6 peer is remembered as what it is |
 | `lastSuccess` | timestamp | last acknowledged delivery |
-| `cardAddresses` | up to three | as handed over in the card |
+| `cardAddresses` | up to three | as handed over in the invitation data |
 
 Records are updated on every received packet and on every
 acknowledgement. They are never exchanged with third parties.
@@ -1657,27 +1784,31 @@ post box (§8.2) until they return.
 
 ### 7.1 All steps at once
 
-A sender knows the recipient's own addresses from the card (§15.2), up to
+A sender knows the recipient's own addresses from the invitation data (§15.2), up to
 four of them, plus the neighbour address and whatever it has observed
 itself (§6.2). **Which step an address serves is decided by the sender,
 from the address itself** — an address inside the sender's own segment
 serves step 1, one reachable from the open net serves step 2, and the same
-card can feed both. It attempts **every applicable step together**,
-staggered by a few milliseconds. The first acknowledgement wins; the
-remaining attempts are cancelled.
+invitation can feed both. It attempts **every applicable step together**:
+steps 1 and 3 leave at once; step 4 leaves as soon as its proof of work
+(§8.2) is ready. A step is never paused, resumed or repeated; only the
+acknowledgement ends a sending. The first acknowledgement wins; the
+remaining attempts are cancelled — a proof of work still running and a
+placement not yet sent are dropped.
 
 | Step | Way | Address from | Target |
 |---|---|---|---|
-| 1 | the card's addresses that lie in the sender's own segment, plus a search call where §7.2 sends one | card + call | milliseconds |
-| 2 | the card's addresses that are reachable from the open net — **not for messages** (below) | card, if any | seconds |
-| 3 | via the sender's and the recipient's fixed neighbours, by code (§8.1) | card, contact | seconds |
+| 1 | the addresses in the invitation data that lie in the sender's own segment, plus a search call where §7.2 sends one | invitation data + call | milliseconds |
+| 2 | the addresses in the invitation data that are reachable from the open net — **not for messages** (below) | invitation data, if any | seconds |
+| 3 | via the sender's and the recipient's fixed neighbours, by code (§8.1) | invitation data, contact | seconds |
 | 4 | post box under the recipient's day value (§8.2) | own neighbours | until the recipient returns |
 
 **Messages go through steps 1, 3 and 4.** Step 2 serves learning the own
 address (§7.3) and calls (§17); a message is not sent to a public address,
 because that shows the path between sender and recipient to everybody on
 it. The price is one or two hops on the open internet — tens of
-milliseconds.
+milliseconds. **Call signals go through steps 1 and 3 only:** a call that
+cannot ring now is not left in a post box (§17.2).
 
 Sequential escalation is prohibited. A step that is slow must not be able
 to delay a step that is fast, and the only way to guarantee that is to
@@ -1685,10 +1816,10 @@ start them together.
 
 ### 7.2 Step 1 — the local segment
 
-The sender transmits to those addresses in the card that lie in its own
+The sender transmits to those addresses in the invitation data that lie in its own
 segment. **Only when a send to the contact has no way** does it also send
 a search call on the local segment. **A send has no way when the recipient holds no address at all**
-— none of their own, neither from the card nor observed, and no neighbour
+— none of their own, neither from the invitation data nor observed, and no neighbour
 address either. That is the whole test; there is nothing else to weigh. A
 stale address still counts as a way: it produces no answer, and the other
 steps carry in its place (§7.1).
@@ -1735,7 +1866,7 @@ one.
 
 ### 7.3 Step 2 — the public address
 
-The sender transmits to those addresses in the card that are reachable
+The sender transmits to those addresses in the invitation data that are reachable
 from the open net.
 
 **Learning one's own public address.** A node asks a neighbour that is
@@ -1802,7 +1933,7 @@ Behind address translation, and especially behind carrier-grade
 translation, a public address is worthless or absent. The recipient is
 then reachable only through a neighbour both sides can reach. **This is
 the ordinary case on the open internet**, and the address of such a
-neighbour is therefore carried in the card (§15.2).
+neighbour is therefore carried in the invitation data (§15.2).
 
 **No packet names its ends.** A packet on this step carries a code
 (§4.3) — per pair, direction and day, random to anybody without `K_AB` —
@@ -1814,7 +1945,7 @@ person or an identifier.
 
 | Field | Bytes | Content |
 |---|---|---|
-| kind | 1 | `0x20` hand on by code, `0x21` code not known here, `0x22` hand on to an address, `0x23` where are you |
+| kind | 1 | `0x20` hand on by code, `0x21` code not known here, `0x22` hand on to an address, `0x23` where are you (`0x24` registration and `0x25` its acknowledgement have their own layout, below) |
 | hops left | 1 | starts at 3 (`0x23`: at 2) |
 | code | 16 | `0x20`, `0x21`, `0x23`: the code of §4.3 |
 | next addresses | 1 + n × (7 or 19) | `0x22` only: count n (1–3), then type + address + port of each next neighbour |
@@ -1823,12 +1954,24 @@ person or an identifier.
 **How a node learns codes.** Every node tells each of its fixed neighbours
 (§5.2) which codes belong to it: for every contact of every identity it holds,
 the code of that contact towards it for today and tomorrow, plus the code
-of every open invitation (§15.2) and the one-time reply code of every
-pending first contact. The list rides inside the packets that go to the
-fixed neighbour anyway (content byte `0x03`, §5.5), padded to a multiple of
-64 codes so that its length says little about the number of contacts. It
-is sent again when it changes, when the UTC day changes and when the fixed
-neighbour changes. The neighbour keeps a code until the end of the day
+of every open invitation (§15.2), the one-time reply code of every
+pending first contact, and, for every identity with more than one device,
+the own-device code from each other own device towards it (§14.7). The
+list, padded to a multiple of 64 codes so that
+its length says little about the number of contacts, travels in packets of
+its own: one `0x24` per 64 codes, sealed in the pairwise shell to the fixed
+neighbour, which answers each with a `0x25`. It is sent when it changes,
+when the UTC day changes, when a fixed neighbour is new and after a network
+change (the neighbour learns the device's new address only from a
+registration) — at these edges and at no other time. A piece without `0x25` within the answer
+deadline (§11.6) is sent once more, then no more until the next edge.
+
+| Packet | Content |
+|---|---|
+| `0x24` registration | kind + day (4) + piece (1) + pieces (1) + count (1) + the device code (16) + count × 16 B codes |
+| `0x25` registered | kind + day (4) + piece (1) |
+
+The neighbour keeps a code until the end of the day
 after its day, at most 4,096 codes per device and 256 devices (the device
 registered longest ago gives way); the first device to register a code
 keeps it until it expires. A device identifies itself in every
@@ -1842,7 +1985,7 @@ one. A registration names codes, never a person or an identifier.
 packet — the same for every fixed neighbour of the recipient, since each
 of them holds the same codes. It wraps it into **one** `0x22` packet
 naming up to three next addresses — the recipient's fixed neighbours as
-the recipient last told them (§9.2), or for a first contact the card's
+the recipient last told them (§9.2), or for a first contact the invitation
 neighbour (§15.2) — and sends it to its **own** fixed neighbour, which
 hands the inner packet to each of them. The first acknowledgement wins
 (§7.1), a duplicate is ignored (§9.2). A sender without a fixed neighbour
@@ -1880,7 +2023,9 @@ carry.
    minus one, to one open neighbour (§5.2) that has an address in that
    family — at most once, the hop count bounds it. Nothing else.
 2. `0x20`: is the code registered here? Hand the packet to that device.
-   If the incoming hop count is zero, drop; otherwise decrement it.
+   If the incoming hop count is zero, drop; otherwise decrement it. If
+   the transmissions waiting for that device have reached their bound
+   (§20.2), answer `0x21` as in 3.
 3. Otherwise answer `0x21` with the code, so that the sender learns this
    way is closed instead of waiting.
 4. `0x23`: code registered here — hand it to the device; otherwise hand
@@ -1893,7 +2038,8 @@ It reaches every node within two hops (about 1,000 packets, 1.2 MB). The
 recipient answers on the ordinary way; its acknowledgement carries its
 current fixed neighbours (§9.2). At most
 one `0x23` per contact per hour; a node hands on at most one `0x23` per
-minute per incoming neighbour.
+minute per incoming neighbour. A call signal does not start a `0x23`; the
+missed-call message that follows it does, under this rule.
 
 **What each node on the way sees.** The sender's neighbour sees the sender
 and the address of the recipient's neighbour; the recipient's neighbour
@@ -1941,7 +2087,7 @@ per family, the node checks instead of assuming:
 
 1. It opens an **untouched port**: a second UDP socket that has never
    sent anything.
-2. From its data port it sends `0x48` to its card's neighbour, carrying the
+2. From its data port it sends `0x48` to its invitation neighbour, carrying the
    untouched port's number and 16 random bytes.
 3. The neighbour takes the address it **saw** the `0x48` come from — never
    one the node claims — and sends `0x49` with that address, the port and
@@ -1970,7 +2116,7 @@ so the check can neither amplify nor be aimed at a third party.
 | Path | Interval | When |
 |---|---|---|
 | IPv4 | 30 s until measured, then the measured interval | always, to one neighbour — preferably one that also answers over IPv6, so that it can forward between the families; it rests under the three conditions below |
-| IPv6 | 60 s until measured, then the measured interval | unless the family is open (above): to each fixed neighbour of §5.2 that is a contact and an IPv6 neighbour, and to the card's neighbour while an invitation stands; where there is none, to one neighbour — the card's where it is an IPv6 neighbour |
+| IPv6 | 60 s until measured, then the measured interval | unless the family is open (above): to each fixed neighbour of §5.2 that is a contact and an IPv6 neighbour, and to the invitation neighbour while an invitation stands; where there is none, to one neighbour — the invitation neighbour where it is an IPv6 neighbour |
 
 **All of them in one radio wake.** The keep-alive packets to the fixed
 neighbours leave together, at the same instant, as the two families do — one
@@ -2054,11 +2200,12 @@ resumes at that edge.
 
 The recipient is off. The sender leaves the packet under the recipient's
 day value (below) with three holders, and the recipient collects it on
-return.
+return. Call signals are the exception: they are never left in a post
+box (§17.2).
 
 **The holders are chosen so that the recipient will ask them.** First the
 recipient's fixed neighbours as the recipient told them (§8.1, §9.2), or
-for a first contact the neighbour its card names (§15.2); then neighbours the sender
+for a first contact the invitation neighbour its invitation data name (§15.2); then neighbours the sender
 knows the recipient to hold, from address entries and boards (§5.5,
 §11.8a); only then the sender's own neighbours. A post box at a holder the
 recipient never asks is not redundancy — it is a packet that expires after
@@ -2070,11 +2217,12 @@ the sender makes.
 |---|---|
 | `0x30` | hold this, under this day value |
 | `0x31` | held (acknowledgement) |
-| `0x32` | anything under these day values? (at most 7: the retention) |
-| `0x33` | here is one |
+| `0x32` | anything under these values? (at most 7 per question: the retention; an issuer with standing invitations asks a second question for their invitation values, §15.1); every question carries an 8-byte request identifier |
+| `0x33` | here is one, with the number this holder hands out for the question |
 | `0x34` | nothing here |
 | `0x35` | a challenge |
 | `0x36` | proof: the day public key and an Ed25519 signature over the challenge |
+| `0x37` | refused: the request is answered without content — no valid proof, or the challenge unknown; it carries the value and the request identifier |
 
 | Parameter | Value |
 |---|---|
@@ -2082,14 +2230,24 @@ the sender makes.
 | acknowledgements required to count as placed | 2 |
 | retention | 7 days |
 | at most per day value | 100 packets |
-| deletion | only after the collector acknowledges receipt — except the public manifest entry of §26.5.4, which is read, never deleted |
+| deletion | only after the collector acknowledges receipt, to every holder it asked — except the public manifest entry of §26.5.4, which is read, never deleted |
+| placing ends | placed at the second `0x31`; not placed when the transmission to every holder has ended without it — ended as §11.3 defines it: at the recipient's end mark, or 1.1 s after the last part, which for a single part is 1.1 s after it (D-41) — never on a deadline of its own, never repeated; a holder that did not answer counts as one use without an answer (§11.8) |
+| collection ends | per holder, and no holder waits for another: a holder is done when it has handed out the number it announced (`0x34`: none, `0x37`: refused) or its link has ended unanswered (§11.6). Every piece is taken over and acknowledged for deletion when it arrives. Every packet a holder sends back to a collector names the request identifier of the question that packet answers: a challenge (`0x35`) names the question it was issued for, and what is handed out, found empty or refused under that challenge (`0x33`, `0x34`, `0x37`) names the same question; answers are matched to their question by the identifier. A proof under a challenge the holder does not know is refused with the identifier left zero, and the collector matches that refusal by its value. The receipt `0x31` answers a deposit, not a question, and carries the field as zero. What a conversation still lacks is asked for the way §11.3 asks for missing parts: after a quiet period of 300 ms without a new answer from that holder the collector asks once more for everything still open — the question, if no challenge has come; otherwise the proofs of the values still unanswered — and the holder answers a repeated proof as it answered the first. If that brings nothing within another quiet period, the holder is done for this edge with what it has handed out; if it answered nothing at all, that is one use without an answer (§11.8) — at most one per holder and edge, however many questions were waiting for it. No timer runs while answers are arriving, so a slow way is never cut off. Questions to the same holder follow one another, and nothing a holder leaves unanswered delays another holder, another identity or another value |
+| a holder answers | every `0x32` and `0x36`: with content, `0x34` or `0x37`; a holder never stays silent to a collector. A `0x30` without a valid proof of work is not a collector's request and is still discarded silently (below) |
+| a holder hands out | entry by entry under the flow of §11.3: an entry of two or more parts waits for the end mark of the one before it, single-part entries do not wait (D-41); what a collector did not receive it asks for once more within the edge (above), and the holder hands it out again |
 | proof of work on `0x30` | `D_box` = 18 leading zero bits |
 
 **Day keys.** Every identity derives one Ed25519 key pair per UTC day from
-its own signing key and gives each contact the public keys of the next 31
-days, sealed as an ordinary message — at an edge (start, network change,
-new contact), when the last such message to that contact is older than 14
-days. A post-box packet is left under the day value: the first 16 B of
+its **current** signing key — never from the founding key, so that an
+Emergency Key Rotation (§4.5.4) takes the post box away from whoever holds
+the old keys — and gives each contact and each group pair (§4.3) the
+public keys of the next 31 days, sealed as an ordinary message — at an
+edge (start, network change, new contact or group pair — at first contact
+the keys ride in the request and the answer, §15.5.1), when the last such
+message to that contact or pair is older than 14
+days, and at an Emergency Key Rotation to every contact regardless of
+that age. After such a rotation the identity asks under its previous day
+keys for 7 more days. A post-box packet is left under the day value: the first 16 B of
 `SHA-256(day public key)`. Holders see only day values, never a person or
 an identifier. The public manifest entry of §26.5.4 keeps its fixed public
 value and needs no proof.
@@ -2100,7 +2258,9 @@ answers `0x32` with a challenge per day value and hands out or deletes
 nothing until the collector returns the day public key — which must hash
 to the day value — and an Ed25519 signature over the challenge with the day
 secret key. A contact knows the public key but not the secret key: it can
-leave post, not collect or delete it. A challenge is used once. A deletion
+leave post, not collect or delete it. A challenge belongs to one question
+of one collector; a proof repeated under it is answered as the first was.
+A deletion
 acknowledgement is signed the same way.
 
 **Leaving costs work.** A `0x30` carries a 16-byte proof of work bound to
@@ -2113,13 +2273,27 @@ of every holder (§20.2).
 Two of three is deliberate: one unavailable neighbour must not be able to
 block delivery. Deletion after the collector's acknowledgement, rather
 than on hand-out, is equally deliberate: a packet lost on the way to a
-returning recipient would otherwise be gone permanently.
+returning recipient would otherwise be gone permanently. A value is
+collected by one device: whichever device of an identity collects first
+deletes. Own devices therefore use device values (§14.7), and deliveries
+from contacts reach the others by mirroring (§14.2).
 
 **When the recipient asks.** Once at start; again when the network
-changes; again when a new neighbour is found (§11.8); again when the user
-opens the application. Never on a timer (§5.4). It asks its own
+changes; again when the user opens the application; and once when a
+device has taken over an enrolment handover (§14.6.1 step 4). When a new
+neighbour is found (§11.8), that neighbour alone is asked. Never on a
+timer (§5.4). It asks its own
 neighbours and, among them, always each of its fixed neighbours (§5.2) —
-the holders senders choose first.
+the holders senders choose first — and, while an invitation of its
+identity stands, that invitation's invitation neighbour, under the
+invitation values (§15.1); a requester leaves its request there first.
+
+**After more than 7 days.** A device keeps, in the identity's message
+store, the moment its last collection ended with an answer from at least
+one holder. When a collection ends and that moment lies more than 7 days
+back, post left for it in between may have expired uncollected, and the
+device asks for what it missed (§9.5). This is checked where a
+collection ends and nowhere else — never on a clock (§5.4).
 
 **The holder cannot read the content.** It sees a day value and opaque
 bytes, as a forwarder sees a code (§8.1).
@@ -2138,7 +2312,7 @@ mechanism (§9.4).
 | State | Meaning | Shown as (§12.2) |
 |---|---|---|
 | `resting` | created, not yet sent | pending mark |
-| `in transit` | sent, no acknowledgement yet | single mark |
+| `in transit` | sent — a way carried it or a post box took it —, no acknowledgement yet | single mark |
 | `delivered` | the recipient acknowledged | double mark |
 | `failed` | given up; no way carried it | warning mark |
 
@@ -2148,11 +2322,15 @@ consumer is a defect waiting to happen.
 
 `in transit` deliberately covers "lying in a post box". A sender does not
 learn, and does not need to learn, which rung of the ladder carried the
-packet.
+packet. A message that no way has carried yet is `resting`, not
+`in transit`.
 
 **A recipient who is offline is not an error.** The message stays
-`in transit` while it waits in a post box. `failed` is reserved for the
-case where no rung carried it at all.
+`in transit` while it waits in a post box, and it stays `in transit`
+when the holders have dropped it after 7 days: it is not placed a second
+time (the one exception: §9.3), and the recipient asks the sender for it
+on return (§9.5).
+`failed` is reserved for the case where no rung carried it at all.
 
 ### 9.2 The acknowledgement
 
@@ -2161,8 +2339,12 @@ the recipient, carrying the message identifier and the recipient's current
 fixed neighbours (§5.2, §8.1), nothing else. Ordinary messages carry the
 same list, sealed, right behind their identifier; a contact keeps the
 latest list it heard. An identity names to its contacts only fixed
-neighbours that are its own contacts, otherwise the card's neighbour — a
+neighbours that are its own contacts, otherwise the invitation neighbour — a
 friend of one identity is never named to the contacts of another.
+Twin-sync deliveries (§14.7) carry no acknowledgement; placed (§8.2) is
+their final observation. Where §14.7 requires acknowledgement by every
+device (revocations), it is a twin-sync delivery back to the originating
+device.
 
 | Property | Value |
 |---|---|
@@ -2181,6 +2363,9 @@ delivery that never happened.
 | acknowledgement for an unknown identifier | discarded, not raised as an error |
 | duplicate acknowledgement | ignored |
 
+The acknowledgement takes the way the message came; it is left in a post
+box only when the message was collected from one.
+
 An acknowledgement for an unknown identifier is the expected consequence
 of a retry crossing a late answer, and must never surface as a fault.
 
@@ -2188,10 +2373,47 @@ of a retry crossing a late answer, and must never surface as a fault.
 
 The delivery layer never decides on its own that a message has failed. It
 reports what each step did; the application decides when to stop. There
-is no timer that expires messages and no background retry loop.
+is no timer in the delivery layer that expires messages and no background
+retry loop. At the edges of §8.2 the node sends again, under the same
+identifier, what is neither acknowledged nor placed — except call
+signals, which are sent once and end with their call (§17.2). Where the
+application sets itself a limit — a call must ring within 10 s (§17.2) —
+the limit is the application's: it stops the sending, as this section
+provides, and the delivery layer learns of nothing but the stop.
+
+**The application's limit for a message that found no way: 14 days.** A
+message the ladder could not carry — the recipient holds no address and
+no post box could be reached — rests in the sender's history (§9.1) and
+leaves again at every edge of §8.2. When it would leave again and has
+been resting for more than 14 days since it was written, the application
+closes it as `failed` with the reason "no way for 14 days" (§12.2); the
+user may send it again under a new identifier. The check runs only where
+the message would be sent again — at start and at the edges — never on a
+clock; a device never wakes to declare a message dead. Fourteen days, not
+the seven of the post box (§8.2): there a packet occupies a holder's
+storage, here the sender's own. A file keeps its own rule (§9.4, D-34).
+A message closed this way stays in the sender's conversation; when its
+recipient later asks for what it missed (§9.5), it is sent with the
+answer under its own identifier and becomes `delivered` — unless the
+user has sent it again in the meantime, in which case only the new one
+counts.
+
+**A placed message that is not collected.** Placed (§8.2) is final for
+the delivery layer: a placed message is not sent again at an edge, not
+placed a second time and not closed as `failed`. The one exception is an
+emergency key rotation (§4.5.4): what is not acknowledged — placed
+messages included — is sealed anew with the new keys and sent again,
+placing included; the copy with the holders was sealed against keys that
+may be in the hands of whoever forced the rotation. Holders keep it for
+7 days; after that it lies with nobody but its sender, in the
+conversation in the sender's message store, and reaches its recipient
+through the recipient's request (§9.5). The copy kept for sending again
+is dropped at the next edge once the placing is more than 7 days old.
 
 Where a user retries, the message is sent again under a new identifier;
-the old one is closed as `failed`.
+the old one is closed as `failed`. A file is never sent again: when its
+transfer fails it is `failed` at once, with its reason, at the sender and
+the recipient (§9.4).
 
 ### 9.4 Large payloads — three lanes for media
 
@@ -2201,7 +2423,7 @@ viability — never by silent preference.
 | | Lane | When | Mechanism |
 |---|---|---|---|
 | 1 | inline | payload below 256 KB | Reed-Solomon striped, placed like any other packet |
-| 2 | streamed | at or above 256 KB, both parties online, within the relay size cap `C`, a volunteer available | Reed-Solomon pieces through a consenting neighbour; nothing stored in the network; the parties do not learn each other's addresses |
+| 2 | streamed | at or above 256 KB, both parties online, within the relay size cap `C`, a volunteer available | Reed-Solomon pieces through a volunteer (§17.6); nothing stored in the network; the parties do not learn each other's addresses |
 | 3 | bulk | otherwise | the same pieces placed once each with always-on holders, collected by the recipient on its own cadence |
 
 **Lane 1, the codec.** The object is striped at cell level: `K = 7`
@@ -2217,9 +2439,113 @@ no refill round.
 | fragment surplus `d` | 4 |
 | resulting overhead `N/K` | 1.571 |
 | relay size cap `C` | 25 MB of payload (D-1) |
+| bulk rate `R_bulk` | 32 cells/s (38.4 KB/s), one transfer at a time — proposed, to be measured |
 
 **Pieces are lane-neutral.** All three lanes carry the same
 Reed-Solomon pieces and differ only in where those pieces go.
+
+**The transfer key.** Every transfer draws a fresh 32-byte root `K_T`.
+The pieces are sealed under `HKDF(K_T, "bulk/seal")`, and the identifier
+under which they are held and collected is `HKDF(K_T, "bulk/tag")`.
+`K_T` travels in the announcement, which is an ordinary message and
+therefore under the hybrid seal of §4.3; this is what keeps media
+content post-quantum sealed on every lane. `K_T` is never derived from
+`K_AB`: a derived key would inherit the classical-only exchange of
+`K_AB`, would give no forward secrecy because `K_AB` survives every
+rotation (§4.5.4), and would let whoever holds `K_AB` test whether a
+guessed object was sent. A group transfer draws one `K_T` and hands it
+to each member over that member's own leg — encode once, place once.
+
+**Lane 1 is one message.** The pieces of an inline object travel together
+in one sealed message and take the ladder like any other (§7, §8),
+post box included; there they count as one packet against the bound of
+§8.2. Placing them one by one would put up to 407 packets under one day
+value and push the recipient's other post out.
+
+**Holding time.** Pieces and announcement are held for `TTL_media` =
+7 days, the retention of the post box (§8.2); the announcement travels
+with that TTL, so preview and pieces expire together. A holder does not
+clear pieces when the transfer completes: it knows neither `K_T` nor the
+content, so it cannot verify any claim that a transfer is done, and a
+"done, discard" packet would be a delete command anyone could send.
+The announcement is the message in the sense of §9.1; its
+acknowledgement (§9.2) is sent only once the object decodes, and that
+acknowledgement sets `delivered`.
+
+**Lane 3, placement.** Each fragment is placed once. The eleven fragments
+of a stripe go to eleven distinct holders, taken in turn; this is what
+makes the failure boundary above a boundary per holder. A holder is a
+node with evidenced reachability (§11.8a) that keeps a bulk cache
+(§21.3.3): every desktop installation, and a phone whose address the
+check of §8.1 found open. The sender takes them in this
+order: the recipient's fixed neighbours as the recipient last told them
+(§9.2), then its own fixed neighbours (§5.2) — both are devices of
+contacts —, then other neighbours with evidenced reachability. Among
+candidates of equal rank desktops go first; a holder states its class
+in `0x53`. A sender
+that knows fewer than eleven holders places fragments of one stripe on
+a shared holder, and the boundary no longer holds for that stripe (B-30).
+The announcement names the holders, at most eleven addresses; the
+recipient asks exactly those.
+
+**Lane 3, holding.** `0x52` leaves fragments with a holder, `0x53`
+acknowledges them. Proof of work is paid **once per transfer and
+holder**, not per fragment: the first `0x52` of a transfer carries a
+proof of `D_box` (§8.2) bound to the transfer identifier
+`HKDF(K_T, "bulk/tag")` and the number of fragments announced for that
+holder, and the holder accepts that many under the identifier. The
+fragments go into the holder's bulk cache (§21.2, §21.3.3); a full cache
+evicts its oldest fragments (§20.2). The bound of 100 packets per day
+value (§8.2) does not apply to fragments.
+
+**Lane 3, collection.** The recipient sends `0x54` with the identifier
+to each named holder, at the moments of §8.2 — at start, on a network
+change, when the application opens — never on a timer; the holder
+answers with the fragments it holds (`0x51`, sealed under
+`HKDF(K_T, "bulk/seal")`) and closes every pass with `0x55` carrying the
+number of fragments it sent, or answers `0x55` "nothing here" without a
+number. `0x54` may name the first stripe the recipient still lacks; the
+holder then hands out only from that stripe on. When every named holder
+has closed its pass and stripes are still missing, the recipient asks
+again at once from the first missing stripe — the loss rule of §11.3
+driven by the holders' end marks, not by a clock; after three such rounds
+without a new complete stripe the file is `failed`, incomplete (x of y
+stripes). A holder that sends no end mark leaves the next moment of §8.2
+to ask. Stripes already complete are kept on the recipient's disk,
+encrypted, up to 256 MiB, so that a restart asks only for the rest. Knowing the
+identifier is enough to collect: it follows from `K_T`, which only the
+two ends hold, and the fragments are sealed. Nobody deletes; fragments
+expire with `TTL_media`.
+
+**Consent.** Lanes 2 and 3 are visible, linkable events (B-29). Before a
+file takes either lane, the sender is asked for this transfer only, with
+the linkability named (§24.4.5); without consent nothing is sent. No
+remembered blanket consent is offered.
+
+**The rest goes into the network.** A transfer that is interrupted — the
+recipient goes offline during a stream, the volunteer is lost — places
+the object on lane 3 — at least the pieces the recipient does not yet
+hold, and all of them where the sender cannot know what survived at the
+recipient — before the sender counts the file as sent, and the sender
+resumes that placement after its own restart with the same holders under
+the same `K_T`; a holder keeps each fragment once. The recipient then assembles the file from the holders even
+while the sender is off.
+
+**Nothing overtakes a file.** A message to the same contact written after
+a file waits at the sender until that file is completely in the network —
+streamed to the end or placed with holders — and carries the file's
+identifier (8 B). A recipient that receives such a message while the file
+is still incomplete collects from the holders at once; if the file cannot
+be assembled from what the network holds, it is `failed` with its reason,
+and the recipient says so to the sender, which marks it `failed` too. The
+waiting message is then delivered and shown after the file.
+
+**Reasons.** A failed file carries one of: no holder accepted; no way to
+the recipient; consent missing; too large; incomplete (x of y stripes);
+holders gone or expired; given up by the sender. Sender and recipient show
+the same reason. Either end that gives a file up after its announcement
+tells the other in one ordinary message (`MTV3_MEDIA_ABORT`: identifier,
+reason, x of y stripes), so both show the same reason.
 
 **Why Reed-Solomon and not a rateless code.** A rateless code needs
 `K·(1+ε)` blocks and lets the sender produce as many as it likes — an
@@ -2243,6 +2569,47 @@ frame size of §17.6 the volunteer forwards at most 46 MB in each
 direction per transfer. The cap is set, not measured; the volunteer's
 real load and the share of transfers that take lane 2 at this cap are
 measurement work (Appendix C).
+
+### 9.5 Catching up after more than 7 days
+
+A message lies with holders for at most 7 days and is never placed a
+second time (§8.2, §9.3). A device whose last collection lies further
+back asks for what it missed. It does so with the reconciliation of
+§14.6.3 — the same packets, the same bounds, the same store operations —
+carried between the two parties of a pair (§4.3) instead of over the
+own-device line. There is no second mechanism.
+
+**Who is asked.** Every contact and every group pair, once. One request
+covers the conversation of the pair and every group and channel both
+belong to — the scope of §13.5.4. The request is an ordinary message
+(§9.1, §9.2) and names the moment of the device's last collection (§8.2)
+and nothing else about the device. A request that expired in the post
+box of a party that was itself away is sent again when a request from
+that party arrives, never on a clock.
+
+**What is sent.** The party asked sends what it wrote itself, and only
+that: its messages in that scope written or changed since 14 days before
+the named moment (§9.3), newest first, in packets of at most 32 768 B
+including the seal, at most 4 packets per round, the next round on the
+requester's progress report (§20.2); the identifiers of its messages
+deleted in that time; and the identifiers of the requester's messages it
+holds from that time. A group post therefore reaches the requester from
+its author, under the author's seal, as §16.2 delivers it. What the
+party has deleted, and what has expired there (§21.5.3), is not sent —
+deleted is deleted (§13.5.2). A file is named by its record and not sent
+again (§9.4). For each conversation in that scope it also names the
+number of its messages from that time that expired there unacknowledged
+— the number, nothing of their content — and the requester shows it once
+in that conversation.
+
+**What the requester does.** It takes a message only if it holds none
+with that identifier, acknowledges every packet (§9.2) and reports the
+messages as delivered. Its own messages the answer names as held become
+`delivered`.
+
+**Bounds.** One open request per party; one answer per party and named
+moment, a moment in the future refused; nothing from before the pair or
+the membership existed (§20.2).
 
 ## 10. Sybil and censorship resistance
 
@@ -2367,8 +2734,13 @@ no second port and no second protocol.
 | exception | none — no node uses a fixed, published port (§11.7) |
 
 The port is fixed at first start and never changes on its own. A node
-that changes its port is unreachable to everybody holding its card until
-a new card is exchanged.
+that changes its port is unreachable to everybody holding one of its invitations until
+a new invitation is exchanged.
+
+**Reading.** A node reads its socket until empty at every read event and
+processes afterwards, in batches; a sending loop yields to the event loop
+after each batch, without waiting. Re-sending repairs what the network
+lost, never what the node was too slow to read.
 
 **Dual stack.** Both sockets carry the same traffic. A node opens the
 sockets **for the address families it actually has**: it reads its
@@ -2376,7 +2748,7 @@ interfaces first and binds the IPv6 socket only when an IPv6 address is
 present under which someone can reach it — a global address or a unique
 local one. Link-local `fe80::/10` does not count: without a zone
 identifier it is no destination another node can use, and it never enters
-a card (§15.2). There is no speculative bind. A bind on `::` succeeds even
+the invitation data (§15.2). There is no speculative bind. A bind on `::` succeeds even
 on a host with no usable IPv6 at all, so the error would not surface where
 it arises but at the first send, asynchronously, and it ends the socket. A
 node knows its network environment instead of exploring it by failing.
@@ -2387,12 +2759,12 @@ closes the second socket accordingly — a phone leaving Wi-Fi for mobile
 data may lose its IPv6, and keeping the socket would keep a socket whose
 first send ends it.
 
-A node with a global IPv6 address advertises it in its card (§15.2); a
+A node with a global IPv6 address advertises it in its invitation data (§15.2); a
 node without one simply does not, and the address-type byte carries the
 distinction.
 
 **A node speaks only the families it has.** It sends to, admits as a
-neighbour, names in a card (§15.2) and in a way back (§15.5) only addresses
+neighbour, names in invitation data (§15.2) and in a way back (§15.5) only addresses
 of a family it holds a socket for. A hint in another family is not stored
 and not tried.
 
@@ -2415,27 +2787,32 @@ whether a payload was split.
 | identifier | 8 | random per transmission |
 | count | 2 | number of parts, u16 LE |
 | index | 2 | this part's number, u16 LE |
-| payload | up to 1188 | |
+| payload | up to 1158 | |
 
 | Parameter | Value |
 |---|---|
-| part size including header | 1200 B |
+| part size including header | 1170 B — 1200 B on the wire with the shell (§4.2) |
 | header | 12 B |
-| payload per part | 1188 B |
+| payload per part | 1158 B |
 | largest transmission | 65535 parts |
 
 ### 11.3 Re-requesting what is missing
 
 The recipient does not acknowledge parts individually. It waits for a
-quiet moment and then asks once for everything still missing.
+quiet moment and then asks once for everything still missing. When a
+transmission of two or more parts is complete, it says so once: an empty
+request, listing no index. This end mark lets the sender start its next
+transmission to that recipient (§20.2).
 
 | Parameter | Value |
 |---|---|
 | quiet period before asking | 300 ms without a new part |
 | request | one packet listing the missing indices |
-| rounds | at most 3 |
-| after 3 rounds | the transmission fails and the caller is told |
+| rounds | as long as each brings new parts; at most 3 in a row that bring none |
+| after 3 rounds without progress, or 30 s | the transmission fails and the caller is told |
 | incomplete transmissions discarded after | 30 s |
+| end mark | an empty request (no missing index), once per complete transmission of two or more parts |
+| sender without end mark or request | treats the transmission as ended 1.1 s after its last part (quiet period 300 ms + one answer deadline, §11.6) |
 
 There is no timer that runs while parts are arriving, and no
 per-part acknowledgement. A transmission that never completes fails
@@ -2469,7 +2846,7 @@ from here rather than choosing one:
 | 0x20-0x2F | handing on by code (§8.1): `0x20`–`0x23` |
 | 0x30-0x3F | post box (§8.2) |
 | 0x40-0x4F | public-address discovery and knocking (§7.3); board question `0x43` and answer `0x44` (§11.8a); keep-alive measurement `0x45`–`0x47` and open check `0x48`–`0x4A` (§8.1) |
-| 0x50-0x5F | media (§9.4) |
+| 0x50-0x5F | media (§9.4): announcement `0x50`, fragment `0x51`, hold `0x52`, held `0x53`, collect `0x54` (identifier ‖ optional first missing stripe), nothing here or end of pass `0x55` (identifier ‖ optional fragments sent); stream (§17.6): ask `0x56`, cookies or refusal `0x57`, join `0x58`, frame `0x59`, missing `0x5A` |
 | 0x60-0x6F | groups (§16.2) |
 | 0x70-0xFF | free |
 
@@ -2492,9 +2869,27 @@ could see it while each module was built on its own.
 | post box: hold | anyone | §8.2, subject to the per-day-value cap |
 | post box: collect and delete | the recipient, proven by a signed challenge (Ed25519) | §8.2 |
 
-A packet that cannot be parsed is discarded without an answer. A node
-never answers an unparseable packet, because an answer would confirm
-that something is listening.
+A packet that cannot be parsed is discarded without an answer; a single
+packet never triggers one. This does not hide the node: the exception
+below and the anonymous handshake (§4.2) let anyone who reaches the data
+port confirm that a node listens there (RL-12).
+
+One exception, on the shell (§4.2) only: a node that receives from one
+address two 1200-B packets it can open under no key and that do not
+form a handshake starts a shell handshake to that address itself — two
+packets in, two out, at most once per 10 s per address and port and at
+most 8 at a time; a single such packet stays unanswered. This is how a node that
+restarted lets its peers back in. A node whose counterpart has been
+silent for more than 2 s adds one empty sealed packet behind its first
+single-packet sending, so that a restarted counterpart holds two. Link
+keys live in memory only. Whether a counterpart lives is judged only by
+what arrives from it — its cover counts, this node's own cover and
+keep-alive packets to it do not: they never renew a link and do not count
+as sending for this rule; there is no renewal on silence while real
+sending continues. A request
+that expects an answer — the post box's `0x32` and `0x36` — to a
+counterpart not heard for more than 2 s renews the link first; if the
+handshake stays unanswered, the link has ended unanswered (§8.2).
 
 ### 11.7 The first entry
 
@@ -2502,17 +2897,17 @@ A node needs one reachable address to start from. **No address, port or
 host is built into the application or its configuration — an environment
 variable pointing at an entry node is configuration too —, and nothing in
 the system depends on a particular node being present.** The entry comes
-from the invitation card of the first contact (§15.2): its LAN, public and
+from the invitation data of the first contact (§15.2): its LAN, public and
 neighbour addresses and its relay list. From there the node's list grows
 with every neighbour it learns (§11.8); the more addresses of contacts a
-node knows, the better. Where the card's addresses do not answer, the node
+node knows, the better. Where the addresses in the invitation data do not answer, the node
 uses the external records of §11.9. Once stable nodes of our own exist,
-their addresses travel in the card instead of or alongside the relays;
+their addresses travel in the invitation data instead of or alongside the relays;
 they, too, are ordinary nodes without privileges.
 
 ### 11.8 Finding neighbours
 
-A node needs neighbours before it can do anything except show its card
+A node needs neighbours before it can do anything except show its invitation
 (§12.4). It looks in the first three places, **all three at once**, and
 keeps whatever answers first. As soon as one of them has produced a
 neighbour that is reachable under its address, it asks that neighbour's
@@ -2523,13 +2918,13 @@ neighbours (§11.9):
 |---|---|---|---|
 | 1 | remembered | the neighbours from the last run, stored with the contacts (§21) | instant, and usually enough |
 | 2 | the local segment | the neighbour call of §7.2 | milliseconds, when anybody is on the same network |
-| 3 | the first contact's card | the addresses and relays carried in the card of §15.2, and those learned from later cards | one round trip |
+| 3 | the first contact's invitation data | the addresses and relays carried in the invitation data of §15.2, and those learned from later invitations | one round trip |
 | 4 | external records | signed address records published on a public relay network (§11.9) | seconds, and works where none of the others do |
 
 Sources 1–3 are attempted together, not in order: a remembered neighbour
 that has moved must not delay the neighbour call, and an empty local
-segment must not delay the card's addresses. Sources 1–3 count as finished
-when the call's three rounds are over and the card's addresses have been
+segment must not delay the addresses in the invitation data. Sources 1–3 count as finished
+when the call's three rounds are over and the addresses in the invitation data have been
 tried once; external records (§11.9) are then read if the node is still
 below 32 answering neighbours.
 
@@ -2561,14 +2956,17 @@ neighbour goes with its last address.** Every
 packet that expects an answer — the neighbour call, a receipt, a board
 answer, the address answer of §7.3 — confirms the entry and stamps it. An
 entry not confirmed for a day is stale: at the next edge it is tried
-**once**, and only a failure removes it.
+**once**, and only a failure removes it. **A removed address returns only
+with a hint confirmed after its removal**; a hint that says nothing newer —
+a record, a board entry or an address entry older than the removal — is not
+admitted. A network change clears this.
 
-A use has failed only when the request went out twice without an answer
-**and** this node has confirmed at least one other neighbour since its
-start or last network change. A node that confirms nobody — offline, a
-dead uplink — learns nothing about its neighbours from silence and removes
-none. The price is one packet more per failure, and a dead neighbour stays
-one attempt longer.
+An entry counts as failed only when two uses of it failed — each a
+request without an answer — **and** this node has confirmed at least one
+other neighbour since its start or last network change. A single request
+is never repeated for this. A node that confirms nobody — offline, a dead
+uplink — learns nothing about its neighbours from silence and removes
+none. The price is that a dead neighbour stays one use longer.
 
 **A removal is an edge.** Falling below 32 triggers what a cold start
 triggers — sources 1–3, the board (§11.8a), the external records (§11.9) —
@@ -2635,7 +3033,7 @@ discarded.
 | trust | none — an entry is a hint like a record (§11.9) |
 
 **The first pointer is always learned, never built in** (§11.7). It comes
-from a card (§15.2: the issuer's own address or its neighbour's), from the
+from invitation data (§15.2: the issuer's own address or its neighbour's), from the
 neighbour call in the segment (§7.2), or, once, from the external records
 (§11.9). A node that has one pointer does not need the relays again.
 
@@ -2650,7 +3048,7 @@ answers, and since when.
 
 A node below 32 answering neighbours — in the extreme case one with no
 remembered neighbours, on a network where the neighbour call reaches nobody
-and the addresses of the first contact's card do not answer — still needs a
+and the addresses in the first contact's invitation data do not answer — still needs a
 way to more. It reads address records that other nodes have published on a
 public relay network.
 
@@ -2660,7 +3058,7 @@ public relay network.
 | signed with | secp256k1 Schnorr, the signature scheme the relay network requires |
 | read by | any node looking for neighbours |
 | trust | none — a record is a hint, and an address that does not answer is simply dropped |
-| which relays | a built-in list of public relays, extended by the relay lists of cards it has read; the node's own card carries the relays it knows |
+| which relays | a built-in list of public relays, extended by the relay lists of invitations it has read; the node's own invitation data carry the relays it knows |
 | publisher key | a node with a reachable address keeps **one key for its records**, so that a new record replaces the old one and its standing is readable; a node without a reachable address publishes nothing and therefore needs no key |
 | relays written and read | 2–3 |
 | lifetime of a record | 1 day |
@@ -2699,7 +3097,7 @@ carries no authority: an address that does not answer is dropped (§6.1),
 however long it has stood.
 
 The relay network is a start aid only:
-once stable nodes of our own can be offered through the card, it may be
+once stable nodes of our own can be offered through the invitation data, it may be
 read in parallel or not at all.
 
 This is the only part of the system that uses infrastructure it does not
@@ -2722,6 +3120,8 @@ neither reads nor publishes; it finds neighbours by sources 1–3 alone.
 The interface offers no delivery-mode control. There is one path (§3.3),
 and whatever concealment the design provides, it provides on every
 message. No per-chat setting, no explanatory dialog, no switch.
+The one question the interface asks is per file: before a file takes a
+media lane that is weaker than the one path (§9.4, §24.4.5).
 
 ### 12.2 Per message
 
@@ -2732,7 +3132,7 @@ Exactly the four states of §9.1, and nothing that needs explaining:
 | `resting` | pending mark | — |
 | `in transit` | single mark | — |
 | `delivered` | double mark | — |
-| `failed` | warning mark | retry |
+| `failed` | warning mark and its reason | retry — not for a file (§9.3) |
 
 A recipient who is offline is shown as `in transit`, not as an error.
 
@@ -2746,28 +3146,45 @@ interface.
 The indicator is refreshed at most every 30 s, so that a rendering path
 without hardware acceleration is not driven continuously.
 
-### 12.4 The invitation is always available
+### 12.4 When an invitation is shown
 
-The card (§15.2) is generated from the node's own keys and its LAN
-address. It requires no network, no readiness state and no third party,
-and is therefore offered from the first start onwards — including on a
-device that has never reached another node.
+An invitation — QR code, NFC exchange or out-of-band invitation (§15.2,
+§15.6) — is generated from the node's own keys and addresses. **It is
+shown when its invitation data carry a way in from the open network:** an
+own address reachable from the open network (a phone's global IPv6
+address, for instance — two phones that meet in the street reach each
+other directly), or, for a device reachable only through a neighbour
+(behind NAT or carrier-grade NAT), that verified invitation neighbour
+(§15.2). Invitation data without either cannot be redeemed from the
+internet, and showing them produces a request that never arrives.
 
-Both hand-over forms are offered side by side, and both carry the same
-bytes:
+**Until such invitation data can be made, the device shows a waiting
+indicator — at most 30 s.** Then it says plainly that the device cannot
+be reached from the internet right now and that the invitation should be
+tried again later. Below that message a button shows the invitation
+anyway, marked as usable only in the same W/LAN: two devices on one
+network without internet still reach each other over their own addresses
+(§7.2). The rule is the same for all three ways of handing an invitation
+over (owner decision 06.10.2026).
 
-| Form | Use |
+All three ways are offered side by side. QR code and NFC exchange carry
+the invitation data; the out-of-band line carries them and, appended, the
+issuer's key bundle and invitation box key (§15.6), so that it can be
+redeemed while the issuer is off (§15.1):
+
+| Way | Use |
 |---|---|
 | QR code | the other person is present and can scan |
-| one line of text | pasting into a chat, a mail or a message |
+| NFC exchange | the other person is present; the two devices touch |
+| out-of-band invitation | pasting into a chat, a mail or a message; redeemable while the issuer is off |
 
-**Showing the card is universal:** every platform renders its own QR
+**Showing the QR code is universal:** every platform renders its own QR
 code, desktops included. **Scanning follows the camera, not the
 platform:** where a camera is present the app scans, and a phone held in
 front of a desktop's webcam establishes the contact exactly as two phones
-do. Where no camera is present, the text line carries it, passed through
-any channel the two already share. **The card is always issued by the
-device that holds the identity** — where that device runs a separate
+do. Where no camera is present, the out-of-band invitation carries it,
+passed through any channel the two already share. **An invitation is
+always issued by the device that holds the identity** — where that device runs a separate
 service process, its front end obtains it over the local service channel.
 
 ### 12.5 Accepting a contact is an explicit act
@@ -2815,15 +3232,29 @@ announcement that is due anyway.
 **The decision a fresh install must make.** When Cleona is installed fresh
 and the user does *not* create a new account but enters a recovery phrase,
 the first thing to establish is whether **other devices already exist under
-that phrase**.
+that phrase**. The fresh install reads the recovery bundle (§13.3.1):
 
-* **Other devices exist** → this is *not* a recovery case. The data is
-  completed from the same identity running on the other device (§14.4,
-  device-set change). No distress call, no recovery box, no involvement of
-  contacts.
-* **No other device carries this phrase** → **this is the recovery case.**
+* **The bundle carries an open enrolment window** → this is *not* a
+  recovery case. The device asks to be added (§14.6.1) and waits for the
+  approval on the existing device; the data is completed from the same
+  identity running there. No distress call, no recovery box, no
+  involvement of contacts.
+* **A bundle younger than 7 days without a window** → the device asks the
+  user whether the previous device still exists. If so, the user opens the
+  window there; if not, the user chooses recovery explicitly, warned that
+  two devices running one identity without enrolment do not share their
+  key state.
+* **No bundle** → **this is the recovery case.**
   The data is rebuilt from the chats with the contacts, groups and channels
   the user was a member of.
+
+Until the bundle is found or the user chooses recovery, the fresh install
+searches for the bundle only and collects no post of the identity — a
+device that collected and deleted it would take it from a living device
+that never sees it. An unsuccessful search is not an error (§13.2.3): the
+interface says the search is running, points to opening the window on
+another device, and offers recovery. "No bundle" is never concluded
+automatically; the recovery case begins with the user's choice.
 
 The real recovery case is therefore exclusively: **all devices gone.**
 House fire, theft of the entire household, loss while traveling without a
@@ -2854,15 +3285,13 @@ the distress call weighs almost nothing, because a user sends it rarely or
 never in a lifetime. §13.3 and §13.4 are therefore designed with different
 degrees of frugality.
 
-**Delivery path.** The bundle and the distress call are ordinary
-deliveries under seed-derivable tags to the R responsible relays; the
-restore broadcast is an ordinary pairwise delivery under `tag(K_AB)`.
-The bundle, being > 10 KB, rides Reed-Solomon erasure coding rather
-than fountain codes — fountain codes carry only files and updates
-(AP-7), not message or recovery delivery — as described in §9 (today
-K=7, N=11). Recovery traffic goes out through the store-and-harvest
-leg of the delivery ladder (Chapters 7/8) by default: it is not
-latency-critical, and it must not be session-linkable.
+**Delivery path.** The bundle is left in the post box (§8.2) under
+values only the seed yields, with the holders of §13.3.1; it is one
+deposit, split on the wire (§11.2), and takes no media lane — lane 3
+needs an announcement naming the holders, and a device after a total
+loss has nobody to receive one from. The distress call and the restore
+broadcast (§13.4, §13.5) are not yet restated for the post box of §8.2
+(Appendix C).
 
 ---
 
@@ -2909,22 +3338,23 @@ This is exactly where the device lock draws its force from (§14.4: “the
 exclusion is structural, not rule-based") — and this is exactly what the
 central statement of this chapter follows from:
 
-> **If all devices are gone, no device still holds the Shared Key — and it
-> cannot be derived from the 24 words alone.** There is exactly one place
-> it still resides: in the recovery bundle held by the responsible relays
-> (§13.3), whose tag line and seal are supplied exclusively by the seed. As
-> long as the bundle lives — up to 31 days after the last renewal (§13.3.4)
-> — the phrase therefore reopens the old inbox (§13.2.1). Only after bundle
-> expiry is it finally closed (§13.2.2).
+> **If all devices are gone, the current signing and KEM keys are gone
+> with them — after a rotation neither follows from the 24 words (§4.3,
+> D-33).** The recovery bundle carries them (§13.3), found and opened only
+> with the seed. As long as it lies with its holders — up to 7 days after
+> its last placement (§13.3.4) — the phrase therefore brings back the day
+> keys (§8.2) and with them the post still waiting; after that only the
+> founding identity remains (§13.2.2).
 
 This is not a deficiency but the flip side of a property one wants to have.
 An inbox key the seed could reconstruct at any time would be an inbox key a
 locked-out device with seed access could reconstruct too. The price is
-clearly named, small, and arises **only in the without-bundle case** — more
-than 31 days with no device alive (§13.2.2): whatever still lay unharvested
-in the old inbox at that point is lost — at most the delivery-window
-traffic. In the normal case, with a bundle (§13.2.1), nothing is lost that
-the delivery window still carries.
+clearly named, small, and arises **only in the without-bundle case** —
+every device dead for more than 7 days after the last placement of the
+bundle (§13.3.4, §13.2.2): whatever still lay uncollected in a post box
+at that point is lost — at most the post of the last 7 days (§8.2). In
+the normal case, with a bundle (§13.2.1), nothing is lost that a post
+box still holds.
 
 What is **not** lost: the identity — each identity's UserID and its
 fingerprints (§13.1.1) — and the seed-derived key pairs; with the bundle
@@ -2963,11 +3393,13 @@ exactly two paths for this — §13.3 and §13.4.
 
 #### 13.2.1 With a Recovery Bundle: Back Up Immediately
 
-The bundle contains the **Shared Key** (§13.3.2). From this, `inbox_key`
-follows via HKDF; the recovering user harvests their own inbox line for
-the current and the two previous epochs and keeps harvesting where the
-last device left off. For the contacts, **nothing** changes at first: they
-keep writing to the same address, and their messages arrive.
+The bundle contains the current signing key (§13.3.2); the day keys of
+the last 7 days follow from it (§8.2), and the recovering device asks its
+former fixed neighbours, which the bundle names, for the post still lying
+under them. For the contacts nothing changes at first: they keep writing
+to the same day values, and their messages arrive. A contact's address is
+taken from its first envelope that proves its UserID (§4.1); its `s_AB`
+comes from the bundle.
 
 **During recovery, rotation is explicitly not performed.** The reason is
 given in §13.6: a rotation in the middle of the process would have the
@@ -3006,16 +3438,27 @@ follows the offline-is-not-an-error rule and the visibility rule from
 
 ### 13.3 Stage 1 — the Recovery Bundle
 
-The bundle is the normal case: **no contact needs to be online, and none
-needs to react at all.**
+The bundle is the normal case: **no contact needs to react.** It is found
+where the recovering device reaches one of its holders — a former fixed
+neighbour (a contact's device, §5.2), reached for instance by reading that
+contact's invitation again, or a neighbour it happens to find (§13.3.1).
 
 #### 13.3.1 Location, Tag Line and Delivery
 
 ```
-recovery_key(i) = HKDF(seed, "recovery" ‖ i)                          // i = identity_index
-σ_R(i, e)       = HKDF(recovery_key(i), "recovery-line"  ‖ epoch_e)
-tag_R(i, e, j)  = HKDF(recovery_key(i), "recovery" ‖ epoch_e ‖ j)    // j = block index
+recovery_key(i) = HKDF(seed, "recovery" ‖ i)                 // i = identity_index
+box_key(i, d)   = Ed25519 pair from HKDF(recovery_key(i), "recovery-box" ‖ d)   // d = UTC day of placement
+value_R(i, d)   = first 16 B of SHA-256(box_key(i, d).pk)    // a post-box value (§8.2)
 ```
+
+The bundle is left under `value_R(i, d)` of the day it is placed, with
+three holders: the identity's fixed neighbours first (§5.2), then its own
+neighbours as a deposit takes them (§8.2). A holder hands it out only
+against the proof of §8.2, which only the seed can give. The recovering
+device asks the values of the last 7 days in one question — at every
+post-box edge (§8.2) while it is in the recovery case (§13.0), and at once
+with the addresses of any invitation it reads (§15.2). Nothing else can compute
+a value or collect it.
 
 **One bundle per identity.** Shared Key, device set, contact list,
 and current key state are per-identity quantities (§14.4: “all devices
@@ -3025,23 +3468,16 @@ identities could not be fully built by a device that does not host a
 given identity at all. That is why every device delivers its own bundle
 **per identity it hosts**, into that identity's own line; the index
 parameter follows the HKDF pattern of the HD derivation (§4.5.1). The
-recovering user derives the indices in ascending order; the marker (§13.7)
-supplies the stopping criterion.
+recovering user derives the indices in ascending order and asks one index
+beyond the last one found (§13.7).
 
 - Both quantities are derivable **exclusively** from the seed. Neither a
-  contact, nor a relay co-holder, nor a holder of the ContactSeed can
-  compute the line. The bundle appears as an ordinary set of cover-traffic
-  deliveries under single-use tags, planted to the R responsible relays.
-- **Epoch definition.** The recovery epoch is **14 d** (distinct from the
-  liveness epoch of §6/§9, which is far shorter). The recovering user
-  harvests the line for **current + 2 previous** epochs (42 d coverage),
-  which fully covers the bundle's 31-day TTL — no special case arises at
-  the epoch boundary.
-- **Finding without a directory:** the recovering user harvests `σ_R(i)`
-  for the three epochs and matches via a local hash lookup against
-  `tag_R` — the same mechanism as any other harvest, no special path, no
-  query. Cost: **3 temporary harvest lines per identity** during recovery;
-  they lapse afterward.
+  contact, nor a holder, nor a holder of the ContactSeed can compute a
+  value or its proof. To a holder the bundle is an ordinary post-box
+  packet under a value it cannot tell from a day value (§8.2).
+- **A value per day.** A new value for every day of placement keeps two
+  renewals unlinkable at a holder; the search asks the 7 values of the
+  retention (§8.2) in one question.
 
 #### 13.3.2 Content — Minimal Bundle (normative)
 
@@ -3051,44 +3487,42 @@ inbox.
 
 | Field | Purpose | Size |
 |---|---|---|
-| **Shared Key** (current) | `inbox_key = HKDF(shared_key, "inbox")` — one's own inbox (§13.2.1) | 32 B |
 | **current User-KEM-SK** (X25519 + ML-KEM-768) | rotated KEM keys are random and not seed-derivable (§4.5, E-44) — without this entry, ciphertexts from the offline period would be unreadable | ~2.5 KB |
 | **current identity sig SKs** (Ed25519 + ML-DSA-65) + continuity chain | these too rotate on lock-out and are not seed-derivable (§14.4); the chain evidences founding → current key | ~4.5 KB + chain |
 | per contact: founding Ed25519 pubkey | `K_AB` derivation (§4.3) | 32 B |
-| per contact: the contact's `inbox_key` | where the restore deliveries are placed (§13.5.1) | 32 B |
+| per contact: `s_AB` | forming `K_AB` and the codes (§4.3) | 32 B |
+| per contact: its fixed neighbours | step 3 at once (§8.1) | ≤ 57 B |
+| own fixed neighbours | where the own post lies (§8.2) | ≤ 57 B |
+| time of placement | the newest of several copies wins | 8 B |
 | per contact: display name + verification level | UI continuity, key-change detection (§15.7) | ~40 B |
 | per contact: deletion marker / block state | prevents deleted contacts from resurrecting via recovery (§15.9) | 1 B |
 | `g_inv`, `Highwater` of the invite line | closes K-7 (§13.10.3, §15.3.3) | 8 B |
 | prekey pool identifier (current state) | basis for pool invalidation (§13.4.4) | 4 B |
-| own `identity_index`, name + `active` flag | self-declaration of the identity (active index + display name) — the list as a whole arises from the derivation run over all indices (§13.7) | ~50 B |
+| own `identity_index`, name + `active` flag | self-declaration of the identity; a deleted index keeps a minimal bundle with `active = false` while a higher index lives — the list as a whole arises from the derivation run (§13.7) | ~50 B |
 | group/channel roster (IDs + member UserIDs) | rebuilding the sphere | variable |
+| enrolment window end (`enrolment_open_until`), present only while open | tells a fresh install that this is an addition, not a recovery (§13.0, §14.6.1) | 8 B |
 
-Order of magnitude **per identity**: ~105 B per contact → **~21 KB** for
-200 contacts, **~25 KB** with rosters; **~32 KB** with the identity's own
-current key state (KEM-SK + sig SKs + chain). Being > 10 KB, the bundle
-rides Reed-Solomon erasure coding as described in §9 (today K=7, N=11,
-1.571× coding overhead; up to 4 holders may fail without losing the
-bundle) rather than fountain codes — the same large-payload path as any
-message > 10 KB. At a fragment size of ~1.1 KB that is ~29 source
-fragments; with the 1.571× coding overhead, roughly **46 fragments per
-identity and renewal**, monthly, at the 31-day TTL. On the wire, per the
-cell packing of §9, that comes to roughly **1.863× the object** — for
-example, a 262 143 B object rides 407 cells (477 KiB). Secondary
-identities are typically contact-poor — their bundle sits correspondingly
-far below these figures. The key state is a constant item (it does not
+Order of magnitude **per identity**: ~196 B per contact → **~39 KB** for
+200 contacts; **~46 KB** with the identity's own current key state
+(KEM-SK + sig SKs + chain), **~50 KB** with rosters. It is one post-box
+deposit (§13.0), about 44 parts on the wire per holder; its redundancy is
+the three holders (§8.3), not a code. Secondary identities are typically
+contact-poor — their bundle sits correspondingly far below these figures. The key state is a constant item (it does not
 grow with the contact count) and changes nothing about the Rejected
 verdict on the full bundle below — that concerned ~3.1 KB per contact.
 
 **Rejected: full bundle.** It would additionally have carried the current
 PQ pubkeys per contact — ML-KEM-768 pubkey **1,184 B** (`oqs_ffi.dart:196`)
 + ML-DSA-65 pubkey **1,952 B** (`oqs_ffi.dart:210`) ≈ 3.1 KB per contact,
-**~640 KB** monthly at the 31-day TTL for 200 contacts, i.e., roughly
-**30 times more expensive**. All it would have bought is that the
+**~630 KB** more for 200 contacts: a bundle of ~680 KB instead of ~50 KB,
+roughly **13 times** the size, at every renewal (§13.3.4) and with each
+of the three holders. All it would have bought is that the
 **first** delivery to a contact could already be sealed against that
 contact's current KEM key instead of their long-term key (§4.6 stage 3).
 Everything else — current pubkeys, prekey batch, profile data, history —
-is supplied by the contact's response anyway (§13.5), just like the CR
-response on first contact (§15.4). A small security gain at 30 times the
+comes from the contact: its current keys with its first envelope (D-35),
+the history from the contact's response once §13.5 is restated
+(Appendix C). A small security gain at 30 times the
 cost, at a point every user pays permanently.
 
 #### 13.3.3 Sealing — and the Missing Forward Secrecy
@@ -3104,13 +3538,13 @@ is not an implementation deficiency but the definition of the matter: a
 backup that the seed alone is meant to open cannot have a key the seed does
 not contain.
 
-The responsible relays hold the bundle ciphertext replicated (m=3 family
-redundancy, §9); an attacker who runs or compromises the relays that carry
-the target's recovery tag can archive it. The KEX-Gate (§10) is what makes
-grabbing the right relays hard: without the seed, the attacker cannot
-compute `tag_R`. The exposure period is bounded by the 31-day TTL plus
-margin (32 days) — but it renews with every bundle renewal, so it applies,
-in effect, permanently to whichever state is most current.
+The three holders keep the bundle ciphertext for 7 days (§8.2, §13.3.1);
+an attacker who runs or compromises a holder can archive it. What makes
+finding it hard is that a holder cannot tell the bundle from any other
+post-box packet: without the seed, the attacker cannot compute
+`value_R` (§13.3.1). The exposure of one placement is bounded by the
+7-day retention — but it renews with every bundle renewal, so it
+applies, in effect, permanently to whichever state is most current.
 
 Because the bundle also carries the Shared Key, a compromised seed opens
 not only the contact list but also the **current inbox** (§4.6). This
@@ -3131,22 +3565,23 @@ it shortens the path from “elaborate takeover with a visible warning" to
   privileged device**, every one may renew.
   As long as any device is alive, the bundle is renewed — there is no
   device whose failure halts the renewal.
-- **Cadence: renewal with every recovery-epoch change, i.e., every 14
-  days.** The TTL is 31 days, the recovery epoch 14 days. A renewal per
-  epoch leaves a single missed date without consequence (14 + 14 < 31)
-  and needs no timer of its own — it hangs off a tick the node keeps
-  anyway (§19: no polling).
+- **Cadence: at a post-box edge (§8.2), when the last placement is 3
+  days old or older.** The bundle lives 7 days (§8.2); a device with an
+  edge at least every 4 days keeps it alive. There is no timer (§5.4): a
+  device that meets no edge for 7 days lets it lapse, and the interface
+  says so. Opening an enrolment window (§14.6.1) places the bundle at
+  once, outside the 3-day cadence; closing it places nothing — the end
+  time is in the bundle, and the next routine renewal omits the field.
 - **Visibility.** The bundle state belongs in the UI, following the
   pattern from §14.4: “Backup valid until <date>" or “Backup expires in
   N days." An expired bundle must not lapse silently.
-- **Hard limit.** If **all** devices have been dead for longer than 31
-  days plus a renewal margin, the bundle has expired off the relays.
-  Stage 2 (§13.4) then takes over. This limit is unavoidable: the relays
-  are a 31-day medium, and a longer-lived durable-object class for the
-  bundle is ruled out — a recovery bundle readable only by its owner
-  carries no checkable proof, and a deadline-bound type producible
-  without limit across the network is exactly the class excluded for the
-  identity tombstone.
+- **Hard limit.** If all devices have been dead for longer than 7 days
+  after the last placement, the bundle has expired from its holders.
+  Stage 2 (§13.4) is not yet restated for 4.2; until it is, §13.2.2
+  applies. A longer life is ruled out for the same reason as before:
+  holders cannot tell a bundle from any other post without being told,
+  and telling them names it — and a longer-lived durable-object class for
+  the bundle is excluded as for the identity tombstone.
 
 ---
 
@@ -3154,10 +3589,10 @@ it shortens the path from “elaborate takeover with a visible warning" to
 
 #### 13.4.1 Why This Stage Must Exist
 
-Stage 1 fails precisely when all devices have been dead for more than a
-month. Without Stage 2, the commitment “the 24 words restore" would be
-limited to one month, and that would have to read the same in onboarding
-as in the architecture.
+Stage 1 fails precisely when all devices have been dead for more than
+7 days after the last placement of the bundle (§13.3.4). Without Stage 2,
+the commitment “the 24 words restore" would be limited to that week, and
+that would have to read the same in onboarding as in the architecture.
 
 The distress call is a **consented exception**: a self-statement about
 one's own identity, explicitly permitted as one of the exhaustive,
@@ -3193,7 +3628,8 @@ Identifier:  H = SHA-256(kIdentityDomain ‖ "restore" ‖ founding_pk_A ‖ epo
   have spread the beacon tags of one's own contacts across many prefixes
   — the subscription problem would have returned.
 - **Rejected: no distress call.** Then the commitment “24 words suffice"
-  would hold for only 31 days. Honest and cheap, but the commitment is the
+  would hold for only 7 days after the last placement of the bundle
+  (§13.3.4). Honest and cheap, but the commitment is the
   foundation of the entire backup concept, because the 24-word phrase is
   the only cold backup (§13.8).
 
@@ -3356,6 +3792,10 @@ any key exchange at all.
 
 ### 13.5 Restore Broadcast and progressive recovery
 
+**Not built.** Type numbers 30 and 31 are reserved. Until this section is
+restated for the post box of §8.2 (Appendix C), the recovery bundle
+(§13.3) is the only way back.
+
 From the moment `K_AB` is computable again for a contact — via the
 bundle (§13.3) or via the distress-call response (§13.4) —, the entire
 remaining procedure is **ordinary traffic**. §15.6 already establishes
@@ -3390,7 +3830,7 @@ Progressive recovery runs in three phases:
 | Phase | Content | Carrier |
 |---|---|---|
 | 1 — Header | Contacts, group memberships, channel subscriptions — the recovering user's contact list is built immediately | one delivery under `tag(K_AB)`; a large roster is chunked to **≤ 32 KB** like the manifest below and stays in-band |
-| 2 — Manifest | The contact announces every message it knows as an entry — `(messageId, timestamp, conversationId, senderId, type, size hint)`, without the message body. Chunks of **750 entries, ≤ 32 KB**, ~42 B/entry compressed | one chunk stays **under the built split bound** of the delivery layer (`frame_split`), so recovery stays **in-band and bulk-free**: it must not be session-linkable (§13.0), and therefore must not depend on always-on holders either (E-86). |
+| 2 — Manifest | The contact announces every message it knows as an entry — `(messageId, timestamp, conversationId, senderId, type, size hint)`, without the message body. Packets of **≤ 32 KB including the hybrid seal** (~7.8 KB, §4.3), ~570 entries at ~42 B | one packet is split as §11.3 and bounded by §20.2, so recovery stays **in-band and bulk-free**: it must not be session-linkable (§13.0), and therefore must not depend on always-on holders either (E-86). |
 | 3 — Pull | The recovering user deduplicates the manifests against IDs already present and pulls what's missing in batches: `RESTORE_FETCH` (max. 50 IDs per request) / `RESTORE_DELIVER` with the message payloads; every delivered message is persisted immediately, partial progress is durable | delivery pairs under `tag(K_AB)`; large payloads via the transfer stages (§9) |
 
 Three rules of the application logic are normative:
@@ -3424,16 +3864,17 @@ path but a recovery procedure.
 #### 13.5.3 Cost of recovery
 
 Every message delivered back is a delivery and costs the **responding
-contact** bandwidth. At ~590 B per delivery, 200 messages of history is
-~118 KB — negligible. A history of 50,000 messages would run to ~30 MB.
+contact** bandwidth. A single delivery costs at least the seal
+(~7.8 KB); batched in 32 KB packets, ~24 KB of each is content — 10,000
+messages are ~130–270 packets, ~4–9 MB before the three holder copies.
 The one responding pays bandwidth. That is an argument for a prioritized
 pull (default: newest first) and **against** an automatic full pull.
 
 **How a mass restore travels (E-87).** In-band is the
 **default**: chunked to ≤ 32 KB like the manifest (§13.5.2), the drip
 restore runs newest-first and is usable long before it finishes. The
-**bulk lane (§9.3) is offered as a shortcut only**, with the same
-per-transfer consent as any Secure media (§12) — it is far faster and
+**bulk lane (§9.4) is offered as a shortcut only**, with the same
+per-transfer consent as any file on lanes 2 and 3 (§9.4) — it is far faster and
 **linkable**, and a recovery is exactly the moment at which a user should
 not lose anonymity without being asked.
 
@@ -3458,6 +3899,13 @@ The following protective measures apply:
   cannot place a Restore Broadcast that a contact would even harvest
   (§4.3). All it can forge is a **distress call** — and its effect is
   bounded by §13.4.5/§13.4.4.
+- **Scope of an answer (R-1).** A valid broadcast proves that the sender
+  **is** the contact, not that it is recovering — a living contact passes
+  H-2 about itself. An answer therefore carries only what the pair shares:
+  the manifest of the pair's own conversation and the groups and channels
+  both belong to, never another conversation and never the contact list.
+  An answer that no own broadcast asked for is discarded; an answer never
+  creates a contact (D-16).
 
 #### 13.5.5 Last stage: contact rebuild
 
@@ -3491,7 +3939,7 @@ cannot be derived from the seed. Decided:
 - The rotation itself is an ordinary device-set change per §14.4 with
   N = 1: new shared key, new user KEM key, prekey stock discarded and
   refilled, pairwise announcement to all recovered contacts, a
-  transition window ending after the delivery window at the latest.
+  transition of 7 days (§14.4).
 - **In the no-bundle case, this step is dropped**: a new shared key was
   already rolled at the start there (§13.2.2), there is nothing to
   rotate. Contacts not reached stay not reached — their state is the same
@@ -3513,33 +3961,36 @@ queryable object nor a storage location; nothing about persons is
 queryable (§23).
 
 **Decided:** all identities are derivable from the passphrase (HD
-derivation via `identity_index`, §4), **each identity carries its own
-recovery bundle in its own tag line** (§13.3.1), and a **marker per
-identity serves as the stop criterion**.
+derivation via `identity_index`, §4), and each identity carries its own
+recovery bundle under its own values `value_R(i, d)` (§13.3.1). The
+bundle names its `identity_index`, display name and `active` flag
+(§13.3.2). The list of all identities is the result of the derivation
+run, not an object of its own; it is readable only with seed-derived
+keys.
 
-```
-tag_M(i, e) = HKDF(seed, "identity-marker" ‖ i ‖ epoch_e)
-```
+**The run.** A fresh install that entered the words derives the indices
+in ascending order and asks, for every index, the values of the last 7
+days — one question per index to each holder it reaches (§8.2, §13.3.1):
+index 0, and every index up to one beyond the highest index whose
+bundle, active or not, has been found. A holder that holds nothing under
+a value answers `0x34`; that answer is the existence probe. It costs one
+question and no deposit, and nothing has to be placed for it: a separate
+marker would live as long as the bundle, under the same proof, and say
+nothing a question that finds nothing does not already say.
 
-- The marker sits in the bundle line of the respective identity
-  (`σ_R(i)`, §13.3.1) and is delivered along by the same renewal run —
-  **extra cost: one delivery per identity and renewal.** It is derivable
-  exclusively from the seed, so it leaks nothing. Compared to the bundle
-  itself, it is the **cheap existence probe**: a single delivery per
-  index instead of ~42 (§13.3.2), before the actual bundle harvest begins.
-- **Rule:** the recovering user derives indices in ascending order and
-  harvests the marker for each index. The **first index without a marker**
-  ends the derivation — the stop criterion.
-- The recovery bundle of each identity carries its own `identity_index`,
-  name, and `active` flag (§13.3.2). The list of all identities is the
-  result of the derivation run, not an object of its own; it is readable
-  only with seed-derived keys.
-- **Without a bundle and without a marker** — i.e., after more than 31
-  days with no living device — what remains: the user recalls how many
-  identities they had, and the recovery run is carried out once per
-  index. One distress call per identity, because `founding_pk` differs
-  per index (§13.4.2). An index candidate cannot be checked without a
-  marker; there is no target value against which it could be checked.
+The run is not a clock. It repeats at the post-box edges of §8.2
+together with the search for the first bundle (§13.0), and "no further
+identity" is never concluded automatically (D-40): the interface shows
+how many identities were found and lets the user name an index of their
+own. That is the case of §13.2.2, when every bundle has expired — the
+user recalls how many identities they had, and recovery runs once per
+index. One distress call per identity, because `founding_pk` differs per
+index (§13.4.2).
+
+A deleted identity keeps its place in the run: as long as a device hosts
+a higher index, it places a minimal bundle for the deleted index with
+`active = false` (§13.3.2, §21.5.2), so that a gap below a living
+identity does not end the run.
 
 ---
 
@@ -3625,7 +4076,7 @@ in chapter 15 already states this.
 #### 13.10.4 Cold start
 
 A recovery typically runs on a **fresh installation with no remembered
-neighbours** and without a card to redeem. It therefore finds neighbours
+neighbours** and without an invitation to redeem. It therefore finds neighbours
 through the local segment and, where that reaches nobody, through the
 external records of §11.9 (§11.8). The restore is the case that depends on
 these two sources most.
@@ -3663,7 +4114,6 @@ not an addressing means; it carries exactly the following tasks:
 | Task of the DeviceID | Reference |
 |---|---|
 | Device revocation: the revocation delivery names the device | §14.4 |
-| `DeviceDelegationCert` — binds the per-device sig subkey to the identity | §14.6.2 |
 | Quorum count at lock-out and at emergency key rotations — the quorum counts devices | §14.4, §14.8 |
 | Twin-sync attribution (“which of my devices") | §14.7 |
 | Local device-key management (`device_keys.enc`) | §14.4 |
@@ -3674,24 +4124,32 @@ authorization, revocation, and attribution.
 `sendToDevice()` means: seal under this device's tag. Since one's own
 devices hold shared secrets anyway, the device-scoped tag
 `HKDF(K_own, "device" ‖ deviceId ‖ n)` is derivable without any lookup
-— it is needed for the per-device payloads of twin sync (e.g.,
-delegation rotation).
+— it is needed for the per-device payloads of twin sync (e.g., the
+handover of §14.6.2).
 
 ### 14.2 One delivery serves all devices
 
 All devices of an identity hold the same receiving material:
 
-- All devices share the `inbox_key` → they harvest **the same line**.
 - All devices share the user KEM SK → all can unseal **the same cell**.
+- A post-box packet is handed to the first device that collects it and
+  deleted after that device's acknowledgement (§8.2); step 3 reaches the
+  device that registered the code first (§8.1). A call signal is the one
+  delivery the reached device passes on at once to the other own devices,
+  on steps 1 and 3 (§17.2); everything else reaches them by mirroring over
+  the own line.
 
-**One delivery thus serves all of the recipient's devices.** The delivery
-path has no device level: no resolver, no iteration over devices, no
-per-device delivery states, no “1 of N delivered" special case. One
-person costs one delivery (§9), regardless of how many devices they read
-on.
+**One delivery from a contact serves all of the recipient's devices by
+mirroring.** The device that received a delivery mirrors it to the others
+over the own line (§14.7, Type 18); what any device sends — a reply
+written meanwhile included — reaches the others as `MESSAGE_SENT`.
+Contacts still send one delivery: there is no resolver, no iteration over
+devices, no per-device delivery states and no “1 of N delivered" special
+case on the contact's side (§14.3). One person costs a contact one
+delivery (§9), regardless of how many devices they read on.
 
-Twin sync (17 content types, §14.7), the delegation model (sig subkeys,
-delegation certificate), device lock-out, and the lock-out quorum
+Twin sync (17 content types, §14.7), the device set (§14.5), device
+lock-out, and the lock-out quorum
 (§14.8) all run over the same delivery path (§7, §8).
 
 ---
@@ -3780,8 +4238,8 @@ is not needed, because no one is excluded.
 
 **The identity signature keys also rotate along at lock-out.** They sit
 — like the user KEM SK — **under the shared key on every device**; only
-this way can every device issue delegation certificates alone (“adding
-may be done by any device alone"). Without co-rotation, a locked-out
+this way can every device sign in the identity's name alone (§14.6.2).
+Without co-rotation, a locked-out
 device would retain the ability to sign in the identity's name. On
 adding and on routine hygiene, they do **not** rotate (no one is
 excluded — the same rule as for the KEM key). Rotated sig keys are —
@@ -3839,15 +4297,16 @@ instantly — neither at one's own devices nor at the contacts. Both
 sides need a window in which **the old and the new key are valid at the
 same time**.
 
-*Device side.* The triggering device places the **package of wrapped
-new keys** — one for each remaining device — into the **old** line.
-At this point, every device is still reading there; each one picks up
-its own packet and opens it with its own device key. A device that is
-switched on again only weeks later still finds it there (management-TTL
-delivery, 31 days). A locked-out device sees the same package and
-cannot open a single packet — it therefore needs no channel of its own
-for the distribution. Every device keeps the old key until it has the
-new one, and reads **both** lines during the transition.
+*Device side.* The triggering device places the **key packets** — one
+for each remaining device, under that device's value in the **old**
+line and sealed against that device's KEM key (Type 16, §14.7). At this
+point, every device is still asking there; each one collects its own
+packet at its next edge (§8.2) and opens it with its own device key. A
+packet lives 7 days like any post-box deposit (§8.2); a device that
+stays off longer is re-enrolled (§14.6.3). A locked-out device sees the
+deposits and can open none — distribution therefore needs no channel of
+its own. Every device keeps the old keys until it has the new ones, and
+asks under **both** lines during the transition.
 
 *Contact side.* Contacts learn of the rotation via the pairwise
 announcement. Until they have harvested it, they keep writing to the
@@ -3862,15 +4321,17 @@ would be **silently lost**.
 > consequence of there being no central place where a lock could be
 > deposited once and for all.
 
-**End of the transition.** The old line is closed **as soon as all
-contacts have acknowledged the announcement, but at the latest after
-the delivery window** (one recovery-epoch lifetime, 14 days). In the
-normal case, everyone is through after one to two days; the deadline
-only kicks in for contacts who never come back — otherwise a single
-orphaned contact would hold the old line open forever, and with it the
-locked-out device in play. Anyone who still writes to the old address
-after closing notices it by the missing delivery receipt and can send
-again: a visible error instead of a silent loss.
+**End of the transition.** The identity asks under its previous day
+keys for **7 days** after the rotation, and opens for the same 7 days
+what was sealed against its previous KEM keys (§8.2, §4.5.4); then both
+are gone. In the normal case, every contact has the new keys after one
+to two days — with the announcement, or with the next envelope, which
+carries the chain until it is acknowledged (§4.5.4). The limit is fixed
+and does not wait for the last contact: a single contact that never
+comes back would otherwise keep the previous keys in use forever, and
+with them the locked-out device in play. Anyone who still writes under
+the previous keys after that notices it by the missing acknowledgement
+(§9.2) and can send again: a visible error instead of a silent loss.
 
 **Visibility (normative).** The transition belongs in the UI, not in a
 footnote: “Device locked — fully effective once all contacts are
@@ -3878,9 +4339,10 @@ informed (3 of 47 still open)". A lock that is visibly not yet in
 effect is more honest than one that suggests a security it only reaches
 after days.
 
-For **adding and routine rotation**, the same window applies, but
-without urgency there: no one is excluded, and the old line may be read
-along until the end of the regular recovery-epoch coverage (42 days).
+**Adding a device** rotates no key (D-39) and opens no transition. The
+**routine KEM rotation** (§4.5.4) has its own: the previous generation
+is kept for 7 days, and the other own devices receive the new one before
+the contacts do (Type 19, §14.7).
 
 **Replacing a device is not a recovery case.** If a device breaks and a
 new one is set up, that is an ordinary **add**: the new device gets the
@@ -3902,12 +4364,10 @@ they are delivered to it.
 
 **Two paths that work together:**
 
-1. **The delegation certificate travels along with the delivery.** A
-   delivery from a device carries its certificate; verification needs no
-   lookup. This matches the principle that proofs accompany the action.
-   Because the certificate is hybrid-signed and thus a few kilobytes in
-   size, it travels along **only on the first contact per device** and
-   is cached afterward.
+1. **Authenticity does not depend on the sending device.** A delivery
+   is authenticated by its tag (§4.4.3); every device of an identity
+   holds the same identity keys (§14.2, §14.6.2), so a contact verifies
+   nothing per device. There is no per-device certificate.
 2. **The device set is announced pairwise.** Changes go out to contacts
    as an ordinary delivery; the contact holds the state. The
    announcement carries the previous device count and the
@@ -3945,100 +4405,110 @@ the 24 words (§13) is explicitly **not** this path (§13.0).
 
 #### 14.6.1 Procedure
 
-The procedure consists of request and approval — an enrollment request
-from the new device, an approval dialog on an existing one, and an
-encrypted handover of the material. Any device may approve, and every
-enrollment is a device-set change:
+An additional device is set up with the 24 words, and an existing
+device approves it. Any device may approve; there is no primary device.
 
-1. **On the new device:** “Add device" locally generates its own
-   **device sig key pair** (Ed25519 + ML-DSA-65, CSPRNG, **not**
-   seed-derived) and its own **device key**, and issues an enrollment
-   request with `deviceEd25519Pk` + `deviceMlDsaPk`.
-2. **On any existing device:** an approval dialog with the device
-   identifier. **Any device may approve alone**: the rotation due wraps
-   for all already-enrolled devices too, no one loses access, and a
-   thief gains nothing they did not already have.
-3. **Rotation (§14.4):** new shared key, wrapped for all
-   already-enrolled devices **and** the new one. The user KEM key does
-   **not** rotate in this case — no one is excluded.
-4. **Handover** of the material from §14.6.2, sealed against the device
-   KEM key of the new device.
-5. **Announcement** of the changed set to the contacts (§14.5, path 2)
-   and to one's own devices (§14.7, type 16).
+```
+enrol_box(i, d) = Ed25519 pair from HKDF(recovery_key(i), "enrol-box" ‖ d)   // like box_key, §13.3.1
+value_E(i, d)   = first 16 B of SHA-256(enrol_box(i, d).pk)                  // a post-box value (§8.2)
+```
+
+1. **On an existing device** the user opens an *enrolment window*
+   (24 hours) for the identities it hosts. The device places the
+   recovery bundle at once with the window's end (§13.3.2, §13.3.4).
+   While the window is open it adds `value_E(i, d)` of the window's days
+   to the questions of its post-box edges — no question of its own, no
+   timer (§5.4) — and answers an enrolment call on the LAN.
+2. **On the new device** the user enters the words. The device derives
+   the identities (§13.7), generates its own device keys (§4.4.2), finds
+   the bundle and its window (§13.0), and places an enrolment request
+   under `value_E(i, d)`: sealed with `HKDF(recovery_key(i),
+   "enrol-enc")`, carrying its name, platform, device public keys and
+   day keys for 7 days; on the LAN it also sends it as an enrolment
+   call. It takes nothing from the bundle into use and does nothing in
+   the identity's name before the handover.
+3. **Approval:** the request appears in the Requests tab of the existing
+   device with the new device's name, platform and DeviceID. Nothing is
+   handed over before the user accepts; there is no automatic approval.
+   A rejected request closes the window and tells the new device so.
+4. **Handover** of the material of §14.6.2, sealed against the new
+   device's KEM keys, to its values — directly while both are present,
+   otherwise in the post box.
+5. **Announcement** of the changed set to the own devices (§14.7,
+   Type 9) and to the contacts (§14.5, path 2); the window closes.
 6. **Initial reconciliation** (§14.6.3).
 
-**Via NFC**, the same procedure runs; only the first contact between
-the two devices is established by touch instead of by QR.
+**The barrier is the words.** Whoever holds them can read the bundle
+and with it the current keys (§13.3.3). The window and the approval make
+an addition visible and keep two devices from running one identity
+unenrolled by mistake; they do not stop a holder of the words.
 
 **First device of an identity.** Generate a seed (24 words), form
-identities via HD derivation (§4), generate a fresh device key, roll a
-shared key, deliver the identity marker and recovery bundle for the
-first time (§13.3/§13.7).
+identities via HD derivation (§4), generate a fresh device key and place
+the recovery bundle for the first time (§13.3, §13.7).
 
 #### 14.6.2 What the new device receives
 
-| Item | Purpose | Origin |
-|---|---|---|
-| **Shared key**, wrapped with the new device's device key | everyday key; `inbox_key = HKDF(shared_key, "inbox")` | §14.4 |
-| **Delegated sig subkeys** (Ed25519 + ML-DSA-65) | all of this device's inner signatures; derived deterministically via HKDF from the identity material + DeviceID | derivation labels `"cleona-deleg-ed25519-v1" ‖ deviceId` and `"cleona-deleg-ml-dsa-v1" ‖ deviceId`, respectively |
-| **DeviceDelegationCert** | binds the subkey to the identity; travels along with the first delivery per device (§14.5) | hybrid-signed (Ed25519 + ML-DSA-65) |
-| **User KEM SK** (X25519 + ML-KEM-768) | so **all** devices unseal the same cell | §14.2 |
-| **`invite_root`** | invitation line, so the device can harvest contact requests | §15.3.1 |
-| **Share of the shared prekey pool** (secrets) | unsealing incoming cells (§14.3) | shared pool |
-| **UserID, display name, identity indices** | basic state of the UI | §4 |
-| **NOT: the seed** | — | the seed carries the identity and opens the recovery bundle; it is not the everyday key and need not sit permanently on any device |
+The new device holds the seed; it receives only what the seed does not
+give:
 
-**Capability bitmask** (certificate structure, default `0x0F`):
-
-| Bit | Capability |
+| Item | Purpose |
 |---|---|
-| 0 | send in the identity's name |
-| 1 | unseal incoming cells |
-| 2 | participate in twin sync |
-| 3 | reserved, no function |
+| current identity signing secret keys (Ed25519 + ML-DSA-65) and the rotation chain | signing in the identity's name after an Emergency Key Rotation (D-33) |
+| current and previous user KEM generation with its time | opening the same cells as the other devices (§4.5.4) |
+| per contact and group pair: address with chain, `s_AB`, the peer's day keys and fixed neighbours, invitation addresses, name, verification level | the codes, step 3 and the post box at once (§4.3, §8.1, §8.2) |
+| standing invitations with their random keys, codes and waiting requests | harvesting contact requests (D-28) |
+| display name, profile, groups, channels, shared settings, the device set | basic state of the UI |
+| **NOT:** device keys, node keys, the network view, local UI settings | individual per device (§14.7) |
 
-**Certificate validity.** Default **30 days** (`maxValidUntilMs`, `0` =
-no expiry) as a dead-man's switch. The device checks **hourly** and,
-starting **7 days** before expiry, automatically requests a renewal;
-an already-known device is confirmed without prompting. If the
-certificate expires, the device can still **receive** (the user KEM SK
-is unaffected by this), but its signatures are no longer accepted by
-contacts — it must be re-enrolled. **Any** living device may renew.
-
-> **Decided.** The delegation certificate is issued with the **identity
-> signature keys**; these sit under the shared key on **every** device
-> — so every device can issue — and **rotate along at lock-out**
-> (§14.4). A locked-out device loses the ability to sign in the
-> identity's name along with the sig rotation. Verification-level rule
-> and continuity proof: §14.4.
+There is no delegation certificate: every device signs with the identity
+signing keys (§14.4); an expiry could not bind a device that holds them.
 
 #### 14.6.3 Initial reconciliation
 
 A newly enrolled device obtains the application state via the **initial
-reconciliation**. Because a device change has been the standard case, the
-new device **must** be able to obtain it completely, otherwise a device
-swap would lose all contacts.
+reconciliation**. Contacts, groups and channels arrive with the handover
+(§14.6.2). What a device swap loses without reconciliation is the
+history, once the old device is locked out; the UI names what is still
+missing before a lock-out (§14.4).
 
 **Normative:** the initial reconciliation uses the **manifest-and-pull
 machinery from §13.5.2**, just under a different carrier — the
-device-scoped tag `HKDF(K_own, "device" ‖ deviceId ‖ n)` (§14.1) instead
-of `tag(K_AB)`. Everything stated there therefore also applies: header
-first (contacts, groups, channels), then manifest in blocks, then
+own-device line of §14.7 (D-37), the post-box value of
+`HKDF(K_own, "device" ‖ deviceId ‖ d)`, `d` the UTC day, as twin-sync
+Type 20 `RECONCILE`, and directly on the LAN while both devices are
+present, like §14.6.1 step 4. Everything stated there therefore also
+applies: header first — what the handover does not carry: the
+conversation list with its per-chat configuration (§21.5.4), favourites,
+unread counts, running expiry deadlines, and per conversation the count
+and size of the history the source holds — then manifest in blocks, then
 pulling with priority **newest first**, resumable after an interruption.
-A full reconciliation of the history is a deliberate user decision, not
-an automatism — the same rationale as in §13.5.3: the delivering partner
-pays bandwidth. *(The same mechanism that already defines recovery, on
-a different carrier; no new mechanism.)*
+Automatically, the header and the newest 10 messages of each
+conversation follow the handover; a full reconciliation of the history
+and the attachments of a conversation are a deliberate user decision,
+not an automatism. Between own devices nobody else's data plan pays —
+but the source uploads every packet to three holders, those holders
+carry it for up to 7 days, and a device value takes at most 100 packets
+(§8.2). A full history is therefore offered with its size and way, not
+taken. Attachments travel per conversation as one transfer, directly or
+on lane 3 with its consent (§9.4). *(The same mechanism that already
+defines recovery, on a different carrier; no new mechanism.)*
+
+For own devices the limits of §13.5.4 are replaced by: the source serves
+only a device of its own set (Types 9/16), answers at its own edges,
+holds at most 80 packets under one device value and fills again only on
+the recipient's progress report; one reconciliation per device at a
+time.
 
 **Return after a long absence.** A device that has been off for a long
 time must catch up on two things: the **key packages** of all
 intervening rotations (§14.4 places them in the respective old line)
-and the **twin-sync backlog**. Both are bounded by the delivery
-deadlines: management deliveries sit for up to **31 days**, the
-recovery-epoch coverage is **42 days**. From this follows, normatively:
+and the **twin-sync backlog**. Both are bounded by the post box: a
+deposit lives 7 days (§8.2). From this follows, normatively:
 
-> **A device that was switched off for more than 31 days is
-> re-enrolled** — it no longer finds its key packet. The UI states this
+> **A device that was switched off for more than 7 days after a lock-out
+> or an Emergency Key Rotation is re-enrolled** (§14.6.1, D-39) — it no
+> longer finds its key packet. The UI states this
 > plainly (“This device was offline for too long and must be
 > re-enrolled"), instead of letting it run silently into a half-dead
 > state.
@@ -4049,13 +4519,13 @@ twin-sync state before it harvests invitation lines or places delivery
 receipts; until then the UI shows “reconciling state" instead of a
 possibly stale state.
 
-### 14.7 Twin-Sync: 18 Content Types
+### 14.7 Twin-Sync: 21 Content Types
 
 When multiple devices are active, changes to application state must be
 reconciled between them. The Twin-Sync content types handle this.
-There are 18 of them.
+There are 21 of them.
 
-**Types 0–17** (canonical `proto/app_payloads.proto::TwinSyncType`).
+**Types 0–20** (canonical `proto/app_payloads.proto::TwinSyncType`).
 *Types 14–16 are assigned here and **reserved** on the wire
 (`reserved 14, 15, 16;`) but not built in `lib/` yet; whoever spends one
 of those numbers on something else makes this document's numbering and
@@ -4063,15 +4533,15 @@ the wire's permanently different.*
 
 | # | Type | Content |
 |---|---|---|
-| 0 | CONTACT_ADDED | new contact accepted (pubkeys, display name, verification level) |
+| 0 | CONTACT_ADDED | new contact accepted (pubkeys, display name, verification level, founding anchor, the pair secret `s_AB`, the peer's day keys and fixed neighbours) — sent by the device on which the contact came about, the accepting issuer or the requester that received the answer (§15.5.1), so that every device of the user can reach the new contact |
 | 1 | CONTACT_DELETED | contact deleted, with source marker (`inbox_reject`, `conversation_dialog`, `contacts_dialog`, `ipc`) |
 | 2 | MESSAGE_SENT | mirror a message sent on one device |
 | 3 | MESSAGE_EDITED | edit within the edit window (default 60 min, §21.6) |
 | 4 | MESSAGE_DELETED | deletion is **unbounded** — the author may delete at any time (§21.6) |
 | 5 | TWIN_READ_RECEIPT | own read on one device → other devices mark it too |
-| 6 | GROUP_CREATED | own device created or joined a group |
-| 7 | PROFILE_CHANGED | own profile picture / own display name changed |
-| 8 | SETTINGS_CHANGED | shared settings per identity |
+| 6 | GROUP_CREATED | own device created or joined a group (§16.2.2) — with the group's member state and, per group pair (D-36), the pair secret `s_AB`, the member's day keys and fixed neighbours, as Type 0 carries them per contact, so that every device of the user can reach every member; sent by the device that created or joined, and again when a member's entry it was waiting for arrives |
+| 7 | PROFILE_CHANGED | the own profile changed — display name, picture or description (§15.8); only the changed field travels, so that two changes collected out of order do not undo each other |
+| 8 | SETTINGS_CHANGED | shared settings of the identity — what the identity decides and a contact notices, today the transcription language (§21.7); never a path, a model, a sound or a network setting |
 | 9 | DEVICE_ANNOUNCE | announce a new device to the existing devices (carries a `DeviceRecord`) |
 | 10 | DEVICE_RENAMED | one of the user's own devices was renamed (§14.9) |
 | 11 | TWIN_DEVICE_REVOKED | device locked out — propagated to the remaining devices |
@@ -4081,47 +4551,70 @@ the wire's permanently different.*
 | 15 | PREKEY_CONSUMED | consumption notice: this one-time prekey has been used, delete it (§14.3) |
 | 16 | DEVICE_SET_CHANGED | device-set change with the **package of wrapped new shared keys** — one packet per remaining device, placed in the **old** line. On lock-out, the rotated user KEM secret key and the identity signing secret keys travel along underneath it — they are placed under the new shared key (§14.4) |
 | 17 | TWIN_IDENTITY_DELETED | the identity was deleted on another of the user's own devices (§21.5.2). The receiving device wipes its local copy **in full** — the store (`messages.db` and its journals) and every `*.json.enc`, keys first (§21.4.1) — and its host then removes the identity entry and the profile directory, attachments included. **If it was the last identity on that device, the device ends with zero identities and returns to the first-start state; it does not exit.** No second broadcast to the contacts goes out: the deletion already reached them from the deleting device (§15.7) |
+| 18 | DELIVERY_MIRROR | a delivery from a contact, mirrored by the own device that collected it to the other own devices (§14.2) — the other devices show it as if they had received it themselves and do not acknowledge it again |
+| 19 | KEM_ROTATED | the routine KEM rotation of the identity (§4.5.4): the new generation's secret keys (X25519 + ML-KEM-768) with its time, placed by the rotating device to each other own device before the announcement to contacts; the receiving device takes it as its current generation and opens the cells it parked |
+| 20 | RECONCILE | the initial reconciliation (§14.6.3): header, manifest block, fetch, deliver, progress, cancel — device-scoped |
+| 21 | GROUP_LEFT | the identity left a group (§16.2.2) — group identifier and the membership epoch at leaving; the receiving device removes the conversation and sets the same mark. A post the leaving device discarded is not forwarded to the other own devices |
 
 The type carries **17** on the wire (`proto/app_payloads.proto`).
 
 To distinguish Type 11 from Type 16: Type 11 is a plain notification
 (“device X is out") and travels like any other sync delivery. Type 16
-carries **secret material per recipient device** and therefore has its
-own placement rule — it sits in the old line so that even a device
-switched back on only weeks later still finds it, and it is a management
-type with a **31-day** TTL, not the usual 14.
-A locked-out device sees the same package and cannot open a single
-packet — so distribution needs no channel of its own (§14.4).
+carries **secret material per recipient device**: one deposit per
+remaining device under that device's value (§14.1), sealed against that
+device's KEM key. A locked-out device sees the deposits and can open
+none — so distribution needs no channel of its own (§14.4). The deposit
+lives as long as any post-box deposit, 7 days (§8.2, D-6); a longer-lived
+class for it is excluded for the same reason as for the recovery bundle
+(§13.3.4).
 
 **Deliberately not on the list:** `CONTACT_VERIFIED`,
-`CONVERSATION_OPENED`, `GROUP_LEFT`, `CHANNEL_SUBSCRIBED`,
+`CONVERSATION_OPENED`, `CHANNEL_SUBSCRIBED`,
 `CHANNEL_UNSUBSCRIBED`. An upgrade of verification travels as a fresh
 `CONTACT_ADDED`, the existence of a conversation follows from the first
 message, and group or channel joins run over their own protocols (§16).
 
 **Transport and mode.**
 
-- All of the user's own devices share `K_own`, so for the general types
-  **a single delivery** is enough (§7-§9). The triggering sender
-  recognizes its own delivery by the `sync_id` and ignores it — the
-  sender excludes itself.
-- **Delivery-ladder stage per content.** Twin-sync uses the same
-  delivery path as any other delivery (§7, §8). Most types are not
-  latency-critical and are placed only through the mailbox stage (stage
-  4) — the device set changing, revocations, profile/settings changes
-  should not be session-linkable. The near-realtime mirror types —
-  `MESSAGE_SENT`, `MESSAGE_EDITED`, `TWIN_READ_RECEIPT` — also use the
-  direct stages (stage 1/2) so a message typed on the phone appears on
-  the laptop within seconds (the user is already in the chat, so the
-  session-linkability of a direct path is theirs to accept). Key
-  packages (Type 16) go through the mailbox stage only, with the 31-day
-  management TTL.
+- Every twin-sync delivery goes to each other own device under that
+  device's value: the post-box value (§8.2) of the Ed25519 pair derived
+  from `HKDF(K_own, "device" ‖ deviceId ‖ d)`, `d` the UTC day —
+  indistinguishable from a day value for a holder. Each device asks only
+  its own values and deletes after collection like any collector (§8.2).
+  An event costs N−1 deposits (N ≤ 5, §14.8); the sender takes the set
+  from Types 9 and 16 (§14.9.3) and is never a recipient of its own
+  delivery. The `sync_id` still detects duplicates.
+- **Stage:** the post box (stage 4) for every type, except Type 20 on
+  the LAN while both devices are present (§14.6.3) and the mirror of a
+  call signal (Type 18, §17.2), which takes steps 1 and 3 only — step 1
+  to the other device's segment address, step 3 through that device's
+  fixed neighbours under the own-device code
+  `ring(A→B, d) = first 16 B of HKDF(K_own, "ring" ‖ deviceId_A ‖ deviceId_B ‖ d)`,
+  which every device registers for each other own device like a contact's
+  code (§8.1); step 2 carries no message (D-4). A mirror through the post
+  box appears at the other device's next collection edge (§8.2), not
+  within seconds; the mirror of a call signal rings within the seconds of
+  its steps or not at all. Twin-sync deliveries carry no acknowledgement
+  (§9.2). **Every own-line deposit carries, sealed, the depositing
+  device's fixed neighbours and its segment addresses** — the way a
+  message carries them to a contact (§9.2) — so that a device knows where
+  its siblings are reachable; a change of fixed neighbours with no deposit
+  pending costs one deposit per other own device.
+- **Type 18 `DELIVERY_MIRROR`:** a delivery from a contact, mirrored by
+  the device that collected it to the other own devices (§14.2).
+- **Before two devices run one identity,** the routine KEM rotation
+  (§4.5.4) must reach the other own devices as twin sync; otherwise a
+  device collects and deletes post it cannot open. It does so as Type 19
+  `KEM_ROTATED`, placed by the one rotating device (§4.5.4).
 - The **device-scoped** tag `HKDF(K_own, "device" ‖ deviceId ‖ n)`
   (§14.1) is needed only where the payload **differs per device**:
   Type 16 (key package), the initial reconciliation (§14.6.3), and the
   delivery of delegated keys.
-- `K_own` is the cross-device own material; it derives from the shared
-  key and therefore rotates with every device-set change (§14.4).
+- `K_own` is the cross-device own material. Until the shared key of
+  §14.4 is built, `K_own = HKDF(current identity Ed25519 secret key,
+  "own-line")`: it rotates with the identity signing keys — at lock-out
+  and Emergency Key Rotation — not at adding and not at the routine KEM
+  rotation.
 - **Duplicate detection:** every Twin-Sync payload carries a `sync_id`
   (16 B, `proto/app_payloads.proto::TwinSyncEnvelope.sync_id`); the
   recipient discards repeats.
@@ -4137,10 +4630,11 @@ message, and group or channel joins run over their own protocols (§16).
 | Network view: harvest lines, decoy selection, relay partnerships | every device has its own network view and must have one, or the decoys would be correlated |
 | Detailed call history | more local than application state |
 
-**Failure mode, made explicit.** A Twin-Sync delivery is a delivery: it
-has latency (§7/§8) and a TTL. A device that is offline longer than the
-TTL never learns of the change and must catch up on the backlog via
-§14.6.3. This is exactly what the rule in §15.3.3 rests on: a revocation
+**Failure mode, made explicit.** A Twin-Sync delivery is a post-box
+deposit: it appears at the other device's next collection edge and lives
+7 days (§8.2). A device that is offline longer than that never learns of
+the change and must catch up on the backlog via §14.6.3. This is exactly
+what the rule in §15.3.3 rests on: a revocation
 is shown as **partially effective** until acknowledged by all devices —
 a silent intermediate state is ruled out.
 
@@ -4201,6 +4695,7 @@ Every device keeps a record (`DeviceRecord`,
 | Device identifier | the DeviceID (§14.1: subject, not signpost) |
 | **Device name** | default is the **operating system's computer name**, changeable by the user; a change travels as Twin-Sync Type 10 (`proto/app_payloads.proto::DeviceRecord.device_name`) |
 | Platform (Android / iOS / Linux / Windows / macOS) | basis for the display and the expectations from §31 |
+| Device public keys | the device KEM public key (X25519 + ML-KEM-768) and the device signing public key (Ed25519 + ML-DSA-65) of §4.4.2, taken from the enrolment request (§14.6.1 step 2); Type 16 seals each sibling's packet against its device KEM key, and a countersignature (Type 13) verifies against its device signing key |
 | first seen / last seen | “last seen" is fed by the last harvested Twin-Sync |
 | “is this device" | marker for the locally running device |
 
@@ -4250,9 +4745,9 @@ What this chapter promises the user, as a list:
   KEM secret key (§14.2). On the delivery path there is no device level
   and therefore no “1 of N delivered".
 - **A revocation takes effect per contact**, as soon as that contact has
-  harvested the pairwise announcement, at the latest when the old line
-  closes after the delivery window; progress is visible in the UI
-  (§14.4).
+  received the pairwise announcement, at the latest 7 days after the
+  rotation, when the identity stops asking under its previous day keys;
+  progress is visible in the UI (§14.4).
 - **A locked-out device still holds the frames it already received** —
   it possesses the user keys. That is why the user KEM keys **and the
   identity signing keys** rotate along with the lock-out, and the prekey
@@ -4260,8 +4755,8 @@ What this chapter promises the user, as a list:
   label, not a lock.
 
   **Revocation triggers a full identity key rotation.** `revokeDevice`
-  removes the device, retracts its `DeviceDelegationCert` and
-  `DeviceSigInfo` — signing authority — and rotates the identity keys.
+  removes the device, removes its `DeviceSigInfo` from the announced
+  device set — and rotates the identity keys.
 
   - **What rotates:** all four user keys in one step — Ed25519 and
     ML-DSA-65 (identity signing), X25519 and ML-KEM-768 (user KEM) —
@@ -4276,7 +4771,7 @@ What this chapter promises the user, as a list:
   - **No race with the §14.5 quorum.** `_devices.remove()` runs
     synchronously before the rotation starts, and the rotation's own
     device fan-out resolves recipients from `_devices`, never from the
-    publisher's delegation list. The revoked device is out before the
+    announced device set. The revoked device is out before the
     first frame is formed, however long the device-set-change approval
     round still takes.
   - **The prekey stock needs no separate discard today**, because
@@ -4319,29 +4814,29 @@ What this chapter promises the user, as a list:
 
 First contact is the only place where two identities have to come together
 without shared prior knowledge. Everything afterwards runs on keys both
-sides already hold. This chapter specifies the card that one side hands
+sides already hold. This chapter specifies the invitation one side hands
 out, the five packets that turn it into a contact, and the states a
 relationship can be in afterwards.
 
 ### 15.1 Overview — the five packets
 
 The inviting side is called the **issuer**, the joining side the
-**requester**. The issuer creates a card and hands it over; the card needs
-nothing but the issuer's own keys and its own address, so it is available
-from the first start and never waits for a network state (§12.4).
+**requester**. The issuer creates an invitation and hands it over as QR
+code, by NFC exchange or out-of-band; it is made from the issuer's own
+keys and addresses, and when it is shown is ruled in §12.4.
 
 ```
 ISSUER                                     REQUESTER
 ──────────────────────────────────────────────────────────────
-creates card + code
-shows QR, taps NFC,           ──card──►    reads it — no network
+creates invitation + code
+shows QR, taps NFC,           ─invite──►   reads it — no network
 or copies one line of text                 traffic up to this point
 
                               ◄──(0)──     bundle request + 16 random
                                            bytes, unsealed, no identity
 (1) key bundle + the same     ───────►
     16 bytes, unsealed                     checks SHA-256(bundle)
-                                           against the card fingerprint
+                                           against the fingerprint
                               ◄──(2)──     REQUEST: proof of work in
                                            the clear, then a sealed
                                            envelope with the code and
@@ -4362,8 +4857,8 @@ resumed.
 |---|---|---|---|---|
 | 0 | bundle request | `0x01` | 17, 40 or 52 B anonymous, 117 B signed | no — carries no identity in its anonymous form |
 | 1 | key bundle | `0x02` | 3185 B | no — the bundle is public |
-| 2 | request | `0x03` | 7729 B + payload beyond the code | partly — 17 B of proof of work lie outside the seal (§15.5.1) |
-| 3 | answer | `0x04` | 7697 B + payload | yes |
+| 2 | request | `0x03` | 8725 B + payload beyond the code and the day keys | partly — 21 B of proof of work lie outside the seal (§15.5.1) |
+| 3 | answer | `0x04` | 8689 B + introduction and neighbour list | yes |
 | 4 | receipt | `0x05` | 7698 B | yes |
 
 Every packet begins with its type byte. Sealed packets carry one envelope
@@ -4371,16 +4866,36 @@ Every packet begins with its type byte. Sealed packets carry one envelope
 header, 3168 B sender key bundle inside the seal, 2 + 64 B for the two
 signatures' framing and the Ed25519 signature, up to 3309 B for the ML-DSA
 signature, and 16 B authentication tag. Packets above 1200 B are split into
-numbered parts by the wire layer (§11); a sealed request is seven parts.
+numbered parts by the wire layer (§11); a sealed request is eight parts.
 
 **Why the round trip for the bundle.** A packet can be sealed only against
 the full key bundle (Ed25519 + ML-KEM-768 + ML-DSA-65, 3168 B),
-and that bundle does not fit in a card that a camera can scan. The card
-therefore carries a 32-byte fingerprint of it, and packets (0) and (1)
+and that bundle does not fit in a QR code a camera can scan. The invitation data
+therefore carry a 32-byte fingerprint of it, and packets (0) and (1)
 fetch the bundle itself. The requester accepts the bundle only if its
-SHA-256 equals the fingerprint in the card. The cost is one round trip; the
+SHA-256 equals the fingerprint in the invitation data. The cost is one round trip; the
 gain is that the first packet carrying anything private is already fully
 post-quantum sealed, with no classical interim step.
+
+**Without the round trip: the out-of-band invitation.** The out-of-band line (§15.6) carries
+the bundle itself, together with the invitation box key `pk_inv`. A
+requester holding it checks SHA-256 of the bundle against the fingerprint
+exactly as for packet (1) and the issuer's signature over the invitation
+keys (§15.6), skips packets (0) and (1), seals the
+request (2) against the invitation's key pair — the letter key in the invitation data
+and the ML-KEM key in the line (§15.2) — and sends it at once on the ladder — steps 1 and 3 from the invitation data, and
+step 4: the request is left under the invitation value `first 16 B of
+SHA-256(pk_inv)` with the invitation neighbour first (§8.2). `pk_inv` is an
+Ed25519 key drawn at random for the invitation and kept with its record,
+like the invitation's KEM key pair (§15.2); only the issuer can collect
+under that value. Derived from the signing key, it would let whoever
+obtains that key — or the seed of an identity that never rotated — collect
+and delete every request, and an Emergency Key Rotation would strand every
+standing line. Neither side has to be on at the same time:
+the issuer collects at its next edge, the answer (3) and the receipt (4)
+travel under day values (§15.5.1), and a post box holds each for 7 days.
+QR code and NFC exchange keep the round trip; an invitation read from them is redeemable
+only while the issuer is on.
 
 **The random value in packets (0) and (1).** The requester puts 16 random
 bytes into the bundle request; the issuer echoes them unchanged. A bundle
@@ -4389,7 +4904,7 @@ the answer to the question and keeps an unrelated or replayed bundle from
 being taken as the issuer's.
 
 **Two forms of the bundle request.** The packet exists anonymously, for a
-stranger joining from a card, and signed, for a party that is already a
+stranger joining from an invitation, and signed, for a party that is already a
 contact and needs the bundle again — after a reinstallation, for instance,
 where the contact list survived but the stored bundle did not.
 
@@ -4437,20 +4952,30 @@ packet captured on the wire could otherwise be resent forever by anyone as
 a probe. A signed bundle request whose timestamp lies more than **300 s**
 from the receiver's clock is discarded.
 
-### 15.2 The invitation card
+### 15.2 The invitation data
 
-**The bundle holds three keys, not four.** The X25519 key in the card is
-*derived* from the Ed25519 key and is therefore not part of the bundle:
-32 + 1184 + 1952 = 3168 B. A fourth, independently stored X25519 key
-could drift out of step with the Ed25519 key it belongs to; a derived one
-cannot.
+**The bundle holds three keys, not four.** The key bundle is
+32 + 1184 + 1952 = 3168 B: Ed25519, ML-KEM-768, ML-DSA-65. The X25519
+key in the invitation data — the letter key — is not the identity's: **every
+invitation has its own KEM key pair**, X25519 and ML-KEM-768, drawn at
+random when the invitation is issued. The invitation data carry its X25519 half as
+the letter key; the out-of-band line's bundle carries the identity's Ed25519 and
+ML-DSA-65 keys and the invitation's ML-KEM-768 key (§15.6). The
+identity's own KEM keys rotate every 7 days (§4.5.4) — a line sealed
+against them would die after one to two weeks while the invitation is valid for
+up to 90 days. The fingerprint covers only Ed25519 and ML-DSA-65 (§4.1),
+so the bundle check is unaffected. The secret halves are kept with the
+invitation record, travel with the invitation list's backup (§15.3), and
+are deleted with the record — at revocation or at expiry + 7 d. They are
+random, not derived: a key derivable from the signing key would let
+whoever later obtains the seed open every recorded request.
 
 
-**91 bytes** in the smallest case — a device that shows its card before it
-has any usable address at all (§12.4), carrying an address count of `0`
+**91 bytes** in the smallest case — invitation data without any usable
+address (§12.4), carrying an address count of `0`
 and no publisher key. **98 bytes** with one IPv4 address of its own and
 nothing else. The relay list adds at most 195 bytes (three entries of 64
-characters) and the publisher key 32 bytes, so the largest card — four own
+characters) and the publisher key 32 bytes, so the largest invitation data — four own
 addresses in IPv6, a neighbour address in IPv6, the publisher key and three
 relay entries — is **413 bytes**.
 
@@ -4467,32 +4992,32 @@ stale (§11.8). And it is **one of the issuer's open neighbours** (§5.2)
 never carried as the neighbour — a reader on the same segment reaches the
 issuer's own addresses (§7.2) anyway, and a reader elsewhere cannot use
 it**: a node behind address translation is reachable only through the mappings it
-keeps open, and a sender leaves post first with the neighbour the card
-names (§8.2). An unverified neighbour is left out — it would cost the
-recipient a first contact and teach it nothing. **The card never names a
-contact's device** (§5.2): a card travels to people the issuer has not
-accepted yet and is passed on. It names the card's place; contacts learn
+keeps open, and a sender leaves post first with the neighbour the invitation data
+name (§8.2). An unverified neighbour is left out — it would cost the
+recipient a first contact and teach it nothing. **The invitation data never name a
+contact's device** (§5.2): an invitation travels to people the issuer has not
+accepted yet and is passed on. They name the invitation neighbour's place; contacts learn
 the other fixed neighbours sealed (§9.2).
 
-**The publisher key lets a card outlive an address change.** It is the
+**The publisher key lets an invitation outlive an address change.** It is the
 stable key under which the issuing device publishes its record (§11.9); a
-recipient whose card addresses no longer answer looks the current ones up
-under it. The addresses stay in the card regardless: they are the only way
+recipient whose invitation addresses no longer answer looks the current ones up
+under it. The addresses stay in the invitation data regardless: they are the only way
 in that needs no third party — two phones in one W/LAN — and a device
 without a reachable address has no record the key could point to.
 
-**A card is deliberately both.** It secures the way into the network — the
-device half: addresses, neighbour, publisher key, relays — and it carries
+**Invitation data are deliberately both.** They secure the way into the network — the
+device half: addresses, neighbour, publisher key, relays — and they carry
 the request to a person — the user half: letter key, fingerprint, code.
 Neither half works without the other. The device half names the device that
-issued the card (§12.4); on a user with several devices (§14), an old card
+issued the invitation (§12.4); on a user with several devices (§14), an old invitation
 points to the device that issued it.
 
 | Field | Bytes | Content |
 |---|---|---|
-| version | 1 | `0x01` |
+| version | 1 | `0x02` |
 | channel | 1 | `0x00` live, `0x01` beta |
-| letter key | 32 | the issuer's X25519 public key |
+| letter key | 32 | the X25519 public key of this invitation's own key pair |
 | fingerprint | 32 | the identifier of §4.1 (32 B) |
 | own addresses: count | 1 | how many of the issuer's own addresses follow, 0 to 4 |
 | own addresses | 0 to 4 × (7 or 19) | per entry: type (1) + address (4/16) + port (2), in the issuer's order of preference |
@@ -4506,31 +5031,34 @@ points to the device that issued it.
 | code | 16 | random bytes (§15.3) |
 | expiry | 4 | Unix seconds, u32 LE |
 
-Each address carries its own type byte, so the addresses of one card may
+Each address carries its own type byte, so the addresses of one invitation may
 be of different kinds — an IPv6 address next to an IPv4 one is an ordinary
-card, not a special case.
+invitation, not a special case.
 
-**A reader rejects a card whose address type it does not know.** Only `4`
-and `6` are defined; any other value makes the whole card invalid, with an
+**A reader rejects invitation data whose address type it does not know.** Only `4`
+and `6` are defined; any other value makes the whole invitation invalid, with an
 error that names the reason. Guessing the length of an address whose type
 is unknown would shift every later field and turn a future extension into
 silent nonsense.
 
 The same applies to any flag byte other than `0x00` or `0x01`, to any short
-read, and to any surplus byte after the expiry. A card is rejected as a
+read, and to any surplus byte after the expiry. Invitation data are rejected as a
 whole or accepted as a whole; there is no partial read.
 
 **The channel byte separates the networks.** `0x00` is the live network,
-`0x01` the beta network. **A reader rejects a card whose channel is not its
+`0x01` the beta network. **A reader rejects an invitation whose channel is not its
 own immediately** — before any packet leaves — with a message that names
 the reason ("this invitation belongs to the beta network"). Two networks
 that share addresses but not identities would otherwise produce requests
 that travel, arrive, and are then dropped for a reason nobody can see. Any
-channel value other than `0x00` and `0x01` is likewise a rejected card.
+channel value other than `0x00` and `0x01` likewise rejects the invitation.
 
-**The fingerprint is the identifier.** The same 32 bytes address the node
-in the post box and in forwarding (§8). One identity, one identifier, one
-derivation.
+**The fingerprint is the identifier** (§4.1), also after an Emergency Key
+Rotation. One identity, one identifier, one derivation. The requester
+accepts a bundle whose keys hash to the fingerprint, or whose rotation
+chain (§4.5.4) leads from the fingerprint to its keys; the bundle and the
+out-of-band line of a rotated identity carry the chain. An invitation issued before a
+rotation stays redeemable while its invitation stands.
 
 **A node carries every address it can be reached at, in its own order of
 preference.** A node has no roles; it has connections, and it knows all of
@@ -4542,7 +5070,7 @@ skips the rest, so a node without an IPv6 socket passes over an IPv6 entry
 instead of failing on it. Four entries is the cap, which is what a
 multihomed device needs: two families on each of two connections.
 
-**Nothing in the card says what kind of address an entry is.** Whether an
+**Nothing in the invitation data says what kind of address an entry is.** Whether an
 address is reachable inside the reader's own segment, or from the open
 net, is decided by the reader from the address itself (§7.2, §7.3) — the
 same test that decides between ladder step 1 and step 2. A stored
@@ -4556,50 +5084,75 @@ inventing one.
 serves ladder step 3 (§8.1) and names a third party. It is not an exotic
 case: behind NAT, and especially behind CGNAT, the issuer has no address
 of its own worth carrying, and a neighbour both sides can reach is then
-the only way in. A card without it, and without own addresses, offers a
+the only way in. Invitation data without it, and without own addresses, offer a
 requester on the open internet no path except the records of §11.9.
 
-Addresses in the card are hints for reaching the issuer; they are not
+Addresses in the invitation data are hints for reaching the issuer; they are not
 delivery state, and a stale hint produces no answer and no error.
 
-**The card carries no signature.** It travels over a channel the user can
-see. A signature by a key whose own fingerprint sits in the same card adds
-nothing — forging the card requires the issuer's secret keys. The binding
+**QR code and NFC exchange carry no signature.** They travel over a channel the user can
+see. A signature by a key whose own fingerprint sits in the same invitation data adds
+nothing — forging them requires the issuer's secret keys. The binding
 that does the work is the fingerprint check on the bundle.
 
-**What the card does not carry:** no display name, no profile picture, no
+**The out-of-band line does carry one.** The fingerprint covers only the
+identity's Ed25519 and ML-DSA-65 keys (§4.1), not the invitation's KEM
+keys, which the line carries and the round trip of packets (0) and (1)
+would otherwise have delivered signed. Without a signature, whoever alters
+the line in transit — a compromised chat or mail service — could swap
+those keys and read the request sealed against them: name, greeting,
+picture preview and day keys of the requester, and the fact that it
+contacts the issuer. It could not impersonate the issuer, whose answer is
+signed. The line therefore carries an Ed25519 signature (64 B) of the
+issuer's identity key over the invitation keys, `pk_inv`, the code, the
+expiry and the channel (§15.6), and the requester verifies it before it
+seals anything. It is Ed25519 alone, not hybrid, and the reason is stated
+in §4.4.3: the signature is checked once, at redemption, protects only the
+line in transit, and is never shown to a third party.
+
+**What the invitation data do not carry:** no display name, no profile picture, no
 secret key material, and no delivery state. The introduction travels in the
 request and the answer (§15.5), where it is sealed.
 
-**Three ways to hand a card over.** All three carry the same bytes.
+**Three ways to hand an invitation over.** QR code and NFC exchange carry the invitation data; the
+out-of-band line carries the invitation data plus the issuer's invitation box key and key
+bundle (§15.6).
 
 | Channel | Form | Note |
 |---|---|---|
-| QR code | 91–413 B binary, or 122–551 base64url characters | binary, error correction M: **version 16, 81×81 modules** for the largest card, version 6, 41×41 for the smallest. Measured 17.09.2026 with the generator in use (`package:qr` 3.0.2, `QrCode.fromUint8List` as in `invitation_card_view.dart`), per level L/M/Q/H: largest card V13 / V16 / V19 / V22, smallest V5 / V6 / V8 / V9. The publisher key moved the largest card one version up at level M (V15 at 380 B). |
-| NFC touch | the packed bytes in one NDEF record | physical contact; both sides may exchange cards in one operation |
-| one line of text | `cleona:1:<base64url>`, 133–563 characters | for pasting into a chat, a mail, a note, a posting (§15.6) |
+| QR code | 91–413 B binary, or 122–551 base64url characters | binary, error correction M: **version 16, 81×81 modules** for the largest invitation, version 6, 41×41 for the smallest. Measured 17.09.2026 with the generator in use (`package:qr` 3.0.2, `QrCode.fromUint8List` as in `invitation_card_view.dart`), per level L/M/Q/H: largest invitation V13 / V16 / V19 / V22, smallest V5 / V6 / V8 / V9. The publisher key moved the largest invitation one version up at level M (V15 at 380 B). |
+| NFC exchange | the packed bytes in one NDEF record | physical contact; both sides may exchange invitations in one operation |
+| out-of-band invitation | `cleona:2:<base64url>`, 4,487–4,916 characters (about 11,600–12,100 after an Emergency Key Rotation) | for pasting into a chat, a mail, a note; redeemable while the issuer is off (§15.1, §15.6) |
 
 The character counts follow from the byte counts: base64url without padding
-is `ceil(n × 4 / 3)` characters. The text line additionally carries the
+is `ceil(n × 4 / 3)` characters. The out-of-band line additionally carries the
 prefix `cleona:1:` (9 characters) and a 2-byte checksum (§15.6), so it is
 `9 + ceil((n + 2) × 4 / 3)` characters. Checked against the implementation
-on 17.09.2026 for 90, 97 and 380 B (132, 141 and 519 characters) — the
-figures that stood here before, 141–468, were wrong at both ends.
+on 07.10.2026 for 91, 98 and 413 B (133, 143 and 563 characters) — the
+figures that stood here before, 141–468, were wrong at both ends. The
+line `cleona:2:` appends 3265 B (`pk_inv` 32 B, the bundle 3168 B, the
+signature 64 B and the chain count 1 B) and 5,357 B per Emergency Key
+Rotation of the issuer (§4.5.4) before the checksum:
+`9 + ceil((n + 3267 + 5357·r) × 4 / 3)` characters — 4,487 for the
+smallest invitation data (91 B), 4,496 for 98 B and 4,916 for the largest (413 B)
+without rotation; about 11,600 to 12,100 after one.
+It no longer fits a text message on a phone network; chat and mail carry
+it.
 
-| Card | Bytes | As base64url | Text form: +2 B checksum | encoded | + 9-character prefix |
+| Invitation data | Bytes | As base64url | Out-of-band form: +2 B checksum | encoded | + 9-character prefix |
 |---|---|---|---|---|---|
 | LAN IPv4 only | 96 | 128 | 98 | 131 | **140** |
 | three IPv4 addresses | 110 | 147 | 112 | 150 | **159** |
 | three IPv6 addresses | 146 | 195 | 148 | 198 | **207** |
 
-The text line is longer than the bare encoding by more than the prefix,
+The out-of-band line is longer than the bare encoding by more than the prefix,
 because the checksum is added before encoding, not after.
 
 **The first-contact code.** `first 16 B of HKDF(code, "first-contact")`,
-from the card's code field — no field of its own. The issuer registers it
-with its fixed neighbour (§8.1) before the card leaves the device, and the
-reader sends its bundle request (§15.5) under it to the neighbour the card
-names. The bundle request carries, in the clear, the reader's fixed neighbour
+from the code field of the invitation data — no field of its own. The issuer registers it
+with its fixed neighbour (§8.1) before the invitation leaves the device, and the
+reader sends its bundle request (§15.5) under it to the neighbour the invitation data
+name. The bundle request carries, in the clear, the reader's fixed neighbour
 and a one-time reply code registered there, and the bundle returns under
 that code (§15.5). The request carries them again, sealed; the answer
 returns under that code, together with `s_AB` (§4.3).
@@ -4608,13 +5161,13 @@ returns under that code, together with `s_AB` (§4.3).
 
 The code is 16 bytes from a cryptographic random source plus an expiry
 date. Its purpose is one thing only: the issuer accepts a request from an
-unknown party only if that party presents the code from a card the issuer
+unknown party only if that party presents the code from an invitation the issuer
 handed out.
 
 **Two kinds of invitation, chosen by the user.** When an invitation is
 created, the interface asks which kind it is to be. The question is put in
 the user's own terms — one person, or a group — because the answer decides
-how many contacts the card can produce.
+how many contacts the invitation can produce.
 
 | Kind | For | Spent when |
 |---|---|---|
@@ -4625,11 +5178,11 @@ how many contacts the card can produce.
 by the first that arrives.** This is normative and the distinction matters:
 if arrival spent it, any stranger could burn the invitation with one junk
 request before the issuer's user was ever asked, and the person it was
-meant for would find a dead card.
+meant for would find a dead invitation.
 
 For the open kind the user chooses two things at creation: the acceptance
 limit `n`, default **20**, and the validity, default **7 d**. The shorter
-default is deliberate — a card handed to a group stays visible far longer
+default is deliberate — an invitation handed to a group stays visible far longer
 than the occasion that produced it, so its validity is set to outlive the
 occasion and little else.
 
@@ -4637,12 +5190,12 @@ Both kinds are revocable at any time, and for the open kind revocation is
 the working tool rather than an emergency measure: it is revoked once the
 occasion is over.
 
-**The kind is not in the card.** The issuer enforces it, and the other side
-has no need to know it. The card's layout and size are the same either way;
+**The kind is not in the invitation data.** The issuer enforces it, and the other side
+has no need to know it. The layout and size of the invitation data are the same either way;
 what differs is the difficulty byte (§15.5.1), which is higher for the open
 kind.
 
-**Validity.** The expiry is visible in the card. Selectable 7 d / 30 d /
+**Validity.** The expiry is visible in the invitation data. Selectable 7 d / 30 d /
 90 d / unlimited; default **90 d** for the single kind, **7 d** for the
 open kind. Unlimited is written as `0xFFFFFFFF`, the largest u32 (year
 2106).
@@ -4654,10 +5207,10 @@ towards the network** — no answer packet of any kind — and distinguishable
 in the local log, so that an issuer can diagnose what is happening without
 the network learning which of the three it was.
 
-**Checks at the requester.** A card whose expiry has passed is rejected
+**Checks at the requester.** An invitation whose expiry has passed is rejected
 **before any packet leaves**, with an explicit error ("invitation expired —
 ask for a fresh one") instead of a silent non-delivery. When less than 7
-days of validity remain, reading the card warns ("expires in X days — an
+days of validity remain, reading the invitation warns ("expires in X days — an
 answer may no longer be possible") rather than proceeding without comment.
 
 **Expiry and the acceptance window are separate.** A request placed while
@@ -4665,13 +5218,22 @@ the code was valid can arrive later, because it may have travelled through
 a post box that holds packets for 7 days (§8.2). The issuer therefore
 accepts requests bearing a given code until **expiry + 7 d**. The grace
 sits with the issuer, who alone knows the truth about how long it is
-listening; the commitment printed in the card stays honest.
+listening; the commitment printed in the invitation stays honest.
 
-**A card shown on a screen can be photographed over the shoulder.** The
+**A QR code shown on a screen can be photographed over the shoulder.** The
 single kind is what answers that: whoever captured it in passing arrives
-too late once the intended person has scanned it and been accepted. A card
-handed over by NFC touch cannot be captured that way, but it is issued as
+too late once the intended person has scanned it and been accepted. An invitation
+handed over by NFC exchange cannot be captured that way, but it is issued as
 the single kind too, so that one rule covers both face-to-face paths.
+
+**A face-to-face invitation lives 60 s.** A QR code shown person to
+person and an NFC exchange are handed over with both people present and
+online, so the redemption takes seconds. If the invitation has not been
+redeemed 60 s after it was shown, the device that holds the identity
+closes it — the service, not the screen, so that closing the app does not
+leave it standing (owner decision 07.10.2026). A redeemed one is not
+closed this way; its re-contact answer stays possible (§15.5). A posted
+or printed QR code is not face to face and keeps its validity.
 
 **The gate is the acceptance, not the scarcity of the code.** Every
 redemption produces a request carrying the requester's name, which the
@@ -4686,7 +5248,8 @@ invitation it used ("via invitation 'conference' of 3 August"). The issuer
 therefore sees *which* invitation is being flooded and revokes exactly that
 one, without touching the others.
 
-**Revocation.** Revoking an invitation removes its record at the issuer.
+**Revocation.** Revoking an invitation removes its record at the issuer,
+and with it the invitation's key pair (§15.2).
 Requests bearing it are refused silently from that moment. On a single
 device this is immediate, needs no network, and cannot be denied. Where an
 identity runs on several devices, the invitation list is one of the
@@ -4701,7 +5264,7 @@ latency and can fail:
   list before accepting any request**.
 
 **Bulk revocation.** The invitation list can be cleared in one operation,
-invalidating every standing invitation at once — the remedy when a card has
+invalidating every standing invitation at once — the remedy when an invitation has
 leaked and it is not known which one.
 
 **Standing invitations are capped at 10, and on one node they all belong
@@ -4715,14 +5278,14 @@ one-click remedy.
 
 **Reissue.** Codes are random bytes in a local list, not derived from the
 seed phrase. An identity restored onto a new device therefore holds no
-codes: every card handed out before the loss is dead, and stays dead
-silently, because such a card neither expires nor carries anything the
+codes: every invitation handed out before the loss is dead, and stays dead
+silently, because such an invitation neither expires nor carries anything the
 requester could check against. Two consequences follow, and both are
 normative:
 
 * The invitation list — code, expiry, kind and its acceptance count,
   difficulty, label, revoked flag
-  — is part of the identity's backup, so that cards survive a device
+  — is part of the identity's backup, so that invitations survive a device
   change.
 * Restoring without that backup is **fail-closed**: all existing
   invitations are gone, new ones are issued. This costs convenience only,
@@ -4768,7 +5331,7 @@ ensures that whatever load remains never closes the channel.
 
 ### 15.5 Request, answer, receipt
 
-**Structure of the request (2).** Three fields lie in front of the
+**Structure of the request (2).** Four fields lie in front of the
 envelope, in the clear, and are checked before anything is unsealed:
 
 | Field | Bytes | Visible |
@@ -4776,6 +5339,7 @@ envelope, in the clear, and are checked before anything is unsealed:
 | type byte | 1 | yes |
 | random value | 8 | yes |
 | counter | 8 | yes |
+| time window | 4 | yes — u32 LE, the window the proof was computed for (§15.5.1) |
 | envelope | rest | sealed |
 
 Packets (3) and (4) have no such prefix; they are a type byte followed by
@@ -4798,11 +5362,12 @@ anywhere to answer it.
 
 | Field | Size | Purpose |
 |---|---|---|
-| code | 16 B | the code from the card |
+| code | 16 B | the code from the invitation data |
 | display name | u16 length + UTF-8, ≤ 64 characters | how the requester is announced |
 | greeting | u16 length + UTF-8, ≤ 280 characters | free text shown with the question |
 | picture preview | u16 length + JPEG, ≤ 4 KB | optional |
 | age declaration | 1 B | the requester's own `isAdult` flag (§15.10) |
+| day keys | 31 × 32 B | the requester's public day keys from today on (§8.2), so that the answer can be left in its post box |
 
 The limits are counted in **characters, not bytes**, because that is what
 the user sees; the length prefix is in bytes and bounds what the parser
@@ -4810,8 +5375,10 @@ reads. Over-long fields are rejected on receipt, not truncated — a
 truncated greeting would be attributed to its sender.
 
 Beside the field limits the whole request payload is capped at **8 KB**,
-preview included, so that a request stays within a bounded number of parts.
-With a bare code payload the request is 7729 B on the wire — seven parts.
+preview included, so that a request stays within a bounded number of parts;
+the day keys (992 B) count against it, and the largest introduction still
+leaves room (about 6.5 KB). With a bare code payload the request is
+8725 B on the wire — eight parts.
 
 #### 15.5.1 The proof of work on a request
 
@@ -4838,18 +5405,24 @@ learns neither the code nor which invitation was used. The code itself is
 checked again after unsealing, where it appears in the payload; the proof
 of work does not replace that check, it precedes it.
 
-**A solution ages.** The time window makes it valid for about ten minutes.
-Beyond that, the issuer keeps the random values it has seen in the current
-and the previous window — **at most 1000** — and discards a repeat. Without
-that list, one solution once computed could be replayed without limit, and
-the cost the proof is meant to impose would be paid once for an unbounded
-flood.
+**A solution ages.** The request names the window it was computed for.
+The issuer accepts a window no later than its current one plus one, and
+no earlier than seven days and one window before it — the retention of a
+post box (§8.2), since a request may lie there until the issuer is on
+again. It keeps the random values it has seen in that span — **at most
+1000**, the oldest giving way — and discards a repeat. Checking stays at
+most ten hashes: the window is read, not searched. Without that list, one
+solution once computed could be replayed without limit, and the cost the
+proof is meant to impose would be paid once for an unbounded flood. An
+attacker who computes more than 1000 fresh solutions can push an old
+random value out and replay a request; the replay is the same sealed
+request of the same sender and merges in the buffer (§15.4).
 
 **A missing, malformed or failing proof is discarded silently**, without
 unsealing and without any answer. It stands on exactly the same footing as
 a failed code check (§15.3): an unauthorized packet is not answered.
 
-**The difficulty is in the card**, one byte, so that the two kinds of
+**The difficulty is in the invitation data**, one byte, so that the two kinds of
 invitation can demand different work — an invitation handed to a group is
 seen by more parties and must cost more per request than one handed to a
 single person.
@@ -4872,8 +5445,26 @@ construction rests on.
 
 **Payload of the answer (3).** One decision byte — `0x01` accepted, `0x00`
 declined — followed, on acceptance, by the same introduction fields as the
-request. After that, both sides hold the other's verified key bundle, name
-and picture, and nothing further is needed to talk.
+request, the issuer's public day keys from today on (31 × 32 B) and its
+current fixed neighbours (§9.2). After that, both sides hold the other's
+verified key bundle, name and picture, and nothing further is needed to
+talk.
+
+**The answer takes the ladder, never the address the request came from
+when the request was collected from a post box** — that address is the
+holder's. It goes on step 3 under the reply code through the neighbour the
+request names, and on step 4 under the requester's day value from the day
+keys in the request (§8.2). The receipt (4) takes the ladder the same way,
+under the issuer's day value from the answer. The day keys in (2) and (3)
+are the "new contact" edge of §8.2; no separate message follows.
+
+**The other devices of either side** learn of the new contact from the
+device on which it came about — the issuer's device that accepted, the
+requester's device that received the answer — through `CONTACT_ADDED`
+(§14.7): immediately where they are on, from their post box when they
+come on. A request collected by one device is deleted at the holder once
+that device acknowledges it (§8.2); the question is therefore raised on
+that device, and the contact reaches the others only after the decision.
 
 **Payload of the receipt (4).** One byte, `0x01`. It tells the issuer that
 the answer arrived and the contact stands on both sides. Delivery of
@@ -4885,20 +5476,20 @@ exists only after an explicit acceptance. The delivery layer exposes a
 single decision point and holds no policy of its own.
 
 **Automatic acceptance, for two paths only.** Where the issuer handed the
-card over **face to face** — NFC touch or a QR code shown to the person
+invitation over **face to face** — NFC exchange or a QR code shown to the person
 standing there — the request is accepted without a second dialogue, because
 it would ask about something that was just done deliberately. This is a
 property of the invitation record **at the issuer**, not an assertion in the
-card: an attacker cannot obtain automatic acceptance by editing a card, only
+invitation data: an attacker cannot obtain automatic acceptance by editing them, only
 by using an invitation that was issued for that path, which is of the
 single kind (§15.3) and therefore works against him.
 
-| How the card was handed over | User level |
+| How the invitation was handed over | User level |
 |---|---|
-| NFC touch | automatic acceptance |
+| NFC exchange | automatic acceptance |
 | QR shown person to person | automatic acceptance |
-| text line through another channel | accept / decline / block |
-| posted or printed card | accept / decline / block |
+| out-of-band invitation through another channel | accept / decline / block |
+| posted or printed QR code | accept / decline / block |
 
 **Declining** sends the answer with the decision byte `0x00`. The requester
 holds a valid code and therefore already knows the issuer exists; leaving
@@ -4918,28 +5509,37 @@ differs from the stored one is never adopted silently (§15.8).
 **No special path for simultaneous mutual requests.** If both sides send a
 request at the same time, each sees one request in its buffer. Two answers
 are idempotent — delivery is at-least-once in any case — and the situation
-presupposes that both had handed the other a card.
+presupposes that both had handed the other an invitation.
 
-### 15.6 The text form
+### 15.6 The out-of-band form
 
-`cleona:1:<base64url>`, where the payload is the packed card followed by a
-2-byte CRC-16 (reflected, polynomial `0xA001`, initial value `0xFFFF`,
-appended little endian). The base64url alphabet is used without padding
-characters, so the line survives being pasted anywhere.
+`cleona:2:<base64url>`, where the payload is the packed invitation data, then the
+invitation box key `pk_inv` (32 B), then the key bundle (3168 B), then the
+issuer's Ed25519 signature (64 B) over a domain label, the channel, the
+code, the expiry, `pk_inv`, the letter key and the invitation's ML-KEM
+key (§15.2 "The out-of-band line does carry one"), then the issuer's rotation
+chain (§4.5.4; its count `0` and nothing else while the issuer never
+rotated), followed by a 2-byte CRC-16 (reflected, polynomial `0xA001`, initial value
+`0xFFFF`, appended little endian). The base64url alphabet is used without
+padding characters, so the line survives being pasted anywhere.
+`cleona:1:` — the same without `pk_inv`, bundle and signature — is still read; an invitation
+read from it is redeemable only while the issuer is on (§15.1).
 
 **Truncated and corrupted are told apart, and the order matters.** The
-length of a complete card follows from a few bytes read in field order
+length of complete invitation data follows from a few bytes read in field order
 alone — the address count, then each own address's type byte, then the
 neighbour flag and, where set, that address's own type byte, then the
-relay count and each relay entry's length byte — without interpreting any
-address. Every combination gives exactly one length, between 90 and 380
-bytes. So:
+publisher-key flag, then the relay count and each relay entry's length
+byte — without interpreting any address. Every combination gives exactly
+one length, between 91 and 413 bytes; under `cleona:2:` the expected length is that plus 3265 B plus
+5,357 B per chain link, the count read at its fixed offset. So:
 
 | Finding | Reported as | Advice to the user |
 |---|---|---|
 | decoded length ≠ the length the flags imply | truncated | "copy the whole line again" |
 | length correct, checksum wrong | corrupted | "the text is complete but damaged — copy it again" |
-| length and checksum correct, card still unreadable | wrong version | "this invitation comes from a different release" |
+| length and checksum correct, invitation data still unreadable | wrong version | "this invitation comes from a different release" |
+| `cleona:2:` line whose signature does not verify against the Ed25519 key in its bundle, or whose bundle neither hashes to the fingerprint nor is connected to it by its chain | altered | "this invitation was changed on its way — ask for it again over another channel" |
 | no `cleona:1:` prefix and no plausible base64url run | not found | "no invitation in that text" |
 | characters outside the alphabet, or an impossible length for base64url | bad characters | "the text was mangled in transit" |
 
@@ -4947,10 +5547,10 @@ Checking the length **before** the checksum is what makes the first two
 distinguishable. Telling users their paste was truncated when it was
 complete makes them copy too little again.
 
-**Reading a pasted card tolerates what programs do to text:** line breaks
+**Reading a pasted out-of-band line tolerates what programs do to text:** line breaks
 including `\r\n` inserted mid-token, surrounding whitespace, embedding in
 prose, surrounding quotation marks or brackets, zero-width characters and
-byte-order marks, the same card appearing twice in the text, and a missing
+byte-order marks, the same line appearing twice in the text, and a missing
 `cleona:1:` prefix.
 
 ### 15.7 The gate for unknown senders
@@ -4961,7 +5561,7 @@ exactly three things can reach a node, and nothing else:
 | Packet | What it can achieve | What bounds it |
 |---|---|---|
 | bundle request `0x01` | obtain the node's public key bundle | answered only while an invitation is standing (§15.1); the bundle is public by construction |
-| request `0x03` | raise one question to the user | must show a valid proof of work before it is unsealed (§15.5.1), then carry a valid, unexpired, unspent code; counts against the buffer (§15.4) |
+| request `0x03` — arriving directly, forwarded, or collected from the post box under an invitation value | raise one question to the user | must show a valid proof of work for a window within the span of §15.5.1 before it is unsealed, then carry a valid, unexpired, unspent code; counts against the buffer (§15.4) |
 | anything else | nothing | discarded before any processing |
 
 **The type rule is normative, not descriptive.**
@@ -4971,7 +5571,12 @@ exactly three things can reach a node, and nothing else:
 > counts against the request buffer. There is no third type admitted from
 > an unknown party.
 
-Without this rule, anyone holding a printed card could seal an arbitrary
+A **group pair** (§4.3) is not an unknown party for a packet that names a
+group both belong to in the recipient's current member state and whose
+type is a group type (§16.2.2); any other type from a group pair is
+discarded as from an unknown party.
+
+Without this rule, anyone holding a printed QR code could seal an arbitrary
 payload to a node and, for instance, make a call ring on the strength of a
 business card. The check is locally enforceable — it happens after opening
 the envelope, where the sender is known and verified — so it is required
@@ -4980,8 +5585,8 @@ invariant for the test strategy.
 
 For everything beyond first contact the gate is structural rather than a
 rule: an envelope opens only against the recipient's secret keys, and a
-packet from a party whose verified key bundle is not in the contact list has
-no path into the application at all. There is no downstream filter, because
+packet from a party whose verified key bundle is neither in the contact
+list nor among the group pairs has no path into the application at all. There is no downstream filter, because
 nothing arrives that would need filtering.
 
 ### 15.8 Profile updates and identity deletion
@@ -4997,68 +5602,28 @@ Note the two separate picture limits: **64 KB** for a profile update,
 **≤ 4 KB** for the preview in a request (§15.5), which counts against the
 request's payload cap.
 
-**Key material never travels in a profile update.** An identity is its key
-bundle, and the identifier is the SHA-256 of that bundle; a different bundle
-is a different identifier. A packet that claims to come from a stored
-contact but verifies against a different key bundle is therefore **never
-adopted silently**: it is shown as a warning, the contact's verification
-level is reset to `unverified` (§15.10), and adoption requires an explicit
-act by the user. This holds for every unannounced difference, regardless of
-which packet it arrives on. A key change that is **announced** takes the
-path of §15.8.1 instead.
+**Key material never travels in a profile update.** An identity is
+identified by its founding key bundle (§4.1); its signing keys change only
+by an Emergency Key Rotation, which carries its own proof (§4.5.4). A
+packet that claims to come from a stored contact but verifies against keys
+that neither equal the stored ones nor are connected to them by a rotation
+chain is therefore **never adopted silently**: it is shown as a warning,
+the contact's verification level is reset to `unverified` (§15.10), and
+adoption requires an explicit act by the user. This holds for every
+unannounced difference, regardless of which packet it arrives on. A key
+change carried by a chain takes the path of §15.8.1 instead.
 
 #### 15.8.1 The announced key change
 
-An identity that deliberately replaces its key bundle — on losing a device,
-on renewing after a block (§15.9), or on a routine decision to do so —
-sends one key-change announcement to every contact.
-
-The announcement is an ordinary sealed message (§4) under the **new**
-bundle, so the envelope already carries the new bundle and both new
-signatures. Its payload supplies what the envelope cannot: the same
-assertion, signed by the **old** keys.
-
-| Field | Bytes | Content |
-|---|---|---|
-| old key bundle | 3168 | must equal the bundle the recipient has stored, byte for byte |
-| timestamp | 4 | Unix seconds, u32 LE |
-| Ed25519 signature, old key | 64 | over new bundle ‖ old bundle ‖ timestamp |
-| ML-DSA signature length | 2 | u16 BE |
-| ML-DSA-65 signature, old key | ≤ 3309 | over the same bytes |
-
-Payload at most 6547 B; the whole packet is therefore at most 14244 B on
-the wire, twelve parts.
-
-**The recipient accepts it only if all four hold:**
-
-1. the envelope opens and both of its signatures verify — the **new** keys
-   signed it;
-2. the old bundle in the payload is byte for byte the bundle stored for
-   this contact;
-3. both old-key signatures verify against that old bundle, over new bundle
-   ‖ old bundle ‖ timestamp;
-4. the timestamp is not older than the timestamp of the last accepted
-   announcement from this contact.
-
-Signing over both bundles at once is what makes the announcement
-non-transferable: it asserts *this* succession and no other, so it cannot
-be lifted out and replayed towards a third identity.
-
-If all four hold, the recipient replaces the stored bundle and identifier
-and **keeps the verification level**. The level records how the identity
-was verified in person, and an announcement proves that the same party — in
-possession of the old secret keys — performed the change. An **unannounced**
-difference proves nothing of the kind and resets the level to `unverified`
-(§15.10).
-
-If any of the four fails, the packet is discarded and shown as a warning;
-nothing is replaced.
-
-**A contact that never receives the announcement** keeps the old bundle and
-sees the new identity as an unknown party, whose packets do not reach it
-(§15.7). The remedy is the ordinary one: a fresh invitation and the five
-packets of §15.1. This is the declared price of a key change and the reason
-it is an act, not a routine.
+An identity that replaces its signing keys — on suspected compromise, on
+losing a device, on renewing after a block (§15.9) — does so by the
+Emergency Key Rotation of §4.5.4. The identifier stays. The announcement,
+and every envelope until the contact has acknowledged one, carries the
+rotation chain; a contact that verifies it replaces the stored keys and
+keeps or lowers the verification level under §14.4. A contact that
+receives none of them keeps the old keys until the next envelope from the
+identity reaches it; until then its own packets are sealed against the old
+KEM keys (§4.5.4).
 
 **Identity deletion.** Deleting an identity sends a signed deletion notice
 to every contact as an ordinary pairwise message — the departing identity
@@ -5078,7 +5643,7 @@ explicit states.
 | State | Effect |
 |---|---|
 | **active** | in the contact list; packets in both directions |
-| **deleted** | removed from the contact list; a persistent deletion mark prevents re-import through backup restore, device reconciliation and card exchange |
+| **deleted** | removed from the contact list on every own device (§14.7), together with the conversation, its messages and its attachments; a persistent deletion mark prevents re-import through backup restore, device reconciliation and invitation exchange |
 | **blocked** | as deleted, plus: a new request does **not** lift the mark |
 
 **Deleting is not blocking.** A request from a **deleted** party reappears
@@ -5101,34 +5666,36 @@ they expire. What it cannot do is reach the user: nothing is opened,
 nothing is shown, nothing is acknowledged.
 
 **The complete remedy: block and renew.** When blocking, the interface
-additionally offers to renew the identity's key bundle. This generates a
-fresh bundle, and with it a fresh identifier and fresh addresses in every
-newly issued card. The occasion is a revocation, so the cut is **hard, with
-no transition period** — a grace period would leave the lock-out
-ineffective for exactly as long as it lasted.
+additionally offers to renew the identity's signing keys: an Emergency Key
+Rotation (§4.5.4) whose announcement leaves out the blocked party. The
+identifier stays; what the blocked party still holds stops working — the
+codes of its pair are no longer registered, the day keys it holds are no
+longer collected once the 7-day transition has passed, and whatever it
+sends is discarded as before. The occasion is a revocation, so no party
+but the remaining contacts is served by the transition.
 
-Every remaining contact learns the new bundle through the key-change
-announcement of §15.8.1, which is what lets them keep the verification
-level they had. The blocked party is not among the recipients, and receives
-nothing.
+Every remaining contact learns the new keys through the chain of §4.5.4,
+which is what lets them keep the verification level under §14.4. The
+blocked party is not among the recipients, and receives nothing.
 
-Its price is named rather than hidden: a contact that is offline long
-enough to miss the announcement sends into the void and must be reached
-again through a fresh invitation. The loss is visible as a missing
-acknowledgement (§9), not as a silent disappearance. That is why renewal is
-**an option offered when blocking**, never an automatic consequence of it.
+Its price is named rather than hidden: a remaining contact that is offline
+during the rotation seals against the old KEM keys; what it sends opens
+for 7 days, and it adopts the new keys with the next envelope it receives.
+That is why renewal is **an option offered when blocking**, never an
+automatic consequence of it.
 
 ### 15.10 Verification levels, profile, alias
 
 **Verification levels.** A contact carries exactly one of four levels:
 `unverified` / `seen` / `verified` / `trusted`. `verified` is bound to the
 **transmission channel that only the application can know** — a camera scan
-with the other person present, or an NFC touch — and **not** to the card
+with the other person present, or an NFC exchange — and **not** to the invitation data
 format: the same bytes travel over every channel, so the format cannot carry
-the distinction. A card received through a chat therefore never inherits the
+the distinction. An out-of-band invitation received through a chat therefore never inherits the
 in-person level. An **unannounced** key-bundle difference resets the level
-to `unverified` (§15.8); an **announced** key change that passes all four
-checks of §15.8.1 leaves it untouched.
+to `unverified` (§15.8); an **announced** key change — a verified rotation
+chain (§4.5.4) — keeps it when the device quorum is present as well, and
+lowers it otherwise (§14.4).
 
 **Never a fixed neighbour.** A contact can be marked so that it never
 takes a fixed place (§5.2) — for the user whose threat comes from their own
@@ -5152,8 +5719,8 @@ ineffective: identities cost nothing to create, and the sender is not known
 until the envelope is open. Eviction, the code and the cap on open
 invitations do that work instead.
 
-**NFC exchange.** A touch can carry both cards in one operation, so both
-sides end up holding the other's card and either may start the five
+**NFC exchange.** A touch can carry both invitations in one operation, so both
+sides end up holding the other's invitation and either may start the five
 packets. Addresses learned in the process are reachability hints like any
 other (§6.2).
 
@@ -5166,12 +5733,17 @@ own devices.
 **Residual risks.**
 
 1. **The anonymous bundle exchange is unsealed.** Packets (0) and (1) carry
-   no identity, but anyone holding a card can send the anonymous form of
+   no identity, but anyone holding an invitation can send the anonymous form of
    packet (0) and learn, from whether packet (1) comes back, that the node
    is running. The window is bounded by the rule that this form is answered
    only while an invitation is standing (§15.1), and by revocation and expiry —
    not closed. The signed form does not widen it: only a party that already
-   holds the bundle as a contact can produce one.
+   holds the bundle as a contact can produce one. Packet (1) is unsealed
+   on the wire: whoever records that exchange can compute the issuer's
+   identifier from the bundle, and — once the issuer has rotated
+   (§4.5.4) — sees from its chain that and how often it has. The out-of-band line
+   (§15.6) avoids the exchange; on the wire it leaves only the sealed
+   request.
 2. **A decline tells the requester the request was seen.** This is a narrow
    signal and it is not a probe. It reaches only a party that sent a
    **complete sealed request bearing a valid code**, and that request was
@@ -5179,7 +5751,7 @@ own devices.
    learned quietly or in passing. The alternative — silence — would leave an
    honest requester unable to tell a decline from a loss, which is the
    larger harm (§15.5).
-3. **A leaked card is a usable card** until its code expires, is revoked,
+3. **A leaked invitation is a usable invitation** until its code expires, is revoked,
    or its acceptance count is exhausted. The acceptance question is what
    stands between a leaked code and a contact; an open invitation handed to
    a group is a deliberate standing offer, and the interface must say so
@@ -5198,10 +5770,30 @@ own devices.
 6. **Restoring an old invitation list re-arms a revoked invitation**
    (§15.3). The opposite failure — losing the list entirely — is
    fail-closed, and the two cannot both be closed by the same mechanism.
-7. **Address hints in a card go stale.** A card with a long or unlimited
+7. **Address hints in an invitation go stale.** An invitation with a long or unlimited
    validity outlives the addresses printed in it. Stale hints fail silently
    by construction; what remains is the rest of the ladder (§7, §8), and a
-   card whose every hint is stale reaches nobody without producing an error.
+   invitation whose every hint is stale reaches nobody without producing an error.
+8. **The post box way of an invitation can be jammed by its holders.**
+   Whoever holds the out-of-band line can leave packets under its invitation
+   value; at 100 per value (§8.2) the oldest give way, so 100 deposits —
+   100 proofs of `D_box` — push a real request out of a holder before the
+   issuer collects it. The live ladder is not affected, and revocation
+   (§15.3) ends it. A holder may carry up to 100 × 8.7 KB per invitation
+   value for 7 days.
+9. **A request and an answer wait at most 7 days.** An issuer who stays
+   off longer than the retention loses a request left for it; a requester
+   who does not open the application within 7 days loses the answer. Both
+   see the request still pending, not failed (§9.1).
+10. **A printed or shown QR code still needs the issuer on.** Only the
+    out-of-band line carries the bundle; an invitation read from a QR code or by NFC exchange
+    keeps the round trip of packets (0) and (1) (§15.1).
+11. **The line's signature is classical.** It is Ed25519 alone (§4.4.3).
+    An attacker who alters a line in transit and can forge Ed25519 at that
+    moment — which takes a quantum computer working in real time — could
+    swap the invitation keys and read that one request. A signature
+    recorded and broken later gains nothing: by then the request has been
+    sealed against the genuine keys.
 
 **Open measurement.** No design question is left open in this chapter, but
 one value in it is not final: the difficulty `D` (§15.5.1) is printed as 20
@@ -5214,12 +5806,15 @@ are placeholders and are to be treated as such.
 
 | Name | Value |
 |---|---|
-| card size | **91 B** (no address at all, count `0`, no publisher key) … **98 B** (one own IPv4 address) … **413 B** (four own IPv6 addresses, a neighbour in IPv6, the publisher key, three relay entries of 64 characters) |
-| card as base64url | 122 / 131 / 551 characters — `ceil(n × 4 / 3)`, no padding |
-| text form, whole line | 133 / 143 / 563 characters including `cleona:1:` (9) and the 2-byte checksum |
-| text form checksum | CRC-16, polynomial `0xA001`, init `0xFFFF`, 2 B little endian |
-| channel byte | `0x00` live, `0x01` beta; any other value rejects the card |
-| address type byte | `4` = IPv4, `6` = IPv6; any other value rejects the card |
+| invitation data size | **91 B** (no address at all, count `0`, no publisher key) … **98 B** (one own IPv4 address) … **413 B** (four own IPv6 addresses, a neighbour in IPv6, the publisher key, three relay entries of 64 characters) |
+| invitation data as base64url | 122 / 131 / 551 characters — `ceil(n × 4 / 3)`, no padding |
+| out-of-band line, whole | `cleona:2:` 4,487 / 4,496 / 4,916 characters (invitation data + `pk_inv` 32 B + bundle 3168 B + Ed25519 signature 64 B + chain count 1 B + 2-byte checksum); `cleona:1:` 133 / 143 / 563 still read |
+| signature of the out-of-band line | Ed25519, 64 B, issuer identity key, over domain label ‖ channel ‖ code ‖ expiry ‖ `pk_inv` ‖ letter key ‖ invitation ML-KEM key; not hybrid (§4.4.3) |
+| invitation box key | `pk_inv`, Ed25519, random per invitation, kept with the record (secret 64 B); value `first 16 B of SHA-256(pk_inv)` |
+| invitation key pair | X25519 + ML-KEM-768 per invitation, random, kept with the invitation record and deleted with it; ≈ 2.4 KB secret per invitation, at most 10 |
+| out-of-band checksum | CRC-16, polynomial `0xA001`, init `0xFFFF`, 2 B little endian |
+| channel byte | `0x00` live, `0x01` beta; any other value rejects the invitation |
+| address type byte | `4` = IPv4, `6` = IPv6; any other value rejects the invitation |
 | fingerprint | the identifier of §4.1 (32 B) |
 | key bundle | 3168 B |
 | code | 16 B random |
@@ -5237,9 +5832,10 @@ are placeholders and are to be treated as such.
 | acceptances, open kind | `n`, default **20** |
 | spent, single kind | after the first **accepted** request |
 | proof of work | `SHA-256(code ‖ random ‖ counter ‖ time window)` with `D` leading zero bits |
-| proof of work, visible fields | 8 B random value + 8 B counter |
-| time window | Unix minutes ÷ 10 — a solution lasts about 10 min |
-| replay memory | random values of the current and previous window, max. **1000** |
+| proof of work, visible fields | 8 B random value + 8 B counter + 4 B time window |
+| time window | Unix minutes ÷ 10; accepted from the current one + 1 back to 7 d + 1 window |
+| replay memory | random values seen within that span, max. **1000**, oldest out |
+| day keys in request and answer | 31 × 32 B each |
 | difficulty `D` | **provisional**: 20 bits single, 22 bits open — to be set by measurement so that solving takes ≈ 1 s on the weakest target device |
 | check cost at the issuer | at most 10 hashes, independent of `D` |
 | request buffer | **20** per invitation, **100** in total, evicting |
@@ -5251,7 +5847,7 @@ are placeholders and are to be treated as such.
 | profile description | ≤ 500 characters, plain text |
 | profile updates | max. 1 per hour |
 | envelope fixed cost | 7696 B |
-| request on the wire | 7729 B with a bare code payload — seven parts |
+| request on the wire | 8725 B with a bare code payload — eight parts |
 | key-change announcement | payload ≤ 6547 B, packet ≤ 14244 B — twelve parts |
 | verification levels | `unverified` / `seen` / `verified` / `trusted` |
 | relationship states | active / deleted / blocked |
@@ -5363,6 +5959,13 @@ inner signature (the pairwise seal authenticates each leg in a
 symmetric-deniable way). Roles, invites, and member management travel the
 same way, as ordinary 1:1 deliveries over the same legs.
 
+**A group post carries one post identifier.** The author draws 16 random
+bytes per post and carries them in every leg. A reaction, a quote and a
+read mark name the post identifier; acknowledgement, delivery state and
+re-sending stay with the identifier of the leg (§9.2). An edit and a
+deletion are the author's and name, per leg, the identifier of that leg
+(§21.5.1).
+
 **Fan-out does not serialize.** Every leg leaves the device the moment
 it exists (§3.1); legs to different members do not wait on each other.
 
@@ -5433,7 +6036,18 @@ legs exist.
   image and description, as well as the **complete member list** (the
   invitee knows every participant before joining) and travels as an
   ordinary 1:1 delivery over the pairwise leg to the invitee — only they can
-  read it.
+  read it. For every member the list carries that member's address as the
+  member itself signed it on joining (all four public keys, key state,
+  rotation chain where there is one) and its fixed neighbours as the
+  inviter knows them; a membership change carries full entries only for
+  members who are new. In the leg to each member it also carries the
+  `s_AB` of that member with every co-member that is not the inviter
+  (§4.3); a member that is already a contact keeps its own and ignores it.
+  **Joining is an explicit act of the invitee**; only then are its group
+  pairs formed. The **group types** a group pair may send are: group
+  post, reaction, edit, deletion, read mark, poll and vote, calendar entry
+  of a group event, membership update (owner/admin only, checked as
+  below), leave, and the acknowledgement and day-key notice of the pair.
 - **Membership consistency.** Every group keeps a **monotonically
   increasing membership epoch**; every mutating operation (creation,
   invite, removal, role change, leaving) increments it before sending.
@@ -5452,13 +6066,22 @@ legs exist.
   anomaly**.
 - **Leaving & ownership transfer.** Leaving removes the local
   conversation along with the membership record (an ex-member can no
-  longer interact anyway). If the owner leaves a group with remaining
+  longer interact anyway). A device that left a group keeps a mark of
+  the group identifier; a post for a group it left is discarded, and a
+  new invitation — a member list that names the identity and carries a
+  higher epoch than the one at leaving — lifts the mark. A member removed
+  by the owner or an admin receives the new member list as well; its
+  device keeps the conversation readable, marked as removed, blocks
+  writing and discards later posts of the group, as after leaving. A post
+  for a group the device does not hold yet is buffered and applied when
+  the invitation arrives (§21.5.4). If the owner leaves a group with remaining
   members, the owner role passes **automatically** to the first admin,
   or otherwise to the first remaining member; the transfer is
   distributed to everyone before the leave, and recipients apply the
   same transfer logic independently. If the last member leaves, the
   group is silently removed. The UI secures leaving with a two-stage
   confirmation dialog that names the transfer recipient to the owner.
+  The same mark is kept for a channel the device left.
 
 There is no group-level shared addressable state: every leg is an
 ordinary pairwise delivery, and a group has no address of its own that a
@@ -6266,10 +6889,9 @@ Plane D API is narrow and explicit; call code does not access transport
 internals. The media, once connected, is real-time and IP-tolerant
 ("two talk again" is visible to an observer, who they are is not) —
 a direct connection between the two devices once an address pair
-works, by construction (§1.3). Reaching a device that may be in the
-background, however, is an asynchronous problem and follows the same
-delivery path used for messages (§7, §8), detailed for signaling in
-§17.2.
+works, by construction (§1.3). Reaching the other device in the first
+place runs over the delivery layer — ladder steps 1 and 3, never the
+post box — and is detailed for signaling in §17.2.
 
 ### 17.1 D-Frame Format
 
@@ -6307,7 +6929,7 @@ wasteful either way. Plane D has its own, minimal frame format:
   because a promotion is exactly the size difference these classes buy
   away.*
   | **176 B** | one **control frame** (§17.1.1) | control frames share the voice class **deliberately**: a separate size would let an observer outside the call count them, and control traffic peaks exactly when someone starts speaking or presenting |
-  | **1200 B** | one video fragment, one media-stream fragment (§17.6) | video is fragmented anyway at 1187 B of payload, and §11 already fixes this class for stream frames (85.3 % efficiency) |
+  | **1200 B** | one video fragment, one media-stream fragment (§17.6) | video is fragmented anyway at 1157 B of payload, and §11 already fixes this class for stream frames (85.3 % efficiency) |
 
   **One class for everything was rejected, with the price computed:** at
   1200 B a voice call would put **480 kbps on the wire for a 28 kbps
@@ -6425,57 +7047,91 @@ worth relaying by a node that is not a call participant.
 
 ### 17.2 Signaling over the delivery layer
 
-Signaling messages (`INVITE`, `RING_ACK`, `ANSWER`, `REJECT`,
-`HANGUP`, `CANCEL_OTHERS`) are ordinary 1:1 cells under pairwise tags
-— flowless, anonymous, indistinguishable from any other traffic on the
-delivery layer.
+Call signals (`INVITE`, `RING_ACK`, `ANSWER`, `REJECT`, `HANGUP`,
+`CANCEL_OTHERS`, `CALL_MEDIA_STATE`, and the signals of a running call:
+`CALL_KEYFRAME_REQUEST`, `CALL_GROUP_LEAVE`, `CALL_REJOIN`,
+`CALL_GROUP_SENDER_KEY`) are sealed in an envelope (§4.3) and
+sent to the counterpart's identifier like a message, with one difference:
+**a call signal is never left in a post box.** It takes ladder steps 1
+and 3 (§7.1), both at once, and nothing else. On step 3 a forwarder sees
+a code and opaque bytes (§8.1); it cannot tell a call signal from a
+message.
 
-- **Short "interactive" delivery TTL (120 s).** Signaling cells carry a
-  short, 120-second TTL class instead of the default (§9). **The class
-  is therefore visible on the wire** — a relay can tell a signaling
-  cell from a message cell. That is an accepted cost, not an
-  oversight: it buys **freshness** (an INVITE cannot ring days later)
-  and keeps dead ring signals off the relays. There is **no PoW** on an
-  INVITE — the delivery layer carries no message-level PoW at all; the
-  INVITE costs one ordinary packet, nothing more. An INVITE
-  is **placed once**; there is no retransmission — which is why its
-  reaching the recipient in time is a delivery property, not a detail:
-  the 120 s TTL must exceed the interval at which the recipient becomes
-  reachable (§8). **Signaling therefore uses a smaller redundancy set
-  than an ordinary message** (§9), sized so that its own delivery
-  completes within the 120 s TTL rather than needing the several
-  minutes an ordinary message's larger set would take. **This
-  redundancy trade-off is deliberate:** a real-time signal is
-  censorable by its nature, and the smaller set buys far less
-  resilience than the larger one does for a message that has seven
-  days — but it is not measurably worse in practice (§9). Without it, a
-  call to a device in the background would not ring at all before the
-  TTL expired.
-- **Why signaling relies on the mailbox stage, not the direct stages.**
-  The direct/relay stages of the delivery ladder (§7) only reach a
-  device that is reachable *right now*; a device in the background is
-  not. The mailbox stage (§8) is what reaches it regardless of
-  foreground state, at a latency that depends on how often the device
-  becomes reachable there: fast in the foreground, on the order of
-  seconds in the background, and on a closed iOS app, possibly not
-  within the 120 s TTL at all. This is the same "first contact has no
-  cached direct path" situation as §15. The call, once connected, then
-  uses the direct stages for the media itself (§17.1).
-- **Caller state `reaching`.** After placing the INVITE, the caller
-  shows "reaching …" — **no** ringtone. Ringtone and the 60-s answer
-  timeout start only once the callee's `RING_ACK` cell has actually
-  arrived ("it really is ringing on their end"). This means there is
-  no fake ringing against a device that was never reached.
+- **A call rings within 10 seconds or not at all.** A call is worth
+  something only now. The post box reaches a device when it returns
+  (§8.2), and a call that rings then rings for nobody. A call signal
+  therefore has no step 4: no proof of work, no holder, no redundancy
+  (§8.3). Either a direct step carries it, or the call does not take
+  place and the callee learns of it by a message (below).
+- **Sent once.** Each of the two steps sends a call signal once. It is
+  not sent again at the edges of §8.2 (§9.3): it ends with its
+  acknowledgement (§9.2) or with its call, whichever comes first. It has
+  no delivery display (§12.2); what the user sees is the state of the
+  call.
+- **A signal of a running call.** A sender key, a leave, a rejoin and a
+  keyframe request belong to one `callId` and are worth something only
+  while that call runs; they take the same two steps once and end with
+  their acknowledgement or with their call, whichever comes first. A
+  sender key names its version; an older version never replaces a newer
+  one, and a key for a call that has ended is dropped. A participant that
+  misses a sender's key hears nothing from that sender; it asks that
+  sender once, by sending its own key, and asks again only after a key
+  from that sender has arrived.
+- **Caller state `reaching`, at most 10 s.** From the moment the user
+  starts the call the caller shows "reaching …" — **no** ringtone. When
+  the callee's `RING_ACK` arrives, it really is ringing on their end:
+  ringtone and the 60-s answer timeout start then, and only then. When
+  10 s have passed without a `RING_ACK`, the caller shows "not
+  reachable", ends the call, sends one `HANGUP` and the missed-call
+  message (below). There is no fake ringing against a device that was
+  never reached, and nobody waits minutes for a call that does not come
+  about. Reaching and answering are two limits in a row — up to 10 s
+  until `RING_ACK`, then up to 60 s until `ANSWER`. Both are limits of
+  the call, counted by the caller on its own clock; the delivery layer
+  holds no clock for them (§9.3).
+- **Missed call.** Whenever a call ends without having been answered —
+  no `RING_ACK` within 10 s, the caller hanging up before an answer, or
+  60 s of ringing without an `ANSWER` — the caller sends the missed-call
+  message. It is an ordinary message, not a call signal: steps 1, 3 and
+  4, acknowledged, shown and mirrored like any message (§7.1, §9, §14.2).
+  It waits in the post box for a callee
+  who is off — offline is not an error (§1.2). It carries the `callId`
+  and whether the call was audio or video. The callee shows it with the
+  time its own device received it (§22.5.3), never with a time the
+  caller claims. A device that rang for this `callId` shows one entry,
+  not two.
+- **A signal that arrives late.** Nothing holds a call signal back, so it
+  can be late only by seconds on a slow way, or because its envelope
+  could not be opened at once and was parked (§4.5.4). The callee's
+  device counts on its own clock, from its own arrival time: an `INVITE`
+  opened more than 10 s after it arrived does not ring and is dropped.
+  The caller's claimed send time decides nothing (§22.5.3). An `INVITE`
+  that arrives after the caller gave up rings until the caller's `HANGUP`
+  ends it; a `RING_ACK` for a call the caller has already ended is
+  answered with one `HANGUP`. A ringing device stops by itself after
+  60 s.
 - **Ordering:** `callId` + sequence number; terminal types (`REJECT`,
   `HANGUP`) dominate any later out-of-order arrival; completed
   `callId`s are remembered for 24 h (late duplicates are no-ops).
-- **Multi-device (§14):** an INVITE is **one** cell — all of the
-  callee's devices see it via the shared delivery target used for
-  multi-device (§14) and ring. `RING_ACK`
-  carries the ringing device's **ephemeral X25519 binding marker**; the
-  first `ANSWER` binds the session to one device — carrying that same
-  marker — and `CANCEL_OTHERS` (TTL 120 s) names it to end the ringing of
-  the others.
+- **Multi-device (§14):** an INVITE is **one** message to the callee's
+  identifier. Which of the callee's devices it reaches follows from the
+  two steps: step 1 reaches the device at the address, step 3 the device
+  that registered the code with each of the callee's fixed neighbours
+  (§8.1, §14.2). **The device it reaches rings and mirrors it at once to
+  each other own device, on steps 1 and 3 only, under the own-device code
+  of §8.1 (§14.7) — never through the post box, which would ring for
+  nobody.** A device that receives the mirror counts from its own arrival
+  time, rings, and answers the caller directly; it does not acknowledge
+  the mirror to the caller. Every signal the caller sends to the identity
+  for this `callId` — `CANCEL_OTHERS`, `HANGUP`, the signals of the
+  running call — reaches the same first device, which mirrors it the same
+  way until the call has ended. Every device that
+  rings sends a `RING_ACK` carrying its **ephemeral X25519 binding
+  marker**; the first `ANSWER` binds the session to one device — carrying
+  that same marker — and `CANCEL_OTHERS` names it to end the ringing of
+  the others. A device whose ringing `CANCEL_OTHERS` ended shows nothing:
+  the call was answered, and the missed-call message (above) is sent only
+  for a call that nobody answered.
 
   **Why an ephemeral marker rather than a `deviceId`.** §14.1 holds
   the DeviceID to be "not an addressing means …
@@ -6492,14 +7148,10 @@ delivery layer.
 | Recipient state | Incoming call |
 |---|---|
 | App in foreground (§8) | rings within **1–3 s** |
-| Android background (foreground service) | rings within **seconds** |
+| Android background (foreground service) | rings within **seconds**, through its fixed neighbour (§8.1) |
 | Desktop background | rings within **seconds** |
-| iOS app closed | **no incoming calls** — reachability under §8 does not fall inside the 120-s TTL; documented platform limit (§31), not an error class |
-
-Missed calls are nevertheless visible: the caller's `reaching`
-cancellation can be followed up as a normal cell ("missed call") with a
-standard TTL — delivery then follows the messaging model (offline is
-not an error, §1.2).
+| Device off, or reachable on neither step 1 nor step 3 | **does not ring** — the caller sees "not reachable" after 10 s, the callee finds the missed-call message on return |
+| iOS app closed | **no incoming calls** — a closed app keeps no way open for steps 1 and 3 (§8.1); documented platform limit (§31), not an error class |
 
 ### 17.3 Address Candidates and Punch Windows
 
@@ -6580,7 +7232,12 @@ connect outbound to a volunteer — media has no punch dependency at all.
   voice size class — §17.1 freezes the size classes, not the number of
   kinds (as `DFrameKind.punch` already shows).
 - **Loss detection:** 10 s without valid media frames end the session
-  (UI: "connection lost"), independent of signaling.
+  (UI: "connection lost"), independent of signaling. A device in a 1:1
+  call always sends voice frames at the frame rate: muted, or unable to
+  capture — no permission, no device, a capture that delivers nothing —
+  it sends encoded silence in the same size class. The rule therefore
+  needs no exception, and a silent call looks on the wire like a speaking
+  one (§17.1).
 
 ### 17.5 Media Processing above the Plane D API
 
@@ -6664,8 +7321,8 @@ media. There is no punch window and no port prediction on this path; two
 outbound connects replace them.
 
 **Finding the volunteer.** No directory, no fixed point, no designated
-role: candidates are inbound-reachable always-on nodes that have opted in
-("media relay volunteer"), drawn from two rings — the sender's current
+role: every inbound-reachable always-on node serves as a volunteer —
+there is no switch (§12.7) —, drawn from two rings — the sender's current
 sync partners (the ask rides the live link and adds no metadata; a sync
 partner sees the sender's address anyway, RL-1), then entry-cascade
 nodes, whose addresses are public by construction (RL-13). Dual-stack
@@ -6676,6 +7333,8 @@ no identity. Admission at the volunteer is **capped, not negotiated**
 volunteer and take the bulk lane, both parties online or not. The
 volunteer's price is thereby bounded and declared in RL-7 — no unbounded
 third-party load, and no consent dialog on an unattended machine.
+A volunteer carries one stream at a time; a further ask is refused and
+the sender moves on to the next candidate.
 
 **Session.** The volunteer hands out two session cookies; the sender
 places a `STREAM_OFFER` (volunteer address, cookie, transfer parameters)
@@ -6842,16 +7501,17 @@ chapter does not develop further:
 
 #### 18.1.1 Refining the privacy commitment
 
-Calendar data is private, but not location-bound: shared shares do sit
-on foreign relays — as sealed cells on the delivery layer, opaque to
-every relay (§5, §16.1). Normative:
+Calendar data is private, but not location-bound: what is shared with
+others travels as ordinary sealed messages and can wait with holders
+that are not the recipient (§8.2). Normative:
 
 > Calendar data resides **locally and authoritatively** in the encrypted
-> profile (§21). Invitations, RSVPs, changes, and cancellations
-> additionally reside as sealed cells on the delivery layer until their
-> TTL clears them (14 days default). A relay sees tag, TTL, and
-> ciphertext — no event, no participant, no time. There is no PoW on a
-> calendar cell; it costs one ordinary packet, nothing more.
+> profile (§21). Invitations, RSVPs, changes, and cancellations are
+> ordinary messages: for a recipient who is away they additionally lie
+> sealed in a post box, until the recipient collects them and at most
+> 7 days (§8.2). A holder sees a day value and opaque bytes — no event,
+> no participant, no time. A calendar message costs what any message
+> costs, nothing more.
 
 #### 18.1.2 The six calendar messages as cells
 
@@ -6891,10 +7551,10 @@ recipient per chat and must not show through in the aggregate. Details:
 
 **Recipient resolution.** `groupId` first (all group members excluding
 self), otherwise `attendeeNodeIds`. Role logic: the creator may edit
-and delete, the invitee may only RSVP. `K_AB` is deterministically
-derivable from the roster pubkeys for every pair of members (§16.2) —
-so a group member can be invited even if they are not a contact of the
-creator.
+and delete, the invitee may only RSVP. Every pair of members has a
+`K_AB`: from first contact, or for co-members who are not contacts from
+the `s_AB` their invitation carries (§4.3, §16.2.2) — so a group member
+can be invited even if they are not a contact of the creator.
 
 #### 18.1.3 Ordering rule for UPDATE / DELETE (normative)
 
@@ -6912,9 +7572,10 @@ from the same sender can become visible in any order.
    production there.
 3. `CALENDAR_DELETE` **dominates regardless of timestamp**. An update
    received after the delete must not resurrect the event. The local
-   delete marker (`eventId` plus delete time) is retained at least until
-   the maximum delivery TTL (31 days) plus its retention margin has
-   expired — after that, no cell that would need it can still arrive.
+   delete marker (`eventId`, no content) is kept for as long as the
+   identity exists (§20.2): an update for that event can still arrive at
+   any later time, because a device that was away asks for what it
+   missed and the answer carries what was written since then (§9.5).
 4. A `CALENDAR_UPDATE` or `CALENDAR_RSVP` for an **unknown** `eventId`
    is buffered, not discarded — the same pattern used for buffering chat
    configuration changes that arrive before the corresponding group
@@ -6938,9 +7599,9 @@ members that is ~380 cells at ~590 B ≈ 224 KB.
 That is not a bug, but it is expensive. Three observations are recorded
 here as application rules:
 
-1. **RSVP is a standard-TTL cell** (14 d), not a 31-day management cell.
-   It costs one ordinary packet, no PoW — the price is that of
-   an ordinary message.
+1. **An RSVP is an ordinary message** — the same ladder, the same post
+   box and the same 7-day retention (§8.2) as any other; there is no
+   class of its own for it. The price is that of an ordinary message.
 2. **RSVP batching.** Several RSVPs from the same sender for different
    events may be bundled into **one** cell — the same amortization
    pattern as the batched delivery receipt (§9). This is a pure
@@ -6983,10 +7644,14 @@ on which everyone is free. Four points fail to carry this:
    that into ten minutes; on iOS with a closed app, the timing is not
    even predictable (§31). The grid is therefore never "finished", always
    "partially there".
-2. **An offline invitee can answer up to 14 days later.** The
-   `FreeBusyRequest` carries a `requestId` to correlate the response,
-   but no expiry semantics. A response can arrive when the scheduling
-   session has long since ended and the event already created.
+2. **An invitee who is away answers on return.** The request may rest
+   up to 14 days at the sender (§9.3) and lie up to 7 days in a post
+   box (§8.2); an invitee who stays away longer receives it with the
+   answer to their catch-up request (§9.5), so there is no bound on
+   how late the answer can arrive. The `FreeBusyRequest` carries a
+   `requestId` to correlate the response, but no expiry semantics. A
+   response can arrive when the scheduling session has long since ended
+   and the event already created.
 3. **Egress-cost amplification.** The requester places **one** small
    cell and thereby triggers **N** response cells on N foreign devices.
    There is no PoW on this path; the cost is N egress cover-slots. The
@@ -7016,7 +7681,7 @@ with cost:
 
 | Option | Construction | Cost |
 |---|---|---|
-| **A — Asynchronous grid** | The request carries an `expiresAt` (proposal: 24 h, well under the 14-day TTL). The UI shows a **partial grid** with an explicit count ("3 of 8 have answered") instead of blocking. Responses after `expiresAt` are discarded. A new request is a new `requestId` | The feature is preserved, but loses the assurance of a "complete grid". The planner decides on an incomplete basis — which is what they already do today, just without knowing it |
+| **A — Asynchronous grid** | The request carries an `expiresAt` (proposal: 24 h — a response's value decays with the scheduling process, not with a delivery bound; a request can reach an invitee who stays away longer only with the answer to their catch-up request, §9.5). The UI shows a **partial grid** with an explicit count ("3 of 8 have answered") instead of blocking. Responses after `expiresAt` are discarded. A new request is a new `requestId` | The feature is preserved, but loses the assurance of a "complete grid". The planner decides on an incomplete basis — which is what they already do today, just without knowing it |
 | **B — Push instead of pull** | No request. Every user periodically (e.g., daily) places a filtered Free/Busy window as a cell to the contacts they want to show it to | No round trip, no egress amplification, an immediately available grid. Cost: traffic even without demand, and a stockpile of data — the contact learns about bookings they never asked about. This must be opt-in per contact |
 | **C — Replace with date poll** | Free/Busy is not offered; the use case "find a shared time" is covered entirely by `DATE_POLL` (§18.3), which needs no round trip because every participant answers on their own | The most honest variant and the smallest amount of code. Cost: the planner only sees the offered slots, not actual bookings; there is then no Outlook-style assistant |
 
@@ -7026,11 +7691,11 @@ metadata cost is out of proportion.
 
 **OPEN (CAL-4).** Independent of the CAL-3 decision, it must be decided
 from which egress quota a relay's auto-response cells are paid (§9) and
-whether the response may carry a shortened TTL class to lower the
-retention/cover cost. A response older than the scheduling process has
-no value — the 120-s interactive class from §17.2 is too short, a
-24-hour class does not exist. If one is introduced, it is a change to
-the TTL ladder and belongs in the delivery chapter (§9), not here.
+whether the response may be held for less than the 7 days of the post
+box (§8.2). A response older than the scheduling process has no value —
+call signals (§17.2) are no model for it, they take no post box at all,
+and the post box has one retention for everything. A shorter one would
+be a change to §8.2 and belongs there, not here.
 
 #### 18.1.6 ReminderService
 
@@ -7228,9 +7893,11 @@ removal in the settings UI.
 #### 18.3.4 Deadline, TTL, and convergence (normative)
 
 `PollSettings.deadline` closes a poll by wall clock;
-`PollAction.CLOSE` closes it manually. Cells trickle in until the
-delivery TTL, while every node closes locally by its own clock.
-Diverging tallies between nodes are possible.
+`PollAction.CLOSE` closes it manually. A vote cast before the deadline
+can arrive later — up to 21 days after it was cast on a device that
+keeps collecting (§9.3, §8.2), and later still on a device that was
+away and catches up (§9.5) — while every node closes locally by its own
+clock. Diverging tallies between nodes are possible.
 
 **Rule (normative):**
 
@@ -7243,10 +7910,15 @@ Diverging tallies between nodes are possible.
    week's votes will already have expired from the delivery layer long
    before a long-absent participant could receive them. The UI limits
    the term selection accordingly.
-3. A tally before the TTL expires is **provisional**. The UI labels it
-   as such, rather than asserting a finality that the latency band
-   cannot support — the same rule as the durable-object class
-   ("verification state unknown" instead of "no badge", §16.0).
+3. A tally is **provisional** until 21 days after the deadline: until
+   then a vote cast before the deadline can still arrive (rule 1). On a
+   device whose last collection lay more than 7 days back it stays
+   provisional until its catch-up requests are answered (§9.5). The UI
+   labels it as such, rather than asserting a finality that the latency
+   band cannot support — the same rule as the durable-object class
+   ("verification state unknown" instead of "no badge", §16.0). A vote
+   that found no way for 14 days and is sent again by hand (§9.3) can
+   arrive after that; it is counted (rule 1).
 
 #### 18.3.5 Latecomers and `POLL_SNAPSHOT`
 
@@ -7440,8 +8112,8 @@ known set of voters. Both are quantum-independent.
 | # | Topic | Status |
 |---|---|---|
 | **CAL-3** | Free/Busy: state model for the round trip. The channel exists (contacts share `K_AB`), the **round trip** does not. Options A (asynchronous partial grid with `expiresAt`) / B (push instead of pull, opt-in per contact) / C (replace with DATE_POLL). Plane D rejected | open (§18.1.5) |
-| **CAL-4** | Free/Busy auto-responder: egress-quota assignment; possibly a dedicated short TTL class for the response — that would be a delivery-chapter change (§9) | open (§18.1.5) |
-| **CAL-7** | Group-call start from the event card stays locked until the group-call topology (§17) is decided | bound to §17 |
+| **CAL-4** | Free/Busy auto-responder: egress-quota assignment; possibly a shorter post-box retention for the response — that would be a change to §8.2 | open (§18.1.5) |
+| **CAL-7** | Group-call start from the event card stays locked while group calls are deferred (§30.7) | bound to §30.7 |
 | **POLL-4** | `onlyMembersCanVote` has no checkable denominator. Recommendation: remove outright | open (§18.3.3) |
 | **Editorial** | §5 needs a caveat for opt-in services (external calendar sync, media archive), otherwise the cover-uniformity commitment is false as an assurance | change outside this chapter (§18.2) |
 
@@ -7454,7 +8126,7 @@ known set of voters. Both are quantum-independent.
 - **No polling.** Delivery is event-driven (§3.1, §5.4); the cover stream
   carries no sync. There are no demand-driven queries whose occurrence
   would itself be information. **This governs the delivery layer.** Plane
-  D (§17, including the media stream §17.6) and the bulk lane (§9.3) are
+  D (§17, including the media stream §17.6) and the bulk lane (§9.4) are
   declared demand-driven classes; their occurrence *is* information, and
   B-10 / B-29 price exactly that.
 - **Foreground:** a standing streaming harvest subscription (§8).
@@ -7462,10 +8134,11 @@ known set of voters. Both are quantum-independent.
   (§8).
 - **Network change:** every neighbour counts as not answering; remembered
   addresses are re-attempted once and the neighbour call is repeated once
-  (§11.8). The node discards its observed public address, so no card
-  issued afterwards carries a stale one. Messages already left are not
-  sent again because of this edge alone. The node registers its codes
-  again with its fixed neighbour (§8.1); contacts learn a new fixed
+  (§11.8). The node discards its observed public address, so no invitation
+  issued afterwards carries a stale one. A message already acknowledged
+  or placed is not sent again because of this edge; one that is neither
+  is sent once more under its identifier (§9.3). The node registers its
+  codes again with its fixed neighbour (§8.1); contacts learn a new fixed
   neighbour only from the node itself, sealed (§8.1). A device address
   alone is announced to nobody.
 - **Platform specifics:** the Android foreground service carries the
@@ -7492,7 +8165,11 @@ declared limit and a declared behaviour when it is reached.
 
 | Buffer | Bound | On overflow |
 |---|---|---|
-| outgoing parts awaiting re-request (§11.3) | one transmission at a time per recipient | the caller is blocked, not the socket |
+| outgoing parts awaiting re-request (§11.3) | one transmission of two or more parts at a time per recipient — the next hop it is handed to; it ends with the recipient's end mark, or 1.1 s after its last part with no request | the caller is blocked, not the socket: its transmission waits in one of the next two rows |
+| the node's own transmissions waiting for their next hop (§11.3) | what the node has accepted for sending (R-1) | none is evicted; they wait in order, and the other steps of the ladder carry meanwhile (§7.1) |
+| others' transmissions waiting for their next hop — forwarding (§8.1), a holder handing out (§8.2) | per target [OPEN: measured, not yet set] | the forwarder answers `0x21`, the holder hands out later: an open refusal, never a silent loss |
+| packets waiting for a link (§11.6) | what the flow of §11.3 lets through, only while the handshake runs (two answer deadlines at most) | none is evicted; when the neighbour does not answer, all waiting packets drop and their transmissions are told the neighbour is unreachable |
+| socket receive buffer (§11.1) | emptied at every read event | does not fill from the node's own slowness; what the network lost is re-requested (§11.3) |
 | incoming reassembly (§11.3) | 30 s per transmission | oldest incomplete transmission discarded |
 | post box per day value (§8.2) | 100 packets | oldest discarded |
 | post box, all identifiers together (§8.2) | [OPEN: measured, not yet set] | oldest discarded |
@@ -7500,23 +8177,49 @@ declared limit and a declared behaviour when it is reached.
 | forwarder loop memory (§8.1) | 60 s | oldest discarded |
 | request buffer (§15.4) | 20 shown, 100 held | oldest evicted, never blocked |
 | neighbours (§11.7) | 32 | longest silent dropped |
+| reconciliation source, packets under one device value (§14.6.3) | 80 | it fills again only on the recipient's progress report |
+| reconciliation, open fetches on the new device (§14.6.3) | 1 per source | a new request replaces the open one |
+| reconciliation packet (§14.6.3) | 32 768 B including the seal | split into further packets |
+| reconciliation queue on the new device (§14.6.3) | the count the source's header announces | a header above the bound is refused and named |
+| reconciliation tombstones on the new device (§14.6.3) | 7 days, 10 000 | oldest discarded |
+| reconciliations a source serves (§14.6.3) | 1 per own device | the second replaces the first |
+| catching up, packets per round (§9.5) | 4, never more than 80 under one day value | the next round only on the requester's progress report |
+| catching up, open requests on the returning device (§9.5) | 1 per party | a new one replaces the open one and keeps the earlier moment |
+| catching up, answers a party gives (§9.5) | 1 per party and named moment | a repeated or backdated request is discarded and named |
+| identifiers of received deliveries, and of deleted messages and calendar events, kept against a second copy (§7.1, §9.5, §21.5.2, §18.1.3) | none — kept as long as the identity exists | nothing is evicted; the list grows only with what the device itself receives and deletes, as its messages do (§21.4.2); a second copy of a delivery is refused and still acknowledged (§9.2), a copy of something deleted is not shown |
 
-**Evicting beats blocking.** A full buffer that refuses new entries hands
+The one list without a bound in this table is not a queue: it holds
+one row per received delivery and per deleted message or event, no row
+is ever evicted, and its growth
+is bounded by what the device itself receives and acknowledges — the
+same bound that bounds its messages (§21.4.2). A queue that never
+drains would slow the system; a set that only grows with delivered
+traffic slows nothing.
+
+**Evicting beats blocking — for what others leave with a node** (the
+request buffer, the post box, the bulk cache), never on the way of the
+node's own payload. A full buffer that refuses new entries hands
 an attacker a way to close the channel: fill it once and nothing gets in
 again. A full buffer that evicts the oldest keeps working, and the cost
 of an attack is that the attacker's own entries are the ones that age
 out.
 
-### 20.3 There is no queue in the delivery path
+### 20.3 There is no standing queue in the delivery path
 
-The delivery path has no queue at all. A packet is handed to the socket
-when it exists (§3.1); the ladder runs its steps in parallel (§7.1) and
-the first acknowledgement ends the attempt. Nothing waits for a tick,
-and no buffer sits between a message and the wire.
+A packet is handed to the socket when it exists (§3.1); the ladder runs
+its steps in parallel (§7.1) and the first acknowledgement ends the
+attempt. Nothing waits for a tick. Two waits exist, both bounded in §20.2
+and both per next hop: a transmission waits until the previous one to the
+same recipient has arrived whole (§11.3), and packets to a neighbour
+without a link wait for its handshake (§11.6). Neither holds up another
+recipient or another step of the ladder.
 
 This removes the failure that an unbounded or contended queue would
 otherwise produce: a standing backlog that throttles delivery while
-every individual component reports itself healthy.
+every individual component reports itself healthy. A wait that the
+recipient's own end mark ends cannot form such a backlog: it drains at
+the pace at which the recipient receives, and what a forwarder cannot take
+on it refuses openly with `0x21` (§8.1).
 
 ### 20.4 Partition
 
@@ -7541,7 +8244,7 @@ at first start.
 | flood of parts | reassembly discard after 30 s, one transmission at a time per sender |
 | flood of post box placements | proof of work per placement, 100 per day value, 7-day retention (§8.2) |
 | forwarding loop | hop count 3 and 60 s loop memory (§8.1) |
-| unparseable packets | discarded without an answer (§11.5) |
+| unparseable packets | a single one is discarded without an answer; two from one source start one handshake, bounded as in §11.6 |
 
 Each bound is local: a node enforces it alone, needs no agreement with
 anybody, and keeps working when its neighbours do not.
@@ -7552,8 +8255,8 @@ A node that only ever learns neighbours from one source can be fed a
 false view of the network. Three properties answer this:
 
 1. Neighbours come from three independent sources at once (§11.8):
-   remembered, the local segment, and the first contact's card.
-2. A contact's card carries its own addresses (§15.2), so reaching a
+   remembered, the local segment, and the first contact's invitation data.
+2. A contact's invitation data carry its own addresses (§15.2), so reaching a
    contact does not depend on the neighbour set at all.
 3. The post box places with three neighbours and needs two (§8.2), so a
    single dishonest neighbour cannot swallow a message.
@@ -7574,7 +8277,7 @@ The storage order has four tiers:
 | Prio | Content | Deletion criterion |
 |---|---|---|
 | **1** | **Own chats, media, calendar, polls, contacts, metadata.** The user's personal data | **never automatic** — except via rules the user has set themselves (per-chat expiry §21.5.3, media archive §21.6, voice retention §21.7) |
-| **2** | **Delivery-layer storage:** third-party cells of the subscribed tag lines | TTL expiry (14 d default, 31 d for management types) **or** eviction under tag-line-budget overflow, **within the quota** (§20): near-expiry/oldest first |
+| **2** | **What the node holds for others in its post box** (§8.2): sealed packets under day values | the collector's acknowledgement, expiry after **7 days**, **or** — above 100 packets per day value — the oldest gives way (§8.2, §20.2) |
 | **3** | **Durable-object class** (§16.0): anti-entropy replicated objects | Type rules per object (table in §16.0); on sub-budget overflow, trimming **within** the sub-budget, newest-first by first-acceptance day |
 | **4** | **Operational state:** tag-line subscription list, liveness records, sync-partner statistics | discardable and re-acquirable at any time |
 
@@ -7589,19 +8292,19 @@ a store from which anything could be reconstructed.
 ### 21.2 Network storage classes: delivery layer, durable objects, bulk cache
 
 There are three network storage classes: the **delivery layer**
-(§9), the **durable objects** (§16.0), and the **bulk cache** (§9.3,
-§21.3.3) — the capped, lowest-priority class that holds fountain blocks
-of media, file transfer, and the binary distribution on always-on nodes.
+(§9), the **durable objects** (§16.0), and the **bulk cache** (§9.4,
+§21.3.3) — the capped, lowest-priority class that holds the Reed-Solomon
+pieces of the bulk lane and the fountain blocks of the binary distribution on always-on nodes.
 Everything a node holds for others falls into one of these three classes.
 The stream lane (§17.6) stores nothing and appears in no storage class.
 
 **Delivery layer (§9).** Third-party cells of the subscribed tag lines —
 one tag-line budget, eviction only within the quota (§20), one
-network-wide uniform procedure, one format for all content. Bulk blocks
-are uniform cells on the wire (entry type 0x05) but they are **not**
+network-wide uniform procedure, one format for all content. Bulk fragments
+travel as media packets (§9.4, §11.5) and are **not**
 delivery-layer cells: they live in their own budget class (E-53), are
 evicted first under pressure, and are held per holder
-(§9.3), not replicated at the delivery layer's redundancy factor (§9). Cells carry no attributable sender; an eviction cap "per
+(§9.4), not replicated at the delivery layer's redundancy factor (§9). Cells carry no attributable sender; an eviction cap "per
 source" is therefore structurally impossible and is not needed either.
 
 **Durable objects (§16.0).** Anti-entropy replicated objects across
@@ -7636,7 +8339,7 @@ first, then the derivation, then the decision itself.
 | Delivery-layer storage, **desktop** (Linux/Windows/macOS), full TTL | **~160 MB** | Storage |
 | Delivery-layer storage, **mobile** (Android, iOS) | **48 h retention + 32 MB hard cap** — whichever binds first applies | Storage |
 | Durable-object class per node, target size | **≤ 10 MB**, split fixed **6 / 2 / 2 MB** (directory+registrations / verdict and deadline-bound types / rolling) | Storage |
-| **Bulk cache** (desktop only) | **1 GB default**, user-overridable in tiers following the §21.6 pattern | Storage, third-party data, lowest priority |
+| **Bulk cache** | **desktop 1 GB, mobile 100 MB default**, user-overridable in tiers following the §21.6 pattern | Storage, third-party data, lowest priority |
 | Cover + harvest traffic, **mobile** | **~10–21 MB/day** cover (§5, M7) + `1.15+0.23·S` MB/day liveness (§8) — for iOS an upper bound, not an expectation | **Traffic, not storage** |
 | Cover + harvest traffic, **desktop** | cover + liveness + bulk relay throughput | **Traffic, not storage** |
 | Media-archive budget on the device | **100 MB (mobile) to 2 GB (desktop)**, freely settable; the archive's **four** storage tiers (§21.6) are a separate dial | Storage, **local, own data** |
@@ -7694,13 +8397,15 @@ retention rule would stay open).
    (priority 1)** (§21.1). A shared quota would have to buy that
    guarantee through extra machinery and would remain error-prone —
    rejected.
-3. **Bulk as its own, fourth capped class.** Desktop installations only;
-   mobile nodes carry no bulk. **1 GB default**, user-overridable in
+3. **Bulk as its own, fourth capped class.** **Desktop 1 GB default,
+   mobile 100 MB default.** With data-saving mode on (§24.4.2) a mobile
+   node neither accepts nor hands out bulk pieces over a metered
+   connection. User-overridable in
    tiers analogous to the media budget (§21.6 pattern), no automatic
    growth with disk size. **Lowest priority:** under disk pressure, bulk
    is trimmed first (ahead of the delivery layer), with eviction within
    the class by the §20 rule. Explicitly **not** decided alongside
-   this: fountain block count, redundancy factor, desktop share of the
+   this: the fountain parameters of the binary distribution (L-3), the desktop share of the
    relay set — that remains a measurement task.
 4. **Visibility.** §16.0 already requires it for the durable-object
    sub-budgets; the same rule applies normatively to the delivery layer
@@ -7717,7 +8422,7 @@ retention rule would stay open).
 | Platform | Delivery layer | Durable objects | Media (priority 1, user) | Bulk | Total third-party / overall |
 |---|---|---|---|---|---|
 | Desktop | ~160 MB | 10 MB | up to 2 GB (tiers, §21.6) | 1 GB default | ~1.2 GB third-party / ~3.2 GB |
-| Mobile | ≤ 32 MB | on-demand partial cache (§16.0, does not hold the class in full) | 100 MB default | 0 (no bulk) | ~32 MB third-party / ~135 MB |
+| Mobile | ≤ 32 MB | on-demand partial cache (§16.0, does not hold the class in full) | 100 MB default | 100 MB default | ~132 MB third-party / ~235 MB |
 
 The larger desktop footprint deliberately falls on the platform class
 that can carry it (§31 ranking).
@@ -7759,12 +8464,22 @@ carried 3.45.1 at the time of writing.
 - **Key:** `deriveFileEncKey(master_seed, hd_index)`, handed over as
   `PRAGMA hexkey` — the raw 32 bytes, not a passphrase. The key is
   already seed-derived; a second derivation on top would buy nothing.
-- **One database per identity.** A shared one would have to sit under
-  the device-wide key and would give up the separation that
-  `deriveFileEncKey` establishes: the key of identity 1 does not open
-  the data of identity 2. Deleting an identity stays a directory
-  removal, verifiable at the directory, rather than a list of `DELETE`
-  statements whose completeness nobody can check.
+- **One database per identity** for everything an identity owns. A
+  shared one would have to sit under the device-wide key and would give
+  up the separation that `deriveFileEncKey` establishes: the key of
+  identity 1 does not open the data of identity 2. Deleting an identity
+  stays a directory removal, verifiable at the directory, rather than a
+  list of `DELETE` statements whose completeness nobody can check.
+- **One database for the device** (`device.db`), of the same build,
+  under `deriveSharedFileEncKey(master_seed)`. It holds what belongs to
+  the device and to no identity: the list of identities, the device
+  keys, device-wide settings, the secret of the daemon–GUI connection,
+  and the node's own state — its fixed port and neighbours, the sealed
+  packets it holds for others in its post box, the key of its own
+  address record. No message, no conversation and no contact of the
+  user is ever stored in it; what it holds for others it cannot read
+  (§8.2). On the desktop the daemon and the GUI both open it; a writer
+  that finds it busy waits rather than fails.
 - **Deletion:** `SQLITE_SECURE_DELETE` is compiled in. Without it a
   database releases deleted pages for reuse instead of overwriting them,
   and "deleted" would mean "no longer indexed" — which §21.5 does not
@@ -7814,6 +8529,17 @@ to deviate, not a second thing to maintain. **The default is
 decided**. With three levels a user cannot otherwise tell why a
 particular file ended up in plaintext, and a control the user cannot
 read is a source of error rather than a control.
+
+**Content the user lets out.** Destination 3 is one of several places
+where the user lets content leave the application's protection. The
+others are the media archive on the share (§21.6), mirroring into the
+system calendar (§18.2), sharing to another application, and the
+application's own screenshot (§23.10), which lands as an unencrypted
+picture in the user's picture collection and shows message text. What
+has left is outside the application's reach: it is not deleted with
+the message and does not expire with it (§21.5.3). At each of these
+functions the application says so **once** — when the user first turns
+the function on or first uses it, never at every use.
 
 **What this costs, measured** (ext4, 150 000 messages):
 opening the database costs **+38.9 ms once per program start**; the
@@ -7905,75 +8631,130 @@ set wide, at 60 minutes.
 
 #### 21.5.2 What deletion means on the delivery layer — an honest declaration
 
-**The deletion semantics on the delivery layer are to be declared
-explicitly, not tucked into a footnote.**
+**What a deletion reaches and what it does not is declared explicitly,
+not tucked into a footnote.**
 
 A deletion has three levels of effect:
 
-1. **Locally.** The message disappears from the user's own profile.
-   Immediately and completely.
+1. **Locally.** The message disappears from the user's own profile,
+   immediately and completely. What remains is an invisible marker —
+   the message identifier and the party that deleted it, no content —
+   so that a copy that arrives later is not shown: one still under way
+   (a post box, a mirror from an own device, §14.2), or one a party
+   sends again when this device catches up after an absence (§9.5). The
+   marker is set whether or not the message is held: a deletion can
+   overtake its message (§21.5.1). It is kept for as long as the
+   identity exists (§20.2). An own message deleted while it is
+   `resting` or `in transit` is not sent again at an edge (§9.3).
 2. **On the counterparty's devices.** `MESSAGE_DELETED` is an ordinary
-   cell and is sent over the same pairwise legs as any other message
-   (§16.2). It takes effect once the recipient's device receives it, per
-   the timing in §7 and §8 (indeterminate on iOS with the app
-   closed, §31). Best-effort: the deletion request is a request, not a
-   compulsion — a modified client can ignore it.
-3. **On the delivery layer.** **The original cell stays put until its
-   TTL clears it.** It is not revocable, not overwritable, and not
-   traceable — the sender does know its tag, but has no mechanism to
-   remove it from third-party relay holdings, and none is meant to exist
-   (§20: "Sybil is blunt … can … **delete** nothing").
+   message and is sent over the same pairwise legs as any other
+   (§16.2). It takes effect once the recipient's device receives it —
+   directly, at that device's next collection edge (§8.2), or with the
+   answer to its catch-up request (§9.5; indeterminate on iOS with the
+   app closed, §31) — and leaves the same marker there. Best-effort:
+   the deletion request is a request, not a compulsion — a modified
+   client can ignore it.
+3. **On the delivery layer.** **A deletion removes nothing there.** On
+   steps 1 and 3 nothing is kept: a packet is handed on or refused
+   (§8.1, §8.3). In a post box the sealed message is not revocable and
+   not overwritable by the sender: only the recipient may collect a
+   packet or have it deleted (§8.2), and no mechanism for the sender is
+   meant to exist.
 
-**How long.** §21.8 quantifies it for the confiscator: "With an
-archived delivery-layer recording: only undelivered cells, max. 14 days
-default / 31 days for management types." For a deleted message, that
-means: up to 14 days after sending, its ciphertext still sits with
-third-party relays.
+**How long.** A post-box packet leaves a holder in one of three ways
+(§8.2):
 
-**There is no *confirmed delivery* as a deletion criterion.** A relay
-never learns whether a cell was received; there is no return channel
-through which it could find out. That is exactly the property that §5
-("no connection between sender and recipient") and §21.8 ("relay sees:
-tag, TTL, ciphertext") establish. A cell leaves a third-party relay
-holding only through TTL expiry or eviction (§20).
+- **Collected.** When the recipient has collected it and acknowledged
+  receipt, every holder the recipient asked deletes it. A message that
+  was delivered directly may still have been left in a post box, because
+  all steps start together (§7.1); it lies there until the recipient's
+  next collection edge.
+- **Expired.** After **7 days** at the latest — the case of a recipient
+  who does not return, and of a holder the recipient never asks.
+- **Evicted.** Earlier, when more than 100 packets lie under the same
+  day value (§20.2).
 
-> **Normative:** A collected cell does not disappear any earlier. It
-> **expires**. Delivery does not shorten its dwell time.
+A message that found no way is left in a post box later: it rests at
+the sender and leaves again at every edge, for up to 14 days (§9.3). The
+sealed text of a deleted message can therefore lie with holders **up to
+21 days after it was written** — 14 days until it is left, 7 days until
+it expires — and in practice for as long as the recipient stays away.
+After that the sealed text is gone from the holders: what a recipient
+who returns later receives of a deleted message is its identifier,
+named as deleted with the answer to its catch-up request (§9.5) —
+deleted is deleted, the text itself is not sent again.
+
+A file is a separate case (§9.4). Below 256 KB it is one message and
+follows the rule above. On the bulk lane its sealed fragments lie with
+their holders for 7 days (`TTL_media`) from their placement, and
+collecting them does not shorten that: a holder knows neither the key
+nor the content, and a "done, discard" packet would be a delete command
+anyone could send. The stream lane stores nothing.
+
+> **Normative:** A holder deletes a post-box packet on the collector's
+> acknowledgement and otherwise lets it expire after 7 days. Neither the
+> sender nor a deletion reaches it. Fragments on the bulk lane are not
+> deleted; they expire.
 
 **Two approaches that were examined and rejected:**
 
-- *A retract cell under the same tag.* It would break the
-  single-use-tag invariant (§4.3) and would reveal to the relay exactly
-  the linkage between two cells that the invariant prevents. The relay
-  would learn "this cell belongs with that one" — the first building
-  block of a traffic analysis. **Rejected.**
-- *A shortened TTL for everything, so less stays put.* The 14-day TTL
-  is the deliberately chosen delivery window for offline recipients.
-  Taking the deletion semantics as an occasion to turn it back would
-  fake security and cost deliverability. **Rejected.**
+- *A retract packet from the sender to the holders.* A holder sees a
+  day value and opaque bytes, never a person (§8.2), and it deletes only
+  on a proof made with the day secret key, which the recipient alone
+  holds. A retract would need either a holder that remembers who left a
+  packet — it would then know that two events belong to one sender and
+  that this sender withdrew a message, the first building block of a
+  traffic analysis — or a delete command anyone could send (§9.4). And
+  it would reach only what still lies with a holder, not a packet
+  already handed out. **Rejected.**
+- *A shorter retention for everything, so less stays put.* The 7 days
+  are the deliberately chosen time an absent recipient has to return
+  (§8.2). A holder already deletes what was collected; a shorter
+  retention would shorten only the wait for recipients who are away —
+  it would fake security and cost deliverability. **Rejected.**
 
 **Normative for the UI:** The UI must not present "deleted" as "removed
 from the network". The deletion dialog states the effect honestly: the
-message disappears on the devices, the sealed ciphertext expires on the
-network within the TTL. That is the same honesty rule §5 establishes
-for the cover and that §12 establishes for the interface as a whole.
+message disappears on this device and, once they receive the deletion,
+on the recipients' devices; its sealed copy can remain in the network
+until the recipient collects it, at most 21 days after it was sent.
+That is the same honesty rule §1.4 establishes for the costs of the
+design and that §12 establishes for the interface as a whole.
 
 #### 21.5.3 Per-chat expiry
 
 Every conversation (1:1, group, channel) has an individually
 configurable auto-delete timer. If it is set, messages disappear on all
-participants' devices once the deadline elapses. Decisive: **the timer
-starts after READING**, not after sending. In 1:1, one side proposes the
-change and the other confirms it; in groups and channels the owner sets
-it for everyone. Changes affect only future messages — existing ones
-keep their original deadline.
+participants' devices once the deadline elapses. **The deadline runs per
+copy: on a recipient's device it starts when the message is READ there;
+on the sender's devices it starts when the message is sent.** In 1:1,
+one side proposes the change and the other confirms it; in groups and
+channels the owner sets it for everyone. Changes affect only future
+messages — existing ones keep their original deadline.
 
-Starting after reading is mandatory: the delivery window is 14 days, so
-a recipient can stay away for a long time. A send-time-bound timer would
-delete messages before anyone had seen them.
+For the recipient, starting after reading is mandatory: a message can
+arrive long after it was sent — up to 14 days resting with the sender
+(§9.3), 7 in a post box (§8.2), and later still on the recipient's
+request (§9.5) — and a send-time-bound timer would delete it before
+anyone had seen it. The sender has seen its own message; its copy needs
+no such protection, and its deadline hinges on nothing the recipient
+reports. A deadline started by the read receipt would never start where
+read receipts are off (§21.5.4) or in a group; one started by the
+delivery receipt would show the sender an arrival the recipient
+withholds (§21.5.5). When a copy on the sender's device expires before
+the message was acknowledged, the device keeps for that recipient and
+conversation a count of such messages and nothing of their content; the
+count is handed over when the recipient catches up (§9.5) and then
+dropped.
 
-The deletion itself follows §21.5.2 — even an expired message sits as
-ciphertext on the delivery layer until its TTL expires.
+**A message that has not left does not expire.** While it is `resting`
+(§9.1) nobody but the sender holds it, and it leaves again from the
+history at every edge (§9.3); its deadline starts when it is sent. A
+message closed as `failed` after 14 days without a way (§9.3) was never
+sent and stays until the user deletes it or sends it again.
+
+The deletion itself follows §21.5.2 — the expiry removes nothing that
+still lies in a post box or with the holders of a file.
 
 #### 21.5.4 Per-chat configuration
 
@@ -7982,8 +8763,8 @@ The following negotiable settings apply per conversation:
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
 | `allow_downloads` | bool | true | whether received files may be saved |
-| `allow_forwarding` | bool | true | whether messages may be forwarded |
-| `expiry_duration_ms` | int? | null (no expiry) | auto-delete deadline after reading (§21.5.3) |
+| `allow_forwarding` | bool | true | whether messages may be forwarded; where it is off, the application's own screenshot is refused as well (§23.10) |
+| `expiry_duration_ms` | int? | null (no expiry) | auto-delete deadline per copy (§21.5.3) |
 | `edit_window_ms` | int? | null → 60 min | edit window, enforced on both sides (§21.5.1) |
 | `read_receipts_enabled` | bool | true | whether read receipts are sent |
 | `typing_indicators_enabled` | bool | true | whether typing indicators are sent |
@@ -8014,9 +8795,10 @@ operation is skipped, with the notice "already in the download folder".
 (`_pendingGroupConfigs`) and applied once the invitation arrives,
 provided the sender holds the owner or admin role. The buffer is
 **mandatory**, because there is no transport ordering: the
-configuration can arrive before the `GROUP_INVITE`. Buffer bound
-as in §18.1.3: the maximum delivery TTL (31 days) plus retention margin,
-after which no cell that would need the buffer can arrive anymore.
+configuration can arrive before the `GROUP_INVITE`. Posts for a group
+the device does not hold yet, and settings for it, are buffered in the
+identity's message store without a count limit; once the group is
+joined, its auto-delete timer applies to them.
 
 `typing_indicators_enabled` keeps its meaning but gets an additional
 constraint: the typing indicator is sent **only in the foreground and
@@ -8208,10 +8990,13 @@ analysis in §5:
 | Durable-object class | Directory, registrations, cases, verdicts, badges | public by construction — no secret to protect |
 | Media archive on the share | originals, decrypted | deliberately unencrypted (§21.6, security rule "no encryption on the share"); the share is on the user's home network |
 | Own, not-yet-placed cells (outbox) | own messages including recipient | under the DB key |
+| Plaintext in transit (`transient/` in the profile, §23.10) | a file a foreign program needs for the length of one operation — a recording, a pasted picture, a transfer to the share | none while the operation runs; deleted when it ends, emptied at the next start after a crash |
+| What the user let out (§21.4.2) | attachments at destination 3, shared and saved files, the application's own screenshots, mirrored calendar entries | none — outside the application |
 
-Time bound for the delivery-layer share: **max. 14 days** (default TTL)
-or **31 days** (management types), plus retention margin. After that,
-nothing remains, not even for the device's own operator.
+Time bound for what the device holds for others: a post-box packet
+**at most 7 days** (§8.2), a media fragment **at most 7 days**
+(`TTL_media`, §9.4). After that, nothing remains, not even for the
+device's own operator.
 
 ---
 
@@ -8256,8 +9041,20 @@ are independent of the delivery model:
   Android and iOS run in-process — no separate daemon, no IPC (foreground
   service plus activity, or app process plus UI, respectively).
 - **IPC transport:** Unix socket `~/.cleona/cleona.sock` on Linux/macOS,
-  TCP 127.0.0.1 + auth token on Windows. Rationale: the Unix-socket
-  equivalent on Win32 is not reliable enough for Cleona's use.
+  TCP 127.0.0.1 on Windows, with the port number in `cleona.port`.
+  Rationale: the Unix-socket equivalent on Win32 is not reliable enough
+  for Cleona's use.
+- **IPC protection:** the connection is authenticated in both
+  directions and encrypted, on every desktop platform alike. Its secret
+  — 32 random bytes — is drawn once, when the device database is
+  created, and lives there (§21.4.1); daemon and GUI both read it from
+  the database. On connecting, both sides send 32 random bytes and
+  derive one key per direction from the secret and both values; the
+  secret itself never travels. From then on every request, response and
+  event is sealed, and a side that cannot open the first sealed line
+  closes the connection. There is no unencrypted mode, in no build;
+  tools and tests connect through the same exchange. The 24 words are
+  not served over the connection.
 - **Single-instance guard, machine-global:** exactly one Cleona daemon
   per machine and OS user, independent of `--base-dir`/`--profile`. On
   startup the daemon takes flock+PID on
@@ -8361,8 +9158,9 @@ cell defined in §4.3; Layer 2 carries the **link cell**
 
 **Plane D sits beside, not beneath, this stack.** Calls and direct
 transfer (§17) speak their own D-frame format under `call_key` and do
-not use Layer 2. Their signaling, by contrast, rides the same delivery
-path as any other cell (§17.2). The application architecture
+not use Layer 2. Their signaling, by contrast, is carried by the delivery
+layer — ladder steps 1 and 3, never the post box (§17.2). The application
+architecture
 must carry this two-way split explicitly: a narrow D API alongside the
 seam, no second path through the delivery layer (§17).
 
@@ -8386,7 +9184,7 @@ onto each other.
 |---|---|---|
 | `lib/core/link/` | Outbound sync connections; Elligator2-X25519 shell outside, ML-KEM-768 inside, `link_key = KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)`; cell frame fixed at 1200 B; beta/live network-channel separation; transport-parameterized connect and listen paths; per-address transport escalation own-port/UDP → own-port/TCP → 443 → ICMP, 443 bound via kernel redirect; `drawDataPort` excludes `discoveryPort` and `10080` | §4.3, §11 |
 | `lib/core/delivery/` | Cell storage and eviction, as described in §9 and §20 | §5, §9, §20 |
-| `delivery/` — in the tree the package `mycelium/` | The delivery layer of §7–§9 and §11: wire, parts, envelope, ladder; the readiness state machine (§22.7); **interface precedence — wired, Wi-Fi and VPN before cellular, cellular as the last choice** (§10, §22.6, §23.1), and with it the choice of which own address a card and an address record carry (§11.1, §11.9, §15.2) | §5, §6, §8, §9, §10, §11.1, §22.7, §23.1 |
+| `delivery/` — in the tree the package `mycelium/` | The delivery layer of §7–§9 and §11: wire, parts, envelope, ladder; the readiness state machine (§22.7); **interface precedence — wired, Wi-Fi and VPN before cellular, cellular as the last choice** (§10, §22.6, §23.1), and with it the choice of which own address invitation data and an address record carry (§11.1, §11.9, §15.2) | §5, §6, §8, §9, §10, §11.1, §22.7, §23.1 |
 | `lib/core/tags/` | Tag derivation and matching, as described in §4.3–§6 | §4.3, §5, §6 |
 | `lib/core/sync/` | Delivery-layer reconciliation, as described in §5, §6, §9 and §11; budget classes as **platform tiers** (§22.6); data-saver mode; entry cascade; entry-record type — one type, used by ContactSeed hints and the sync exchange alike (E-60) | §5, §6, §9, §11, §22.6 |
 | `lib/core/durable/` | **Durable-object class (§16.0):** public verifiable moderation objects (directory, registrations, cases, verdicts, badges) as anti-entropy replicated objects across relays with per-class state root; proof verification before replication; eviction by type rules; the backdating anchor reuses the cross-partition relay-attestation primitive (§13.4.2); sub-budgets per §21.3 | §16.0, §13.4.2, §21.3 |
@@ -8414,9 +9212,9 @@ own module:
 
 | File | Carries | Normative Source |
 |---|---|---|
-| `device_delegation.dart` | Sig-subkeys of the linked devices and the delegation cert | §14.4 |
-| `rotation_co_auth.dart` | Device quorum for emergency rotation, `max(2, ceil(N/2))` | §14.5 |
-| `linked_device_keys.dart` / `_store.dart` | Key material of the linked devices and its storage | §14.4 |
+| `rotation_co_auth.dart` | Device set and device quorum for emergency rotation, `max(2, ceil(N/2))` | §14.4, §14.5 |
+| `rotation_chain.dart` | Hybrid rotation chain of the identity signing keys, wire form and check | §4.5.4, D-33 |
+| `lib/core/crypto/device_keys_store.dart` | The device key pair and its storage | §4.4.2, §14.1 |
 
 **Normative:** the module carries a neutral, device-related name. A
 directory name must not feign a layer boundary it does not have — in
@@ -8429,7 +9227,7 @@ name is **OPEN** (§22-O-5), proposal `lib/core/device_identity/`.
 
 | Module | Carries | Normative Source |
 |---|---|---|
-| `lib/core/fountain/` | Rateless erasure coding (RaptorQ/LT class) for **large objects and the binary distribution** — not for message delivery; fountain coding covers only files and updates | §9.3 (media lanes), §17.6 (stream lane), update manifest |
+| `lib/core/fountain/` | Rateless erasure coding (RaptorQ/LT class) for **the binary distribution** — not for message delivery and not for media, which use Reed-Solomon (§9.4) | §26.6.1, update manifest |
 | zstd FFI (`compression.dart`) | Compression in the cell assembly, before sealing | §4.3 |
 
 **Normative:** the zstd wrapper is not transport and does not live in a
@@ -8516,16 +9314,15 @@ abstract class ICleonaService {
   /// receive the same cells (§14.2).
   ///
   /// How the payload actually reaches the recipient is described in §7
-  /// and §8 — this seam neither knows nor selects a path.
+  /// and §8 — this seam neither knows nor selects a path. One kind is
+  /// carried differently, and its type alone says so: a call signal
+  /// (§17.2) takes steps 1 and 3 and no post box.
   ///
   /// The return value is the observed send state, not a delivery claim.
   Future<DeliveryState> sendToUser({
     required Uint8List userId,
     required MessageType type,
     required Uint8List payload,
-    TtlClass ttl = TtlClass.standard,         // 14 d default, 31 d administrative
-    Uint8List? recipientX25519PkOverride,     // non-contacts from GROUP_INVITE
-    Uint8List? recipientMlKemPkOverride,
   });
 }
 
@@ -8551,20 +9348,24 @@ transfer itself is a parallel `TransferPhase`
 (`negotiating` → `streaming n %` | `seeding n %` → `available`), shown as
 progress and never folded into the delivery state — a running stream is
 not itself `resting` or `inTransit` in the message sense. `delivered`
-flips only on the decoded receipt (§9.3); `failed` covers "no volunteer
-and no holder accepted anything." The announce travels with
+flips only on the acknowledgement of the announcement, sent once the object decodes (§9.4); `failed` covers every reason
+of §9.4, and a file that a later message found incomplete. The announce travels with
 `TTL = TTL_media`, so preview and blocks die together; the state that
 produces follows the four in §9.1.
 
-**What the signature does not know.** There is no resolution of the user
-into a device list and no per-device send: **one** delivery serves every
-device of the recipient, because they share the `inbox_key` (§14.2).
-And there is no fallback path beside the delivery layer of §7–§9 — no
-separate path cascade and no default gateway.
+**What the signature does not know.** Contacts are never addressed per
+device: a contact gets **one** delivery, and the device of the recipient
+that collects it mirrors it to the recipient's other devices (§14.2).
+Sending to one's own UserID is the one per-device case: it deposits once
+per other own device under that device's value (§14.7). There are no key
+overrides: a co-member who is not a contact is reached as a group pair
+(§4.3). And there is no fallback path beside the delivery layer of §7–§9
+— no separate path cascade and no default gateway.
 
-**The TTL class belongs to the caller.** The application layer, not the
-transport layer, knows what lifetime a message needs. (There is no
-PoW-priced TTL — eviction is TTL + quota, §20.)
+**The seam takes no lifetime.** How long a payload lives is the same for
+every type and not the caller's choice: 7 days in a post box (§8.2),
+14 days resting at the sender when no way carried it (§9.3), 7 days for
+the pieces of a file (§9.4).
 
 **Delivery state over IPC, normative.** `MessageStatus` is serialized
 between daemon and GUI under a **stable `wireName`**, not via the
@@ -8587,18 +9388,13 @@ described in §7 and §8. It follows that:
   **Plane D API** (§17); live-call frames are the only direct,
   address-bearing traffic. The punch window for Plane D lives in the D
   API (§17.3).
-- **Twin sync** to one's own devices runs as a delivery to one's own
-  UserID (§14); all devices share the inbox and receive the same cell
-  (§14.2). It is a normal `sendToUser` to one's own UserID.
+- **Twin sync** to one's own devices runs as a `sendToUser` to one's own
+  UserID (§14): it deposits once per other own device under that
+  device's value (§14.7).
 
-**OPEN (§22-O-1):** whether, in addition, a device-addressed send is
-needed to reach a single device rather than all of a user's devices at
-once. Two options:
-**(a)** none — Plane D has its own, narrow API
-(`dLink.send(frame, session)`), twin sync runs via `sendToUser` to
-one's own UserID; **(b)** a device-addressed variant, if a use case
-turns up that must address a **single** device and is not Plane D. No
-such case is substantiated. Recommendation: (a).
+**Decided (§22-O-1 = (b), restricted to one's own devices):** a single
+own device can be named for per-device payloads (§14.6.1 step 4, Type 16);
+contacts are never addressed per device (§14.2).
 
 #### 22.5.3 The receive side: `Eingang`
 
@@ -8699,7 +9495,9 @@ start-menu entry, optional desktop shortcut, optional daemon autostart
 via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; follow-up
 updates run via the in-network update path, not via a new installer
 run). Daemon `cleona-daemon.exe`, GUI `cleona.exe`, IPC via TCP
-127.0.0.1 + auth token, tray via Win32 FFI, toast notifications. `netsh
+127.0.0.1 (§22.1), tray via Win32 FFI, toast notifications, sounds via the
+bundled helper `cleona-play.exe` (one process per sound, like `pw-play`
+under Linux; decoder libogg/libvorbis, output through `PlaySound`). `netsh
 advfirewall` sets up an **inbound UDP rule** on first start: inbound
 reachability is not a condition for one's own delivery (§22.5.2), it is
 the **contribution to others** and the prerequisite for incoming calls.
@@ -8818,8 +9616,9 @@ A functional gate decides behavior, not display. There is one gate; the two poin
   contact, §16.7) is possible from `ready` on. UI and service layer query
   the **same** getter; two independent copies of the same gate are
   impermissible.
-- **The invitation is not gated.** The card is offered in every
-  readiness state, `searching` included (§12.4).
+- **The invitation follows §12.4, not the readiness state.** It is shown
+  when its invitation data carry a way in from the open network, whatever
+  the readiness state says.
 - **Re-entry:** a node without an answering neighbour arms no retry
   timer of its own; it waits for the edges of §11.8.
 
@@ -8899,10 +9698,31 @@ Below these lie the platform gates outside Cleona's control (system DND,
 notification-channel settings, POST_NOTIFICATIONS on Android 13+), as
 well as the rule that notifications are held back during an active call.
 
-**L3 in detail.** Cells up to 14 days old (default TTL, §9) are the
-**normal case for harvesting**, and a retention-bounded device harvests
-on its cadence (§6/§8). A message's age therefore carries no suppression
-rule.
+**What a system notification shows.** The same on every platform: the
+sender's display name as its title and the beginning of the message —
+at most 100 characters — as its text; for media and files, the kind or
+the file name in place of the text. A reminder shows the event's title
+and how long until it starts. The text is handed to the
+platform's notification service and to nothing else: it is not written
+to a log, and it is not passed as an argument of a process, where every
+local user could read it.
+
+**A notification without content.** One setting, device-wide and off
+by default, reduces every message notification to the fact that a
+message arrived — no sender, no text, no file name — and every
+reminder to the fact that a reminder is due. A call keeps showing the
+caller's name. The reason for the setting: what is handed to the
+platform's notification service is readable by every application the
+user has granted notification access, by a paired watch, and on the
+lock screen. On Android a message notification is additionally marked
+private (`VISIBILITY_PRIVATE`), with or without the setting: a locked
+device then shows it without sender and text wherever the system is
+set to hide sensitive content.
+
+**L3 in detail.** A message can arrive at any age — up to 14 days
+resting at the sender (§9.3), up to 7 days in a post box (§8.2), and
+later still with the answer to a recipient's catch-up request (§9.5).
+A message's age therefore carries no suppression rule.
 
 **Normative:** L3 is anchored to the **first-harvest event**, not to
 message age. First harvest after a cold start, or after a readiness
@@ -9014,13 +9834,16 @@ repeatedly.
 are declared per platform, when they are requested, and what they are
 for. §23.6–§23.8 describe the privacy side: what each observer actually
 sees, which metadata leaks the design deliberately does **not** close,
-and what commitments to the user can be derived from that. The operating
+and what commitments to the user can be derived from that. §23.10
+describes what the application does on a device that is itself
+hostile, and what it does not. The operating
 system knows nothing of this document's delivery model — the permission
 list itself therefore differs little from that of any messenger; what
 matters is its **rationale**, and that follows this document's delivery
-model: every connection is built outbound, cells sit on responsible
-relays until their TTL expires, and inbound reachability is not a
-precondition for receiving (§22.5.2, §31.1).
+model: every connection is built outbound, a packet for an absent recipient
+waits in a post box until it is collected, at most 7 days (§8.2), and
+inbound reachability is not a precondition for receiving (§22.5.2,
+§31.1).
 
 ### 23.1 Design principles
 
@@ -9073,6 +9896,10 @@ precondition for receiving (§22.5.2, §31.1).
 **Hardware feature:** `android.hardware.nfc` is declared with
 `required="false"` — Cleona installs and runs on devices without NFC;
 the exchange button is hidden there.
+
+**Backup and capture.** The manifest excludes the application's data
+from Android backup and device-to-device transfer, and the activity's
+window is excluded from capture. Both are set out in §23.10.
 
 **The foreground service is the canonical background path.**
 `CleonaForegroundService` starts as `specialUse` (API 34+, subtype
@@ -9158,14 +9985,22 @@ constraints. APNs has been reviewed and rejected. The consequences are
 set out in §31 (Tier 5) and §17.2: the delivery **guarantee** is the same
 across platforms, the delivery **moment** while the app is closed follows
 Apple's policy, and **there are no inbound calls while the app is
-closed** (the 120 s signaling TTL is shorter than any guaranteed
-background window).
+closed** (a call must ring within 10 s, §17.2, and a closed app keeps no
+way open on which a call signal could reach it).
+
+**Capture.** iOS offers no way to exclude a window from capture; what
+the application does instead is in §23.10.
 
 ### 23.4 Desktop (Linux / Windows / macOS)
 
 No runtime permission model. Camera and microphone access is governed by
 PipeWire/PulseAudio (Linux), the Windows audio/video device APIs
 (Windows), or TCC (macOS). No app permission dialogs are shown.
+
+**Capture and other processes.** What the application does against
+screen capture and against other processes of the same user differs
+per desktop platform, and on Linux it is nothing inside the
+application; see §23.10.
 
 **External tools (Linux):**
 
@@ -9216,7 +10051,7 @@ OPEN K23-2).
 | Malicious contact | The epoch's inbox tag line — but the KEX-Gate (§4, §10.1) means only the pair partners can compute it, and a contact *is* a pair partner; `inbox_key` is rotatable (§14.4, §15.9) |
 | Delivery-layer relay | Tag (single-use, meaningless), TTL, ciphertext — no PoW field (the lever against delivery failure is redundancy, not proof-of-work) |
 | Relay-cache contributor | "some node is fetching encrypted blocks" — pseudonymous |
-| Confiscator | Third-party cells: ciphertext with no key reference. With an archived delivery-layer share: only undelivered cells, max. 14 days by default / 31 days for management types (§9, §21.8) |
+| Confiscator | What the device holds for others: sealed packets with no key reference — post-box packets not yet collected and media fragments, none older than 7 days (§8.2, §9.4, §21.8) |
 
 **Plane D (calls/direct transfer).** Consented direct connections carry
 their own, honestly declared metadata price:
@@ -9226,7 +10061,7 @@ their own, honestly declared metadata price:
 | ISP / passive attacker | a consented constant flow of uniform frames between two IPs for the duration of the call |
 | The called/calling contact | IP address + local address candidates of the other party — "what he has, he has"; consent is revocable, an already-seen address is not |
 | Media relay volunteer (opt-in) | both IPs and the call duration — the labeled price of the relay (§17.3) |
-| Delivery-layer observer | nothing new — signaling rides the harvest path as an ordinary cell (§17.2) |
+| Delivery-layer observer | nothing new — a call signal is a sealed envelope on ladder steps 1 and 3 (§17.2); a forwarder sees a code and opaque bytes, and no holder ever sees one |
 | Confiscator | nothing after the fact: `call_key`s are ephemeral, recorded Plane D traffic cannot be decrypted retroactively |
 
 **Small-network honesty:** the anonymity set is the user base; in a
@@ -9238,6 +10073,8 @@ resistance grows with network size.
 
 This chapter lists the metadata leaks exhaustively and by name. **A
 leak not listed here is a defect in the document, not in the system.**
+The list covers what leaves the device. What other software on the
+device can read is not a leak of the design and is stated in §23.10.
 
 | # | Leak | Against whom | Why it remains | Mitigation |
 |---|---|---|---|---|
@@ -9247,12 +10084,12 @@ leak not listed here is a defect in the document, not in the system.**
 | RL-4 | **Candidate set in public channels** — the tag secret is published, making the target space enumerable | sync partner | Public means public | Decoys here work only as a **factor**, not as an anonymity set |
 | RL-5 | **First contact** — the invitation tag family narrows down, for the issuer, which node the requester is on (§15); the invitation family reveals to every URI holder "this invitation is open" and, for as long as the acknowledgment survives, the **issuer's reachability** | invitation issuer, or any URI holder | First contact with no shared secret at all cannot be established anonymously | Subscription asymmetric and time-limited (only the scanner subscribes, only until the answer); tag derived **per invitation**, not per issuer |
 | RL-6 | **Restore-Beacon** — the one-time self-publication in the recovery case (§13 stage 2) | every network participant | Without a beacon there would be no way back if every device is gone | One-time moment, not a durable state; stage 1 (own bundle) does not need it at all |
-| RL-7 | **Plane D discloses IPs** — per call to the other party, and to the volunteer on relay opt-in (§23.6 second table); **for media streams (§17.6) only to the volunteer, never to the other party**. The volunteer sees both addresses, the transfer's duration and its approximate size — bounded per transfer by the relay size cap `C` (D-1) | call partner, relay volunteer | Real time without a direct connection does not exist | Consented, per-contact togglable, revocable, labeled in the UI. **Honestly:** revocation does not take back an already-seen address |
+| RL-7 | **Plane D discloses IPs** — per call to the other party, and to the volunteer on relay opt-in (§23.6 second table); **for media streams (§17.6) only to the volunteer, never to the other party**. The volunteer sees both addresses, the transfer's duration and its approximate size — bounded per transfer by the relay size cap `C` (D-1) | call partner, relay volunteer | Real time without a direct connection does not exist | Calls: consented, per-contact togglable, revocable, labeled in the UI. Media streams: every always-on node volunteers without a switch (§17.6); the sender's consent per file (§24.4.5) names it. **Honestly:** revocation does not take back an already-seen address |
 | RL-8 | **Data-saving mode makes the node distinguishable** — a reduced cover share is visible from outside (§24.4.2, §5.4) | ISP, sync partner | Whoever sends less looks different | Never automatic, only user-chosen, as a **visible state** with a named consequence. **Locked while it would weaken protection a chat relies on** (§24.4.2): the cover stream is node-wide, not per chat |
 | RL-9 | **A malicious contact knows the epoch's inbox tag line** | accepted contacts | The contact must know where their cells are placed; the KEX-Gate means only the pair can compute the tag, and the contact is a pair partner | `inbox_key` is rotatable (§14.4, §15.9); the cover stream, not a prefix-shard, is the anonymity set |
 | RL-10 | **Sync-graph volume is locally observable** — a node sees how many sync partners it has and the cover-stream volume; a global network-size oracle derivable from a prefix metric is retired (no prefix sharding) | every network participant | The sync graph must be observable to function | Aggregate quantity with no link to persons |
 | RL-11 | **Cleona traffic classifies as "structureless" traffic** — uniformly distributed bytes, fixed cell size 1,200 B (§4.3), constant rate, no plaintext header that ties it to a known protocol | ISP, censor with an allowlist policy | Cover uniformity (§5) makes all Cleona nodes look alike **to each other**; resemblance to **someone else's** traffic is a different goal and conflicts with it | Open — the blending options are tracked as **K23-6** (§23.9). **Honestly:** indistinguishability from randomness is not protection against an allowlist policy — it is the very trait that policy flags |
-| RL-12 | **An active probe confirms a node**, provided the prober holds the link key | censor with an invitation, a ContactSeed, or a cached entry record | A reachable node must answer valid handshakes | Without the link key there is no answer and no timing difference → a blind remote scan of the **handshake path** comes up empty; replaying a captured `init` is limited to the current epoch. **Scoped:** this holds for UDP entirely and for TCP connections that are not HTTP- or TLS-shaped; on TCP the bootstrap HTTP server (update manifest) answers unauthenticated (404 without server identifiers), so a scan does learn that *something* listens, but not what |
+| RL-12 | **An active probe confirms a node** | anyone who can reach the data port | On UDP the shell handshake is anonymous (§4.2), and two unreadable packets make a node start one itself (§11.6) | The data port is random in 20000–60000: a blind scan of one address costs two 1200-B packets on each of 40,001 ports, 96 MB; with address and port known, 2400 B. The probe learns that a node listens there, not who it is. On TCP the same port answers HTTP unauthenticated (§26.6.5), so a scan learns there, too, that *something* listens |
 | RL-13 | **Entry nodes are enumerable** — whoever publishes itself in the entry cascade is readable, address included, by anyone who has the app (§11); the same holds for the entry records circulating in the sync exchange. A record is signed and self-certifying (§9.1, §11.1), so it is not merely readable but verifiably attributable to a node key — see B-18 | anyone who has the app — including a censor | A cold start with no discoverable entry point is impossible | Affects the **inbound-reachable** subset, not the delivery layer: outbound-only nodes issue no record. The entry cascade hands the list out on request, the entry records only to someone who syncs — a difference in cost, not in category. **Decided by E-63:** a reachable node may withhold its record and become a **private door** (§11); its address then travels only in a ContactSeed. Publishing stays the default |
 | RL-14 | **Target-port allowlist** — a node listens on a random port 10000–64999 (`drawDataPort`); a network that permits only 80/443 outbound blocks sync **and** onboarding, before any form disguise applies | corporate, hotel, guest networks with a port allowlist | A full answer would need a well-known port — hence a fixed point, excluded by the no-fixed-point property (no well-known port, no designated relay). Uniformly-blocked-outbound is declared out of scope (§31.1); per-host-only-outbound would be a designated relay, likewise excluded | Mitigated, not closed (E-64): transport escalation to TCP/443 and, as a last resort, ICMP (§11); 443 doors are a property, not a role (§23.9.3) |
 | RL-15 | **Escalation stage `tcpOwnPort` is visible as a deviation** — a node that falls back to TCP on its own port (§11, E-65) carries a wire profile Cleona does not control: TCP connection setup, ACK cadence, window development, retransmissions. The constant rate of equally sized cells (§5), which cover uniformity is meant to produce, then has a second pattern laid over it that does not come from Cleona's design. **Stage 3 (ICMP) carries the same class of deviation, more strongly:** a node that keeps its cell stream alive over echo/reply pairs produces an ICMP volume no ordinary client produces, and it stands out against pure background ping traffic rather than blending into it | ISP, on-path observer | Without the stage, networks that block UDP outbound but permit arbitrary TCP ports have no path at all unless the counterpart operates a 443 door (§11) | The stage is a **fallback, not a default** (§4.3): the deviation exists only where the bare UDP path already fails, i.e. exactly where the alternative is no connection rather than an inconspicuous one. It is not mitigated beyond that, and it is not claimed to be |
@@ -9283,9 +10120,9 @@ commitment is backed by the passage that supports it.
 
 | Item | Cited passage |
 |---|---|
-| Master seed and every private key derived from it | §4.2 — keyring, `sodium_mlock`, no network path |
+| Master seed and every private key derived from it | §4.5.2 — sealed by the OS keyring at rest, no network path |
 | Device keys (Sig and KEM) | §14.2 — generated locally, not seed-derived, no network path |
-| Plaintext of messages, media, calendar, polls | §4.3 — sealed before ever leaving the process |
+| Plaintext of messages, media, calendar, polls | §4.3 — sealed before it goes into the network. On the device it leaves the application only where the user lets it out (§21.4.2) and as the text of a system notification (§22.8) |
 | Device address book, location, phone state | §23.5 — not even requested |
 | Usage data, crash reports without consent, telemetry | see "no analytics" below |
 | The mapping role pseudonym → main identity | §16.7 — published nowhere |
@@ -9313,8 +10150,7 @@ commitment is backed by the passage that supports it.
    §10.1). What is enumerable are **objects under pseudonyms** (RL-2).
 3. **Time is coarse.** A cell carries no timestamp beyond the placement
    epoch (§4.3), and the placement epoch is **24 h** (E-J) — a stored
-   cell dates to a calendar day, no finer. *This is a different clock
-   from the 14-day **recovery** epoch (§13.3).*
+   cell dates to a calendar day, no finer.
 4. **What we do not hide, we say.** §23.7 is the exhaustive list; the
    "small-network honesty" from §23.6 additionally applies to every one
    of these commitments.
@@ -9344,8 +10180,11 @@ commitment is backed by the passage that supports it.
   budget (§22.6) before the user is asked. Nothing is installed without the
   user's click (§26.5.4, §26.6.1).
 - **Offline is the normal case, not the error case.** A message to a
-  powered-off device is delivered as soon as it sits on a responsible
-  relay; it waits up to 14 days (§9).
+  powered-off device waits in a post box for up to 7 days (§8.2); what
+  could not be left anywhere rests at the sender and leaves again at
+  every edge, for up to 14 days (§9.3). A recipient who stays away
+  longer receives it with the answer to their catch-up request on
+  return (§9.5) — there is no bound on how late it can arrive.
 - **The delivery guarantee is the same across platforms** (§31). What
   differs between platforms is latency, contribution, and callability.
 - **Cleona is deniable** (§4). No recipient can prove to a third party
@@ -9356,6 +10195,11 @@ commitment is backed by the passage that supports it.
   mutually exclusive with today's building blocks. Moderation objects
   carry an Ed25519 self-signature under a pseudonym; this too must be
   explicitly communicated.
+- **Cleona does not protect its content from the device it runs on.**
+  Software with root or kernel rights on the user's device reads what
+  the user reads and types (§2, B-31). The application closes the ways
+  that need no such rights (§23.10); it does not detect a compromised
+  device and does not claim to.
 
 ### 23.9 Open points of this chapter
 
@@ -9556,6 +10400,106 @@ pass only genuine TLS: there, opaque bytes on 443 die and only the form
 disguise of E-62 helps — the two decisions are complementary, port
 first, form second. And it changes nothing for a censor who blocks by
 enumeration (RL-13, K23-7) rather than by port or form.
+
+### 23.10 Device hardening — what the application does against its own device
+
+The boundary is §2: against software with root or kernel rights the
+application protects nothing. Below that boundary lie the ways in that
+need no special rights — a screen recorder, an accessibility service, a
+keyboard, a backup, another account on the same machine. The
+application closes those where the platform offers a means, and says
+where it offers none. Nothing in this section is a permission, and
+nothing in it sends a packet.
+
+**Screen capture and reading the screen.**
+
+| Platform | What the application does | What stays open |
+|---|---|---|
+| Android | The activity's window carries `FLAG_SECURE`: screenshots, screen recording, casting to another display and the preview in the app overview show nothing. The Flutter view is marked `accessibilityDataSensitive`: only accessibility services declared as accessibility tools read its content | The accessibility marking takes effect from Android 14. A service that declares itself a tool and that the user enables still reads. A second device photographing the screen |
+| Windows | The main window is excluded from capture (`SetWindowDisplayAffinity`, `WDA_EXCLUDEFROMCAPTURE`): screenshots, recorders and remote-support tools do not show it | From Windows 10 version 2004. A program that injects code into the process or runs with administrator rights lifts the exclusion |
+| macOS | The main window is excluded from sharing (`NSWindow.sharingType = .none`) | The effect on current macOS versions is to be measured on a device |
+| iOS | While the screen is recorded or mirrored, the content is covered; it is covered in the app switcher as well | A single screenshot cannot be prevented on iOS |
+| Linux | Nothing inside the application. Under X11 every program of the session reads every window; under Wayland the compositor decides and asks the user. The user documentation recommends a Wayland session | Everything, under X11 |
+
+Capture exclusion is on in the beta build and in the live build alike,
+so that what is tested is what ships. One switch turns it off, and only
+the test run sets it: the E2E guideline verifies by screenshot (§28.1),
+and a window excluded from capture cannot be verified that way. Where
+the platform lets no other application set the switch, the live build
+honours it too — on Android it is a system property that only the
+developer connection or root can set. Where the platform draws no line
+between the programs of one user, the switch is honoured only in beta
+builds, like `--ignore-single-instance` (§22.1) — that is Windows.
+
+**The application's own screenshot.** Where the window is excluded
+from capture, the application offers a screenshot function of its own.
+The picture goes to the user's picture collection, unencrypted — the
+user asked for it — and is one of the places where content leaves the
+application's protection (§21.4.2). The button is always shown. In a
+conversation in which forwarding is not allowed (§21.5.4) it takes no
+picture and says instead that a screenshot is not possible because
+forwarding is not allowed there. The application's own window is
+likewise absent from a screen share in a call (§17.5).
+
+**Keyboard.** On Android and iOS the message input field asks the
+keyboard not to learn from what is typed
+(`enableIMEPersonalizedLearning: false`). Suggestions and
+autocorrection stay on. It is a request: a keyboard that ignores it
+reads every keystroke.
+
+**Notifications.** What a notification shows, and the setting that
+shows nothing, are in §22.8.
+
+**Backup (Android).** The manifest sets `allowBackup="false"` and
+data-extraction rules that exclude everything: neither cloud backup
+nor device-to-device transfer copies the profile. Nothing is lost by
+it — a further device is set up with the 24 words (D-39), and the
+hardware-bound key that seals the seed does not travel with a backup.
+
+**Plaintext in transit.** A foreign program sometimes needs a file —
+the recorder, the transcription, the transfer to the share, the share
+dialog. Such a file lies in a directory `transient/` inside the
+profile that only the owner can enter, never in the system's shared
+temp directory. It is deleted when the operation ends, and the
+directory is emptied when its owner starts — at that edge, not on a
+timer. This closes other accounts of the machine and later forensics;
+a process of the same user reads the directory.
+
+**Crash logs** are written into the profile directory, readable by the
+owner only, never into a shared temp directory.
+
+**No secret in a process argument.** A secret or a piece of content is
+never passed as an argument of a process or through a shell, where
+every local user can read it for as long as the process lives; it goes
+over standard input or through a file only the owner can read. This
+holds for the keyring (`secret-tool` on Linux) as it does for the
+share's credentials (§21.6) and the notification text (§22.8).
+
+**Process memory (Linux, live build).** Daemon and GUI call
+`prctl(PR_SET_DUMPABLE, 0)` at start: another process of the same user
+can neither attach to them nor read their memory, and no core dump is
+written. Only the live build does this; the beta build stays
+debuggable. Root reads on. Windows offers nothing comparable to an
+ordinary program.
+
+**The connection between daemon and GUI (desktop).** It is
+authenticated in both directions and encrypted under a secret kept in
+the device database (§22.1). This closes three ways in: another account
+of the machine, which on Windows can reach the loopback port; a foreign
+program listening on a port number a crashed daemon left behind; and
+reading the traffic from outside the two processes.
+
+**A notice where content leaves.** Once per function, §21.4.2.
+
+**What the application deliberately does not do.**
+
+| Not done | What follows |
+|---|---|
+| Locked memory for the seed | The seed lies in ordinary process memory (§4.5.2). Locked memory would keep it out of swap and nothing more: whoever reads the process reads locked memory too |
+| An application lock | Whoever holds the unlocked device sees the application as its user does; the device's own lock is the lock. A stolen, unlocked device is a valid member (§14.4) |
+| Removing or marking the copy button of the 24 words | What is copied is readable by other applications and by clipboard managers |
+| A default expiry for new chats | Expiry stays off unless it is set for a chat (§21.5.3) |
+| Root or jailbreak detection | The application does not tell the user whether the device is compromised. Heuristics raise false alarms on deliberately rooted and alternative systems and are evaded by the software they look for; the reliable variant needs Google services (§23.8, no cloud dependency) |
 
 ---
 
@@ -9793,11 +10737,10 @@ prescribed pattern:
 
 This is a **parameterized** string (`AppLocale.tr` with two counters),
 not a fixed one. In addition, a label and an explanation are needed for
-the end of the transition: the old range closes once all contacts have
-acknowledged it, at the latest after 14 days (§14.6); whoever still
-writes to the old address after that sees a delivery receipt that never
-arrives and can resend (§14.6) — this too needs a text, because
-otherwise the case looks like a silent loss.
+the end of the transition: the previous keys are used for 7 days after
+the rotation (§14.4); whoever still writes under them after that sees an
+acknowledgement that never arrives and can resend (§14.4) — this too
+needs a text, because otherwise the case looks like a silent loss.
 
 #### 24.4.4 Invitation classes (§15)
 
@@ -9822,11 +10765,11 @@ Strings needed:
 - the note on the one-time nature of QR invitations (§15) and the
   confirmation of automatic acceptance for NFC and QR scan (§15).
 
-#### 24.4.5 Per-transfer media consent (§9.3, §12)
+#### 24.4.5 Per-transfer media consent (§9.4, §12.1)
 
-*§9.3 and §12 require this text
-normatively — "an explicit consent **naming the
-linkability**" / "**naming the downgrade** for **this** transfer" — and
+*§9.4 requires this text
+normatively — an explicit consent **naming the
+linkability** for **this** transfer — and
 it is bound to the i18n requirement of §24.2 like every other string in
 this section.*
 
@@ -9835,14 +10778,16 @@ carry a file on the cell path (§9.4) must ask before
 using a media lane, and the dialog must name what changes. Prescribed
 core, in this order:
 
-- that the choice applies to **this one file** and the chat keeps its
+- that the choice applies to **this one transfer** — for a reconciliation
+  bundle (§14.6.3) the dialog names the number of files and the size it
+  carries — and the chat keeps its
   usual protection afterwards — a remembered blanket consent is the silent mode
   switch §12 exists to prevent;
 - that the transfer is **an event visible from outside**: it does not
   ride the cover stream, so start, end, rate and approximate size are
   visible at both egresses (B-29);
 - that **one holding relay sees both ends** of the same transfer tag —
-  the uploader and the downloader (B-29). This is the linkability §9.3
+  the uploader and the downloader (B-29). This is the linkability §9.4
   requires to be named, and it is *stronger* than an ordinary message's linkability (§7),
   where no single relay sees both ends;
 - that the object **stays with strangers for up to `TTL_media`** until
@@ -9898,19 +10843,20 @@ stands and what their own node contributes to it. The page updates itself
 automatically every 5 s; all labels are localized into 34 languages
 (§24).
 
-The dashboard's metric basis is **cells, tag lines, sync partners, and
-the readiness state**. The data model and collection logic live in
-`lib/core/network/network_stats.dart` and
-`lib/ui/screens/network_stats_screen.dart`.
+The dashboard's metric basis is **the readiness state, the neighbours,
+the packets on the data port, and what the node holds for others**. The
+data model and collection logic live in `lib/core/stats/network_stats.dart`
+and `lib/ui/screens/network_stats_screen.dart`; the delivery-layer values
+come from the host of `mycelium/` (§22.4.1).
 
 ---
 
 ### 25.1 Delivery-Plane / D-Plane Separation
 
-> **Plane note.** Metrics on the **delivery layer** are anonymous and
-> relationship-free: cells, tag lines, sync partners. They **never**
-> carry a contact reference — there is none, and establishing one would
-> be a breach of the KEX-Gate (§4, §10.1). Metrics on **Plane D** (calls,
+> **Plane note.** Metrics on the **delivery layer** are anonymous:
+> readiness, neighbours, packets, holdings. They **never** name a
+> contact — also not where a fixed neighbour is a contact's device
+> (§5.2, D-26). Metrics on **Plane D** (calls,
 > direct transfer, §17) are IP-based and relationship-bearing; they exist
 > only during a consented session and are kept **separate and labeled**
 > in the dashboard (§25.9).
@@ -9920,8 +10866,8 @@ the readiness state**. The data model and collection logic live in
 ### 25.2 Design Principles
 
 1. **Full transparency.** The user sees what their node does: how much it
-   holds for others, with whom it reconciles, how high its cover share
-   is. No hidden activity.
+   holds for others, how many neighbours answer it, how high its cover
+   share is. No hidden activity.
 2. **Readiness, not acquaintance.** The lead metric is the three-valued
    readiness state `searching`/`connecting`/`ready` (§22.7) — not a number
    with thresholds. §22.7 states the rule this chapter implements: *"The
@@ -9949,17 +10895,17 @@ reset at any individual display point:
 
 - **Profile data on disk.** The "Profile data on disk" field measures the
   sum of the `.enc` and `.json` files in the profile directory.
-- **Tag-line occupancy chart.** The chart's capacity comes from the
-  platform tier (§22.6), not from a display constant.
+- **Holdings chart.** Its capacity comes from the bounds of §8.2 and
+  §21.3, not from a display constant.
 
 The metrics themselves are defined in the following sections:
 
 | Section | Content |
 |---|---|
-| §25.4 | Readiness and delivery layer — readiness state, sync partners, latencies, sync-graph volume, connection type, data-saving mode |
-| §25.5 | Own traffic — bytes, cover and payload share, cells, reconciliations, quota utilization, cells placed |
-| §25.6 | Delivery-layer contribution — tag-line subscriptions, tag-line occupancy, cells held, storage occupancy, evictions, harvest hit rate |
-| §25.7 | Sync partners — per-partner row format and aggregates |
+| §25.4 | Readiness and delivery layer — readiness state, answering neighbours, address families, latencies, connection type, data-saving mode |
+| §25.5 | Own traffic — bytes, cover and payload share, packets, cover rate, budget utilization |
+| §25.6 | Contribution — post-box packets held, bulk cache, forwarding, refusals, evictions |
+| §25.7 | Neighbours — per-neighbour row format, aggregates, connection sheet |
 | §25.8 | Durable-object class — class occupancy, sub-budgets, overflow display, class state, and verification state |
 | §25.9 | Plane D diagnostics — NAT type, public address, port mapping, callability, active D-sessions |
 
@@ -9974,11 +10920,11 @@ deliverable, and how does the delivery layer around it stand?
 |---|---|---|
 | **Readiness state** | Readiness state machine (§22.7) | `searching` / `connecting` / `ready`. Lead metric of the dashboard |
 | **Answering neighbours** | §22.7.1, §11.8 | Neighbours that have answered, on their data address, a packet of this node that expected an answer, since start or the last network change (confirmation stamp). `ready` hinges on this number (≥ 2) |
-| **Family-diversity indicator** | §11 (dual-stack) | dual-stack only: the share of syncs over the weaker address family (sliding window). Below **25 %** the active countermeasure runs (raising to 2 partners per family) and is shown here. **Shown with its cause:** the same value arises from drifting partner choice and from neighbours with no inbound capacity left, and the countermeasure only helps against the first. The dashboard must therefore state whether cross-family attempts are failing for lack of remote capacity — otherwise it reports drift and the operator looks in the wrong place |
+| **Address families** | §11.1 | the families the node holds a socket for, and the answering neighbours per family. A dual-stack node bridges between single-family nodes (§11.1) |
 | **Settling time, installation → `ready`** | §22.7 | "the only settling time the system has; it is to be measured and reported" |
 | **Time in current readiness state** | State machine | makes getting stuck in `connecting` immediately visible |
 | **Delivery latency** | §9 | `in transit` → `delivered`, measured on the node's own sends. §7 and §8 give the expected values |
-| **Sync-graph volume** | §23.7 (RL-10) | locally observable (how many neighbours, cover-stream volume). **No global network-size estimate** — a size oracle derivable from a prefix metric is retired (no prefix sharding, RL-10) |
+| **Neighbours** | §11.8, §5.2 | answering neighbours against the optimum of 32, fixed neighbours (at most three contacts' devices, D-26), open set of 4. **No global network-size estimate** (RL-10) |
 | **Connection type** | §22.6, §11 | WLAN / Ethernet / VPN / cellular. Cellular as the last choice is normative; the user should see which link is currently carrying traffic |
 | **Data-saving mode** | §22.6, §5.4 | active/inactive. §22.6 demands **visible state**, not a hidden setting, along with a named consequence |
 | Uptime, status | Daemon | time since daemon start; whether the daemon is running |
@@ -9993,7 +10939,7 @@ applies no threshold logic of its own:
 | `searching` | red |
 
 A threshold on an acquaintance count does not carry weight here: §22.7
-notes that many sync partners in the same island are not deliverable.
+notes that remembered neighbours that do not answer are not deliverable.
 Deliverability follows from evidence, not from count.
 
 ---
@@ -10009,89 +10955,64 @@ payload and cover share, and set against the platform tier's quota.
 | Bytes sent / received (today) | daily volume at the link layer |
 | **Cover share** | the share of cover cells in the sent cell stream. §5: *"The cover share dominates by design — that is the protection, not waste."* The dashboard must therefore label it **as a protection measure**, not as overhead |
 | **Payload share** | the counterpart; together 100 % of the cell stream |
-| **Cells per reconciliation tick** | a constant number per tick (§5). If the observed value deviates from the quota, either the saving mode is active or a budget is exhausted — both are to be made visible |
-| **Reconciliations today** | always-on tier: cover tick; retention-bounded tier: burst ~5 min or streaming subscription in the foreground (§22.6). Makes platform throttling visible |
+| **Cover rate** | the current rate — `R_cover` or `R_metered` (§5.2, §5.3) — and whether empty packets are reduced (D-7) |
 | **Quota utilization** | consumed daily volume against the platform tier's upper bound (§22.6). *"Quotas are upper bounds, not targets"* — the display must not suggest a fill bar meant to be filled up |
-| **Application cells sent / received** | one logical send operation, as described in §7 and §8 |
-| **Wire cells sent / received** | wire level. On the wire there are **only** cells (§4.3). Bytes are measured at the link layer (after fragmentation, before decryption); cells at the application layer (one logical send operation, regardless of how many wire cells it becomes; the split pieces of one seal count once, and `SendOutcome.pieces` reports their number separately) |
+| **Transmissions sent / received** | one logical sending, however many parts it becomes (§11.2) |
+| **Packets sent / received** | wire level; every packet on the data port is 1200 B (§4.2, §11.1) |
 | Chat messages sent / received | a genuine subset of the sent cells |
 
-**Control traffic.** Control traffic is link handshakes, tag-line-list
-reconciliation, delivery acknowledgments (§9), durable-object class-state
-reconciliation (§16.0), and cover cells. The chat counters set themselves
+**Control traffic.** Control traffic is shell handshakes (§11.6),
+acknowledgements (§9.2), code registration (§8.1), neighbour calls
+(§7.2), keep-alive (§8.1), durable-object class-state reconciliation
+(§16.0), and cover. The chat counters set themselves
 apart from this: they count exclusively user messages.
 
 ---
 
-### 25.6 Section 3 — Delivery-Layer Contribution
+### 25.6 Section 3 — Contribution
 
-This section shows what the node holds for others — held storage only,
-not traffic passed through in transit (mechanism: §7, §8). The
-contribution this section accounts for is **held storage**: cells on
-tag lines and durable objects (§16.0). A relay may count pass-through
-traffic as a local diagnostic, but that is not a storage-contribution
-metric.
+This section shows what the node does for others. Held storage and
+forwarding are shown apart: only the first is storage.
 
 | Metric | Description |
 |---|---|
-| **Tag-line subscriptions** | the number of subscribed tag lines, composed as described in §6, **plus** one subscription per subscribed channel (§16) |
-| **Display rule (normative)** | Real and decoy tag lines are **not shown separately**. The decoys exist precisely so the real subscriptions disappear into the list (§6); a statistic that tells them apart cancels the protection against anyone who looks at the screen — including a screenshot in a bug report |
-| **Tag-line occupancy** | bar chart: cells held per subscribed tag line against the per-tag-line quota (§20). The capacity comes from the platform tier (§22.6), **not** from a display constant (§25.3) |
-| **Cells held (total)** | cells this node holds for others — the actual contribution |
-| **Delivery-layer storage occupancy** | bytes, broken down by: inbox tag lines / decoy tag lines / channel tag lines / fountain-erasure cache / durable-object class / profile data (§21) |
-| **Evictions** | cells that yielded due to per-tag-line quota overflow (§20), and cells that expired via TTL. Two separate numbers — the first is a capacity signal, the second is normal operation. **Normative:** the overflow number is reported **per tag-line class**. A management-class overflow means setup is being lost; inside a combined counter it would hide behind the default class, which overflows continuously in normal operation (§20) |
-| **Fountain-erasure cache (always-on tier)** | fountain/erasure blocks held for large payloads and the binary distribution, and their volume (§9.3 bulk lane; AP-7 fountain for files/updates) |
-| **Harvest hit rate** | the share of checked tags that matched against the harvestable-tag set, per reconciliation. It is the only metric that measures the **effectiveness** of harvesting; if it falls to 0 while readiness reports `ready`, either the tag derivation or the epoch window is wrong — exactly the failure class that otherwise hides as a silent outage |
+| **Post-box packets held** | packets this node holds for others (§8.2), against the bound per day value (D-6) |
+| **Bulk cache** | pieces of lane 3 (§9.4) and fountain blocks of the binary distribution (§26.6.1), against 1 GB desktop / 100 MB phone (D-32) |
+| **Forwarded** | transmissions forwarded under step 3 (§8.1) — a local diagnostic, not storage |
+| **Refused** | holds and forwards refused at a stated bound (D-41) — a capacity signal |
+| **Evictions** | bulk-cache pieces evicted oldest first (D-30) and post-box packets expired after 7 days (D-6) — two numbers; the first is a capacity signal, the second normal operation |
 | Profile data on disk | the sum of the `.enc` and `.json` files in the profile directory (§25.3) |
-
-**On the harvest hit rate, normative.** It is kept **exclusively locally**
-and is not observable from the outside: matching happens locally (§6),
-and the rate of delivery-layer reconciliation is constant and
-independent of the hit (§5). The metric must therefore never trigger a
-send reaction — no "sync more often at a low rate". That would be exactly
-demand-driven behavior whose very occurrence is information (§19: no
-polling).
-
-**OPEN (§25-O-1):** The denominator of the rate in streaming subscription
-mode. In burst mode it is well-defined (tags checked per burst); in
-streaming subscription mode the partner streams entire tag lines (§6),
-and the denominator grows with the tag-line volume rather than with the
-node's own interest. Options: **(a)** report the rate only in burst mode,
-"running" in streaming mode; **(b)** separate rates per mode; **(c)**
-normalize the denominator to a fixed time window.
 
 ---
 
-### 25.7 Section 4 — Sync Partners
+### 25.7 Section 4 — Neighbours
 
-This section lists the partners the node reconciles with.
+This section lists the node's neighbours (§11.8).
 
-**Row format per sync partner:**
+**Row format per neighbour:**
 
 ```
-Partner:        7af3…2c8e            (shortened partner identifier)
-Direction:      outbound             (outbound / inbound / both)
-Address family: IPv6                 (§11 — tracked per family)
-Independent:    yes                  (§22.7, as far as locally ascertainable)
-Last reconciliation: 8 s ago
-Acknowledgments: received 142 / issued 138
-Cells:          out 1,204 / in 1,190
+Address family:  IPv6            (§11.1)
+Fixed:           yes             (§5.2 — never which contact)
+Found by:        board           (remembered / local segment / invitation / external records / board, §11.8, §11.8a)
+Last confirmed:  8 s ago         (stale after 1 day, §11.8)
 ```
 
-**What this row deliberately omits and must not be added:** no contact
-reference, no route, no cost, no NAT type, no `isDirect`. A sync partner
-is **not** a contact, and establishing the connection between the two
-would be the linkage the KEX-Gate excludes (§4, §10.1).
+**What this row deliberately omits and must not be added:** no address,
+no node identifier (drawn anew at every start, §7.2), no contact name —
+also not for a fixed neighbour that is a contact's device (D-26).
 
-**Aggregates of the section:** verified partners outbound / inbound, of
-which independent, distribution by address family, acknowledgment rate
-(issued / received), partner turnover per period.
+**Aggregates of the section:** answering neighbours against the optimum
+of 32, fixed neighbours (at most three), the open set (4, §5.2), whether
+the node keeps a board (§11.8a), and whether the external records are
+switched on and the own record is published (§11.9).
 
-**Connection sheet (recovery actions).** A sheet can be opened from the
-partner list. It shows readiness progress and, on request, manually
-triggers the entry cascade (cached entry addresses → LAN discovery,
-§11). A rescue bundle is a set of entry records in the one format
-(E-60, §22.4.4).
+**Connection sheet.** A sheet can be opened from this section. It shows
+the readiness state and the answering neighbours (§22.7.1) and offers
+one action, "reconnect": it triggers the edge of a network change
+(§11.8) — the remembered addresses are re-attempted once and the
+neighbour call is repeated once. The sheet takes no address and no
+bundle by hand: the sources of §11.8 are the only ones.
 
 ---
 
@@ -10132,13 +11053,13 @@ info. They appear in their own, clearly labeled block:
 > reachability (§22.5.2).
 >
 > **They do, however, concern the node's contribution to others.** The
-> public address is what a node needs in order to publish a usable entry
-> record under §11.3 ("every externally reachable node publishes"). A
+> public address is what a node needs in order to publish a usable
+> address record under §11.9 ("publishing follows reachability"). A
 > node that does not know its external address publishes its private one,
-> and the cold-start board fills with records nobody can dial. Learning
+> and the external records fill with addresses nobody can reach. Learning
 > the address (§17.3, "observed address" instead of STUN) therefore
-> serves two consumers: the address candidates of a call, and the entry
-> record of the cascade. Neither is a condition for one's own delivery —
+> serves two consumers: the address candidates of a call, and the address
+> record of §11.9. Neither is a condition for one's own delivery —
 > both are the "contribution to others" named in §22.6.
 
 | Metric | Role |
@@ -10171,20 +11092,19 @@ retrieves them via the IPC command `get_network_stats`. The sources:
 
 | Metric group | Source |
 |---|---|
-| Cells out/in, split by payload and cover | link layer |
-| Cells sent / received / forwarded | application-level cell counters |
+| Packets out/in, split by payload and cover | wire and cover stream of `mycelium/` |
+| Transmissions sent / received / forwarded | `mycelium/` |
 | Delivery latency (`in transit` → `delivered`) | latency measurement of the node's own send path (§9) |
-| Tag-line subscription state, readiness state | sync module and readiness state machine (§11, §22.7) |
-| Delivery-layer storage occupancy per tag-line class and durable-object class | cell and durable-object storage (§21, §16.0) |
+| Readiness state, answering and fixed neighbours | host of `mycelium/` (§11.8, §22.7) |
+| Holdings: post box, bulk cache; durable-object class | `mycelium/` (§8.2, §21.3) and durable-object storage (§16.0) |
 | Class state (per-class state root) and verification state | `durable/` (§16.0) |
 
 **Counter persistence** across daemon restarts: the counters are written
 to disk periodically.
 
 **Privacy. Normative:** the dashboard generates **zero** network traffic;
-all values come from the cover-stream reconciliation that happens anyway.
-This also makes opening the statistics page unobservable from the outside
-— under rate-constant reconciliation it is not observable anyway.
+all values are the node's own counters of traffic that happens anyway.
+This also makes opening the statistics page unobservable from the outside.
 
 **What the dashboard never does:** reconcile metrics with other nodes,
 send them to an external service, attach them to a bug report without
@@ -10203,9 +11123,8 @@ decision log, the ruling at the respective paragraph.
 
 | # | Topic | Options |
 |---|---|---|
-| §25-O-1 | Denominator of the harvest hit rate in streaming subscription mode (§25.6) | (a) report only in burst mode; (b) separate rates per mode; (c) normalize to a time window |
 | §25-O-2 | Whether the cover share is shown as a **number** or only as a category | A precise percentage is a self-declaration about the node's own cover strength. It is local and harmless, but travels into bug reports via screenshots. Options: (a) exact number; (b) tiers ("high / reduced"); (c) exact number only while saving mode is active, otherwise a tier |
-| §25-O-3 | Which history is kept as a time series (§25.4) | (a) readiness state over time; (b) verified partners outbound/inbound; (c) both overlaid. Length and resolution: 720 entries |
+| §25-O-3 | Which history is kept as a time series (§25.4) | (a) readiness state over time; (b) answering neighbours; (c) both overlaid. Length and resolution: 720 entries |
 | §25-O-4 | Target-value display of platform-tier utilization (§25.5) | §22.6 says "upper bounds, not targets" — a fill bar suggests the opposite. Options: (a) bar with a warning threshold; (b) plain number; (c) bar only upon reaching the limit |
 | §25-O-6 | i18n scope | This chapter's metric set is to be fully carried over into `stats_*` keys before the IPC/UI work package (Appendix C) and created in **all 34 locales** (work rule #7, `dart scripts/check_i18n_complete.dart`). The scope is to be quantified beforehand |
 
@@ -10217,15 +11136,15 @@ This chapter presents the license model, publishing infrastructure,
 trademark protection, funding sources, and donation banner in full.
 Two decisions shape it technically:
 
-1. **The update transport runs over the fountain-erasure cache.** The
+1. **The update transport runs over the bulk cache.** The
    manifest is signed, and the binaries travel as fountain blocks over
-   the fountain-erasure cache held by the always-on tier (E-40, §26.6.1).
+   the bulk cache held by the always-on tier (E-40, §26.6.1).
 2. **The maintainer key carries signatures exclusively.** It signs the
    update manifest and controls no network access; the donation targets
    carry their own key pair (§26.7).
 
 The in-app update path is fully specified: signed manifest, fetching the
-binaries from the network's own fountain-erasure cache, verification
+binaries from the network's own bulk cache, verification
 against hash and signature, automatic installation once verification
 passes (§26.6.1).
 
@@ -10472,7 +11391,10 @@ never share it). A node asks for it at the moments it asks the post box
 anyway — at start, when the network changes, when the user opens the
 application — and additionally when a new neighbour appears. Never on a
 timer. A node holding a verified manifest newer than the one it is handed,
-or hearing "nothing here", places its own copy there. Collecting the
+or hearing "nothing here", places its own copy there. A node holding a
+verified manifest also keeps it in its own post box under the public
+value, so that every neighbour asking it is handed it; this adds no
+packet (owner decision 07.10.2026). Collecting the
 manifest does not delete it (§8.2): it is a public object, and deletion on
 collection exists to protect private post. Every node asks the
 same question, so the question distinguishes no one.
@@ -10525,10 +11447,10 @@ through existing users. Six principles apply:
 The last point is anchored in the pipeline: `release-build.sh` runs only
 after the interactively approved push (step 3, §26.2).
 
-#### 26.6.1 In-network updates via the fountain-erasure cache (E-40)
+#### 26.6.1 In-network updates via the bulk cache (E-40)
 
 **Decided (E-40):** The manifest is hybrid-signed (§4), the binaries
-travel as fountain blocks over the fountain-erasure cache (§9, AP-7
+travel as fountain blocks over the bulk cache (§9, AP-7
 fountain for files/updates), and the manifest is harvested rather than
 queried.
 
@@ -10540,7 +11462,7 @@ Procedure:
    ~k·(1+ε) distinct blocks reconstruct the whole; no block is special,
    and no coordination is needed (§9).
 3. The carrier is the **always-on tier** (§22.6): desktop installations
-   acting as an automatic cache class with their own fountain-erasure
+   acting as an automatic cache class with their own bulk
    cache. A cache sees only "interest in blob hash X" — not who is
    downloading (§9).
 4. The node learns of the manifest via the fetch path (§26.5.4) and
@@ -10563,7 +11485,7 @@ version is never offered.
 
 **Decisions about the fetch path:**
 
-- One tag per platform; the blocks sit as cells in the fountain-erasure
+- One tag per platform; the blocks sit as cells in the bulk
   cache (§9).
 - **The fetch path.** Always-on nodes hold the pieces of every current
   object in their bulk cache (§21.2). A node that still lacks pieces asks
@@ -10579,7 +11501,7 @@ version is never offered.
   pieces arriving by cover fill are still kept (§24.4.2).
 - Rateless: no fixed block count, no index allocation (§9).
 - Storage budgets follow the platform tiers from §22.6: retention-bounded
-  (Android/iOS) versus always-on (desktop, "automatic fountain-erasure
+  (Android/iOS) versus always-on (desktop, "automatic bulk
   cache").
 - Old blocks clear themselves via the cells' TTL plus per-tag-line
   quota eviction (§20, §21), once no one is holding them anymore. (There
@@ -10847,7 +11769,7 @@ anyway). Verification is via a SHA-256 comparison against a separately
 transmitted hash.
 
 NFC is not a path for the binary: a tag holds a few kilobytes, and NFC
-carries only the contact card (§15). Android Beam, the one NFC-initiated
+carries only the invitation data (§15). Android Beam, the one NFC-initiated
 file transfer Android had, negotiated over NFC but moved the bytes over
 Bluetooth or Wi-Fi Direct; it was deprecated in Android 10 and removed in
 Android 14.
@@ -10866,14 +11788,14 @@ verifies it themselves — otherwise no one does.
 | 2 | GitHub Releases | Microsoft / DMCA | First installation, sideload |
 | 3 | Invitation link + entry cascade + HTTP download from a node | only if **all** directly reachable nodes are blocked | First installation, decentralized |
 | 4 | physical (USB / share sheet / Bluetooth / LAN WLAN) | not censorable except by seizure | First installation, last-resort fallback |
-| 5 | In-network update via the **fountain-erasure cache** | not censorable as long as a sync partner is reachable | Updates for existing users |
+| 5 | In-network update via the **bulk cache** | not censorable as long as a sync partner is reachable | Updates for existing users |
 | 6 | In-network delta update | not censorable | Updates, bandwidth-saving |
 
 In stages 5 and 6, the delivery layer carries the load; the condition
 follows the readiness state from §22.7.
 
 **Never dependent on outsiders again after installation** — §26.6.1
-carries this claim: the fountain-erasure cache needs no reachability of
+carries this claim: the bulk cache needs no reachability of
 the sender and no coordination. The external channels 1–4 are needed
 only for first installation, and none of them is indispensable.
 
@@ -10885,7 +11807,7 @@ The distribution path consists of these building blocks:
 |---|---|
 | `UpdateManifest` (`lib/core/update/update_manifest.dart`), `UpdateChecker`, `scripts/sign-update-manifest.sh` | signed version manifest with a hybrid signature (§26.5.2); the fields `dhtBinaryTag`/`deltaBinaryTag` name the tags of the full binary and the delta, plus `minMonotoneSeq`, `binaryHashes`, `binarySignatures`, `binarySizes` |
 | `BinaryUpdateManager`, `DeltaUpdateManager` (`lib/core/update/`) | state machine of the update fetch: check, download, assemble, verify, clean up, or find and apply the delta path (bsdiff/bspatch, fallback to the full binary) |
-| Fountain content layer | encoding and fetching of the binary blocks via the fountain-erasure cache (§9) |
+| Fountain content layer | encoding and fetching of the binary blocks via the bulk cache (§9) |
 | `BinaryFetchClient`, `BinaryHttpServer`, `BootstrapWebApp` (`lib/core/update/`) | HTTP path for first installation and foreign-platform fetch; the assembler decodes fountain blocks (§26.6.5) |
 | `InviteLink`, `InviteLinkService`, `InstallSourceDetector` (`lib/core/update/`) | generate and evaluate the invitation link, choose the update path by installation source; link format open (§26.6.3, OPEN L-4) |
 | `PhysicalTransferHelper` (`lib/core/update/physical_transfer_helper.dart`) | export/import and verification for physical handover (§26.6.6) |
@@ -10943,7 +11865,7 @@ sits at the relevant paragraph.
 | # | Point | Options |
 |---|---|---|
 | L-2 | There is no time commitment for the freshness of the update manifest: the manifest is learned at the moments named in §26.5.4, and its latency follows from how often those moments occur. This also leaves the worst-case network-split window unnumbered for rolling back a hard-block manifest. | (a) give no time commitment, but instead tie freshness to the readiness state and the platform tier (§22.6, §8/§9) and measure the value in the lab (§28/§29); (b) introduce a separate, shorter TTL class for manifest cells — this costs delivery-layer budget and has to be weighed against §20. No numeric value is set here |
-| L-3 | Fountain parameters for binaries: block count, redundancy factor, and the share an always-on node contributes to the fountain-erasure cache. §26.6.1 works with a 150 MB example. The budget question has been decided since E-53: variant (a), a **separate bulk quota** (its own class, default 1 GB, desktop only, lowest priority — §22.6/§21); the retention-bounded field values are likewise fixed (48 h / ≤ 32 MB) | The fountain parameters themselves remain a **measurement task**: to be measured, not set |
+| L-3 | Fountain parameters for binaries: block count, redundancy factor, and the share an always-on node contributes to the bulk cache. §26.6.1 works with a 150 MB example. The budget question has been decided since E-53: variant (a), a **separate bulk quota** (its own class, default 1 GB, desktop only, lowest priority — §22.6/§21); the retention-bounded field values are likewise fixed (48 h / ≤ 32 MB) | The fountain parameters themselves remain a **measurement task**: to be measured, not set |
 | L-4 | The invitation link must name the fetch path without presupposing the inviter's direct reachability: there is no per-block addressing (§7/§9), and the ContactSeed carries entry hints (§15). | (a) the link carries entry hints like the seed does, and the browser downloads from the first reachable node the entry cascade resolves; (b) the link stays address-bearing and is declared exclusively as a LAN/near-field path; (c) a split — entry-cascade discovery for the address, the link only for hash, signature, and size. This also affects whether the browser assembler needs a fountain decoder (§26.6.5) |
 | L-5 | Whether there are invitation-related entry records (§26.6.4). Such a record needs a decryption key, and the invitation link carries no key field — a publish with no reader violates Work Rule 5. | (a) fully specify the path — the key travels along in the link, which makes any derivation question moot; (b) do not publish invitation-related records — the link already carries the source and an external fallback, and the entry cascade only covers the case "the address changed before the click happened" |
 
@@ -11037,7 +11959,11 @@ ones — see the note there.
 
 The tree contains no software audio or video codecs: capture,
 playback, echo cancellation, and noise reduction run through the native
-OS voice sessions, video through platform hardware codecs (§17).
+OS voice sessions, video through platform hardware codecs (§17). The one
+exception is the Windows notification-sound helper `windows/cleona_play/`:
+it decodes Ogg Vorbis with libogg 1.3.6 and libvorbis 1.3.7, fetched at build
+time from the pinned upstream commits, not kept in the tree; it plays the
+bundled sounds and runs in its own process, never in the daemon.
 
 ---
 
@@ -11091,7 +12017,7 @@ a prerequisite here.
 
 #### 27.4.2 Fountain codes — **decided (E-42): LT/online codes in pure Dart**
 
-§9.3 requires rateless erasure coding: "content → k source blocks (block
+§26.6.1 requires rateless erasure coding for the binary distribution: "content → k source blocks (block
 size = 1 cell payload ≈ 1.1 KB) → arbitrarily many encoded blocks can be
 generated; **any** ~k·(1+ε) distinct blocks reconstruct the whole." The
 building block needs to be implemented.
@@ -11102,7 +12028,7 @@ building block needs to be implemented.
 |---|---|---|
 | (a) | RaptorQ per RFC 6330, native library + FFI | best ε (near-optimal overhead). Price: a native library on five platforms; RaptorQ's licensing and IP situation needs to be clarified **before** committing to it — this document makes no statement on that |
 | (b) | LT codes or online codes in pure Dart | markedly simpler, no build chain, no third-party license. Price: worse ε, i.e. more blocks for the same reconstruction probability. For a 150 MB binary (§26.6.1: ~135,000 blocks), every additional percent hits the bulk volume immediately |
-| (c) | fixed-rate block code (Reed-Solomon, parameterized) | **for the bulk lane at scale:** discards the core claim of §9 (no block is special, no coordination). **Not for the band below the fountain lower bound** — there a block *is* special by measurement, and the coordination is sender-local rather than a protocol: the sender picks a distinct holder per fragment index of a stripe, with no query, no round trip and no timer, so §19's "no polling" is untouched (the bulk lane is a declared demand-driven class there in any case). Adopted for that band with E-3 = D (§9.3) |
+| (c) | fixed-rate block code (Reed-Solomon, parameterized) | fixed overhead, no tail, a stated failure boundary, no back-channel needed. Adopted for all three media lanes (§9.4); not for the binary distribution, where many seeders emit interchangeable blocks without coordination (§26.6.1) |
 
 **Decided (E-42): (b) as the starting point.** Rationale on
 the IP situation: the foundational LT patents (filed ≤ 2002) have expired
@@ -11208,7 +12134,8 @@ and the data-saver-mode suggestion when a metered connection is detected
 
 `ffmpeg` (optional, speech transcription), `wl-clipboard` and `xclip`
 (optional, binary clipboard), `pw-play` with `paplay` fallback
-(notification sounds). No network relevance.
+(notification sounds, Linux); on Windows the bundled `cleona-play.exe`
+(§22.6). No network relevance.
 
 ---
 
@@ -11216,7 +12143,7 @@ and the data-saver-mode suggestion when a metered connection is detected
 
 Five platforms, fixed roles, fixed artifacts. Linux, Windows, and macOS
 run as a separate daemon plus GUI (IPC over a Unix socket, over TCP
-loopback with an auth token on Windows), Android and iOS in a single
+loopback on Windows; §22.1), Android and iOS in a single
 process:
 
 | Platform | Role (build) | Runtime tier (§22.6) | Artifact |
@@ -11301,7 +12228,7 @@ Decided numbers of this chapter are recorded at the respective paragraph.
 
 | # | Topic | Options | Blocks |
 |---|---|---|---|
-| §27-O-3 | block size and target ε of the fountain coding (§27.4.2) | §9.4 names a 1024 B block payload; the fountain overhead is a function of size, not a constant (§9.4). What remains open is throughput on the weakest target platform and the duplicate share of blocks collected in real use (§9.3). Bar (E-42): ε + throughput on the weakest target platform | §9 figures |
+| §27-O-3 | target ε of the fountain coding for the binary distribution (§27.4.2, §26.6.1) | The fountain overhead depends on object size (measured 2026-08-30: 1.021 at 200 MiB, 1.367 at 64 KiB). What remains open is throughput on the weakest target platform and the duplicate share of blocks collected in real use. Bar (E-42): ε + throughput on the weakest target platform | §26.6.1 figures |
 | §27-O-7 | whether `cleona_pow` should be dropped from the native build | `cleona_pow` has no protocol consumer — PoW plays no role in the design (§10/§20) — so dropping it from the build chain is a packaging cleanup, not an architecture decision. `secp256k1_schnorr.dart` is a separate question, named and bounded in §4.2, not a removal question — it has an active consumer (§27.4.4) | — |
 
 ---
@@ -11369,6 +12296,10 @@ were decided (E-49): two-stage (→ §28.9.3).
   finding will ever have — they **must** appear in the log (§28.8).
 - **Group/channel naming convention in E2E** (`docs/TESTING.md`): unique,
   thematically distinct names per spec.
+- **Keyring variant in E2E.** The lab machines log in automatically, so
+  their keyring stays locked and the tests run with the file variant of the
+  master seed (§4.5.2). One test of its own covers the keyring variant on a
+  machine with an unlocked keyring.
 
 ---
 
@@ -11441,7 +12372,7 @@ The business-logic suites by area, with the evidence that carries them:
 | UI / design system | golden suites, `smoke_design_tokens`, `smoke_skin_catalog`, `smoke_message_bubble`, `gui-02`, `gui-15`, `gui-38` | §22 |
 | Media & chat UX | `smoke_media_transfer`, `smoke_chat_ux`, `smoke_link_preview`, `smoke_voice_transcription`, `smoke_archive` | application layer above the service API |
 | Calls | `smoke_calls`, `smoke_group_calls`, `smoke_video_calls`, `smoke_overlay_tree`, `smoke_voice_codec`, `gui-25`, `gui-33`, `gui-34`, `gui-64` | §17 (E-26): Plane D with its own D-frame format; jitter buffer, codecs, state machine |
-| Multi-device | `smoke_twin_sync`, `smoke_device_delegation`, `smoke_linked_device_*`, `smoke_rotation_co_auth`, `gui-48` | §14: device model, delegation and rotation logic |
+| Multi-device | `smoke_twin_sync`, `smoke_multi_device`, `smoke_rotation_co_auth`, `gui-48` | §14: device model, device set and rotation logic |
 | Infrastructure | `smoke_log_retention`, `smoke_atomic_json_writer`, `smoke_ipc_stability`, `smoke_update_manifest`, `gui-46-tray-icon`, `gui-63-windows-installer` | platform-bound, not network-bound |
 
 ---
@@ -11490,7 +12421,7 @@ evidence.
 | Z-11 | **Beta/live network-channel separation:** handshake fails before a cell flows | §4 | **L** | | | Lab, two nodes with different `kNetworkChannel`: no link key, no handshake |
 | Z-12 | **Identity determinism:** seed import deterministically yields the same UserID | §4 | **L** | | | Lab: byte-identical, pinned `kIdentityDomain`; 24 words → identical UserID across every reinstall. Must be in place before release |
 | Z-13 | **Delivery latency across the ladder** (§7, §8): steps 1–3 resolve while the recipient is online, typically within seconds; step 4 (the post box) delivers only once the recipient returns — there is no fixed upper bound, by design | §7, §8, §9 | L | S | **F** | Honestly measurable only in the field. The lab can see a step fail to resolve, not confirm real-world timing. |
-| Z-14 | **Callability matrix** (foreground 1–3 s, Android/desktop background seconds, iOS closed: no calls) | §17.2, §8 | L | | **F** | Lab: signaling state machine `reaching`/RING_ACK, 30-s punch window, 120-s TTL class. Field: the times and the iOS claim |
+| Z-14 | **Callability matrix** (foreground 1–3 s, Android/desktop background seconds, device off: no ring and a missed-call message, iOS closed: no calls) | §17.2, §8 | L | | **F** | Lab: signaling state machine `reaching`/RING_ACK, 30-s punch window; a call signal never causes a `0x30` and is not sent again at an edge; "not reachable" after 10 s without `RING_ACK`; the missed-call message reaches a callee who was off; an `INVITE` opened more than 10 s after its arrival does not ring. Field: the times, the 10 s through a fixed neighbour, and the iOS claim |
 | Z-15 | **Ring-signature vote + verifiable class state** | §16.4/§16.7, E-25/E-29 | **L** | S | | Lab: signature correctness, key-image uniqueness, cross-poll unlinkability, inclusion proofs. Remains a **review item** (E-47: external review optional, §23.3) — a test run does not replace a proof |
 | Z-16 | **Prekey pool / forward secrecy**, shared pool under multi-device | §4, §14, E-40(2) | **L** | S | | Lab: consumption, refill threshold, consumption notice as a twin-sync type, discard and refill on lock-out. Simulation: exhaustion under load (B = 16, refill threshold B/2 — E-51, simulator-tunable) |
 | Z-17 | **Anonymity sets** (how large is the set a sender disappears into) | §23, §4 | | S | **F** | Simulation delivers an upper bound under model assumptions; only the field measurement is load-bearing. Until then, this commitment is carried as **modeled** |
@@ -11517,7 +12448,7 @@ The following suites are to be built with AP-5:
 | `smoke_delivery_ack.dart` | L | Z-1 in full, including the negative cases |
 | `smoke_readiness.dart` | L | Z-2, all transitions, independence and family criterion |
 | `smoke_dauerobjekt.dart` | L | type system, proof check, protection rule §16.0 ("an object that describes a third party is unconstructible by the type system" — a **negative test against constructibility**), sub-budgets 6/2/2 MB |
-| `smoke_fountain.dart` | L | rateless codec, k·(1+ε) reconstruction from arbitrary blocks (§9) |
+| `smoke_fountain.dart` | L | rateless codec, k·(1+ε) reconstruction from arbitrary blocks (§26.6.1) |
 | `smoke_link_handshake.dart` | L | Elligator2 + ML-KEM, network-channel separation (Z-11), uniform wire profile (§4) |
 | `smoke_ladder.dart` | L | the four-rung ladder (§7, §8) tried in parallel; the first acknowledgement wins and cancels the rest; `SendOutcome {placing, placed, failed}` on `sendToUser` |
 | `gui-66-readiness.spec.ts` | L | readiness in the connection icon, tray, Android notification, network-stats badge (E-41); separate inbound/outbound partner counts |
@@ -11716,7 +12647,7 @@ paragraph.
 | # | Point | Options / status |
 |---|---|---|
 | **T-2** | **Tolerance bands of the simulation metrics** | Without a band, a metrics run cannot be decided red/green. Proposal: measure first, then set the band — but before its first use as a gate |
-| **T-3** | **Test surface for the identity registry** | The decision has been made (§13, E-39 point 4 + E-48: HD derivation + marker per identity, one own bundle per identity with name/`active` — not a network object). **The test surface for the §13 mechanism (marker, derivation, per-identity bundles) still needs to be built** — a pure work item, no longer an open decision |
+| **T-3** | **Test surface for the identity registry** | The decision has been made (§13.7, E-39 point 4, D-35, D-40: HD derivation, one own bundle per identity with index, name and `active`, found by the ascending run — not a network object). **The test surface for the §13 mechanism (derivation, per-identity bundles, the ascending run) still needs to be built** — a pure work item, not an open decision |
 | **T-5** | **Test preset for Z-19** | `ModerationConfig.lab()` sets `identityMinAge=0` for fresh VMs and thereby disables the age rule that the gated-reputation eligibility (§10) makes **central**. Z-19 runs against a preset with **simulated registry aging**, built before the Z-19 lab run. A pure work item |
 | **T-6** | **Golden tests under skin/state extension** | The reference PNGs cover components × skin/mode combinations. If new state icons for `message_bubble` and the status bar come with Z-2/§22.7, the references grow accordingly. No conflict, just effort — noted here so it does not come as a surprise |
 | **T-7** | **Field measurement plan** | §22.7 requires measuring and reporting the time to `ready`, §22.6 calls the iOS figure unsubstantiated, Z-17 is a pure field matter. There is **no** measurement plan for the beta network (What is collected? How does it reach the developer without violating §23?). That is the largest unwritten area of this chapter |
@@ -11888,8 +12819,8 @@ their prerequisites, their verifications, and their dependency order.
 The system comprises the delivery layer — the cover system (§5),
 reachability (§6), the direct and indirect delivery ways (§7, §8),
 delivery states and acknowledgement (§9), Sybil & censorship resistance
-(§10), NAT & transport (§11) — the fountain content layer for files and
-in-network updates (§9, §26.6.1), and the application layers on top of
+(§10), NAT & transport (§11) — the large-payload layer, Reed-Solomon media
+lanes (§9.4) and fountain-coded in-network updates (§26.6.1), and the application layers on top of
 it: calendar, polls, archive, moderation, channels, media, identity,
 IPC, i18n, storage, tray, platform binding, and the crypto primitives
 (§4). `calls/` carries the Plane D API (§17).
@@ -12013,7 +12944,7 @@ cheaper.
 
 | Content | Prerequisite | Verification |
 |---|---|---|
-| AP-7: **fountain-erasure cache** — files (§9) and in-network updates (§26.6.1); manifest hybrid-signed, browser assembler on fountain (§26.6.5) | WP-5 | Transfer E2E; update delivery |
+| AP-7: **bulk cache** — media lanes (§9.4, Reed-Solomon) and in-network updates (§26.6.1, fountain); manifest hybrid-signed, browser assembler on fountain (§26.6.5) | WP-5 | Transfer E2E; update delivery |
 | Build the **network simulator** (stage 1/2, §28.9.3) and answer the scale-dependent measurement questions of §29.5 | WP-1; tool decided (E-49); cost model + hardware decided (E-54) | Metric runs with tolerance bands (T-2) |
 | AP-8: cold start and rendezvous, first-launch profile path (§21), release | all previous | Field test |
 | Satisfy release criteria **G-1…G-5** (§28.10) | AP-8, simulator results | G-1…G-5 green simultaneously |
@@ -12072,7 +13003,7 @@ production launch:
 | Kemeleon / uniform ML-KEM encoding (O-2) | optional points |
 | Form-masquerade (benign traffic-profile imitation) — the (b)-hardening, declared boundary D1a (E-D) | §23.9.1, E-62 |
 | Rendezvous phase 2 — metric-gated evolution of the entry cascade (thresholds since E-52: 50 nodes / 8 weeks / diversity floor, reversible) | §11 |
-| Group calls (C-9/C-10/C-11) | §17 |
+| Group calls | §17.7 |
 | In-call collaboration (§17.5): remote control and screen-frame transport (PipeWire/MediaProjection) | depends on the Plane D API from WP-2 |
 | Threshold signatures for the update manifest (e.g., 2 of 3) — the update signature is the last remaining centralized capability (§26.7) | §26.7 |
 | PQ-NIKE upgrade path for pairwise secrets — own implementation of a published candidate scheme once one is classified viable (as of 2026 none exists) | §15 |
@@ -12137,7 +13068,7 @@ interface**, not the **volume**; it therefore costs no anonymity (§5).
 
 | Rank | Platform | Tier (§22.6) | Contribution to the network | Callability (§17.2) |
 |---|---|---|---|---|
-| 1 | Linux Desktop | always-on | highest: full-rate cover stream, unrestricted mailbox-holding for others, full retention, automatic fountain-erasure cache (§9) | inbound within seconds |
+| 1 | Linux Desktop | always-on | highest: full-rate cover stream, unrestricted mailbox-holding for others, full retention, automatic bulk cache (§9.4, §26.6.1) | inbound within seconds |
 | 2 | macOS | always-on | same as Linux | inbound within seconds |
 | 3 | Windows Desktop | always-on | same as Linux, after platform-specific fixes | inbound within seconds |
 | 4 | Android | retention-bounded | limited: cover stream and delivery ladder run mainly in the foreground service window, retention bounded (§22.6) | inbound within seconds (foreground service) |
@@ -12148,8 +13079,8 @@ latency (§7, §8), contribution (§22.6), and callability (§17.2).
 
 ### 31.3 The platforms individually
 
-**Desktop.** Always-on tier plus the automatic fountain-erasure cache
-for files and in-network updates (§9, §26.6.1); inbound calls within
+**Desktop.** Always-on tier plus the automatic bulk cache
+for media and in-network updates (§9.4, §26.6.1); inbound calls within
 seconds (§17.2).
 
 #### Tier 1 — Linux desktop
@@ -12160,8 +13091,8 @@ nor network access. **Linux contributes the most.** Specifically:
 
 - **Always-on tier** with a continuous cover stream and a rough
   guideline of ~40–50 MB/day cover plus bulk (§5).
-- **Automatic fountain-erasure cache** for the third file-transfer tier
-  (fountain-erasure cache on always-on relays, §9) — this role is
+- **Automatic bulk cache** for the bulk lane and the binary distribution
+  (§9.4, §26.6.1) — this role is
   occupied exclusively by desktop installations.
 - **Full retention** (always-on relays, 14 days default).
 - **Accepts inbound syncs**, thus a usable relay / door for nodes that
@@ -12194,7 +13125,7 @@ the link layer (§11) uses ordinary UDP sockets:
   87.9% under Windows, caused by the behavior of the I/O Completion
   Ports. The fix is a native C shim (`libcleona_net`, direct
   `WSASendTo`); it sits in the link layer (§11).
-- **IPC over TCP + auth token** instead of Unix sockets — additional
+- **IPC over TCP** instead of Unix sockets — additional
   complexity.
 - **Process management** (scheduled task, PID and lock files) is more
   error-prone than under Unix.
@@ -12251,9 +13182,11 @@ what has arrived (§7, §8) and fits into a background-refresh window.
 There are no keepalives. The delivery *guarantee* is platform-equal; the
 delivery *moment* with the app closed is Apple policy (the APNs
 rejection stands — push wake-up was evaluated and rejected, Appendix D, D-18).
-**Calls (E-26):** with the app closed, iOS has **no inbound calls** — the
-120-s signaling TTL sits below every guaranteed background window. That
-is a documented platform limit, not an error class (callability matrix:
+**Calls (E-26):** with the app closed, iOS has **no inbound calls** — a
+call must ring within 10 s (§17.2), and a closed app keeps no way open on
+which a call signal could reach it. The caller sees "not reachable"; the
+missed-call message is collected when the app is opened. That is a
+documented platform limit, not an error class (callability matrix:
 §17.2).
 
 In addition:
@@ -12310,7 +13243,7 @@ iOS-reachable code MUST have an `onError` handler.
 **Recovery after death of the file descriptor.** The procedure is:
 **bind fresh sockets, re-read the descriptor, re-select sync partners**
 (§22.4). Unsent messages sit in the outbox and are offered again on the next
-opportunity (§9.3) — there is no persistent SendQueue and no
+opportunity (§21.2) — there is no persistent SendQueue and no
 timer-based retry.
 
 These four quirks concern only the foreground session. The BGTask path
@@ -12328,7 +13261,7 @@ The platform question breaks down into two separate statements:
    (§16.0) carries what is load-bearing beyond that: delivery does not
    depend on any device staying reachable.
 2. **The hierarchy measures contribution and callability.** Desktop
-   systems run the always-on tier, hold the fountain-erasure caches,
+   systems run the always-on tier, hold the bulk caches,
    and are callable. Mobile devices predominantly receive and
    contribute little — Android measurably more than iOS.
 
@@ -12376,9 +13309,9 @@ and nobody notices.
 | message identifier length, acknowledgement rules | §9.2 |
 | media size threshold, stripe width `K`, block size, fragment surplus `d`, relay size cap `C` | §9.4 |
 | part size, header layout, re-request window and rounds, discard timer | §11 |
-| invitation card layout and sizes, code length, expiry, buffer sizes, field limits, channel byte | §15.2, §15.12 |
+| invitation data layout and sizes, code length, expiry, buffer sizes, field limits, channel byte | §15.2, §15.12 |
 | admission cost | §10 |
-| call frame sizes and budgets | §17 |
+| call frame sizes and budgets; reach limit and answer timeout of a call | §17, §17.2 |
 
 ## Appendix B — Declared limits
 
@@ -12400,6 +13333,10 @@ of the whole design:
 | B-10 | **Calls disclose a conversation.** Real time requires a consented direct channel: an observer sees that two parties are talking, without learning which two | metadata | §17 |
 | B-11 | **Public channels are enumerable.** The tag secret is published, so decoys act as a dilution factor, not as an anonymity set | anonymity | §23 |
 | B-12 | **Moderation acts on objects, not persons.** No account-level sanction exists to reach for | product | §16 |
+| B-18 | **A published entry record is a signed membership artefact.** B-6 priced the fingerprint as "a captured public key can be confirmed to be in the network". A published record is more: address, `E_node` and an Ed25519 signature, verifiably tied to a node key and enumerable by anyone holding the app (RL-13). The counter is E-63 — a node may be reachable and withhold its record — but publishing stays the default, because a network in which withholding were the default could not cold-start | membership | §11.1, §23.9.2 |
+| B-29 | **A media transfer is a visible, linkable event on lanes 2 and 3.** Stream lane: the volunteer sees uploader IP, downloader IP, duration and approximate size of one transfer. Bulk lane: start, end, rate and approximate size are visible at both egresses, and a holder sees uploader and downloader of the same transfer. In a group transfer the holders additionally see which members collect — a correlation that pairwise legs (§16.2) do not have. Content stays post-quantum sealed on both lanes, because `K_T` is drawn per transfer and travels in the announcement (§9.4). The cover system runs on unaffected | anonymity | §9.4, §17.6 |
+| B-30 | **Offline media needs reachable holders; streamed media needs a volunteer.** Holders are desktops and phones whose address the check of §8.1 found open; a phone behind a closed family holds nothing, and iOS holds only while the application is open. A segment without such holders delivers media only while both parties are reachable, the payload is within the relay size cap `C`, and a volunteer accepts (D-1). A sender needs eleven holders — contacts' devices first, desktops before phones among equals — for the bulk lane's failure boundary to hold | availability | §9.4, §17.6, §21.3, §22.6 |
+| B-31 | **A compromised device reads everything.** Software running on the user's device with root or kernel rights reads what the application decrypts, displays and takes as input. It also reads the master seed: at rest the seed is sealed under a key of the device's key store (§4.5.2), but the running application must unseal it, because it computes every key from it and no device key store offers ML-KEM or ML-DSA — and with the seed goes every identity derived from it (§4.5.1). No measure in the application prevents this. §23.10 lists what the application does against software without such rights, and what it deliberately does not do. An Emergency Key Rotation afterwards keeps `K_AB` and the codes on the founding keys (D-33) | confidentiality | §2, §4.5.2, §23.10 |
 
 ## Optional points
 
@@ -12443,11 +13380,37 @@ is measurement and build work:
   run below the minimum juror count is a failure, not a skip.
 - The participant count up to which video is offered in a group call
   (§17.7).
+- The own-device line of the delivery layer (§14.7, D-37) is decided;
+  enrolling a second device (§14.6) on the post box of §8.2, the
+  synchronisation of the routine KEM rotation across own devices, and
+  Type 16 with its key packets (§14.7) are still open work. Until
+  enrolment is built, a contact stands only on the device on which it
+  came about.
+- Stages 2 and 3 of recovery (§13.4 distress call, §13.5 restore
+  broadcast) in terms of the post box of §8.2 — not yet restated, and
+  **not built**: the V3 restore path is removed and its type numbers 30/31
+  are reserved (S398, R-1). The restatement starts from §13.5.2 (manifest
+  and pull) and the scope rule of §13.5.4; the recovery bundle (§13.3) is
+  the only way back after a total loss until then.
+- The durable-object class (§16.0) and everything that stands on it — the
+  channel directory and public channels (§16.3), moderation
+  (§16.4–§16.6), the system channels (§16.7) — in terms of the nodes,
+  edges and post box of §5–§11: not yet restated, and **not built**; the
+  V3 channel loop is removed (31.08.2026). §16.0 still describes the
+  class on relays, cells and the cover stream of the withdrawn layer; the
+  restatement starts from the invariants that stay — public,
+  self-verifying objects with carried proof, a per-class state root over
+  held **and** permanently rejected identifiers (31.08.2026), eviction by
+  type rules, the sub-budgets of §21.3 — and names what standing traffic
+  the replication costs, which needs its own approval (§1.2, D-9). Until
+  then a channel report is counted locally and leaves the device as
+  nothing (`ChannelReportOutcome.notSent`); the production launch waits
+  on this class (§30.5, Z-19).
 - The build order (§30) and its release criteria G-1…G-5 (§28.10); a
   further pass over §8; the test areas at T-3 and T-6 (§28.11); the
   review items from §30.3 A (optional, E-47); UI/i18n determinations
   (§15-O-1…O-5, K16-2…K16-4, I-2, I-3, §25-O-1…O-4/O-6, STO-4,
-  CAL-3/CAL-4/CAL-7, POLL-4, C-9/C-10/C-11, L-2/L-4/L-5, R-3 procedural
+  CAL-3/CAL-4/CAL-7, POLL-4, L-2/L-4/L-5, R-3 procedural
   rule); the threat-model document must be kept in step with this
   chapter.
 
@@ -12491,6 +13454,31 @@ through a proposal with before, after and rationale.
 | D-22 | Persistence in three forms; messages in an encrypted SQLite database per identity (SQLite3 Multiple Ciphers, no plaintext temp); the "decrypted temp file, flush every 60 s" design is rejected | owner | §4.5.3, §21.4.1 |
 | D-23 | Update: collected and assembled automatically, offered only when complete and verified, "Install" starts without a second question; no downgrade; an update comes only from a hand-signed manifest | owner, 14.09.2026 | §26.5.4, §26.6 |
 | D-24 | Interface precedence: wired, Wi-Fi and VPN before cellular | owner, 16.09.2026 (S390) | §22.4.1, §23.1 |
-| D-25 | The card carries up to four own addresses; they are classified by the reader, not by the issuer; the neighbour address only when verified | owner, 16.09.2026 (S390) | §15.2 |
-| D-26 | Fixed neighbours come from contacts: up to three currently reachable contacts' devices, replaced at edges, fixed rather than redrawn; the card never names a contact; one `0x22` fans out to up to three, only for registered devices; the list rides in acknowledgements and messages; a contact can be excluded | owner, 24.09.2026 (proposal "contacts as fixed neighbours", version 3) | §5.2, §8.1, §9.2, §15.2, §15.10 |
+| D-25 | The invitation data carry up to four own addresses; they are classified by the reader, not by the issuer; the neighbour address only when verified | owner, 16.09.2026 (S390) | §15.2 |
+| D-26 | Fixed neighbours come from contacts: up to three currently reachable contacts' devices, replaced at edges, fixed rather than redrawn; the invitation data never name a contact; one `0x22` fans out to up to three, only for registered devices; the list rides in acknowledgements and messages; a contact can be excluded | owner, 24.09.2026 (proposal "contacts as fixed neighbours", version 3) | §5.2, §8.1, §9.2, §15.2, §15.10 |
 | D-27 | Keep-alive only where a check shows it is needed: a family found open from outside needs none; IPv4 to at most one neighbour; IPv6 to each fixed contact neighbour, all in one radio wake | owner, 24.09.2026 (version 3) | §8.1 |
+| D-28 | First contact works with neither side on at the same time, for the out-of-band invitation: it carries the bundle and the invitation box key; request, answer and receipt take the post box; the request's proof names its window and holds for 7 days; QR and NFC keep the round trip; the issuer's acceptance question stays (D-16); the other devices of either side learn of the contact through `CONTACT_ADDED`; the line's KEM keys are the invitation's own random key pair, not the identity's rotating ones (R-b); the line binds them with the issuer's Ed25519 signature, classical on purpose (T-a, §4.4.3) | owner, 28.09.2026 (proposal E: E1-b, E2, E3, E4-a, O1; R-b; T-a) | §15.1, §15.5.1, §15.6, §8.2, §14.7 |
+| D-29 | Media lanes: pieces sealed under a transfer key drawn per transfer and carried in the announcement; lane 1 is one message; a media message is `delivered` on the acknowledgement of its announcement, sent once the object decodes; consent per file only before lanes 2 and 3; one stream per volunteer | owner, 14.09.2026 (proposal "media lanes", H2/Q1/Z1/N1/V-b) and 28.09.2026 | §9.4, §17.6, §24.4.5 |
+| D-30 | Lane 3: each fragment placed once, the eleven of a stripe with eleven distinct holders — desktops and phones found reachable — contacts' devices first, desktops before phones among equals; proof of work once per transfer and holder; fragments live in the bulk cache and are evicted oldest first; the announcement names the holders | owner, 28.09.2026 (E1 = A) | §9.4, §21.2, §21.3.3 |
+| D-31 | Every inbound-reachable always-on node is a media volunteer; there is no switch for it | owner, 28.09.2026 (E2 = B) | §17.6, §12.7, RL-7 |
+| D-32 | Phones keep a bulk cache of 100 MB (desktop 1 GB); they hold and hand out on any network, except over metered connections while data-saving mode is on | owner, 28.09.2026 | §21.3, §9.4 |
+| D-33 | An Emergency Key Rotation keeps the identity: UserID, delivery identifier and the fingerprint of the invitation data stay the founding identifier; `K_AB` and the codes stay on the founding keys (price named: whoever holds old keys and `s_AB` computes codes). The new signing keys are bound by the hybrid rotation chain, which travels inside the seal with the announcement and every envelope until acknowledged, and in the bundle and the out-of-band line; superseded keys and forks are refused, a fork is shown. Day keys follow the current keys and are sent again, the previous ones collected for 7 days; invitation box keys are random; standing invitations are revoked at the rotation; renewal after a block is such a rotation; the words alone do not restore after a rotation, the recovery bundle does | owner, 28.09.2026 (proposal A with the extensions; replaces the interim decision of 14.09.2026 "new signing keys = new identifier") | §4.1, §4.3, §4.5.4, §8.2, §15.1, §15.2, §15.6, §15.8, §15.9, §15.10, §15.11 |
+| D-34 | A file is never sent again: a failed transfer is `failed` with its reason at both ends; an interrupted transfer places the rest on lane 3; a later message to the same contact waits until the file is in the network, and finding the file incomplete makes it `failed` | owner, 29.09.2026 (proposal A) | §9.3, §9.4, §12.2 |
+| D-35 | Recovery bundle on the post box: values per UTC day from the seed, own fixed neighbours first as holders, 7 days, renewed at post-box edges when 3 days old, one deposit; content without Shared Key and `inbox_key`, with `s_AB`, fixed neighbours and time; found by the holders a device reaches, including by reading a contact's invitation; restored contacts re-anchor on their first envelope proving the UserID | owner, 29.09.2026 (proposal B-1) | §13.0, §13.1.2, §13.2.1, §13.3 |
+| D-36 | Co-members who are not contacts are **group pairs**: the inviter draws their `s_AB` and carries it with each member's self-signed address in the invitation; joining is explicit; a group pair carries only group types, gets day keys, never a fixed seat, and ends with the last shared group; the send seam has no key overrides | owner, 29.09.2026 (proposal B-3, G2) | §4.3, §8.2, §15.7, §16.2.2, §18.1.2, §22.5.1 |
+| D-37 | Own-device line: one post-box deposit per other own device under `HKDF(K_own,"device"‖deviceId‖d)`, deleted by its collector; `K_own` from the current identity signing key until the shared key is built; post box only, except the initial reconciliation also directly to a LAN address of the other device while both are present (§14.6.1 step 4, §14.6.3) and the mirror of a call signal on steps 1 and 3 under the own-device code (D-46); no receipt; deliveries from contacts and replies written meanwhile reach the other own devices by mirroring (Type 18, `MESSAGE_SENT`); §22-O-1 = (b) for own devices only; the routine KEM rotation reaches the own devices before two devices run one identity | owner, 29.09.2026 (proposal B-4: E1, E5 mirroring, E7) | §8.2, §9.2, §14.2, §14.7, §22.5.1, §22.5.2 |
+| D-38 | Link keys live in memory only; a link is not renewed while sending continues, and cover and keep-alive never renew it; a restarted node lets its peers back in after two unreadable packets, and a single-packet sending after more than 2 s of silence carries one empty companion packet | owner, 29.09.2026 (proposal OP-28/OP-29: E1–E4) | §11.6, §5.6 |
+| D-39 | An additional device is set up with the 24 words; an existing device opens a 24-hour enrolment window that travels in the recovery bundle; a fresh install that finds the window asks to be added under a seed-derived value that only a device with an open window asks, and is handed over only after approval in the Requests tab; a bundle without a window leads to the question whether the previous device still exists, no bundle to recovery; no shared-key rotation, no delegation certificate. Where two co-members share several groups, the `s_AB` of the smallest group identifier applies | owner, 29.09.2026 (proposal B-4b revised: E-1 A; §4.3 sentence from B-3) | §4.3, §13.0, §13.3.2, §13.3.4, §14.6.1, §14.6.2 |
+| D-40 | A fresh install that entered the words searches for the bundle only and collects no post before the bundle is found or the user chooses recovery; "no bundle" is never concluded automatically. With more than one device, only the device with the smallest DeviceID (or any, once the generation is 14 days old) performs the routine KEM rotation and places Type 19 `KEM_ROTATED` to the other own devices before announcing to contacts; a cell that cannot be opened is parked up to 7 days / 100 cells and counted visibly if it expires | owner, 29.09.2026 (B-4b finding A; E7 = b1 + c) | §4.5.4, §13.0, §14.7 |
+| D-41 | Flow control per next hop, as §20.2 states it: the splitter sends one transmission of two or more parts at a time to each next hop and starts the next when the recipient's end mark — an empty re-request — arrives, or 1.1 s after the last part with no request; single-part packets do not wait; the node's own transmissions wait in order and are never evicted; others' transmissions (forwarding, a holder handing out) have a stated bound per target, above which the forwarder answers `0x21`; the shell holds during a handshake what the flow lets through, without eviction, and when the neighbour does not answer the waiting transmissions are told it is unreachable | owner, 29.09.2026 (OP-33 variant B; variant A, displacement by transmission, rejected; eviction withdrawn with the draft delivery path A→B) | §1.2, §3.1, §8.1, §11.3, §20.2, §20.3 |
+| D-42 | Initial reconciliation of own devices as twin-sync Type 20 `RECONCILE` on the own-device line, directly on the LAN while both devices are present; automatically the header (conversation list with per-chat configuration, counts, sizes) and the newest 10 messages of each conversation; the full history and the attachments of a conversation only on the user's request, attachments per conversation as one transfer with one consent; the source serves only its own set, at most 80 packets under one device value, refilled on progress; one collection edge after taking over a handover | owner, 29.09.2026 (proposal Erstabgleich: E-1 b, E-2 b, E-3 b, A-1…A-9) | §8.2, §13.5.2, §13.5.3, §14.6.3, §14.7, §20.2, §24.4.5 |
+| D-43 | A re-request round counts against the limit only if it brought no new part; a transmission fails after three rounds in a row without progress or after 30 s; the test of the largest lane-1 transmission checks completeness within three rounds without progress and no loss in the shell, not the absence of re-requests. Re-sending is the last resort: a receiver drains its socket at every read event (§11.1) | owner, 29.09.2026 (proposal R3, option B) | §11.1, §11.3 |
+| D-44 | The delivery path runs on events, not clocks: steps 1 and 3 leave at once and step 4 when its proof of work is ready; no step is paused, resumed or repeated, only the acknowledgement ends a sending; the acknowledgement takes the way the message came and goes to a post box only for post collected from one; code registration is a packet of its own (`0x24`, acknowledged by `0x25`) to each fixed neighbour at the edges of §8.1, one second attempt; placing ends at two `0x31` or when every holder transmission has ended, a collection when each holder has handed out the number it announced or one request for what is missing (§8.2) has brought nothing, and deletion goes to every holder asked; at the edges of §8.2 only what is neither acknowledged nor placed is sent again, under the same identifier; a node reads its socket until empty at every read event | owner, 29.09.2026 (draft delivery path A→B, S398) | §3.4, §5.5, §5.6, §7.1, §8.1, §8.2, §9.2, §9.3, §11.1, §11.8, §20.2 |
+| D-45 | Call signals are never left in a post box: they take ladder steps 1 and 3 only, are sent once and are not sent again at an edge. A call rings within 10 s or not at all: without a `RING_ACK` within 10 s the caller shows "not reachable", and the callee receives "missed call" as an ordinary message, shown with the callee's own arrival time. The 10 s are a limit of the call on the caller's clock, not a clock of the delivery path (D-44). The device a call signal reaches mirrors it to the other own devices on the same two steps (D-46) | owner, 30.09.2026 | §7.1, §8.1, §8.2, §9.3, §17.2 |
+| D-46 | An incoming call rings on every reachable device of the callee: the device a call signal reaches mirrors it at once to each other own device on steps 1 and 3 only, under the own-device code `HKDF(K_own, "ring" ‖ deviceId_A ‖ deviceId_B ‖ d)` registered with the fixed neighbours like a contact's code; the mirror is not acknowledged to the caller; a mirrored device answers the caller directly; the first device keeps mirroring the caller's signals of that `callId` until the call ends; own-line deposits carry the depositing device's fixed neighbours and segment addresses. Contacts still send one delivery; the neighbour still holds one device per code; nothing is left in a post box. A device whose ringing `CANCEL_OTHERS` ended shows no missed call | owner, 01.10.2026 (proposal S400 multi-device ringing, K1) | §8.1, §14.2, §14.7, §17.2 |
+| D-47 | A message without a way rests in the sender's history and leaves again at every edge; after 14 days of resting the application closes it as `failed` with its reason, checked only when it would be sent again, never on a clock; 14 and not the 7 days of the post box, because it occupies the sender's own storage, not a holder's | owner, 14.09.2026 ("C with 14 days", S384) | §9.1, §9.3, §12.2 |
+| D-48 | A message lies with holders for at most 7 days and is never placed a second time (the one exception: §9.3); it stays `in transit`. A device whose last collection lies more than 7 days back asks every contact and group pair for what it missed, naming the moment of that collection; each sends its own messages since then, through the reconciliation of §14.6.3 carried between the pair. An edge, not a clock | owner, 02.10.2026 (decision 11; form: proposal S403) | §8.2, §9.1, §9.3, §9.5, §14.6.3, §20.2, §21.5.3 |
+| D-49 | The compromised device is a declared limit: against software with root or kernel rights the application protects no content; the seed is sealed by the device's key store at rest and readable in the running process. Below that it hardens — capture exclusion on Android, Windows and macOS, also in the beta build, with a switch only the test run sets, honoured in the live build only where no other application can set it; the application's own screenshot, into the picture collection, refused with a notice where forwarding is not allowed; accessibility marking on Android; cover while recording on iOS; on Linux nothing but the Wayland advice; no keyboard learning in the message field; a notification without content as a setting, off by default, on every platform; no Android backup; plaintext in transit only inside the profile; crash logs in the profile; no secret in a process argument; one notice per function where content leaves; `PR_SET_DUMPABLE` in the Linux live build only | owner, 02.10.2026 (S402 list, nos. 1–7, 9–14, 16, 20, 22) | §2, §21.4.2, §21.5.4, §22.8, §23.10, B-31 |
+| D-50 | Not built: locked memory for the seed — it lies in ordinary process memory; an application lock; removing or marking the copy button of the 24 words; a default expiry for new chats; root or jailbreak detection | owner, 02.10.2026 (S402 list, nos. 8, 17, 18, 19, 21) | §4.5.2, §23.10 |
+| D-51 | State of the device lives in a device database of the same build as the identity's, under `deriveSharedFileEncKey(master_seed)`; the master seed lies in the OS keyring. It holds the identities, the device keys, device-wide settings, the secret of the daemon–GUI connection and the node's own state (port and neighbours, post box, address-record key); the pieces held for others stay files. Daemon and GUI both open it | owner, 02.10.2026 | §4.5.2, §4.5.3, §21.4.1 |
+| D-52 | The connection between daemon and GUI is authenticated in both directions and encrypted on Linux, Windows and macOS, under a secret drawn once and kept in the device database; no unencrypted mode in any build; the 24 words are not served over it. Replaces the "no" to no. 15 of the S402 list | owner, 02.10.2026 | §22.1, §23.10 |

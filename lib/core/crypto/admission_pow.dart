@@ -3,7 +3,8 @@
 // Static, reusable proof per device keypair: an 8-byte nonce, such that
 // SHA-256("cleona-id-pow-v1" || device_ed25519_pk || nonce) has at least
 // [difficultyBits] leading zero bits. Computed once at keypair generation
-// (isolate), persisted in device_keys.bin (v3 container), travels as
+// (isolate), persisted with the device keys (v3 container, in the device
+// database since S403 — `device_keys_store.dart`), travels as
 // PeerInfoProto.device_id_pow_nonce with the pubkey it certifies.
 //
 // Bound to the PUBKEY, not to the device ID — survives secret rotation.

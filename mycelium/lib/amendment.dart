@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/first_contact.dart' show Report;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/message.dart' show Back, kIdentifierLength;
@@ -137,6 +138,18 @@ class ReadMark {
 typedef AuthorFrom = ({Address who, DateTime at})? Function(
     Uint8List identifier);
 
+/// How many amendments an identity remembers as taken (§20.2: bound and
+/// behaviour). An amendment names only the message it refers to, and its
+/// envelope carries no identifier of its own; but every step of one sending
+/// carries the SAME bytes (`ladder.dart`), and a new amendment is sealed
+/// anew (ephemeral X25519, ML-KEM, nonce — `envelope.dart`), so the packet's
+/// hash tells a copy from a new one even when the content is equal (a
+/// reaction set, withdrawn and set again). Beyond the bound the oldest gives
+/// way: a copy arriving after that many newer amendments goes up once more —
+/// harmless, every amendment is a state (set, withdrawn, content, read), not
+/// a counter. No clock. Set, not measured: at most ≈ 100 KB per identity.
+const int kAmendmentsSeenAtMost = 1024;
+
 /// The amendment path. Holds no history — that lies with the caller.
 class Amendments {
   final PostBox me;
@@ -230,6 +243,17 @@ class Amendments {
   /// Feeds in an arriving packet.
   void receive(Uint8List packet, CardAddress origin) {
     if (packet.isEmpty) throw AmendmentError('empty packet');
+    // A copy of a sending already taken (§7.1 sends every step at once; §9.2
+    // "duplicate … ignored"): the same bytes — see [kAmendmentsSeenAtMost].
+    final seen = SodiumFFI()
+        .sha256(packet)
+        .sublist(0, 16)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    if (_seen.contains(seen)) {
+      report?.call('Amendment ${seen.substring(0, 8)} arrived again — ignored');
+      return;
+    }
     final (plaintext, sender) = Envelope.unseal(
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
@@ -251,7 +275,13 @@ class Amendments {
       default:
         throw AmendmentError('unexpected kind ${packet[0]}');
     }
+    _seen.add(seen); // only what opened and was taken counts as taken
+    if (_seen.length > kAmendmentsSeenAtMost) _seen.remove(_seen.first);
   }
+
+  /// Amendments taken, by the first 16 B of SHA-256 over the whole packet —
+  /// insertion order, the oldest gives way ([kAmendmentsSeenAtMost]).
+  final Set<String> _seen = <String>{};
 
   void _reactionCame(Uint8List identifier, Uint8List rest, Address from) {
     if (rest.length < kEffectLength + 1) {

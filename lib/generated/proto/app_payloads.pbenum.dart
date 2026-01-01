@@ -36,6 +36,27 @@ class AddressType extends $pb.ProtobufEnum {
   const AddressType._($core.int v, $core.String n) : super(v, n);
 }
 
+/// V4.2 §4.5.4 "The announcement must carry the mode the sender should use
+/// for follow-ups": whether the recipient's tags for this pair are still
+/// valid for the new keys. Carried by BOTH rotation notices (`KeyRotation`,
+/// `KeyRotationBroadcast`) under the SAME field number 9, so the one
+/// dispatcher that parses every notice as `KeyRotationBroadcast` reads it
+/// for both. Signed with the rest of the body.
+class KeyRotationMode extends $pb.ProtobufEnum {
+  static const KeyRotationMode KEY_ROTATION_MODE_UNSPECIFIED = KeyRotationMode._(0, _omitEnumNames ? '' : 'KEY_ROTATION_MODE_UNSPECIFIED');
+  static const KeyRotationMode KEY_ROTATION_MODE_TAGS_VALID = KeyRotationMode._(1, _omitEnumNames ? '' : 'KEY_ROTATION_MODE_TAGS_VALID');
+
+  static const $core.List<KeyRotationMode> values = <KeyRotationMode> [
+    KEY_ROTATION_MODE_UNSPECIFIED,
+    KEY_ROTATION_MODE_TAGS_VALID,
+  ];
+
+  static final $core.Map<$core.int, KeyRotationMode> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static KeyRotationMode? valueOf($core.int value) => _byValue[value];
+
+  const KeyRotationMode._($core.int v, $core.String n) : super(v, n);
+}
+
 ///  ── Own-video state (§10.6, Spec-Erratum E2) ──────────────────────────
 ///
 ///  Why a sender is currently not sending video. Meaningful ONLY while
@@ -61,11 +82,15 @@ class VideoOffReason extends $pb.ProtobufEnum {
   static const VideoOffReason VIDEO_OFF_REASON_UNSPECIFIED = VideoOffReason._(0, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_UNSPECIFIED');
   static const VideoOffReason VIDEO_OFF_REASON_USER_DISABLED = VideoOffReason._(1, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_USER_DISABLED');
   static const VideoOffReason VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT = VideoOffReason._(2, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT');
+  static const VideoOffReason VIDEO_OFF_REASON_NOT_SUPPORTED = VideoOffReason._(3, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_NOT_SUPPORTED');
+  static const VideoOffReason VIDEO_OFF_REASON_START_FAILED = VideoOffReason._(4, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_START_FAILED');
 
   static const $core.List<VideoOffReason> values = <VideoOffReason> [
     VIDEO_OFF_REASON_UNSPECIFIED,
     VIDEO_OFF_REASON_USER_DISABLED,
     VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT,
+    VIDEO_OFF_REASON_NOT_SUPPORTED,
+    VIDEO_OFF_REASON_START_FAILED,
   ];
 
   static final $core.Map<$core.int, VideoOffReason> _byValue = $pb.ProtobufEnum.initByValue(values);
@@ -90,6 +115,10 @@ class TwinSyncType extends $pb.ProtobufEnum {
   static const TwinSyncType ROTATION_APPROVAL_REQUEST = TwinSyncType._(12, _omitEnumNames ? '' : 'ROTATION_APPROVAL_REQUEST');
   static const TwinSyncType ROTATION_APPROVAL_RESPONSE = TwinSyncType._(13, _omitEnumNames ? '' : 'ROTATION_APPROVAL_RESPONSE');
   static const TwinSyncType TWIN_IDENTITY_DELETED = TwinSyncType._(17, _omitEnumNames ? '' : 'TWIN_IDENTITY_DELETED');
+  static const TwinSyncType DELIVERY_MIRROR = TwinSyncType._(18, _omitEnumNames ? '' : 'DELIVERY_MIRROR');
+  static const TwinSyncType KEM_ROTATED = TwinSyncType._(19, _omitEnumNames ? '' : 'KEM_ROTATED');
+  static const TwinSyncType RECONCILE = TwinSyncType._(20, _omitEnumNames ? '' : 'RECONCILE');
+  static const TwinSyncType GROUP_LEFT = TwinSyncType._(21, _omitEnumNames ? '' : 'GROUP_LEFT');
 
   static const $core.List<TwinSyncType> values = <TwinSyncType> [
     CONTACT_ADDED,
@@ -107,6 +136,10 @@ class TwinSyncType extends $pb.ProtobufEnum {
     ROTATION_APPROVAL_REQUEST,
     ROTATION_APPROVAL_RESPONSE,
     TWIN_IDENTITY_DELETED,
+    DELIVERY_MIRROR,
+    KEM_ROTATED,
+    RECONCILE,
+    GROUP_LEFT,
   ];
 
   static final $core.Map<$core.int, TwinSyncType> _byValue = $pb.ProtobufEnum.initByValue(values);
@@ -301,6 +334,25 @@ class ApprovalKindV3 extends $pb.ProtobufEnum {
   static ApprovalKindV3? valueOf($core.int value) => _byValue[value];
 
   const ApprovalKindV3._($core.int v, $core.String n) : super(v, n);
+}
+
+class ReconcileFetch_Kind extends $pb.ProtobufEnum {
+  static const ReconcileFetch_Kind MANIFEST = ReconcileFetch_Kind._(0, _omitEnumNames ? '' : 'MANIFEST');
+  static const ReconcileFetch_Kind MESSAGES = ReconcileFetch_Kind._(1, _omitEnumNames ? '' : 'MESSAGES');
+  static const ReconcileFetch_Kind NEWEST = ReconcileFetch_Kind._(2, _omitEnumNames ? '' : 'NEWEST');
+  static const ReconcileFetch_Kind SINCE = ReconcileFetch_Kind._(3, _omitEnumNames ? '' : 'SINCE');
+
+  static const $core.List<ReconcileFetch_Kind> values = <ReconcileFetch_Kind> [
+    MANIFEST,
+    MESSAGES,
+    NEWEST,
+    SINCE,
+  ];
+
+  static final $core.Map<$core.int, ReconcileFetch_Kind> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static ReconcileFetch_Kind? valueOf($core.int value) => _byValue[value];
+
+  const ReconcileFetch_Kind._($core.int v, $core.String n) : super(v, n);
 }
 
 

@@ -98,18 +98,21 @@ class NotificationSettings {
   }
 }
 
-/// Manages notification sounds and vibration (Architecture 18.8).
+/// Manages notification sounds and vibration (§22.8).
 ///
-/// Uses paplay (PulseAudio) on Linux for audio playback — no Flutter dependency.
-/// On Android, sounds are played via platform channel.
+/// Linux: `pw-play` (PipeWire) with `paplay` (PulseAudio) as fallback
+/// (§22.6) — no Flutter dependency. Android: via platform channel.
+/// Windows: the bundled helper program `cleona-play.exe`
+/// (`windows/cleona_play/`), one process per sound like under Linux.
 class NotificationSoundService {
   // Process log as default: until [init] runs with the real per-identity
   // profileDir, this service belongs to no identity. The daemon path calls
   // [init] and overwrites `_log` with the correct value (self-heal, see
   // below); the second construction site (`ipc_client.dart`, which never
-  // calls [init] because it is only a proxy object for GUI-side settings)
-  // stays on the process log and thus writes at least into ONE file
-  // instead of none.
+  // calls [init] because it only MIRRORS the daemon's settings for the GUI
+  // to read — it plays nothing and stores nothing; changes and previews go
+  // to the daemon over IPC) stays on the process log and thus writes at
+  // least into ONE file instead of none.
   CLogger _log = CLogger.get('notification_sound', profileDir: AppPaths.dataDir);
 
   NotificationSettings _settings = NotificationSettings();
@@ -151,8 +154,8 @@ class NotificationSoundService {
   /// Initialize with profile directory for settings persistence.
   ///
   /// [store] is the identity's encrypted store. It may be `null` — that is
-  /// the stand-in in `ipc_client.dart`, which never calls [init] anyway,
-  /// and the path for guards that only measure playback. Without a store
+  /// the settings mirror in `ipc_client.dart`, which never calls [init]
+  /// anyway, and the path for guards that only measure playback. Without a store
   /// nothing is loaded and nothing written; the setting then applies only
   /// for this run.
   Future<void> init(String profileDir, {MessageStore? store}) async {
@@ -226,16 +229,46 @@ class NotificationSoundService {
     await saveSettings();
   }
 
-  /// Detect available audio player.
-  /// Linux: pw-play (PipeWire) or paplay (PulseAudio).
-  /// Windows: PowerShell with SoundPlayer (built-in, no external deps).
+  /// File name of the Windows sound player in the bundle root. The Windows
+  /// build fails when it is missing (`windows/verify_bundle_dlls.cmake`,
+  /// `-DEXPECTED_PROGRAMS`).
+  static const String windowsPlayerName = 'cleona-play.exe';
+
+  /// Path of the Windows sound player for a bundle root. Next to the GUI
+  /// binary, where the MSVC runtime DLLs it needs are bundled as well.
+  static String windowsPlayerPath(String bundleDir) =>
+      '$bundleDir\\$windowsPlayerName';
+
+  /// Argument list of the Windows sound player for one file. [volume] is the
+  /// linear gain 0..1; it applies to every sound, as in the `paplay` branch.
+  static List<String> windowsPlayerArgs(String path, double volume) =>
+      [path, '--volume', volume.clamp(0.0, 1.0).toStringAsFixed(3)];
+
+  /// Player program and argument list for one sound file on the desktop —
+  /// a real argument list, no shell interpolation. The one place that
+  /// decides how a sound is started; [_playOnce], [_startLoop] and
+  /// [_playOnceSync] all go through it.
+  (String, List<String>) _playerCommand(String path) {
+    if (Platform.isWindows) {
+      return (
+        windowsPlayerPath(AppPaths.bundleDir),
+        windowsPlayerArgs(path, _settings.callVolume),
+      );
+    }
+    final player = _getAudioPlayer();
+    return (
+      player,
+      player == 'paplay'
+          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
+          : [path], // pw-play doesn't support --volume
+    );
+  }
+
+  /// Detect available audio player under Linux: pw-play (PipeWire) or
+  /// paplay (PulseAudio).
   static String? _audioPlayer;
   static String _getAudioPlayer() {
     if (_audioPlayer != null) return _audioPlayer!;
-    if (Platform.isWindows) {
-      _audioPlayer = 'powershell';
-      return _audioPlayer!;
-    }
     // Prefer pw-play (Ubuntu 24.04 default), fall back to paplay
     for (final cmd in ['pw-play', 'paplay']) {
       try {
@@ -250,8 +283,18 @@ class NotificationSoundService {
     return _audioPlayer!;
   }
 
+  /// Test seam: when set, [_playOnce] reports the file it was asked to play
+  /// here instead of starting a player. Never set in the product.
+  void Function(String filename)? playProbe;
+
   /// Play a sound file once — fire and forget.
   Future<void> _playOnce(String filename) async {
+    final probe = playProbe;
+    if (probe != null) {
+      probe(filename);
+      return;
+    }
+
     // Android: play via platform channel (assets, not filesystem)
     if (Platform.isAndroid) {
       if (onPlaySoundAndroid != null) {
@@ -264,21 +307,7 @@ class NotificationSoundService {
     final path = '$_soundsDir/$filename';
     if (!File(path).existsSync()) return;
     try {
-      final player = _getAudioPlayer();
-      if (Platform.isWindows) {
-        // Windows: use PowerShell SoundPlayer (.wav) — .ogg not supported natively,
-        // but SoundPlayer handles WAV. For .ogg, silently no-op until we add a converter.
-        final wavPath = path.replaceAll('.ogg', '.wav');
-        if (File(wavPath).existsSync()) {
-          Process.start('powershell', ['-NoProfile', '-Command',
-            '(New-Object Media.SoundPlayer "$wavPath").PlaySync()'])
-            .then((p) => p.exitCode).catchError((_) => -1);
-        }
-        return;
-      }
-      final args = player == 'paplay'
-          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
-          : [path]; // pw-play doesn't support --volume
+      final (player, args) = _playerCommand(path);
       _log.debug('_playOnce: player=$player path=$path');
       Process.start(player, args).then((p) {
         p.exitCode.then((code) => _log.debug('_playOnce: exit=$code player=$player'));
@@ -302,24 +331,9 @@ class NotificationSoundService {
     final path = '$_soundsDir/$filename';
     if (!File(path).existsSync()) return;
 
-    final String executable;
-    final List<String> args;
-    if (Platform.isWindows) {
-      // Windows: one PlaySync() per iteration — the repetition happens in Dart.
-      final wavPath = path.replaceAll('.ogg', '.wav');
-      if (!File(wavPath).existsSync()) return;
-      executable = 'powershell';
-      args = ['-NoProfile', '-Command',
-        '(New-Object Media.SoundPlayer "$wavPath").PlaySync()'];
-    } else {
-      final player = _getAudioPlayer();
-      executable = player;
-      // Same argument construction as _playOnce/_playOnceSync — a real argument
-      // list, no shell interpolation.
-      args = player == 'paplay'
-          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
-          : [path]; // pw-play doesn't support --volume
-    }
+    // One player process per iteration on every desktop platform — the
+    // repetition happens in Dart.
+    final (executable, args) = _playerCommand(path);
 
     _loopActive = true;
     final generation = ++_loopGeneration;
@@ -401,17 +415,7 @@ class NotificationSoundService {
     final path = '$_soundsDir/$filename';
     if (!File(path).existsSync()) return -5;
     try {
-      final player = _getAudioPlayer();
-      if (Platform.isWindows) {
-        final wavPath = path.replaceAll('.ogg', '.wav');
-        if (!File(wavPath).existsSync()) return -6;
-        final p = await Process.start('powershell', ['-NoProfile', '-Command',
-          '(New-Object Media.SoundPlayer "$wavPath").PlaySync()']);
-        return await p.exitCode;
-      }
-      final args = player == 'paplay'
-          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
-          : [path];
+      final (player, args) = _playerCommand(path);
       _log.debug('_playOnceSync: player=$player path=$path');
       final p = await Process.start(player, args);
       final code = await p.exitCode;

@@ -78,16 +78,38 @@ class PollService {
     return null;
   }
 
+  /// §16.2.2: "Posts from non-members are silently discarded." True when
+  /// [entityIdHex] is a group or a private channel held here and
+  /// [senderHex] is not one of its members.
+  ///
+  /// Not judged: an entity not held here, and a public channel (system
+  /// channels included, §16.7) — its subscribers join at the owner, and the
+  /// other members' lists do not learn of them.
+  bool _fromNonMember(String entityIdHex, String senderHex) {
+    final group = _ctx.groups[entityIdHex];
+    if (group != null) return !group.members.containsKey(senderHex);
+    final channel = _ctx.channels[entityIdHex];
+    if (channel == null || channel.isPublic) return false;
+    return !channel.members.containsKey(senderHex);
+  }
+
   List<Uint8List> _ringForEntity(String entityIdHex) {
     final members = _pollRecipients(entityIdHex)?.toList() ?? const [];
     final keys = <Uint8List>[];
     final channel = _ctx.channels[entityIdHex];
+    final group = _ctx.groups[entityIdHex];
     for (final memberHex in members) {
       final c = _ctx.contacts[memberHex];
       if (c?.ed25519Pk != null) {
         keys.add(c!.ed25519Pk!);
       } else if (channel != null) {
         final m = channel.members[memberHex];
+        if (m?.ed25519Pk != null) keys.add(m!.ed25519Pk!);
+      } else if (group != null) {
+        // B-3: a co-member who is not a contact belongs to the ring too —
+        // with the key its member entry carries (every member forms the
+        // same ring).
+        final m = group.members[memberHex];
         if (m?.ed25519Pk != null) keys.add(m!.ed25519Pk!);
       }
     }
@@ -242,11 +264,15 @@ class PollService {
       return;
     }
 
+    // A group: the frame names the group, so that a co-member who is not a
+    // contact is reached as a group pair (B-3, §16.2.2 "poll and vote").
+    final groupIdBytes = hexToBytes(entityIdHex);
     for (final memberHex in recipients) {
       await _ctx.sendEncryptedPayload(
         hexToBytes(memberHex),
         type,
         Uint8List.fromList(payload),
+        groupId: groupIdBytes,
       );
     }
   }
@@ -435,6 +461,7 @@ class PollService {
         hexToBytes(memberHex),
         messageType,
         payload,
+        groupId: hexToBytes(poll.groupId), // B-3: see `_fanoutToEntity`
       );
     }
   }
@@ -829,6 +856,11 @@ class PollService {
         _log.debug('POLL_CREATE for unknown entity ${poll.groupId.substring(0, 8)}, ignoring');
         return;
       }
+      if (_fromNonMember(poll.groupId, senderHex)) {
+        _log.warn('POLL_CREATE from non-member ${senderHex.substring(0, 8)} '
+            'in ${poll.groupId.substring(0, 8)} — dropped');
+        return;
+      }
 
       if (pollManager.polls.containsKey(poll.pollId)) {
         _log.debug('Duplicate POLL_CREATE ${poll.pollId.substring(0, 8)}');
@@ -869,6 +901,11 @@ class PollService {
         _log.debug('POLL_VOTE for unknown poll $pollIdHex');
         return;
       }
+      if (_fromNonMember(poll.groupId, senderHex)) {
+        _log.warn('POLL_VOTE from non-member ${senderHex.substring(0, 8)} '
+            'in ${poll.groupId.substring(0, 8)} — dropped');
+        return;
+      }
       if (poll.settings.anonymous) {
         _log.warn('Ignoring non-anonymous POLL_VOTE on anonymous poll $pollIdHex');
         return;
@@ -898,8 +935,30 @@ class PollService {
         _log.warn('POLL_VOTE_ANONYMOUS for non-anonymous poll, dropping');
         return;
       }
+      // The ring travels in the vote and proves nothing about membership;
+      // the leg it arrives on does (§16.2.2).
+      final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
+      if (_fromNonMember(poll.groupId, senderHex)) {
+        _log.warn('POLL_VOTE_ANONYMOUS from non-member '
+            '${senderHex.substring(0, 8)} in ${poll.groupId.substring(0, 8)} '
+            '— dropped');
+        return;
+      }
 
       final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
+      // §18.4.3: "In a group the ring is well-defined: the member list." A
+      // key image is one per signing key (§18.4.1) — over keys of its own
+      // making a member would cast one vote per key. Every key of the ring
+      // must therefore be a member's as this device knows them; a ring that
+      // leaves members out narrows only the voter's own anonymity set.
+      final members = {
+        for (final pk in _ringForEntity(poll.groupId)) bytesToHex(pk),
+      };
+      if (ring.isEmpty || ring.any((pk) => !members.contains(bytesToHex(pk)))) {
+        _log.warn('POLL_VOTE_ANONYMOUS over a ring with a key outside the '
+            'member list of ${poll.groupId.substring(0, 8)} — dropped');
+        return;
+      }
       final keyImage = Uint8List.fromList(msg.keyImage);
       final keyImageHex = bytesToHex(keyImage);
       final payload = Uint8List.fromList(msg.encryptedChoice);
@@ -1094,7 +1153,7 @@ class PollService {
   /// is optional (§14.1: the V4.1 path knows no device) — a log line is no
   /// reason to insert an untruth.
   static String _hexShort(Uint8List? bytes) {
-    if (bytes == null) return 'kein-Geraet';
+    if (bytes == null) return 'no-device';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

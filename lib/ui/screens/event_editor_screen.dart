@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/calendar/reminder_text.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/theme/skins.dart';
 
 /// Event creation/editing screen.
@@ -279,7 +281,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     final appState = context.read<CleonaAppState>();
     final service = appState.service;
     if (service == null) return;
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
 
     final title = _titleController.text.trim();
     if (title.isEmpty) {
@@ -350,7 +352,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
   }
 
   void _deleteEvent(BuildContext context) {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -501,7 +503,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                     ),
                     ...contacts.map((entry) => CheckboxListTile(
-                      title: Text(entry.value.effectiveName),
+                      title: Text(shownContactName(entry.value.effectiveName, locale)),
                       value: tempAttendees.contains(entry.key),
                       onChanged: (checked) => setDialogState(() {
                         if (checked == true) {
@@ -574,17 +576,10 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
 
   String _formatReminderMinutes(int minutes) {
     final locale = AppLocale.read(context);
-    if (minutes == 0) return locale.get('reminder_at_time');
-    if (minutes < 60) {
-      return locale.tr('reminder_minutes_before', {'count': '$minutes'});
-    }
-    if (minutes < 1440) {
-      return locale.tr('reminder_hours_before', {'count': '${minutes ~/ 60}'});
-    }
-    if (minutes < 10080) {
-      return locale.tr('reminder_days_before', {'count': '${minutes ~/ 1440}'});
-    }
-    return locale.tr('reminder_weeks_before', {'count': '${minutes ~/ 10080}'});
+    final (:key, :count) = reminderOffsetText(minutes);
+    return count == null
+        ? locale.get(key)
+        : locale.tr(key, {'count': '$count'});
   }
 
   IconData _categoryIcon(EventCategory c) => switch (c) {

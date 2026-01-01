@@ -101,6 +101,10 @@ class CallSession {
   /// call that rings and then stays silent is exactly the opposite.
   String? mediaPathNote;
 
+  /// The punch window of this call ended without a common address family —
+  /// the one refusal §17.3 names apart ("no common connection type").
+  bool mediaPathNoCommonFamily = false;
+
   /// Has this call already reported ONCE that Plane D carries nothing?
   ///
   /// A call sends up to 50 frames/s. Without this marker the
@@ -184,6 +188,16 @@ class CallSession {
   /// "active" line for this call — prevents per-frame log spam (~50/s).
   bool liveMediaFastPathLogged = false;
 
+  /// Why this call ended. Set by the teardown that knows a reason
+  /// ([CallManager.hangup] on the §17.4 loss rule); every other end leaves it
+  /// at [CallEndReason.unspecified].
+  CallEndReason endReason = CallEndReason.unspecified;
+
+  /// This device has no capture right now and sends silence instead
+  /// (`CallService`, voice tick). The call stands; the peer does not hear
+  /// the user.
+  bool captureUnavailable = false;
+
   CallSession({
     required this.callId,
     required this.peerNodeIdHex,
@@ -206,6 +220,8 @@ class CallSession {
         framesReceived: framesReceived,
         videoFramesSent: videoFramesSent,
         videoFramesReceived: videoFramesReceived,
+        endReason: endReason,
+        captureUnavailable: captureUnavailable,
       );
 }
 
@@ -731,9 +747,12 @@ class CallManager {
       _log.info('Layer D carries for '
           '${call.peerNodeIdHex.substring(0, 8)}: ${call.mediaPathNote} '
           '(${out.packetsSent} probes / ${out.bytesSent} B, §17.3)');
+      // From here on the peer's media must arrive: §17.4 loss detection.
+      transport.watchMediaLoss(call.peerNodeIdHex);
       return;
     }
     call.mediaPathNote = out.refusal;
+    call.mediaPathNoCommonFamily = out.noCommonFamily;
     _log.error('Layer D does not carry for '
         '${call.peerNodeIdHex.substring(0, 8)}: ${out.refusal} '
         '(${out.packetsSent} probes / ${out.bytesSent} B)');
@@ -806,12 +825,18 @@ class CallManager {
   /// the other side is politeness. Without this order
   /// `_currentCall` can stay `!= null` after `hangup()` (B-7,
   /// test gui-33-video-calls 33.10).
-  Future<void> hangup() async {
+  ///
+  /// [reason] names an end the UI must tell apart from an ordinary hang-up —
+  /// today only the §17.4 loss rule passes one. The HANGUP goes out either
+  /// way: a peer that is alive after all learns that this side has ended.
+  Future<void> hangup(
+      {CallEndReason reason = CallEndReason.unspecified}) async {
     final call = _currentCall;
     if (call == null) return;
 
     _cancelRingingTimeout();
     call.state = CallState.ended;
+    call.endReason = reason;
     onCallEnded?.call(call);
     _currentCall = null;
     _unregisterLiveMediaPeer(call);

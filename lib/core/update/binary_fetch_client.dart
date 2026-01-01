@@ -6,8 +6,9 @@ import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
     show EndpointAddress;
 
 /// HTTP client for fetching binaries/fragments from other Cleona nodes'
-/// embedded HTTP servers (§19.6.6). Used as the `fetchFragment` callback
-/// for [BinaryUpdateManager.startDownload] / [DeltaUpdateManager.downloadDelta].
+/// embedded HTTP servers (§26.6.5): first installation and the fetch of a
+/// foreign platform ([ForeignBinaryAcquirer]), and [DeltaUpdateManager]'s
+/// download. Not the update's source since S406-UPDPKG (P4, §26.6.1).
 ///
 /// Talks plain HTTP (no TLS) — the same trust model as the rest of §19.6:
 /// transport integrity doesn't matter here because the assembled binary is

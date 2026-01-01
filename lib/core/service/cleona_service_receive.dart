@@ -83,7 +83,14 @@ extension V3ReceivePathOps on CleonaService {
   /// specific handlers.
   ///
   /// Each handler dispatches to the subsystem-specific business logic.
-  Future<void> handleApplicationFrame({
+  ///
+  /// Returns what the group gate decided (§16.2.2): the collecting device
+  /// does not mirror a frame it discarded for a group this device left
+  /// (§14.7 Type 21 GROUP_LEFT, `cleona_service_mycelium.dart`). A frame
+  /// that returns before the gate — an unknown type, a duplicate — reads as
+  /// [GroupGateVerdict.pass]: none of them is a post of a group, and the
+  /// mirror only carries the post kinds anyway.
+  Future<GroupGateVerdict> handleApplicationFrame({
     required HarvestEvent event,
     // `sourceAddr`/`sourcePort` have been dropped here without replacement:
     // they were read ZERO times in the body and only passed through. That
@@ -95,12 +102,46 @@ extension V3ReceivePathOps on CleonaService {
     // (First-CR infra path, S&F/erasure re-injection) keep the safe
     // default false — a receipt then never confirms a direct route.
     bool wasDirect = false,
+    // §14.7 Type 18 (D-37): the frame is a contact's delivery mirrored by
+    // another own device. It is shown like a received one and NOT
+    // acknowledged again — the collecting device already did.
+    bool mirrored = false,
   }) async {
+    // A TYPE THIS BUILD DOES NOT KNOW IS DISCARDED — before dedup, receipt
+    // and dispatch (S398, finding R-1). protobuf leaves an unknown enum value
+    // in `unknownFields`, and `event.type` then reads `MTV3_TEXT`: a frame of
+    // a reserved type (30/31 restore, 35-37 guardian) or of a future one
+    // would be shown as a text message made of its payload and acknowledged
+    // as text. Measured before this line: all three appeared in the chat
+    // (`test/smoke/smoke_restore_response_scope.dart`, point 4). No receipt:
+    // an application receipt confirms a message the application took.
+    if (event.unknownType != null) {
+      _log.warn('handleApplicationFrame: frame of unknown type '
+          '${event.unknownType} from ${event.senderUserId.hex.length >= 8 ? event.senderUserId.hex.substring(0, 8) : event.senderUserId.hex} '
+          '— discarded (reserved or newer than this build)');
+      return GroupGateVerdict.pass;
+    }
 
-    // Receive-side dedup (Architecture §5.8 RUDP-Light): suppress the PAYLOAD
-    // of duplicate frames. The same logical message can arrive via Direct +
-    // Reed-Solomon reassembly + S&F mutual peer; without dedup the user sees
-    // the message thrice.
+
+    // Receive-side dedup — the identity's memory of received DELIVERY
+    // identifiers (§20.2, S403 decision 1): one slim table in the store
+    // (`received_ids`, schema 4), one row per 8-byte identifier, kept
+    // for as long as the identity exists — no cap, no eviction, no
+    // arrival time. It replaces the capped ring this process held until
+    // S403 (`_processedMessageIds`, 4 096 entries, forgotten with the
+    // process): a copy of a delivery from 5 000 deliveries ago, or after
+    // a restart, stays refused.
+    //
+    // THE DELIVERY IDENTIFIER, NOT THE app message id: mycelium draws
+    // the 8 bytes per message, retries carry the same one (D-44) — the
+    // duplicate IS the retry or the second route. The 16-byte
+    // messageId names the MESSAGE: an edit and a deletion travel under
+    // the identifier of their TARGET, and keyed on it the SECOND edit of
+    // the same message would be dropped as a duplicate of the first
+    // (the ring needed `delete:`/`edit:` special keys for exactly that
+    // reason; the delivery identifier needs none — every delivery has
+    // one of its own). `test/smoke/smoke_received_ids_app.dart` holds
+    // both halves apart.
     //
     // The DELIVERY_RECEIPT is NOT suppressed. The architecture's canonical
     // receiver pipeline (§ "service.handleApplicationFrame", step [b]) reads:
@@ -123,24 +164,32 @@ extension V3ReceivePathOps on CleonaService {
     // Deliberately NOT rate-limited — a time window would leave retries inside
     // it unacknowledged and would recreate exactly this bug.
     //
-    // Inner.messageId is set by `sendToUser` (16-byte UUID v4); empty
-    // messageIds fall through (transitional path until all senders are
-    // wired — receipt-emit just won't happen for those).
-    if (event.messageId.isNotEmpty) {
+    // `deliveryId == null`: the layer below the seam has ALREADY kept this
+    // identifier — mycelium marks every inbound of a sender it knows in the
+    // same memory before the callback — or the caller has no delivery
+    // context at all (a direct call, a replay in a guard). Nothing is
+    // checked and nothing kept here then; the per-messageId dedup of
+    // `_addMessageToConversation` still hides a double dispatch of one
+    // message at the bubble level.
+    final deliveryId = event.deliveryId;
+    if (deliveryId != null) {
       final msgIdHex = event.messageId.hex;
-      if (_processedMessageIds.contains(msgIdHex)) {
-        _log.debug('handleApplicationFrame: duplicate ${event.type.name} '
-            'msgId=${msgIdHex.substring(0, 8)} — re-acking, payload dropped');
+      final msgIdShort = msgIdHex.length >= 8 ? msgIdHex.substring(0, 8) : msgIdHex;
+      if (store.receivedIdKnown(deliveryId)) {
+        _log.debug('handleApplicationFrame: duplicate delivery '
+            '(${event.type.name}) msgId=$msgIdShort — re-acking, '
+            'payload dropped');
         // Finding 1 (§8.1): a messageId whose receipt was suppressed on first
         // sight must stay unacknowledged on every replay. Without this check
         // the re-ack above silently undoes the silent-CR-drop suppression,
         // because the L1 retry carries the identical inner messageId.
         if (_suppressedReceiptMsgIds.contains(msgIdHex)) {
           _log.debug('handleApplicationFrame: duplicate of a receipt-suppressed '
-              'frame msgId=${msgIdHex.substring(0, 8)} — NOT re-acking');
-          return;
+              'frame msgId=$msgIdShort — NOT re-acking');
+          return GroupGateVerdict.pass;
         }
-        if (isAckWorthyV3(event.type) &&
+        if (!mirrored &&
+            isAckWorthyV3(event.type) &&
             event.senderUserId.isNotEmpty) {
           final senderUserId = Uint8List.fromList(event.senderUserId);
           if (!constantTimeEquals(senderUserId, identity.userId)) {
@@ -152,12 +201,9 @@ extension V3ReceivePathOps on CleonaService {
             );
           }
         }
-        return;
+        return GroupGateVerdict.pass;
       }
-      _processedMessageIds.add(msgIdHex);
-      while (_processedMessageIds.length > CleonaService._processedMessageIdsCap) {
-        _processedMessageIds.remove(_processedMessageIds.first);
-      }
+      store.receivedIdKeep(deliveryId);
     }
 
     // §3.1 A-2: refresh sender's known deviceNodeId on every incoming
@@ -198,12 +244,70 @@ extension V3ReceivePathOps on CleonaService {
     // A5: any verified ApplicationFrame proves contact liveness
     if (senderContact != null && senderContact.status == 'accepted') {
       senderContact.lastAckedAt = DateTime.now();
-      _staleWarningWrittenFor.remove(senderUserHex);
       if (senderContact.autoRepairAttempted) {
         senderContact.autoRepairAttempted = false;
       }
+      // A-4: this device opened the frame with the contact's keys → `seen`.
+      // Not for a copy another own device mirrored (§14.7 Type 18): that
+      // device opened it, not this one.
+      if (!mirrored) _markKeyMaterialUsed(senderContact);
     }
 
+    // §16.2.2: a frame for a group this device left is discarded, one for a
+    // group it does not hold yet waits for the invitation
+    // (`cleona_service_group_gate.dart`). Neither reaches a handler now.
+    final gate = _groupGate(event);
+    if (gate == GroupGateVerdict.pass) {
+      _applicationEventDispatch(event, wasDirect: wasDirect);
+
+      // §9.4 "Nothing overtakes a file" (S398-W5): a file arrived, or a
+      // message that waited behind one — order and collection
+      // (`cleona_service_file_order.dart`).
+      _fileOrderReceived(event);
+    }
+
+    if (gate != GroupGateVerdict.discarded &&
+        CleonaService._isUserMessage(event.type)) {
+      statsCollector.addMessageReceived();
+    }
+
+    // Auto-DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light): for ack-worthy
+    // ApplicationFrame types, emit a receipt back to the sender's UserID
+    // with the inner messageId. The sender's `_handleDeliveryReceiptV3`
+    // upgrades the matching outgoing UiMessage from `sent` to `delivered`.
+    // Skipped when:
+    //   - messageId empty (sender hasn't been migrated to set inner.messageId),
+    //   - senderUserId empty,
+    //   - sender is ourselves (loopback / self-send won't have a contact).
+    //
+    // UNCHANGED FOR A FRAME THE GATE HELD BACK. The delivery layer has
+    // acknowledged it by now (§9.2: "Every non-ephemeral message is
+    // acknowledged by exactly one packet from the recipient" — sent by
+    // mycelium for every frame it opens, before the application decides
+    // anything), and this receipt says the same thing; withholding it here
+    // would make the two disagree.
+    if (!mirrored &&
+        isAckWorthyV3(event.type) &&
+        event.messageId.isNotEmpty &&
+        event.senderUserId.isNotEmpty) {
+      final senderUserId = Uint8List.fromList(event.senderUserId);
+      if (!constantTimeEquals(senderUserId, identity.userId)) {
+        _sendDeliveryReceiptV3(
+          recipientUserId: senderUserId,
+          messageId: Uint8List.fromList(event.messageId),
+          senderDeviceId: event.senderDeviceId,
+          groupId: event.groupId ?? const <int>[],
+        );
+      }
+    }
+    return gate;
+  }
+
+  /// The dispatcher: hands [event] to the handler of its kind. Called for a
+  /// frame that arrives ([handleApplicationFrame]) and for one that waited
+  /// for the invitation into its group (`_groupWaitingApply`, §16.2.2).
+  void _applicationEventDispatch(HarvestEvent event,
+      {required bool wasDirect}) {
     switch (event.type) {
       // Messaging — Cluster C2
       case proto.MessageTypeV3.MTV3_TEXT:
@@ -215,20 +319,23 @@ extension V3ReceivePathOps on CleonaService {
       case proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
         _handleMediaAnnounceV3(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_REQUEST:
-        // Fire-and-forget: chunk-stream may take a while; the dispatch loop
-        // mustn't block on it.
-        unawaited(_handleMediaRequestV3(event));
+      // Lane 2 (§17.6, S398 P3b) — `cleona_service_stream.dart`.
+      case proto.MessageTypeV3.MTV3_MEDIA_STREAM_REQUEST:
+        _streamRequestReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_CHUNK:
-        _handleMediaChunkV3(event);
+      case proto.MessageTypeV3.MTV3_MEDIA_STREAM_OFFER:
+        _streamOfferReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_COMPLETE:
-        _handleMediaCompleteV3(event);
+      case proto.MessageTypeV3.MTV3_MEDIA_HOLDERS:
+        _streamHoldersReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_REJECT:
-        _handleMediaRejectV3(event);
+      // §9.4 "Reasons", D-34 (S398-W1) — `cleona_service_transfer.dart`.
+      case proto.MessageTypeV3.MTV3_MEDIA_ABORT:
+        _mediaAbortReceived(event);
         break;
+      // MTV3_MEDIA_REQUEST / _CHUNK / _COMPLETE / _REJECT have no handler
+      // (S399 P2-7): §9.4 knows no fetch on request, and a file is never
+      // sent again (§9.3, D-34). They fall to `default` and are logged.
       case proto.MessageTypeV3.MTV3_REACTION:
         _handleReactionV3(event);
         break;
@@ -256,13 +363,15 @@ extension V3ReceivePathOps on CleonaService {
         _handleDeliveryReceiptV3(event, wasDirect: wasDirect);
         break;
 
-      // Recovery / Identity / Profile — Cluster C4
-      case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
-        _handleRestoreBroadcastV3(event);
+      // §9.5 (D-48): catching up after more than 7 days — request, answer
+      // packet or progress report of a party (`cleona_service_catch_up.dart`).
+      case proto.MessageTypeV3.MTV3_CATCH_UP:
+        _catchUpReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_RESTORE_RESPONSE:
-        _handleRestoreResponseV3(event);
-        break;
+
+      // Identity / Profile — Cluster C4. Types 30/31 (V3 restore) are
+      // reserved; a frame carrying them is discarded above as an unknown
+      // type (S398, finding R-1).
       case proto.MessageTypeV3.MTV3_IDENTITY_DELETED:
         _handleIdentityDeletedV3(event);
         break;
@@ -307,6 +416,9 @@ extension V3ReceivePathOps on CleonaService {
         break;
       case proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST:
         _handleGroupMembershipResyncRequest(event);
+        break;
+      case proto.MessageTypeV3.MTV3_GROUP_JOIN: // B-3, §16.2.2
+        _handleGroupJoinV3(event);
         break;
 
       // Channels — Cluster C4
@@ -381,9 +493,9 @@ extension V3ReceivePathOps on CleonaService {
       case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
         _calls.onKeyframeRequested?.call();
         break;
-      // §10.6 / V1.12 — handled here, not in CallService: the state is a
-      // protocol fact about the peer, and CallService (V2.1) is not touched
-      // during wave 1 of the audio/video rebuild.
+      // §17.5 — handled here, not in CallService: the state is a report
+      // about the peer that the UI reads (`peerCallMediaState`); CallService
+      // decides only when OUR state changes (`onOwnVideoStateChanged`, S399).
       case proto.MessageTypeV3.MTV3_CALL_MEDIA_STATE:
         handleCallMediaStateV3(event);
         break;
@@ -444,12 +556,10 @@ extension V3ReceivePathOps on CleonaService {
       case proto.MessageTypeV3.MTV3_TWIN_SYNC:
         _handleTwinSyncV3(event);
         break;
-      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_REQUEST:
-        _handleDevicePairRequestV3(event);
-        break;
-      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_APPROVE:
-        _handleDevicePairApproveV3(event);
-        break;
+      // B-4b: the V3 pairing frames (DEVICE_PAIR_REQUEST/_APPROVE) have no
+      // handler any more — a further device is enrolled over the words
+      // (§14.6.1, `cleona_service_enrolment.dart`); such a frame falls into
+      // `default` and is dropped.
       case proto.MessageTypeV3.MTV3_DEVICE_REVOCATION:
         _handleDeviceRevocationV3(event);
         break;
@@ -519,32 +629,6 @@ extension V3ReceivePathOps on CleonaService {
 
       default:
         _log.warn('handleApplicationFrame: unhandled type ${event.type}');
-    }
-
-    if (CleonaService._isUserMessage(event.type)) {
-      statsCollector.addMessageReceived();
-    }
-
-    // Auto-DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light): for ack-worthy
-    // ApplicationFrame types, emit a receipt back to the sender's UserID
-    // with the inner messageId. The sender's `_handleDeliveryReceiptV3`
-    // upgrades the matching outgoing UiMessage from `sent` to `delivered`.
-    // Skipped when:
-    //   - messageId empty (sender hasn't been migrated to set inner.messageId),
-    //   - senderUserId empty,
-    //   - sender is ourselves (loopback / self-send won't have a contact).
-    if (isAckWorthyV3(event.type) &&
-        event.messageId.isNotEmpty &&
-        event.senderUserId.isNotEmpty) {
-      final senderUserId = Uint8List.fromList(event.senderUserId);
-      if (!constantTimeEquals(senderUserId, identity.userId)) {
-        _sendDeliveryReceiptV3(
-          recipientUserId: senderUserId,
-          messageId: Uint8List.fromList(event.messageId),
-          senderDeviceId: event.senderDeviceId,
-          groupId: event.groupId ?? const <int>[],
-        );
-      }
     }
   }
 
@@ -643,6 +727,9 @@ extension V3ReceivePathOps on CleonaService {
       recipientUserId: recipientUserId,
       messageType: proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
       payload: receipt.writeToBuffer(),
+      // B-3 (§16.2.2 "the acknowledgement … of the pair"): a receipt for a
+      // group leg names the group, so it can go back over a group pair.
+      groupId: groupId.isEmpty ? null : Uint8List.fromList(groupId),
       targetDeviceId:
           (senderDeviceId != null && senderDeviceId.isNotEmpty)
               ? senderDeviceId

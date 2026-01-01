@@ -93,7 +93,6 @@ extension V3ContactRequestOps on CleonaService {
         existing.acceptedAt ??= DateTime.now();
         existing.lastAckedAt = DateTime.now();
         _crRetryCountPerContact.remove(senderHex);
-        _staleWarningWrittenFor.remove(senderHex);
         // First-CR ContactSeed bootstrap is over once we have the recipient's
         // User-KEM pubkeys (filled below). Clear the seed bundle so re-contact
         // uses the User-KEM pair directly and stale Device-KEM pubkeys don't
@@ -131,7 +130,7 @@ extension V3ContactRequestOps on CleonaService {
           if (identityKeyChanged) {
             final prevLevel = existing.verificationLevel;
             final keyChange = onIdentityRotation(prevLevel);
-            existing.verificationLevel = keyChange.newLevel;
+            existing.applyKeyChange(keyChange);
             _saveContacts();
             _saveConversations();
             _log.info('RC-1: CRR retry from ${senderHex.substring(0, 8)} with CHANGED keys — '
@@ -170,7 +169,7 @@ extension V3ContactRequestOps on CleonaService {
             !constantTimeEquals(oldEd25519, Uint8List.fromList(resp.ed25519PublicKey));
         if (identityKeyChanged) {
           final keyChange = onIdentityRotation(existing.verificationLevel);
-          existing.verificationLevel = keyChange.newLevel;
+          existing.applyKeyChange(keyChange);
           _log.info('RC-1: CRR first-accept from ${senderHex.substring(0, 8)} with '
               'changed keys — §8.3 reset');
           try {
@@ -192,7 +191,8 @@ extension V3ContactRequestOps on CleonaService {
 
         // Create conversation with system message so the contact appears
         // immediately in the "Aktuell" tab (not only in "Kontakte" tab).
-        _addSystemMessage(senderHex, '${resp.displayName} accepted your contact request.',
+        _addSystemMessage(
+            senderHex, noticeWithName(kNoticeContactAccepted, resp.displayName),
             type: UiMessageType.identityDeleted); // system message type
         _saveConversations();
 

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
+import 'package:cleona/core/services/key_change_policy.dart' show KeyChangeOutcome;
 import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 /// One built fan-out leg of a [ServiceContext.sendToUser] call: the outer
@@ -256,6 +257,125 @@ extension MessageStatusGuard on MessageStatus {
   }
 }
 
+/// The running transfer of a media message beside its delivery state
+/// (§22.5.1 "Media and delivery state"): shown as progress, never folded
+/// into the four states of §9.1: `negotiating` → `streaming n %` |
+/// `seeding n %` → `available`, and `collecting` at the recipient.
+///
+/// | Phase | Side | Meaning |
+/// |---|---|---|
+/// | `negotiating` | both | lane 2 announced, waiting for the recipient's request / a volunteer / the offer (§17.6) |
+/// | `streaming` | sender | pieces go through the volunteer, percent of pieces sent (lane 2) |
+/// | `seeding` | sender | pieces go to the holders, percent of pieces sent (lane 3) |
+/// | `available` | sender | the stream finished, or every piece lies with a holder |
+/// | `collecting` | recipient | pieces arrive (stream or holders), percent of stripes complete |
+enum TransferPhase {
+  negotiating('negotiating'),
+  streaming('streaming'),
+  seeding('seeding'),
+  available('available'),
+  collecting('collecting');
+
+  const TransferPhase(this.wireName);
+
+  /// Stable name over IPC — never the index (§22.5.1, same reason as
+  /// [MessageStatus.wireName]).
+  final String wireName;
+
+  /// `null` for an unknown name — the receiver then shows no progress
+  /// instead of a wrong one.
+  static TransferPhase? fromWire(Object? v) {
+    for (final p in values) {
+      if (p.wireName == v) return p;
+    }
+    return null;
+  }
+}
+
+/// What became of a channel report (§16.4, S398-W4 / seam report B-9).
+///
+/// There is deliberately NO "sent": §16.4 publishes a channel report as a
+/// cell under `tag_report`, signed by the registered reporter pseudonym
+/// (§16.5), and neither the public tag cell nor the pseudonym registry has a
+/// carrier in the 4.2 delivery layer yet. Until it has, the honest best
+/// case is [notSent]: checked, kept on this device (it counts in this
+/// node's own tally, like every report cell the node sees), and NOT on the
+/// network. Before S398 the same state answered `true`.
+enum ChannelReportOutcome {
+  /// Valid, kept locally, not published — no carrier for `tag_report`.
+  notSent('not_sent'),
+
+  /// 5 reports per day already filed (§16.4 report rate limit).
+  rateLimited('rate_limited'),
+
+  /// The reporter does not qualify (registration age, CSAM rules).
+  notQualified('not_qualified'),
+
+  /// Wrong number of evidence posts (§16.4: 3–10).
+  evidenceInvalid('evidence_invalid'),
+
+  /// The command did not reach the service (no daemon, no identity).
+  unavailable('unavailable');
+
+  const ChannelReportOutcome(this.wireName);
+
+  /// Stable name over IPC — never the index.
+  final String wireName;
+
+  static ChannelReportOutcome fromWire(Object? v) {
+    for (final o in values) {
+      if (o.wireName == v) return o;
+    }
+    return unavailable;
+  }
+}
+
+/// Why a file transfer failed (v4_2 §9.4 "Reasons", D-34, S398-W1). Sender
+/// and recipient show the same reason (§12.2 "warning mark and its reason").
+///
+/// | Reason | Where it arises |
+/// |---|---|
+/// | `noHolder` | lane 3: no holder accepted a piece |
+/// | `noRoute` | the delivery layer took nothing (`sendToUser` false) |
+/// | `consentMissing` | lanes 2/3 without the consent of §24.4.5 |
+/// | `tooLarge` | above what a transfer can carry |
+/// | `incomplete` | the recipient could not assemble it (x of y stripes) |
+/// | `holdersGone` | every holder had nothing, or `TTL_media` passed |
+/// | `senderGaveUp` | the sender gave up after its announcement |
+enum FailureReason {
+  noHolder('noHolder', 1),
+  noRoute('noRoute', 2),
+  consentMissing('consentMissing', 3),
+  tooLarge('tooLarge', 4),
+  incomplete('incomplete', 5),
+  holdersGone('holdersGone', 6),
+  senderGaveUp('senderGaveUp', 7);
+
+  const FailureReason(this.wireName, this.code);
+
+  /// Stable name over IPC and in the store — never the index (§22.5.1).
+  final String wireName;
+
+  /// Stable byte in `MTV3_MEDIA_ABORT` (`cleona_service_transfer.dart`).
+  final int code;
+
+  /// `null` for an absent or unknown name — no reason is better than a
+  /// wrong one.
+  static FailureReason? fromWire(Object? v) {
+    for (final r in values) {
+      if (r.wireName == v) return r;
+    }
+    return null;
+  }
+
+  static FailureReason? fromCode(int c) {
+    for (final r in values) {
+      if (r.code == c) return r;
+    }
+    return null;
+  }
+}
+
 /// Media download state for two-stage media delivery.
 enum MediaDownloadState {
   none('none', 0),
@@ -326,8 +446,89 @@ enum CallDirection { outgoing, incoming }
 /// Group call state visible to UI.
 enum GroupCallState { idle, inviting, ringing, inCall, ended }
 
+/// Why a peer is not sending video right now (§17.5, Spec-Erratum E2).
+///
+/// The Dart-side mirror of the wire enum `VideoOffReason`. It exists so that
+/// nothing above the protocol layer has to import the generated protobuf —
+/// `lib/ui/` imports none today and should not start here. It lives in this
+/// file (not in `cleona_service.dart`) because the sender side,
+/// `call_service.dart`, names it too (S399).
+///
+/// **Invariante I12.** Every value describes the *sender's own* transmission.
+/// None of them is an instruction, a permission or a prohibition aimed at the
+/// peer, and no such value may be added: Cleona has no message with which one
+/// side can switch the other side's camera off.
+enum CallVideoOffReason {
+  /// No reason was given, or the peer sent a reason this build does not know.
+  ///
+  /// Treated as "no picture, and we cannot say why". It is deliberately **not**
+  /// folded into [userDisabled]: claiming the peer chose this, when the wire
+  /// said something we could not read, would state intent as fact. Forward
+  /// compatibility depends on this staying distinct — see the extension rule
+  /// in `proto/app_payloads.proto::VideoOffReason`.
+  unspecified,
+
+  /// The peer switched their own video off. A deliberate act, not a fault.
+  userDisabled,
+
+  /// The peer cannot send: no supported encoder step produces frames that fit
+  /// under the current per-frame ceiling. Wire form of
+  /// `CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE` (`native/cleona_video/cleona_video.h`,
+  /// Spec-Erratum E1), raised by the rate control of V1.17.
+  ///
+  /// The display for this must differ from [userDisabled] — that difference is
+  /// the entire point of E2.
+  bandwidthInsufficient,
+
+  /// The peer's device has no video path at all — no capture/encode path,
+  /// no video backend, or a build without a video engine (the desktop
+  /// daemon, §17.5 "desktop video calls remain audio-only"). A property of
+  /// the device: a better connection does not change it. Wire:
+  /// `VIDEO_OFF_REASON_NOT_SUPPORTED` (S399, owner C8).
+  notSupported,
+
+  /// The peer's device can do video, but it could not be started in this
+  /// call (`CLEONA_VIDEO_ERR_BACKEND`: camera busy, codec refused, …).
+  /// Deliberately not "camera unavailable" — the backend does not tell those
+  /// apart. Wire: `VIDEO_OFF_REASON_START_FAILED`.
+  startFailed,
+}
+
 /// Participant state in a group call.
 enum ParticipantState { invited, ringing, joined, left, crashed }
+
+/// Why a 1:1 call ended, where the end has a reason the UI must name.
+///
+/// Travels by NAME over the IPC (`CallInfo.toJson`), not by index: a value
+/// added later must not shift the meaning of an existing one.
+enum CallEndReason {
+  /// An ordinary end: somebody hung up, rejected, or the ringing ran out.
+  unspecified,
+
+  /// §17.4 loss detection: 10 s without valid media frames ended the session
+  /// (UI: "connection lost", i18n key `call_connection_lost`).
+  connectionLost,
+}
+
+/// Why a 1:1 call did not come about although both sides wanted it: Plane D
+/// carries no media (§17.3).
+///
+/// Travels by NAME over the IPC (event `call_unavailable`), like
+/// [CallEndReason].
+enum CallUnavailableReason {
+  /// No address pair carries, or this device has no Plane D at all — §17.3:
+  /// "honestly, "no call"" (i18n key `call_unavailable_no_path`).
+  noMediaPath,
+
+  /// §17.3: "v4-only ↔ v6-only has no common pair — clear message "no common
+  /// connection type"" (i18n key `call_unavailable_no_common_type`).
+  noCommonConnectionType,
+}
+
+/// Wire reason of a `CALL_REJECT` sent because the callee's Plane D carries
+/// no media (`CallService.acceptCall`); the caller's UI names it like its
+/// own [CallUnavailableReason.noMediaPath].
+const String kCallRejectMediaUnavailable = 'media-unavailable';
 
 /// Call information for IPC/UI.
 class CallInfo {
@@ -342,6 +543,15 @@ class CallInfo {
   int videoFramesSent;
   int videoFramesReceived;
 
+  /// Why the call ended; meaningful once [state] is [CallState.ended].
+  final CallEndReason endReason;
+
+  /// This device cannot capture audio right now — no microphone permission,
+  /// no voice session, or a capture device that delivers nothing. It keeps
+  /// sending silence on cadence, so the call stands, but the peer does not
+  /// hear the user (UI: i18n key `call_microphone_unavailable`).
+  final bool captureUnavailable;
+
   CallInfo({
     required this.callId,
     required this.peerNodeIdHex,
@@ -353,6 +563,8 @@ class CallInfo {
     this.framesReceived = 0,
     this.videoFramesSent = 0,
     this.videoFramesReceived = 0,
+    this.endReason = CallEndReason.unspecified,
+    this.captureUnavailable = false,
   }) : startedAt = startedAt ?? DateTime.now();
 
   Map<String, dynamic> toJson() => {
@@ -366,6 +578,8 @@ class CallInfo {
         'framesReceived': framesReceived,
         'videoFramesSent': videoFramesSent,
         'videoFramesReceived': videoFramesReceived,
+        'endReason': endReason.name,
+        'captureUnavailable': captureUnavailable,
       };
 
   static CallInfo fromJson(Map<String, dynamic> json) => CallInfo(
@@ -380,6 +594,9 @@ class CallInfo {
         framesReceived: json['framesReceived'] as int? ?? 0,
         videoFramesSent: json['videoFramesSent'] as int? ?? 0,
         videoFramesReceived: json['videoFramesReceived'] as int? ?? 0,
+        endReason: CallEndReason.values.asNameMap()[json['endReason']] ??
+            CallEndReason.unspecified,
+        captureUnavailable: json['captureUnavailable'] as bool? ?? false,
       );
 }
 
@@ -485,12 +702,42 @@ class UiMessage {
   final String conversationId;
   String senderNodeIdHex;
   String text;
-  final DateTime timestamp;
+
+  /// The position in the conversation (display, store order). Set once at
+  /// creation; moved only by §9.4 "Nothing overtakes a file" (S398-W5): a
+  /// message that waited behind a file is placed just after it at the
+  /// recipient (`_fileOrderPlace`), by at most what that takes.
+  DateTime timestamp;
   final UiMessageType type;
-  MessageStatus status;
+  MessageStatus _status;
   final bool isOutgoing;
+
+  /// The delivery state (§9.1).
+  MessageStatus get status => _status;
+
+  /// Every change of the state goes through here, so that no route on which
+  /// an own message leaves can miss the start of its expiry deadline: the
+  /// first time an own message is seen as sent — `inTransit`, or `delivered`
+  /// where the receipt is the first thing known of it — [sentAt] is set.
+  set status(MessageStatus next) {
+    _status = next;
+    if (isOutgoing && sentAt == null && _hasLeft(next)) {
+      sentAt = DateTime.now();
+    }
+  }
+
+  /// §9.1: `in transit` is "sent, no acknowledgement yet", `delivered` is
+  /// acknowledged. `resting` has not left, and `failed` alone says nothing
+  /// about whether it ever did.
+  static bool _hasLeft(MessageStatus s) =>
+      s == MessageStatus.inTransit || s == MessageStatus.delivered;
   String? filePath;
   DateTime? editedAt;
+
+  /// Only ever read: a row an earlier build left in the store, emptied and
+  /// flagged. `ensureLoaded` turns it into a mark outside the conversation
+  /// (`cleona_service_deletion_marks.dart`); no conversation carries a
+  /// flagged message.
   bool isDeleted;
   // Media fields
   String? mimeType;
@@ -498,14 +745,42 @@ class UiMessage {
   String? filename;
   String? thumbnailBase64;
   MediaDownloadState mediaState;
-  /// When this message was taken note of LOCALLY — the
-  /// anchor of the per-chat expiry deadline (§21.5.3), not the read mark.
+  /// INCOMING: when this message was READ here — the anchor of the per-chat
+  /// expiry deadline of a recipient's copy (§21.5.3: "on a recipient's
+  /// device it starts when the message is READ there"). `null` means
+  /// unread: no deadline runs.
   ///
-  /// Set when inserting into the conversation, for incoming
-  /// AND outgoing (`cleona_service.dart::addMessage`). It therefore says
-  /// NOTHING about whether the other side has read — for that there is
-  /// [readByRecipient].
+  /// Set when the user opens the conversation (`markConversationRead`),
+  /// when the message arrives while the conversation is open in the
+  /// foreground, or when an own device reports the read. An own message
+  /// carries none: its deadline hinges on nothing the recipient reports
+  /// ([sentAt]).
   DateTime? readAt;
+
+  /// OUTGOING: when this message was SENT — the anchor of the per-chat
+  /// expiry deadline of the sender's copy (§21.5.3: "on the sender's
+  /// devices it starts when the message is sent"). `null` means it has not
+  /// left: no deadline runs ("A message that has not left does not
+  /// expire") — a `resting` message, and one closed as `failed` without
+  /// ever having left.
+  ///
+  /// Set by the [status] setter the first time the message is seen as sent
+  /// on this device. The copy mirrored from another own device (§14.2,
+  /// `MESSAGE_SENT`) takes the time stamp of its content — the same moment
+  /// on every own device, not the arrival of the mirror. A row stored
+  /// before this field existed, already sent, takes its [timestamp]: the
+  /// only moment the row knows.
+  DateTime? sentAt;
+
+  /// The expiry deadline that applied to this message when it entered the
+  /// conversation, in ms after [readAt] (incoming) or [sentAt] (outgoing)
+  /// (§21.5.3: "Changes affect only future messages — existing ones keep
+  /// their original deadline").
+  ///
+  /// `0` = recorded, no deadline. `null` = a row written before the
+  /// deadline was kept per message; the expiry sweep records the
+  /// conversation's deadline for it the first time it sees it.
+  int? expiryMs;
 
   /// OUTGOING: the recipient's read receipt has arrived
   /// (`_handleReadReceiptV3`). Colours the two ticks, does not change the
@@ -600,6 +875,38 @@ class UiMessage {
   // GM-2 (§9.1.4): true when sender's membership hash differs at same/lower epoch
   bool membershipMismatch;
 
+  /// Why this file failed (§9.4 "Reasons", S398-W1): on an outgoing message
+  /// with `failed`, on an incoming one with `mediaState == failed`. `null`
+  /// otherwise.
+  FailureReason? failureReason;
+
+  /// The detail of [failureReason]: "x/y" stripes for `incomplete`, the
+  /// sender's own reason (a wire name) for `senderGaveUp`.
+  String? failureDetail;
+
+  /// §9.4 "Nothing overtakes a file" (S398-W5), incoming only: this message
+  /// waited at the sender behind the file whose identifier starts with these
+  /// 16 hex digits (8 B); it is shown after that file. `null` otherwise.
+  String? afterFile;
+
+  /// §16.2 "A group post carries one post identifier": the 16 bytes (32 hex
+  /// digits) the author drew for this group post — the same at the author
+  /// and at every member, while [id] is the display identifier at the author
+  /// and the identifier of the own leg at a member. A reaction, a quote and
+  /// a read mark name it. `null` for everything that is not a group post and
+  /// for a group post that came without one; such a message is referred to
+  /// by [id].
+  String? postId;
+
+  /// The identifier a reaction, a quote or a read mark names for this
+  /// message on the wire: the post identifier of a group post, [id]
+  /// otherwise.
+  String get referenceId => postId ?? id;
+
+  /// Whether a reference [idHex] that came over the wire means this message:
+  /// the identifier it is kept under, or its post identifier (§16.2).
+  bool isReferredToBy(String idHex) => id == idHex || postId == idHex;
+
   /// Emoji reactions: emoji → set of senderNodeIdHex.
   /// Example: {"👍": {"aabb...", "ccdd..."}, "❤️": {"aabb..."}}
   Map<String, Set<String>> reactions = {};
@@ -639,8 +946,9 @@ class UiMessage {
     required this.text,
     required this.timestamp,
     required this.type,
-    this.status = MessageStatus.resting,
+    MessageStatus status = MessageStatus.resting,
     required this.isOutgoing,
+    DateTime? sentAt,
     this.filePath,
     this.editedAt,
     this.isDeleted = false,
@@ -650,6 +958,7 @@ class UiMessage {
     this.thumbnailBase64,
     this.mediaState = MediaDownloadState.none,
     this.readAt,
+    this.expiryMs,
     this.readByRecipient = false,
     this.readReceiptSent = false,
     this.archiveTier,
@@ -671,11 +980,18 @@ class UiMessage {
     this.pollId,
     this.calendarEventId,
     this.membershipMismatch = false,
+    this.failureReason,
+    this.failureDetail,
+    this.afterFile,
+    this.postId,
     Map<String, Set<String>>? reactions,
     Map<String, String>? fanoutLegs,
     Set<String>? deliveredBy,
     Set<String>? withheldBy,
-  })  : reactions = reactions ?? {},
+  })  : _status = status,
+        sentAt = sentAt ??
+            (isOutgoing && _hasLeft(status) ? timestamp : null),
+        reactions = reactions ?? {},
         fanoutLegs = fanoutLegs ?? {},
         deliveredBy = deliveredBy ?? {},
         withheldBy = withheldBy ?? {};
@@ -701,6 +1017,8 @@ class UiMessage {
         'filePath': filePath,
         if (editedAt != null) 'editedAt': editedAt!.millisecondsSinceEpoch,
         if (readAt != null) 'readAt': readAt!.millisecondsSinceEpoch,
+        if (sentAt != null) 'sentAt': sentAt!.millisecondsSinceEpoch,
+        if (expiryMs != null) 'expiryMs': expiryMs,
         if (readByRecipient) 'readByRecipient': true,
         if (readReceiptSent) 'readReceiptSent': true,
         if (isDeleted) 'isDeleted': true,
@@ -739,6 +1057,10 @@ class UiMessage {
         // The loss is OLDER than the store (the JSON form used
         // the same method); it was noticed during the round-trip comparison for S366.
         if (membershipMismatch) 'membershipMismatch': true,
+        if (failureReason != null) 'failureReason': failureReason!.wireName,
+        if (failureDetail != null) 'failureDetail': failureDetail,
+        if (afterFile != null) 'afterFile': afterFile,
+        if (postId != null) 'postId': postId,
         if (fanoutLegs.isNotEmpty) 'fanoutLegs': fanoutLegs,
         if (deliveredBy.isNotEmpty) 'deliveredBy': deliveredBy.toList(),
         if (withheldBy.isNotEmpty) 'withheldBy': withheldBy.toList(),
@@ -758,6 +1080,10 @@ class UiMessage {
             isOutgoing: json['isOutgoing'] as bool),
         isOutgoing: json['isOutgoing'] as bool,
         membershipMismatch: json['membershipMismatch'] as bool? ?? false,
+        failureReason: FailureReason.fromWire(json['failureReason']),
+        failureDetail: json['failureDetail'] as String?,
+        afterFile: json['afterFile'] as String?,
+        postId: json['postId'] as String?,
         filePath: json['filePath'] as String?,
         editedAt: json['editedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['editedAt'] as int)
@@ -765,6 +1091,10 @@ class UiMessage {
         readAt: json['readAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['readAt'] as int)
             : null,
+        sentAt: json['sentAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['sentAt'] as int)
+            : null,
+        expiryMs: json['expiryMs'] as int?,
         // S390: the read mark has changed its carrier (finding B-4).
         // A record that THIS store formerly wrote with `status: 'read'`
         // still carries it there — and it is read,
@@ -990,6 +1320,11 @@ class Conversation {
   ChatConfig? pendingConfigProposal;
   /// Who proposed the pending config (nodeIdHex of proposer).
   String? pendingConfigProposer;
+  /// At least one message here carries a deadline of its own
+  /// ([UiMessage.expiryMs]). The expiry sweep visits a conversation whose
+  /// deadline was switched off later only because of this mark — existing
+  /// messages keep theirs (§21.5.3).
+  bool expiryPending = false;
   /// Marked as favorite.
   bool isFavorite;
   /// Per-conversation notification toggle (null = use identity default).
@@ -1071,6 +1406,21 @@ class GroupMemberInfo {
   Uint8List? x25519Pk;
   Uint8List? mlKemPk;
 
+  /// B-3 (v4_2 §16.2.2, D-36): the member's address as the member itself
+  /// signed it on joining (mycelium `group_member.dart`), and both
+  /// signatures — `null` until the member has joined. Only a CHECKED entry
+  /// is kept (`cleona_service_group_pairs.dart`).
+  Uint8List? address;
+  Uint8List? addressSigEd25519;
+  Uint8List? addressSigMlDsa;
+
+  /// Its fixed neighbours as the inviter knew them (neighbour-list codec).
+  Uint8List? neighbours;
+
+  /// Whether this member carries a checked, self-signed entry.
+  bool get hasSignedEntry =>
+      address != null && addressSigEd25519 != null && addressSigMlDsa != null;
+
   GroupMemberInfo({
     required this.nodeIdHex,
     required this.displayName,
@@ -1078,25 +1428,45 @@ class GroupMemberInfo {
     this.ed25519Pk,
     this.x25519Pk,
     this.mlKemPk,
+    this.address,
+    this.addressSigEd25519,
+    this.addressSigMlDsa,
+    this.neighbours,
   });
 
-  Map<String, dynamic> toJson() => {
+  /// [withEntry] `false` leaves out the signed entry (≈ 6.7 KB per member) —
+  /// for the state the GUI reads, which never needs it.
+  Map<String, dynamic> toJson({bool withEntry = true}) => {
         'nodeIdHex': nodeIdHex,
         'displayName': displayName,
         'role': role,
         if (ed25519Pk != null) 'ed25519Pk': bytesToHex(ed25519Pk!),
         if (x25519Pk != null) 'x25519Pk': bytesToHex(x25519Pk!),
         if (mlKemPk != null) 'mlKemPk': bytesToHex(mlKemPk!),
+        if (withEntry && hasSignedEntry) ...{
+          'address': bytesToHex(address!),
+          'addressSigEd25519': bytesToHex(addressSigEd25519!),
+          'addressSigMlDsa': bytesToHex(addressSigMlDsa!),
+          if (neighbours != null) 'neighbours': bytesToHex(neighbours!),
+        },
       };
 
-  static GroupMemberInfo fromJson(Map<String, dynamic> json) => GroupMemberInfo(
-        nodeIdHex: json['nodeIdHex'] as String,
-        displayName: json['displayName'] as String? ?? '',
-        role: json['role'] as String? ?? 'member',
-        ed25519Pk: json['ed25519Pk'] != null ? hexToBytes(json['ed25519Pk'] as String) : null,
-        x25519Pk: json['x25519Pk'] != null ? hexToBytes(json['x25519Pk'] as String) : null,
-        mlKemPk: json['mlKemPk'] != null ? hexToBytes(json['mlKemPk'] as String) : null,
-      );
+  static GroupMemberInfo fromJson(Map<String, dynamic> json) {
+    Uint8List? bytes(String k) =>
+        json[k] != null ? hexToBytes(json[k] as String) : null;
+    return GroupMemberInfo(
+      nodeIdHex: json['nodeIdHex'] as String,
+      displayName: json['displayName'] as String? ?? '',
+      role: json['role'] as String? ?? 'member',
+      ed25519Pk: bytes('ed25519Pk'),
+      x25519Pk: bytes('x25519Pk'),
+      mlKemPk: bytes('mlKemPk'),
+      address: bytes('address'),
+      addressSigEd25519: bytes('addressSigEd25519'),
+      addressSigMlDsa: bytes('addressSigMlDsa'),
+      neighbours: bytes('neighbours'),
+    );
+  }
 }
 
 /// Group info.
@@ -1130,6 +1500,14 @@ class GroupInfo {
   /// Default false = disclose.
   bool withholdDeliveryStatus;
 
+  /// B-3 (v4_2 §16.2.2): "Joining is an explicit act of the invitee; only
+  /// then are its group pairs formed." `false` from an invitation until the
+  /// user joins; the creator is joined.
+  bool joined;
+
+  /// Who invited this identity (UserID hex) — the explicit join goes there.
+  String? inviterNodeIdHex;
+
   GroupInfo({
     required this.groupIdHex,
     required String name,
@@ -1140,22 +1518,29 @@ class GroupInfo {
     DateTime? createdAt,
     this.membershipEpoch = 0,
     this.withholdDeliveryStatus = false,
+    this.joined = true,
+    this.inviterNodeIdHex,
   })  : _name = name,
         members = members ?? {},
         createdAt = createdAt ?? DateTime.now() {
     LogRedaction.registerName(name, kind: 'group');
   }
 
-  Map<String, dynamic> toJson() => {
+  /// [withEntries] `false`: the member entries without their signed
+  /// addresses ([GroupMemberInfo.toJson]) — for the GUI state.
+  Map<String, dynamic> toJson({bool withEntries = true}) => {
         'groupIdHex': groupIdHex,
         'name': name,
         'description': description,
         'pictureBase64': pictureBase64,
         'ownerNodeIdHex': ownerNodeIdHex,
         'createdAt': createdAt.millisecondsSinceEpoch,
-        'members': members.map((k, v) => MapEntry(k, v.toJson())),
+        'members': members.map(
+            (k, v) => MapEntry(k, v.toJson(withEntry: withEntries))),
         'membershipEpoch': membershipEpoch,
         'withholdDeliveryStatus': withholdDeliveryStatus,
+        'joined': joined,
+        if (inviterNodeIdHex != null) 'inviterNodeIdHex': inviterNodeIdHex,
       };
 
   static GroupInfo fromJson(Map<String, dynamic> json) {
@@ -1176,6 +1561,8 @@ class GroupInfo {
       members: membersMap,
       membershipEpoch: json['membershipEpoch'] as int? ?? 0,
       withholdDeliveryStatus: json['withholdDeliveryStatus'] as bool? ?? false,
+      joined: json['joined'] as bool? ?? true,
+      inviterNodeIdHex: json['inviterNodeIdHex'] as String?,
     );
   }
 }
@@ -1280,18 +1667,11 @@ class ChannelInfo {
     this.isPublic = false,
     // false, matching fromJson and the compact wire format: toJson writes
     // 'isAdult' ONLY when true, so absence means "not adult" by definition.
-    // The default of true was not merely a trap — it fired: the Restore
-    // Broadcast channel restore (cleona_service.dart:11221) omits the argument,
-    // because RestoreChannelInfo carries no is_adult field at all
-    // (proto/app_payloads.proto::RestoreChannelInfo). Every channel recovered through the canonical
-    // recovery path was therefore flagged 18+, persisted that way by
-    // _saveChannels(), shown with the red 18+ badge (chat_screen.dart:1777),
-    // filtered out of every default channel search for all other users
-    // (channel_index.dart:119) and propagated into signed CHANNEL_INVITEs
-    // (cleona_service.dart:6626). Verified 2026-07-28.
-    //
-    // Restoring a genuinely adult channel still loses the flag — that needs the
-    // proto field and is a separate, protocol-level decision.
+    // The default of true was not merely a trap — it fired (verified
+    // 2026-07-28): a constructor call that omitted the argument flagged the
+    // channel 18+, persisted it that way, showed the red badge and filtered
+    // it out of every default channel search. That call was the channel
+    // restore of the V3 restore path, removed in S398 (finding R-1).
     this.isAdult = false,
     this.language = 'de',
     this.category = 'general',
@@ -1738,6 +2118,11 @@ class ContactInfo {
   String? pendingNameChange; // Remote name change waiting for user decision
   /// When this contact was accepted (for long-term contact checks).
   DateTime? acceptedAt;
+  /// When the own request to this contact went out (`pending_outgoing`):
+  /// after 7 days without an answer the invitation's post box no longer
+  /// holds it, and the user sends anew if he still wants to (S405 F-1,
+  /// owner decision 06.10.2026).
+  DateTime? requestedAt;
   /// Verification level (Architecture Section 5.5): unverified, seen, verified, trusted.
   String verificationLevel;
   /// §26 Multi-Device: known device-node-IDs for this contact (learned from senderDeviceNodeId).
@@ -2028,6 +2413,26 @@ class ContactInfo {
   /// Default false.
   bool neverFixedNeighbour;
 
+  /// Re-verify lock (v4_2 "Contact verification and key-change detection";
+  /// S405 finding A-4). Set when a key change makes a `verified`/`trusted`
+  /// contact fall back to `unverified`: the level then stays `unverified`
+  /// "until the user actively re-verifies" — an opened message does NOT
+  /// lift it to `seen` meanwhile. Cleared only by the active verification
+  /// ([CleonaService.setContactVerificationLevel]) or by a rotation whose
+  /// level §14.4 retains. A contact that was only `seen` gets no lock.
+  /// Purely local, persisted with the contact. Default false.
+  bool reverifyRequired;
+
+  /// Applies the key-change policy outcome [o] (`key_change_policy.dart`)
+  /// to this contact: the new level, and the re-verify lock when a
+  /// `verified`/`trusted` level fell back. A level §14.4 retained (both
+  /// proofs present) lifts the lock again; any other outcome leaves it as
+  /// it is (a locked contact stays locked through a further rotation).
+  void applyKeyChange(KeyChangeOutcome o) {
+    verificationLevel = o.newLevel;
+    if (o.wasVerified) reverifyRequired = o.changed;
+  }
+
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
 
@@ -2057,6 +2462,7 @@ class ContactInfo {
     this.profilePictureBase64,
     this.pendingNameChange,
     this.acceptedAt,
+    this.requestedAt,
     this.verificationLevel = 'unverified',
     Set<String>? deviceNodeIds,
     List<ContactDeviceSigKey>? deviceSigKeys,
@@ -2080,6 +2486,7 @@ class ContactInfo {
     this.trustAnchorQuarantineReason,
     this.withholdDeliveryStatus = false,
     this.neverFixedNeighbour = false,
+    this.reverifyRequired = false,
   })  : deviceNodeIds = deviceNodeIds ?? {},
         deviceSigKeys = deviceSigKeys ?? [],
         // §15.2: the anchor comes in only via this one path and
@@ -2107,6 +2514,7 @@ class ContactInfo {
         if (profilePictureBase64 != null) 'profilePicture': profilePictureBase64,
         if (pendingNameChange != null) 'pendingNameChange': pendingNameChange,
         if (acceptedAt != null) 'acceptedAt': acceptedAt!.millisecondsSinceEpoch,
+        if (requestedAt != null) 'requestedAt': requestedAt!.millisecondsSinceEpoch,
         'verificationLevel': verificationLevel,
         if (deviceNodeIds.isNotEmpty) 'deviceNodeIds': deviceNodeIds.toList(),
         if (deviceSigKeys.isNotEmpty)
@@ -2139,6 +2547,7 @@ class ContactInfo {
           'trustAnchorQuarantineReason': trustAnchorQuarantineReason,
         if (withholdDeliveryStatus) 'withholdDeliveryStatus': true,
         if (neverFixedNeighbour) 'neverFixedNeighbour': true,
+        if (reverifyRequired) 'reverifyRequired': true,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -2163,6 +2572,9 @@ class ContactInfo {
         pendingNameChange: json['pendingNameChange'] as String?,
         acceptedAt: json['acceptedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['acceptedAt'] as int)
+            : null,
+        requestedAt: json['requestedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['requestedAt'] as int)
             : null,
         verificationLevel: json['verificationLevel'] as String? ?? 'unverified',
         deviceNodeIds: json['deviceNodeIds'] != null
@@ -2205,68 +2617,105 @@ class ContactInfo {
         withholdDeliveryStatus:
             json['withholdDeliveryStatus'] as bool? ?? false,
         neverFixedNeighbour: json['neverFixedNeighbour'] as bool? ?? false,
+        reverifyRequired: json['reverifyRequired'] as bool? ?? false,
       );
 }
 
-/// §7.1 LD-9/LD-11: Delegation status for the local device.
-class LinkedDeviceStatus {
-  final bool isLinkedDevice;
-  final int capabilities;
-  final int issuedAtMs;
-  final int maxValidUntilMs;
-  final bool isExpired;
+/// B-4b (§13.0, §14.6.1, D-39, D-40): where a device stands in the
+/// enrolment of a further device.
+///
+/// On a fresh install from the words: [searching] until the bundle is found
+/// (search only, no own post, D-40); [waiting] after it found an open
+/// window and laid its request; [noWindow] when the bundle carries none (the
+/// user is asked whether the previous device still exists); [rejected] when
+/// the existing device declined; [recovering] once the user chose recovery
+/// explicitly — the only way into the recovery case (D-40). [none] on every
+/// ordinary device.
+enum EnrolmentPhase { none, searching, waiting, noWindow, rejected, recovering }
 
-  LinkedDeviceStatus({
-    required this.isLinkedDevice,
-    this.capabilities = 0,
-    this.issuedAtMs = 0,
-    this.maxValidUntilMs = 0,
-    this.isExpired = false,
+/// The enrolment as the interface shows it — one value, across IPC as JSON.
+class EnrolmentView {
+  /// E7 is not built yet: two devices of one identity stay behind this
+  /// lock ("Add another device: not available yet"); a test opens it.
+  final bool available;
+  final EnrolmentPhase phase;
+
+  /// This device's open window, `null` when none is open.
+  final DateTime? windowUntil;
+
+  /// When the found bundle was laid (the question without a window shows
+  /// how long ago the previous device was active).
+  final DateTime? bundleAt;
+
+  /// The requests waiting for a decision in the Requests tab.
+  final List<EnrolmentRequestView> requests;
+
+  const EnrolmentView({
+    this.available = false,
+    this.phase = EnrolmentPhase.none,
+    this.windowUntil,
+    this.bundleAt,
+    this.requests = const [],
   });
 
-  bool get hasCert => isLinkedDevice && issuedAtMs > 0;
-
-  int get daysRemaining {
-    if (maxValidUntilMs == 0) return -1;
-    final remaining = maxValidUntilMs - DateTime.now().millisecondsSinceEpoch;
-    return (remaining / (24 * 60 * 60 * 1000)).ceil();
-  }
-
-  bool get expiresWithin7Days {
-    final d = daysRemaining;
-    return d >= 0 && d <= 7;
-  }
-
-  String get expiryDate {
-    if (maxValidUntilMs == 0) return '';
-    final dt = DateTime.fromMillisecondsSinceEpoch(maxValidUntilMs);
-    return '${dt.day}.${dt.month}.${dt.year}';
-  }
-
-  List<String> get capabilityNames {
-    final names = <String>[];
-    if (capabilities & 1 != 0) names.add('send');
-    if (capabilities & 2 != 0) names.add('contacts');
-    if (capabilities & 4 != 0) names.add('groups');
-    if (capabilities & 8 != 0) names.add('channels');
-    return names;
-  }
-
   Map<String, dynamic> toJson() => {
-        'isLinkedDevice': isLinkedDevice,
-        'capabilities': capabilities,
-        'issuedAtMs': issuedAtMs,
-        'maxValidUntilMs': maxValidUntilMs,
-        'isExpired': isExpired,
+        'available': available,
+        'phase': phase.name,
+        if (windowUntil != null) 'windowUntil': windowUntil!.millisecondsSinceEpoch,
+        if (bundleAt != null) 'bundleAt': bundleAt!.millisecondsSinceEpoch,
+        'requests': [for (final r in requests) r.toJson()],
       };
 
-  static LinkedDeviceStatus fromJson(Map<String, dynamic> json) =>
-      LinkedDeviceStatus(
-        isLinkedDevice: json['isLinkedDevice'] as bool? ?? false,
-        capabilities: json['capabilities'] as int? ?? 0,
-        issuedAtMs: json['issuedAtMs'] as int? ?? 0,
-        maxValidUntilMs: json['maxValidUntilMs'] as int? ?? 0,
-        isExpired: json['isExpired'] as bool? ?? false,
+  static EnrolmentView fromJson(Map<String, dynamic> j) => EnrolmentView(
+        available: j['available'] as bool? ?? false,
+        phase: EnrolmentPhase.values.firstWhere(
+            (p) => p.name == j['phase'], orElse: () => EnrolmentPhase.none),
+        windowUntil: j['windowUntil'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(j['windowUntil'] as int),
+        bundleAt: j['bundleAt'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(j['bundleAt'] as int),
+        requests: [
+          for (final r in (j['requests'] as List? ?? const []))
+            if (r is Map) EnrolmentRequestView.fromJson(r.cast<String, dynamic>())
+        ],
+      );
+}
+
+/// One enrolment request as the Requests tab shows it (§14.6.1 step 3):
+/// name, platform and DeviceID of the new device, and when it came.
+class EnrolmentRequestView {
+  final String requestIdHex;
+  final String deviceName;
+  final String platform;
+  final String deviceIdHex;
+  final DateTime receivedAt;
+
+  const EnrolmentRequestView({
+    required this.requestIdHex,
+    required this.deviceName,
+    required this.platform,
+    required this.deviceIdHex,
+    required this.receivedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'requestId': requestIdHex,
+        'deviceName': deviceName,
+        'platform': platform,
+        'deviceId': deviceIdHex,
+        'receivedAt': receivedAt.millisecondsSinceEpoch,
+      };
+
+  static EnrolmentRequestView fromJson(Map<String, dynamic> j) =>
+      EnrolmentRequestView(
+        requestIdHex: j['requestId'] as String? ?? '',
+        deviceName: j['deviceName'] as String? ?? '',
+        platform: j['platform'] as String? ?? '',
+        deviceIdHex: j['deviceId'] as String? ?? '',
+        receivedAt:
+            DateTime.fromMillisecondsSinceEpoch(j['receivedAt'] as int? ?? 0),
       );
 }
 
@@ -2374,6 +2823,13 @@ class CalendarEvent {
   String createdBy;              // Node ID hex of creator
   bool cancelled;
 
+  /// §18.1.3 rule 2: the `updatedAt` of the last `CALENDAR_UPDATE` taken
+  /// from the creator, on the creator's clock. 0 = none taken yet (the
+  /// invitation carries no such value). [updatedAt] cannot serve as the
+  /// "locally stored state": it is the local change mark the external sync
+  /// compares, and a local answer moves it.
+  int creatorUpdatedAt;
+
   CalendarEvent({
     required this.eventId,
     required this.identityId,
@@ -2405,6 +2861,7 @@ class CalendarEvent {
     int? updatedAt,
     required this.createdBy,
     this.cancelled = false,
+    this.creatorUpdatedAt = 0,
   })  : attendeeNodeIds = attendeeNodeIds ?? [],
         recurrenceExceptions = recurrenceExceptions ?? [],
         tags = tags ?? [],
@@ -2447,6 +2904,7 @@ class CalendarEvent {
         'updatedAt': updatedAt,
         'createdBy': createdBy,
         'cancelled': cancelled,
+        if (creatorUpdatedAt > 0) 'creatorUpdatedAt': creatorUpdatedAt,
       };
 
   static CalendarEvent fromJson(Map<String, dynamic> json) => CalendarEvent(
@@ -2482,6 +2940,7 @@ class CalendarEvent {
         updatedAt: json['updatedAt'] as int?,
         createdBy: json['createdBy'] as String? ?? '',
         cancelled: json['cancelled'] as bool? ?? false,
+        creatorUpdatedAt: json['creatorUpdatedAt'] as int? ?? 0,
       );
 }
 

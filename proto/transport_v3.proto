@@ -558,6 +558,18 @@ message ApplicationFrameV3 {
   // GM-1 (§9.1.4): sender's local group membership state for split-view detection
   uint64 group_membership_epoch = 18;
   bytes  group_membership_hash  = 19; // 32 bytes SHA-256
+
+  // §9.4 "Nothing overtakes a file", D-34 (S398-W5): a message that waited at
+  // the sender behind a file carries that file's identifier — the first 8
+  // bytes of the file's message identifier on this leg. Empty otherwise.
+  bytes  after_file             = 20; // 8 bytes
+
+  // §16.2 "A group post carries one post identifier": 16 random bytes the
+  // author draws per post and carries in every leg. A reaction, a quote and
+  // a read mark name it; acknowledgement, delivery state and re-sending stay
+  // with message_id, the identifier of the leg (§9.2). Empty for everything
+  // that is not a group post.
+  bytes  post_id                = 21; // 16 bytes
 }
 // ── KEM header v3 (Sec H-5 v2) ──────────────────────────────────────────
 //
@@ -606,7 +618,7 @@ message PerMessageKemV3 {
 // ── MessageType V3 (numbering from Appendix A.4) ────────────────────────
 //
 // CAUTION: numbers DIFFER FROM MessageType (old). Examples:
-//   old: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30
+//   old: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30 (reserved, S398)
 //   old: TWIN_SYNC=131          → V3: MTV3_TWIN_SYNC=180
 // Hard cut in wave 2 (profile reset, §23.2). Until then both
 // enums coexist without problems because they have different names.
@@ -626,14 +638,38 @@ enum MessageTypeV3 {
   MTV3_REPLY                      = 8;   // metadata in ContentMetadata
   MTV3_EDIT                       = 9;   // EditMetadata
   MTV3_DELETE                     = 10;  // soft-delete (15min window)
+  // Lane 2 of §9.4 (§17.6 "Cascade and windows", S398-P3b). Ordinary sealed
+  // messages; the tag is HKDF(K_T, "bulk/tag") of the announcement.
+  MTV3_MEDIA_STREAM_REQUEST       = 11;  // recipient -> sender: tag (16 B)
+  MTV3_MEDIA_STREAM_OFFER         = 12;  // sender -> recipient: tag ‖ STREAM_OFFER
+  MTV3_MEDIA_HOLDERS              = 13;  // sender -> recipient: lane 3 announcement, same K_T
+  // §9.4 "Reasons", D-34 (S398-W1): a file transfer failed for good — either
+  // end tells the other. tag 16 ‖ reason u8 ‖ complete u32 ‖ stripes u32.
+  MTV3_MEDIA_ABORT                = 14;  // both directions
   MTV3_TYPING_INDICATOR           = 15;  // ephemeral
   MTV3_READ_RECEIPT               = 16;  // ephemeral
   MTV3_DELIVERY_RECEIPT           = 17;  // ACK for non-ephemeral types
+  // §9.5 (D-48): catching up after more than 7 days — the reconciliation of
+  // §14.6.3 carried between the two parties of a pair instead of over the
+  // own-device line (twin-sync Type 20). Payload: ReconcilePacket
+  // (app_payloads.proto) — request (fetch SINCE), answer (deliver), progress.
+  // An ordinary message (§9.1, §9.2); between group pairs it names a group
+  // both belong to.
+  MTV3_CATCH_UP                   = 18;
   MTV3_VOICE_MESSAGE              = 22;  // AAC, optional transcription
 
   // ── Recovery & Identity ─────────────────────────────────────
-  MTV3_RESTORE_BROADCAST          = 30;
-  MTV3_RESTORE_RESPONSE           = 31;
+  // S398 RESERVED (30, 31): the V3 restore path (`RESTORE_BROADCAST`,
+  // `RESTORE_RESPONSE`). Its answer handed a contact that signed a broadcast
+  // about itself every conversation of the receiver, also those with third
+  // parties, and the whole contact list (finding R-1); its receiving half
+  // created every listed entry as an accepted contact. v4_2 Appendix C: the
+  // restore broadcast is not yet restated for the post box of §8.2, the
+  // recovery bundle (§13.3) is the only way back until then. Reserved so
+  // that the numbers do not come back with another meaning; a frame that
+  // still carries one is discarded as an unknown type (`HarvestEvent`).
+  reserved 30, 31;
+  reserved "MTV3_RESTORE_BROADCAST", "MTV3_RESTORE_RESPONSE";
   MTV3_IDENTITY_DELETED           = 32;
   MTV3_PROFILE_UPDATE             = 33;
   MTV3_KEY_ROTATION_BROADCAST     = 34;
@@ -666,6 +702,7 @@ enum MessageTypeV3 {
   MTV3_GROUP_LEAVE                = 52;
   MTV3_GROUP_KEY_UPDATE           = 53;
   MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = 54; // §9.1.4 GM-2: request current member list from owner
+  MTV3_GROUP_JOIN                 = 55;  // B-3 (§16.2.2): explicit join, self-signed entry
 
   // ── Channels ────────────────────────────────────────────────
   MTV3_CHANNEL_CREATE             = 60;
@@ -818,8 +855,11 @@ enum MessageTypeV3 {
 
   // ── Multi-Device (§7) ───────────────────────────────────────
   MTV3_TWIN_SYNC                  = 180;   // 12 Sub-Types via TwinSyncType
-  MTV3_DEVICE_PAIR_REQUEST        = 181;
-  MTV3_DEVICE_PAIR_APPROVE        = 182;
+  // S398 P1: the V3 pairing (delegation certificate) fell with D-39 —
+  // "no shared-key rotation, no delegation certificate". Reserved so the
+  // numbers never return with a new meaning.
+  reserved 181, 182;
+  reserved "MTV3_DEVICE_PAIR_REQUEST", "MTV3_DEVICE_PAIR_APPROVE";
   MTV3_DEVICE_REVOCATION          = 183;
   MTV3_ROTATION_REJECTION_ALERT   = 184;   // §7.5: Linked → Contacts: "I reject this rotation"
   // §14.5 path 2: pairwise device-set announcement. ADDITIVE — 185 was

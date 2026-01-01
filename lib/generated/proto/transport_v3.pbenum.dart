@@ -124,7 +124,7 @@ class PayloadTypeV3 extends $pb.ProtobufEnum {
 ///  ── MessageType V3 (numbering from Appendix A.4) ────────────────────────
 ///
 ///  CAUTION: numbers DIFFER FROM MessageType (old). Examples:
-///    old: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30
+///    old: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30 (reserved, S398)
 ///    old: TWIN_SYNC=131          → V3: MTV3_TWIN_SYNC=180
 ///  Hard cut in wave 2 (profile reset, §23.2). Until then both
 ///  enums coexist without problems because they have different names.
@@ -143,12 +143,15 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_REPLY = MessageTypeV3._(8, _omitEnumNames ? '' : 'MTV3_REPLY');
   static const MessageTypeV3 MTV3_EDIT = MessageTypeV3._(9, _omitEnumNames ? '' : 'MTV3_EDIT');
   static const MessageTypeV3 MTV3_DELETE = MessageTypeV3._(10, _omitEnumNames ? '' : 'MTV3_DELETE');
+  static const MessageTypeV3 MTV3_MEDIA_STREAM_REQUEST = MessageTypeV3._(11, _omitEnumNames ? '' : 'MTV3_MEDIA_STREAM_REQUEST');
+  static const MessageTypeV3 MTV3_MEDIA_STREAM_OFFER = MessageTypeV3._(12, _omitEnumNames ? '' : 'MTV3_MEDIA_STREAM_OFFER');
+  static const MessageTypeV3 MTV3_MEDIA_HOLDERS = MessageTypeV3._(13, _omitEnumNames ? '' : 'MTV3_MEDIA_HOLDERS');
+  static const MessageTypeV3 MTV3_MEDIA_ABORT = MessageTypeV3._(14, _omitEnumNames ? '' : 'MTV3_MEDIA_ABORT');
   static const MessageTypeV3 MTV3_TYPING_INDICATOR = MessageTypeV3._(15, _omitEnumNames ? '' : 'MTV3_TYPING_INDICATOR');
   static const MessageTypeV3 MTV3_READ_RECEIPT = MessageTypeV3._(16, _omitEnumNames ? '' : 'MTV3_READ_RECEIPT');
   static const MessageTypeV3 MTV3_DELIVERY_RECEIPT = MessageTypeV3._(17, _omitEnumNames ? '' : 'MTV3_DELIVERY_RECEIPT');
+  static const MessageTypeV3 MTV3_CATCH_UP = MessageTypeV3._(18, _omitEnumNames ? '' : 'MTV3_CATCH_UP');
   static const MessageTypeV3 MTV3_VOICE_MESSAGE = MessageTypeV3._(22, _omitEnumNames ? '' : 'MTV3_VOICE_MESSAGE');
-  static const MessageTypeV3 MTV3_RESTORE_BROADCAST = MessageTypeV3._(30, _omitEnumNames ? '' : 'MTV3_RESTORE_BROADCAST');
-  static const MessageTypeV3 MTV3_RESTORE_RESPONSE = MessageTypeV3._(31, _omitEnumNames ? '' : 'MTV3_RESTORE_RESPONSE');
   static const MessageTypeV3 MTV3_IDENTITY_DELETED = MessageTypeV3._(32, _omitEnumNames ? '' : 'MTV3_IDENTITY_DELETED');
   static const MessageTypeV3 MTV3_PROFILE_UPDATE = MessageTypeV3._(33, _omitEnumNames ? '' : 'MTV3_PROFILE_UPDATE');
   static const MessageTypeV3 MTV3_KEY_ROTATION_BROADCAST = MessageTypeV3._(34, _omitEnumNames ? '' : 'MTV3_KEY_ROTATION_BROADCAST');
@@ -160,6 +163,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_GROUP_LEAVE = MessageTypeV3._(52, _omitEnumNames ? '' : 'MTV3_GROUP_LEAVE');
   static const MessageTypeV3 MTV3_GROUP_KEY_UPDATE = MessageTypeV3._(53, _omitEnumNames ? '' : 'MTV3_GROUP_KEY_UPDATE');
   static const MessageTypeV3 MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = MessageTypeV3._(54, _omitEnumNames ? '' : 'MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST');
+  static const MessageTypeV3 MTV3_GROUP_JOIN = MessageTypeV3._(55, _omitEnumNames ? '' : 'MTV3_GROUP_JOIN');
   static const MessageTypeV3 MTV3_CHANNEL_CREATE = MessageTypeV3._(60, _omitEnumNames ? '' : 'MTV3_CHANNEL_CREATE');
   static const MessageTypeV3 MTV3_CHANNEL_POST = MessageTypeV3._(61, _omitEnumNames ? '' : 'MTV3_CHANNEL_POST');
   static const MessageTypeV3 MTV3_CHANNEL_INVITE = MessageTypeV3._(62, _omitEnumNames ? '' : 'MTV3_CHANNEL_INVITE');
@@ -213,8 +217,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_IDENTITY_LIVE_RETRIEVE = MessageTypeV3._(174, _omitEnumNames ? '' : 'MTV3_IDENTITY_LIVE_RETRIEVE');
   static const MessageTypeV3 MTV3_IDENTITY_LIVE_RESPONSE = MessageTypeV3._(175, _omitEnumNames ? '' : 'MTV3_IDENTITY_LIVE_RESPONSE');
   static const MessageTypeV3 MTV3_TWIN_SYNC = MessageTypeV3._(180, _omitEnumNames ? '' : 'MTV3_TWIN_SYNC');
-  static const MessageTypeV3 MTV3_DEVICE_PAIR_REQUEST = MessageTypeV3._(181, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_REQUEST');
-  static const MessageTypeV3 MTV3_DEVICE_PAIR_APPROVE = MessageTypeV3._(182, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_APPROVE');
   static const MessageTypeV3 MTV3_DEVICE_REVOCATION = MessageTypeV3._(183, _omitEnumNames ? '' : 'MTV3_DEVICE_REVOCATION');
   static const MessageTypeV3 MTV3_ROTATION_REJECTION_ALERT = MessageTypeV3._(184, _omitEnumNames ? '' : 'MTV3_ROTATION_REJECTION_ALERT');
   static const MessageTypeV3 MTV3_DEVICE_SET_ANNOUNCE = MessageTypeV3._(185, _omitEnumNames ? '' : 'MTV3_DEVICE_SET_ANNOUNCE');
@@ -250,12 +252,15 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_REPLY,
     MTV3_EDIT,
     MTV3_DELETE,
+    MTV3_MEDIA_STREAM_REQUEST,
+    MTV3_MEDIA_STREAM_OFFER,
+    MTV3_MEDIA_HOLDERS,
+    MTV3_MEDIA_ABORT,
     MTV3_TYPING_INDICATOR,
     MTV3_READ_RECEIPT,
     MTV3_DELIVERY_RECEIPT,
+    MTV3_CATCH_UP,
     MTV3_VOICE_MESSAGE,
-    MTV3_RESTORE_BROADCAST,
-    MTV3_RESTORE_RESPONSE,
     MTV3_IDENTITY_DELETED,
     MTV3_PROFILE_UPDATE,
     MTV3_KEY_ROTATION_BROADCAST,
@@ -267,6 +272,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_GROUP_LEAVE,
     MTV3_GROUP_KEY_UPDATE,
     MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
+    MTV3_GROUP_JOIN,
     MTV3_CHANNEL_CREATE,
     MTV3_CHANNEL_POST,
     MTV3_CHANNEL_INVITE,
@@ -320,8 +326,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_IDENTITY_LIVE_RETRIEVE,
     MTV3_IDENTITY_LIVE_RESPONSE,
     MTV3_TWIN_SYNC,
-    MTV3_DEVICE_PAIR_REQUEST,
-    MTV3_DEVICE_PAIR_APPROVE,
     MTV3_DEVICE_REVOCATION,
     MTV3_ROTATION_REJECTION_ALERT,
     MTV3_DEVICE_SET_ANNOUNCE,

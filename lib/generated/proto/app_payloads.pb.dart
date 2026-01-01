@@ -1094,6 +1094,7 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? membershipHash,
     $core.List<$core.int>? membershipSigEd25519,
     $core.List<$core.int>? membershipSigMlDsa,
+    $core.Iterable<GroupPairSeed>? pairSeeds,
   }) {
     final $result = create();
     if (groupId != null) {
@@ -1126,6 +1127,9 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     if (membershipSigMlDsa != null) {
       $result.membershipSigMlDsa = membershipSigMlDsa;
     }
+    if (pairSeeds != null) {
+      $result.pairSeeds.addAll(pairSeeds);
+    }
     return $result;
   }
   GroupInviteV3._() : super();
@@ -1143,6 +1147,7 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'membershipHash', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'membershipSigEd25519', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'membershipSigMlDsa', $pb.PbFieldType.OY)
+    ..pc<GroupPairSeed>(11, _omitFieldNames ? '' : 'pairSeeds', $pb.PbFieldType.PM, subBuilder: GroupPairSeed.create)
     ..hasRequiredFields = false
   ;
 
@@ -1251,6 +1256,12 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
   $core.bool hasMembershipSigMlDsa() => $_has(9);
   @$pb.TagNumber(10)
   void clearMembershipSigMlDsa() => clearField(10);
+
+  /// B-3 (v4_2 §4.3, §16.2.2, D-36): in the leg to each member, the `s_AB` of
+  /// that member with every co-member that is not the inviter. Per leg,
+  /// outside the membership hash.
+  @$pb.TagNumber(11)
+  $core.List<GroupPairSeed> get pairSeeds => $_getList(10);
 }
 
 class GroupMemberV3 extends $pb.GeneratedMessage {
@@ -1261,6 +1272,10 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? ed25519PublicKey,
     $core.List<$core.int>? x25519PublicKey,
     $core.List<$core.int>? mlKemPublicKey,
+    $core.List<$core.int>? address,
+    $core.List<$core.int>? addressSigEd25519,
+    $core.List<$core.int>? addressSigMlDsa,
+    $core.List<$core.int>? neighbours,
   }) {
     final $result = create();
     if (nodeId != null) {
@@ -1281,6 +1296,18 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     if (mlKemPublicKey != null) {
       $result.mlKemPublicKey = mlKemPublicKey;
     }
+    if (address != null) {
+      $result.address = address;
+    }
+    if (addressSigEd25519 != null) {
+      $result.addressSigEd25519 = addressSigEd25519;
+    }
+    if (addressSigMlDsa != null) {
+      $result.addressSigMlDsa = addressSigMlDsa;
+    }
+    if (neighbours != null) {
+      $result.neighbours = neighbours;
+    }
     return $result;
   }
   GroupMemberV3._() : super();
@@ -1294,6 +1321,10 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'ed25519PublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'x25519PublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'mlKemPublicKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'address', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'addressSigEd25519', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'addressSigMlDsa', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'neighbours', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -1371,6 +1402,179 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
   $core.bool hasMlKemPublicKey() => $_has(5);
   @$pb.TagNumber(6)
   void clearMlKemPublicKey() => clearField(6);
+
+  /// B-3 (§16.2.2): the member's address as the member itself signed it on
+  /// joining — all four public keys, key state, rotation chain (mycelium
+  /// `group_member.dart`). Full entries travel only for members new to the
+  /// receiver; empty otherwise.
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get address => $_getN(6);
+  @$pb.TagNumber(7)
+  set address($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasAddress() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearAddress() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get addressSigEd25519 => $_getN(7);
+  @$pb.TagNumber(8)
+  set addressSigEd25519($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasAddressSigEd25519() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearAddressSigEd25519() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get addressSigMlDsa => $_getN(8);
+  @$pb.TagNumber(9)
+  set addressSigMlDsa($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasAddressSigMlDsa() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearAddressSigMlDsa() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get neighbours => $_getN(9);
+  @$pb.TagNumber(10)
+  set neighbours($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasNeighbours() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearNeighbours() => clearField(10);
+}
+
+/// B-3 (§4.3): the pair secret seed of the receiver with one co-member.
+class GroupPairSeed extends $pb.GeneratedMessage {
+  factory GroupPairSeed({
+    $core.List<$core.int>? memberId,
+    $core.List<$core.int>? seed,
+  }) {
+    final $result = create();
+    if (memberId != null) {
+      $result.memberId = memberId;
+    }
+    if (seed != null) {
+      $result.seed = seed;
+    }
+    return $result;
+  }
+  GroupPairSeed._() : super();
+  factory GroupPairSeed.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupPairSeed.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupPairSeed', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'memberId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'seed', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupPairSeed clone() => GroupPairSeed()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupPairSeed copyWith(void Function(GroupPairSeed) updates) => super.copyWith((message) => updates(message as GroupPairSeed)) as GroupPairSeed;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupPairSeed create() => GroupPairSeed._();
+  GroupPairSeed createEmptyInstance() => create();
+  static $pb.PbList<GroupPairSeed> createRepeated() => $pb.PbList<GroupPairSeed>();
+  @$core.pragma('dart2js:noInline')
+  static GroupPairSeed getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupPairSeed>(create);
+  static GroupPairSeed? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get memberId => $_getN(0);
+  @$pb.TagNumber(1)
+  set memberId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasMemberId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearMemberId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get seed => $_getN(1);
+  @$pb.TagNumber(2)
+  set seed($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSeed() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSeed() => clearField(2);
+}
+
+/// B-3 (§16.2.2): the explicit join — the joiner's own, self-signed entry,
+/// to the member who invited it.
+class GroupJoin extends $pb.GeneratedMessage {
+  factory GroupJoin({
+    $core.List<$core.int>? groupId,
+    GroupMemberV3? member,
+  }) {
+    final $result = create();
+    if (groupId != null) {
+      $result.groupId = groupId;
+    }
+    if (member != null) {
+      $result.member = member;
+    }
+    return $result;
+  }
+  GroupJoin._() : super();
+  factory GroupJoin.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupJoin.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupJoin', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
+    ..aOM<GroupMemberV3>(2, _omitFieldNames ? '' : 'member', subBuilder: GroupMemberV3.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupJoin clone() => GroupJoin()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupJoin copyWith(void Function(GroupJoin) updates) => super.copyWith((message) => updates(message as GroupJoin)) as GroupJoin;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupJoin create() => GroupJoin._();
+  GroupJoin createEmptyInstance() => create();
+  static $pb.PbList<GroupJoin> createRepeated() => $pb.PbList<GroupJoin>();
+  @$core.pragma('dart2js:noInline')
+  static GroupJoin getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupJoin>(create);
+  static GroupJoin? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get groupId => $_getN(0);
+  @$pb.TagNumber(1)
+  set groupId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasGroupId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGroupId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  GroupMemberV3 get member => $_getN(1);
+  @$pb.TagNumber(2)
+  set member(GroupMemberV3 v) { setField(2, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMember() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMember() => clearField(2);
+  @$pb.TagNumber(2)
+  GroupMemberV3 ensureMember() => $_ensure(1);
 }
 
 /// GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
@@ -2433,1011 +2637,6 @@ class IdentityDeletedNotification extends $pb.GeneratedMessage {
   void clearDisplayName() => clearField(3);
 }
 
-class RestoreBroadcast extends $pb.GeneratedMessage {
-  factory RestoreBroadcast({
-    $core.List<$core.int>? oldNodeId,
-    $core.List<$core.int>? newNodeId,
-    $core.List<$core.int>? newEd25519Pk,
-    $core.List<$core.int>? newX25519Pk,
-    $core.List<$core.int>? newMlKemPk,
-    $core.List<$core.int>? newMlDsaPk,
-    $core.String? displayName,
-    $fixnum.Int64? timestamp,
-    $core.List<$core.int>? signature,
-    $core.List<$core.int>? signatureMlDsa,
-  }) {
-    final $result = create();
-    if (oldNodeId != null) {
-      $result.oldNodeId = oldNodeId;
-    }
-    if (newNodeId != null) {
-      $result.newNodeId = newNodeId;
-    }
-    if (newEd25519Pk != null) {
-      $result.newEd25519Pk = newEd25519Pk;
-    }
-    if (newX25519Pk != null) {
-      $result.newX25519Pk = newX25519Pk;
-    }
-    if (newMlKemPk != null) {
-      $result.newMlKemPk = newMlKemPk;
-    }
-    if (newMlDsaPk != null) {
-      $result.newMlDsaPk = newMlDsaPk;
-    }
-    if (displayName != null) {
-      $result.displayName = displayName;
-    }
-    if (timestamp != null) {
-      $result.timestamp = timestamp;
-    }
-    if (signature != null) {
-      $result.signature = signature;
-    }
-    if (signatureMlDsa != null) {
-      $result.signatureMlDsa = signatureMlDsa;
-    }
-    return $result;
-  }
-  RestoreBroadcast._() : super();
-  factory RestoreBroadcast.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreBroadcast.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreBroadcast', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'oldNodeId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newNodeId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'newEd25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'newX25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
-    ..aOS(7, _omitFieldNames ? '' : 'displayName')
-    ..a<$fixnum.Int64>(8, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
-    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'signature', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'signatureMlDsa', $pb.PbFieldType.OY)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreBroadcast clone() => RestoreBroadcast()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreBroadcast copyWith(void Function(RestoreBroadcast) updates) => super.copyWith((message) => updates(message as RestoreBroadcast)) as RestoreBroadcast;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreBroadcast create() => RestoreBroadcast._();
-  RestoreBroadcast createEmptyInstance() => create();
-  static $pb.PbList<RestoreBroadcast> createRepeated() => $pb.PbList<RestoreBroadcast>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreBroadcast getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreBroadcast>(create);
-  static RestoreBroadcast? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get oldNodeId => $_getN(0);
-  @$pb.TagNumber(1)
-  set oldNodeId($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasOldNodeId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearOldNodeId() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.List<$core.int> get newNodeId => $_getN(1);
-  @$pb.TagNumber(2)
-  set newNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasNewNodeId() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearNewNodeId() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.List<$core.int> get newEd25519Pk => $_getN(2);
-  @$pb.TagNumber(3)
-  set newEd25519Pk($core.List<$core.int> v) { $_setBytes(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasNewEd25519Pk() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearNewEd25519Pk() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.List<$core.int> get newX25519Pk => $_getN(3);
-  @$pb.TagNumber(4)
-  set newX25519Pk($core.List<$core.int> v) { $_setBytes(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasNewX25519Pk() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearNewX25519Pk() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<$core.int> get newMlKemPk => $_getN(4);
-  @$pb.TagNumber(5)
-  set newMlKemPk($core.List<$core.int> v) { $_setBytes(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasNewMlKemPk() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearNewMlKemPk() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get newMlDsaPk => $_getN(5);
-  @$pb.TagNumber(6)
-  set newMlDsaPk($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasNewMlDsaPk() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearNewMlDsaPk() => clearField(6);
-
-  @$pb.TagNumber(7)
-  $core.String get displayName => $_getSZ(6);
-  @$pb.TagNumber(7)
-  set displayName($core.String v) { $_setString(6, v); }
-  @$pb.TagNumber(7)
-  $core.bool hasDisplayName() => $_has(6);
-  @$pb.TagNumber(7)
-  void clearDisplayName() => clearField(7);
-
-  @$pb.TagNumber(8)
-  $fixnum.Int64 get timestamp => $_getI64(7);
-  @$pb.TagNumber(8)
-  set timestamp($fixnum.Int64 v) { $_setInt64(7, v); }
-  @$pb.TagNumber(8)
-  $core.bool hasTimestamp() => $_has(7);
-  @$pb.TagNumber(8)
-  void clearTimestamp() => clearField(8);
-
-  @$pb.TagNumber(9)
-  $core.List<$core.int> get signature => $_getN(8);
-  @$pb.TagNumber(9)
-  set signature($core.List<$core.int> v) { $_setBytes(8, v); }
-  @$pb.TagNumber(9)
-  $core.bool hasSignature() => $_has(8);
-  @$pb.TagNumber(9)
-  void clearSignature() => clearField(9);
-
-  @$pb.TagNumber(10)
-  $core.List<$core.int> get signatureMlDsa => $_getN(9);
-  @$pb.TagNumber(10)
-  set signatureMlDsa($core.List<$core.int> v) { $_setBytes(9, v); }
-  @$pb.TagNumber(10)
-  $core.bool hasSignatureMlDsa() => $_has(9);
-  @$pb.TagNumber(10)
-  void clearSignatureMlDsa() => clearField(10);
-}
-
-class RestoreResponse extends $pb.GeneratedMessage {
-  factory RestoreResponse({
-    $core.int? phase,
-    $core.Iterable<ContactEntry>? contacts,
-    $core.Iterable<StoredMessage>? messages,
-    $core.Iterable<RestoreGroupInfo>? groups,
-    $core.Iterable<RestoreChannelInfo>? channels,
-  }) {
-    final $result = create();
-    if (phase != null) {
-      $result.phase = phase;
-    }
-    if (contacts != null) {
-      $result.contacts.addAll(contacts);
-    }
-    if (messages != null) {
-      $result.messages.addAll(messages);
-    }
-    if (groups != null) {
-      $result.groups.addAll(groups);
-    }
-    if (channels != null) {
-      $result.channels.addAll(channels);
-    }
-    return $result;
-  }
-  RestoreResponse._() : super();
-  factory RestoreResponse.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreResponse.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreResponse', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.int>(1, _omitFieldNames ? '' : 'phase', $pb.PbFieldType.OU3)
-    ..pc<ContactEntry>(2, _omitFieldNames ? '' : 'contacts', $pb.PbFieldType.PM, subBuilder: ContactEntry.create)
-    ..pc<StoredMessage>(3, _omitFieldNames ? '' : 'messages', $pb.PbFieldType.PM, subBuilder: StoredMessage.create)
-    ..pc<RestoreGroupInfo>(4, _omitFieldNames ? '' : 'groups', $pb.PbFieldType.PM, subBuilder: RestoreGroupInfo.create)
-    ..pc<RestoreChannelInfo>(5, _omitFieldNames ? '' : 'channels', $pb.PbFieldType.PM, subBuilder: RestoreChannelInfo.create)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreResponse clone() => RestoreResponse()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreResponse copyWith(void Function(RestoreResponse) updates) => super.copyWith((message) => updates(message as RestoreResponse)) as RestoreResponse;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreResponse create() => RestoreResponse._();
-  RestoreResponse createEmptyInstance() => create();
-  static $pb.PbList<RestoreResponse> createRepeated() => $pb.PbList<RestoreResponse>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreResponse getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreResponse>(create);
-  static RestoreResponse? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.int get phase => $_getIZ(0);
-  @$pb.TagNumber(1)
-  set phase($core.int v) { $_setUnsignedInt32(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasPhase() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearPhase() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.List<ContactEntry> get contacts => $_getList(1);
-
-  @$pb.TagNumber(3)
-  $core.List<StoredMessage> get messages => $_getList(2);
-
-  @$pb.TagNumber(4)
-  $core.List<RestoreGroupInfo> get groups => $_getList(3);
-
-  @$pb.TagNumber(5)
-  $core.List<RestoreChannelInfo> get channels => $_getList(4);
-}
-
-class RestoreGroupInfo extends $pb.GeneratedMessage {
-  factory RestoreGroupInfo({
-    $core.List<$core.int>? groupId,
-    $core.String? name,
-    $core.String? description,
-    $core.String? ownerNodeIdHex,
-    $core.Iterable<RestoreGroupMember>? members,
-  }) {
-    final $result = create();
-    if (groupId != null) {
-      $result.groupId = groupId;
-    }
-    if (name != null) {
-      $result.name = name;
-    }
-    if (description != null) {
-      $result.description = description;
-    }
-    if (ownerNodeIdHex != null) {
-      $result.ownerNodeIdHex = ownerNodeIdHex;
-    }
-    if (members != null) {
-      $result.members.addAll(members);
-    }
-    return $result;
-  }
-  RestoreGroupInfo._() : super();
-  factory RestoreGroupInfo.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreGroupInfo.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreGroupInfo', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
-    ..aOS(2, _omitFieldNames ? '' : 'name')
-    ..aOS(3, _omitFieldNames ? '' : 'description')
-    ..aOS(4, _omitFieldNames ? '' : 'ownerNodeIdHex')
-    ..pc<RestoreGroupMember>(5, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: RestoreGroupMember.create)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreGroupInfo clone() => RestoreGroupInfo()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreGroupInfo copyWith(void Function(RestoreGroupInfo) updates) => super.copyWith((message) => updates(message as RestoreGroupInfo)) as RestoreGroupInfo;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreGroupInfo create() => RestoreGroupInfo._();
-  RestoreGroupInfo createEmptyInstance() => create();
-  static $pb.PbList<RestoreGroupInfo> createRepeated() => $pb.PbList<RestoreGroupInfo>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreGroupInfo getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreGroupInfo>(create);
-  static RestoreGroupInfo? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get groupId => $_getN(0);
-  @$pb.TagNumber(1)
-  set groupId($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasGroupId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearGroupId() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get name => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set name($core.String v) { $_setString(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasName() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearName() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get description => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set description($core.String v) { $_setString(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasDescription() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearDescription() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.String get ownerNodeIdHex => $_getSZ(3);
-  @$pb.TagNumber(4)
-  set ownerNodeIdHex($core.String v) { $_setString(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasOwnerNodeIdHex() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearOwnerNodeIdHex() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<RestoreGroupMember> get members => $_getList(4);
-}
-
-class RestoreGroupMember extends $pb.GeneratedMessage {
-  factory RestoreGroupMember({
-    $core.String? nodeIdHex,
-    $core.String? displayName,
-    $core.String? role,
-    $core.List<$core.int>? ed25519Pk,
-    $core.List<$core.int>? x25519Pk,
-    $core.List<$core.int>? mlKemPk,
-  }) {
-    final $result = create();
-    if (nodeIdHex != null) {
-      $result.nodeIdHex = nodeIdHex;
-    }
-    if (displayName != null) {
-      $result.displayName = displayName;
-    }
-    if (role != null) {
-      $result.role = role;
-    }
-    if (ed25519Pk != null) {
-      $result.ed25519Pk = ed25519Pk;
-    }
-    if (x25519Pk != null) {
-      $result.x25519Pk = x25519Pk;
-    }
-    if (mlKemPk != null) {
-      $result.mlKemPk = mlKemPk;
-    }
-    return $result;
-  }
-  RestoreGroupMember._() : super();
-  factory RestoreGroupMember.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreGroupMember.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreGroupMember', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'nodeIdHex')
-    ..aOS(2, _omitFieldNames ? '' : 'displayName')
-    ..aOS(3, _omitFieldNames ? '' : 'role')
-    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'ed25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'x25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'mlKemPk', $pb.PbFieldType.OY)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreGroupMember clone() => RestoreGroupMember()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreGroupMember copyWith(void Function(RestoreGroupMember) updates) => super.copyWith((message) => updates(message as RestoreGroupMember)) as RestoreGroupMember;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreGroupMember create() => RestoreGroupMember._();
-  RestoreGroupMember createEmptyInstance() => create();
-  static $pb.PbList<RestoreGroupMember> createRepeated() => $pb.PbList<RestoreGroupMember>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreGroupMember getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreGroupMember>(create);
-  static RestoreGroupMember? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.String get nodeIdHex => $_getSZ(0);
-  @$pb.TagNumber(1)
-  set nodeIdHex($core.String v) { $_setString(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasNodeIdHex() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearNodeIdHex() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get displayName => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set displayName($core.String v) { $_setString(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasDisplayName() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearDisplayName() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get role => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set role($core.String v) { $_setString(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasRole() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearRole() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.List<$core.int> get ed25519Pk => $_getN(3);
-  @$pb.TagNumber(4)
-  set ed25519Pk($core.List<$core.int> v) { $_setBytes(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasEd25519Pk() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearEd25519Pk() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<$core.int> get x25519Pk => $_getN(4);
-  @$pb.TagNumber(5)
-  set x25519Pk($core.List<$core.int> v) { $_setBytes(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasX25519Pk() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearX25519Pk() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get mlKemPk => $_getN(5);
-  @$pb.TagNumber(6)
-  set mlKemPk($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasMlKemPk() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearMlKemPk() => clearField(6);
-}
-
-class RestoreChannelInfo extends $pb.GeneratedMessage {
-  factory RestoreChannelInfo({
-    $core.List<$core.int>? channelId,
-    $core.String? name,
-    $core.String? description,
-    $core.String? ownerNodeIdHex,
-    $core.Iterable<RestoreChannelMember>? members,
-    $core.bool? isAdult,
-  }) {
-    final $result = create();
-    if (channelId != null) {
-      $result.channelId = channelId;
-    }
-    if (name != null) {
-      $result.name = name;
-    }
-    if (description != null) {
-      $result.description = description;
-    }
-    if (ownerNodeIdHex != null) {
-      $result.ownerNodeIdHex = ownerNodeIdHex;
-    }
-    if (members != null) {
-      $result.members.addAll(members);
-    }
-    if (isAdult != null) {
-      $result.isAdult = isAdult;
-    }
-    return $result;
-  }
-  RestoreChannelInfo._() : super();
-  factory RestoreChannelInfo.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreChannelInfo.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreChannelInfo', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
-    ..aOS(2, _omitFieldNames ? '' : 'name')
-    ..aOS(3, _omitFieldNames ? '' : 'description')
-    ..aOS(4, _omitFieldNames ? '' : 'ownerNodeIdHex')
-    ..pc<RestoreChannelMember>(5, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: RestoreChannelMember.create)
-    ..aOB(6, _omitFieldNames ? '' : 'isAdult')
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreChannelInfo clone() => RestoreChannelInfo()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreChannelInfo copyWith(void Function(RestoreChannelInfo) updates) => super.copyWith((message) => updates(message as RestoreChannelInfo)) as RestoreChannelInfo;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreChannelInfo create() => RestoreChannelInfo._();
-  RestoreChannelInfo createEmptyInstance() => create();
-  static $pb.PbList<RestoreChannelInfo> createRepeated() => $pb.PbList<RestoreChannelInfo>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreChannelInfo getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreChannelInfo>(create);
-  static RestoreChannelInfo? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get channelId => $_getN(0);
-  @$pb.TagNumber(1)
-  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasChannelId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearChannelId() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get name => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set name($core.String v) { $_setString(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasName() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearName() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get description => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set description($core.String v) { $_setString(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasDescription() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearDescription() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.String get ownerNodeIdHex => $_getSZ(3);
-  @$pb.TagNumber(4)
-  set ownerNodeIdHex($core.String v) { $_setString(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasOwnerNodeIdHex() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearOwnerNodeIdHex() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<RestoreChannelMember> get members => $_getList(4);
-
-  /// NSFW rating. Without this field the restore path could not carry the flag
-  /// at all, so a recovered channel always fell back to the ChannelInfo
-  /// constructor default. Per architecture §9.2.2 a channel marked not safe for
-  /// minors is invisible to identities without the isAdult flag, so losing the
-  /// flag on recovery would expose an adult channel to exactly those users.
-  /// Field 6 is additive: old senders leave it unset and new readers see the
-  /// protobuf default false, which is the pre-existing behaviour.
-  @$pb.TagNumber(6)
-  $core.bool get isAdult => $_getBF(5);
-  @$pb.TagNumber(6)
-  set isAdult($core.bool v) { $_setBool(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasIsAdult() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearIsAdult() => clearField(6);
-}
-
-class RestoreChannelMember extends $pb.GeneratedMessage {
-  factory RestoreChannelMember({
-    $core.String? nodeIdHex,
-    $core.String? displayName,
-    $core.String? role,
-    $core.List<$core.int>? ed25519Pk,
-    $core.List<$core.int>? x25519Pk,
-    $core.List<$core.int>? mlKemPk,
-  }) {
-    final $result = create();
-    if (nodeIdHex != null) {
-      $result.nodeIdHex = nodeIdHex;
-    }
-    if (displayName != null) {
-      $result.displayName = displayName;
-    }
-    if (role != null) {
-      $result.role = role;
-    }
-    if (ed25519Pk != null) {
-      $result.ed25519Pk = ed25519Pk;
-    }
-    if (x25519Pk != null) {
-      $result.x25519Pk = x25519Pk;
-    }
-    if (mlKemPk != null) {
-      $result.mlKemPk = mlKemPk;
-    }
-    return $result;
-  }
-  RestoreChannelMember._() : super();
-  factory RestoreChannelMember.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory RestoreChannelMember.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RestoreChannelMember', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'nodeIdHex')
-    ..aOS(2, _omitFieldNames ? '' : 'displayName')
-    ..aOS(3, _omitFieldNames ? '' : 'role')
-    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'ed25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'x25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'mlKemPk', $pb.PbFieldType.OY)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  RestoreChannelMember clone() => RestoreChannelMember()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  RestoreChannelMember copyWith(void Function(RestoreChannelMember) updates) => super.copyWith((message) => updates(message as RestoreChannelMember)) as RestoreChannelMember;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static RestoreChannelMember create() => RestoreChannelMember._();
-  RestoreChannelMember createEmptyInstance() => create();
-  static $pb.PbList<RestoreChannelMember> createRepeated() => $pb.PbList<RestoreChannelMember>();
-  @$core.pragma('dart2js:noInline')
-  static RestoreChannelMember getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RestoreChannelMember>(create);
-  static RestoreChannelMember? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.String get nodeIdHex => $_getSZ(0);
-  @$pb.TagNumber(1)
-  set nodeIdHex($core.String v) { $_setString(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasNodeIdHex() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearNodeIdHex() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get displayName => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set displayName($core.String v) { $_setString(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasDisplayName() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearDisplayName() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get role => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set role($core.String v) { $_setString(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasRole() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearRole() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.List<$core.int> get ed25519Pk => $_getN(3);
-  @$pb.TagNumber(4)
-  set ed25519Pk($core.List<$core.int> v) { $_setBytes(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasEd25519Pk() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearEd25519Pk() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<$core.int> get x25519Pk => $_getN(4);
-  @$pb.TagNumber(5)
-  set x25519Pk($core.List<$core.int> v) { $_setBytes(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasX25519Pk() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearX25519Pk() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get mlKemPk => $_getN(5);
-  @$pb.TagNumber(6)
-  set mlKemPk($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasMlKemPk() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearMlKemPk() => clearField(6);
-}
-
-class ContactEntry extends $pb.GeneratedMessage {
-  factory ContactEntry({
-    $core.List<$core.int>? nodeId,
-    $core.String? displayName,
-    $core.List<$core.int>? ed25519Pk,
-    $core.List<$core.int>? x25519Pk,
-    $core.List<$core.int>? mlKemPk,
-    $core.List<$core.int>? mlDsaPk,
-    $core.List<$core.int>? profilePicture,
-    $core.String? description,
-  }) {
-    final $result = create();
-    if (nodeId != null) {
-      $result.nodeId = nodeId;
-    }
-    if (displayName != null) {
-      $result.displayName = displayName;
-    }
-    if (ed25519Pk != null) {
-      $result.ed25519Pk = ed25519Pk;
-    }
-    if (x25519Pk != null) {
-      $result.x25519Pk = x25519Pk;
-    }
-    if (mlKemPk != null) {
-      $result.mlKemPk = mlKemPk;
-    }
-    if (mlDsaPk != null) {
-      $result.mlDsaPk = mlDsaPk;
-    }
-    if (profilePicture != null) {
-      $result.profilePicture = profilePicture;
-    }
-    if (description != null) {
-      $result.description = description;
-    }
-    return $result;
-  }
-  ContactEntry._() : super();
-  factory ContactEntry.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory ContactEntry.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ContactEntry', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'nodeId', $pb.PbFieldType.OY)
-    ..aOS(2, _omitFieldNames ? '' : 'displayName')
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'ed25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'x25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'mlKemPk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'mlDsaPk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'profilePicture', $pb.PbFieldType.OY)
-    ..aOS(8, _omitFieldNames ? '' : 'description')
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  ContactEntry clone() => ContactEntry()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  ContactEntry copyWith(void Function(ContactEntry) updates) => super.copyWith((message) => updates(message as ContactEntry)) as ContactEntry;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static ContactEntry create() => ContactEntry._();
-  ContactEntry createEmptyInstance() => create();
-  static $pb.PbList<ContactEntry> createRepeated() => $pb.PbList<ContactEntry>();
-  @$core.pragma('dart2js:noInline')
-  static ContactEntry getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ContactEntry>(create);
-  static ContactEntry? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get nodeId => $_getN(0);
-  @$pb.TagNumber(1)
-  set nodeId($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasNodeId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearNodeId() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get displayName => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set displayName($core.String v) { $_setString(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasDisplayName() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearDisplayName() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.List<$core.int> get ed25519Pk => $_getN(2);
-  @$pb.TagNumber(3)
-  set ed25519Pk($core.List<$core.int> v) { $_setBytes(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasEd25519Pk() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearEd25519Pk() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.List<$core.int> get x25519Pk => $_getN(3);
-  @$pb.TagNumber(4)
-  set x25519Pk($core.List<$core.int> v) { $_setBytes(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasX25519Pk() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearX25519Pk() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.List<$core.int> get mlKemPk => $_getN(4);
-  @$pb.TagNumber(5)
-  set mlKemPk($core.List<$core.int> v) { $_setBytes(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasMlKemPk() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearMlKemPk() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get mlDsaPk => $_getN(5);
-  @$pb.TagNumber(6)
-  set mlDsaPk($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasMlDsaPk() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearMlDsaPk() => clearField(6);
-
-  @$pb.TagNumber(7)
-  $core.List<$core.int> get profilePicture => $_getN(6);
-  @$pb.TagNumber(7)
-  set profilePicture($core.List<$core.int> v) { $_setBytes(6, v); }
-  @$pb.TagNumber(7)
-  $core.bool hasProfilePicture() => $_has(6);
-  @$pb.TagNumber(7)
-  void clearProfilePicture() => clearField(7);
-
-  @$pb.TagNumber(8)
-  $core.String get description => $_getSZ(7);
-  @$pb.TagNumber(8)
-  set description($core.String v) { $_setString(7, v); }
-  @$pb.TagNumber(8)
-  $core.bool hasDescription() => $_has(7);
-  @$pb.TagNumber(8)
-  void clearDescription() => clearField(8);
-}
-
-class StoredMessage extends $pb.GeneratedMessage {
-  factory StoredMessage({
-    $core.List<$core.int>? messageId,
-    $core.List<$core.int>? senderId,
-    $core.List<$core.int>? recipientId,
-    $core.String? conversationId,
-    $fixnum.Int64? timestamp,
-    $core.int? uiMessageType,
-    $core.List<$core.int>? payload,
-  }) {
-    final $result = create();
-    if (messageId != null) {
-      $result.messageId = messageId;
-    }
-    if (senderId != null) {
-      $result.senderId = senderId;
-    }
-    if (recipientId != null) {
-      $result.recipientId = recipientId;
-    }
-    if (conversationId != null) {
-      $result.conversationId = conversationId;
-    }
-    if (timestamp != null) {
-      $result.timestamp = timestamp;
-    }
-    if (uiMessageType != null) {
-      $result.uiMessageType = uiMessageType;
-    }
-    if (payload != null) {
-      $result.payload = payload;
-    }
-    return $result;
-  }
-  StoredMessage._() : super();
-  factory StoredMessage.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory StoredMessage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'StoredMessage', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'recipientId', $pb.PbFieldType.OY)
-    ..aOS(4, _omitFieldNames ? '' : 'conversationId')
-    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
-    ..a<$core.int>(6, _omitFieldNames ? '' : 'uiMessageType', $pb.PbFieldType.O3)
-    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  StoredMessage clone() => StoredMessage()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  StoredMessage copyWith(void Function(StoredMessage) updates) => super.copyWith((message) => updates(message as StoredMessage)) as StoredMessage;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static StoredMessage create() => StoredMessage._();
-  StoredMessage createEmptyInstance() => create();
-  static $pb.PbList<StoredMessage> createRepeated() => $pb.PbList<StoredMessage>();
-  @$core.pragma('dart2js:noInline')
-  static StoredMessage getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<StoredMessage>(create);
-  static StoredMessage? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get messageId => $_getN(0);
-  @$pb.TagNumber(1)
-  set messageId($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasMessageId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearMessageId() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.List<$core.int> get senderId => $_getN(1);
-  @$pb.TagNumber(2)
-  set senderId($core.List<$core.int> v) { $_setBytes(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasSenderId() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearSenderId() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.List<$core.int> get recipientId => $_getN(2);
-  @$pb.TagNumber(3)
-  set recipientId($core.List<$core.int> v) { $_setBytes(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasRecipientId() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearRecipientId() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.String get conversationId => $_getSZ(3);
-  @$pb.TagNumber(4)
-  set conversationId($core.String v) { $_setString(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasConversationId() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearConversationId() => clearField(4);
-
-  @$pb.TagNumber(5)
-  $fixnum.Int64 get timestamp => $_getI64(4);
-  @$pb.TagNumber(5)
-  set timestamp($fixnum.Int64 v) { $_setInt64(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasTimestamp() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearTimestamp() => clearField(5);
-
-  /// V3 (2026-05-05 Wave 7): UI-tag carrying `UiMessageType.wireValue` (sequential
-  /// 0..N, see lib/core/service/service_types.dart). Detached from the V2
-  /// `MessageType` wire enum so RESTORE_RESPONSE no longer drags V2-numbering
-  /// into the inner-frame payload.
-  @$pb.TagNumber(6)
-  $core.int get uiMessageType => $_getIZ(5);
-  @$pb.TagNumber(6)
-  set uiMessageType($core.int v) { $_setSignedInt32(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasUiMessageType() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearUiMessageType() => clearField(6);
-
-  @$pb.TagNumber(7)
-  $core.List<$core.int> get payload => $_getN(6);
-  @$pb.TagNumber(7)
-  set payload($core.List<$core.int> v) { $_setBytes(6, v); }
-  @$pb.TagNumber(7)
-  $core.bool hasPayload() => $_has(6);
-  @$pb.TagNumber(7)
-  void clearPayload() => clearField(7);
-}
-
 class CallInvite extends $pb.GeneratedMessage {
   factory CallInvite({
     $core.List<$core.int>? callId,
@@ -4429,6 +3628,7 @@ class KeyRotation extends $pb.GeneratedMessage {
     $core.List<$core.int>? newMlKemPk,
     $fixnum.Int64? rotationTimestamp,
     $core.List<$core.int>? signature,
+    KeyRotationMode? mode,
   }) {
     final $result = create();
     if (newX25519Pk != null) {
@@ -4443,6 +3643,9 @@ class KeyRotation extends $pb.GeneratedMessage {
     if (signature != null) {
       $result.signature = signature;
     }
+    if (mode != null) {
+      $result.mode = mode;
+    }
     return $result;
   }
   KeyRotation._() : super();
@@ -4454,6 +3657,7 @@ class KeyRotation extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'rotationTimestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'signature', $pb.PbFieldType.OY)
+    ..e<KeyRotationMode>(9, _omitFieldNames ? '' : 'mode', $pb.PbFieldType.OE, defaultOrMaker: KeyRotationMode.KEY_ROTATION_MODE_UNSPECIFIED, valueOf: KeyRotationMode.valueOf, enumValues: KeyRotationMode.values)
     ..hasRequiredFields = false
   ;
 
@@ -4513,6 +3717,16 @@ class KeyRotation extends $pb.GeneratedMessage {
   $core.bool hasSignature() => $_has(3);
   @$pb.TagNumber(4)
   void clearSignature() => clearField(4);
+
+  /// Same number as `KeyRotationBroadcast.mode` — see `KeyRotationMode`.
+  @$pb.TagNumber(9)
+  KeyRotationMode get mode => $_getN(4);
+  @$pb.TagNumber(9)
+  set mode(KeyRotationMode v) { setField(9, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasMode() => $_has(4);
+  @$pb.TagNumber(9)
+  void clearMode() => clearField(9);
 }
 
 class ChannelJoinRequest extends $pb.GeneratedMessage {
@@ -8789,6 +8003,1370 @@ class VoicePayload extends $pb.GeneratedMessage {
   void clearTranscriptConfidence() => clearField(4);
 }
 
+/// The payload of a Type-20 TwinSyncEnvelope. §1.3: compressed before the
+/// seal where zstd-3 gains at least 10 % (the rule of §4.5.3).
+class ReconcilePacket extends $pb.GeneratedMessage {
+  factory ReconcilePacket({
+    $core.int? codec,
+    $core.List<$core.int>? body,
+  }) {
+    final $result = create();
+    if (codec != null) {
+      $result.codec = codec;
+    }
+    if (body != null) {
+      $result.body = body;
+    }
+    return $result;
+  }
+  ReconcilePacket._() : super();
+  factory ReconcilePacket.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcilePacket.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcilePacket', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'codec', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'body', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcilePacket clone() => ReconcilePacket()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcilePacket copyWith(void Function(ReconcilePacket) updates) => super.copyWith((message) => updates(message as ReconcilePacket)) as ReconcilePacket;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcilePacket create() => ReconcilePacket._();
+  ReconcilePacket createEmptyInstance() => create();
+  static $pb.PbList<ReconcilePacket> createRepeated() => $pb.PbList<ReconcilePacket>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcilePacket getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcilePacket>(create);
+  static ReconcilePacket? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get codec => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set codec($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCodec() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCodec() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get body => $_getN(1);
+  @$pb.TagNumber(2)
+  set body($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasBody() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearBody() => clearField(2);
+}
+
+enum ReconcileFrame_Kind {
+  header, 
+  manifest, 
+  fetch, 
+  deliver, 
+  progress, 
+  cancel, 
+  notSet
+}
+
+class ReconcileFrame extends $pb.GeneratedMessage {
+  factory ReconcileFrame({
+    $core.List<$core.int>? reconcileId,
+    ReconcileHeader? header,
+    ReconcileManifest? manifest,
+    ReconcileFetch? fetch,
+    ReconcileDeliver? deliver,
+    ReconcileProgress? progress,
+    ReconcileCancel? cancel,
+  }) {
+    final $result = create();
+    if (reconcileId != null) {
+      $result.reconcileId = reconcileId;
+    }
+    if (header != null) {
+      $result.header = header;
+    }
+    if (manifest != null) {
+      $result.manifest = manifest;
+    }
+    if (fetch != null) {
+      $result.fetch = fetch;
+    }
+    if (deliver != null) {
+      $result.deliver = deliver;
+    }
+    if (progress != null) {
+      $result.progress = progress;
+    }
+    if (cancel != null) {
+      $result.cancel = cancel;
+    }
+    return $result;
+  }
+  ReconcileFrame._() : super();
+  factory ReconcileFrame.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileFrame.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static const $core.Map<$core.int, ReconcileFrame_Kind> _ReconcileFrame_KindByTag = {
+    2 : ReconcileFrame_Kind.header,
+    3 : ReconcileFrame_Kind.manifest,
+    4 : ReconcileFrame_Kind.fetch,
+    5 : ReconcileFrame_Kind.deliver,
+    6 : ReconcileFrame_Kind.progress,
+    7 : ReconcileFrame_Kind.cancel,
+    0 : ReconcileFrame_Kind.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileFrame', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..oo(0, [2, 3, 4, 5, 6, 7])
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'reconcileId', $pb.PbFieldType.OY)
+    ..aOM<ReconcileHeader>(2, _omitFieldNames ? '' : 'header', subBuilder: ReconcileHeader.create)
+    ..aOM<ReconcileManifest>(3, _omitFieldNames ? '' : 'manifest', subBuilder: ReconcileManifest.create)
+    ..aOM<ReconcileFetch>(4, _omitFieldNames ? '' : 'fetch', subBuilder: ReconcileFetch.create)
+    ..aOM<ReconcileDeliver>(5, _omitFieldNames ? '' : 'deliver', subBuilder: ReconcileDeliver.create)
+    ..aOM<ReconcileProgress>(6, _omitFieldNames ? '' : 'progress', subBuilder: ReconcileProgress.create)
+    ..aOM<ReconcileCancel>(7, _omitFieldNames ? '' : 'cancel', subBuilder: ReconcileCancel.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileFrame clone() => ReconcileFrame()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileFrame copyWith(void Function(ReconcileFrame) updates) => super.copyWith((message) => updates(message as ReconcileFrame)) as ReconcileFrame;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileFrame create() => ReconcileFrame._();
+  ReconcileFrame createEmptyInstance() => create();
+  static $pb.PbList<ReconcileFrame> createRepeated() => $pb.PbList<ReconcileFrame>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileFrame getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileFrame>(create);
+  static ReconcileFrame? _defaultInstance;
+
+  ReconcileFrame_Kind whichKind() => _ReconcileFrame_KindByTag[$_whichOneof(0)]!;
+  void clearKind() => clearField($_whichOneof(0));
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get reconcileId => $_getN(0);
+  @$pb.TagNumber(1)
+  set reconcileId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasReconcileId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearReconcileId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  ReconcileHeader get header => $_getN(1);
+  @$pb.TagNumber(2)
+  set header(ReconcileHeader v) { setField(2, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasHeader() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearHeader() => clearField(2);
+  @$pb.TagNumber(2)
+  ReconcileHeader ensureHeader() => $_ensure(1);
+
+  @$pb.TagNumber(3)
+  ReconcileManifest get manifest => $_getN(2);
+  @$pb.TagNumber(3)
+  set manifest(ReconcileManifest v) { setField(3, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasManifest() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearManifest() => clearField(3);
+  @$pb.TagNumber(3)
+  ReconcileManifest ensureManifest() => $_ensure(2);
+
+  @$pb.TagNumber(4)
+  ReconcileFetch get fetch => $_getN(3);
+  @$pb.TagNumber(4)
+  set fetch(ReconcileFetch v) { setField(4, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasFetch() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFetch() => clearField(4);
+  @$pb.TagNumber(4)
+  ReconcileFetch ensureFetch() => $_ensure(3);
+
+  @$pb.TagNumber(5)
+  ReconcileDeliver get deliver => $_getN(4);
+  @$pb.TagNumber(5)
+  set deliver(ReconcileDeliver v) { setField(5, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasDeliver() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDeliver() => clearField(5);
+  @$pb.TagNumber(5)
+  ReconcileDeliver ensureDeliver() => $_ensure(4);
+
+  @$pb.TagNumber(6)
+  ReconcileProgress get progress => $_getN(5);
+  @$pb.TagNumber(6)
+  set progress(ReconcileProgress v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasProgress() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearProgress() => clearField(6);
+  @$pb.TagNumber(6)
+  ReconcileProgress ensureProgress() => $_ensure(5);
+
+  @$pb.TagNumber(7)
+  ReconcileCancel get cancel => $_getN(6);
+  @$pb.TagNumber(7)
+  set cancel(ReconcileCancel v) { setField(7, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasCancel() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearCancel() => clearField(7);
+  @$pb.TagNumber(7)
+  ReconcileCancel ensureCancel() => $_ensure(6);
+}
+
+/// What the handover does not carry (§14.6.3): the conversation list with
+/// its per-chat configuration and, per conversation, the count and size of
+/// the history the source holds before the cut. Split into parts.
+class ReconcileHeader extends $pb.GeneratedMessage {
+  factory ReconcileHeader({
+    $fixnum.Int64? cutMs,
+    $core.int? part,
+    $core.int? parts,
+    $core.Iterable<ReconcileChat>? chats,
+  }) {
+    final $result = create();
+    if (cutMs != null) {
+      $result.cutMs = cutMs;
+    }
+    if (part != null) {
+      $result.part = part;
+    }
+    if (parts != null) {
+      $result.parts = parts;
+    }
+    if (chats != null) {
+      $result.chats.addAll(chats);
+    }
+    return $result;
+  }
+  ReconcileHeader._() : super();
+  factory ReconcileHeader.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileHeader.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileHeader', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aInt64(1, _omitFieldNames ? '' : 'cutMs')
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'part', $pb.PbFieldType.OU3)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'parts', $pb.PbFieldType.OU3)
+    ..pc<ReconcileChat>(4, _omitFieldNames ? '' : 'chats', $pb.PbFieldType.PM, subBuilder: ReconcileChat.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileHeader clone() => ReconcileHeader()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileHeader copyWith(void Function(ReconcileHeader) updates) => super.copyWith((message) => updates(message as ReconcileHeader)) as ReconcileHeader;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileHeader create() => ReconcileHeader._();
+  ReconcileHeader createEmptyInstance() => create();
+  static $pb.PbList<ReconcileHeader> createRepeated() => $pb.PbList<ReconcileHeader>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileHeader getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileHeader>(create);
+  static ReconcileHeader? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get cutMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set cutMs($fixnum.Int64 v) { $_setInt64(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCutMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCutMs() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get part => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set part($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasPart() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPart() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get parts => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set parts($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasParts() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearParts() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<ReconcileChat> get chats => $_getList(3);
+}
+
+class ReconcileChat extends $pb.GeneratedMessage {
+  factory ReconcileChat({
+    $core.List<$core.int>? convId,
+    $core.String? displayName,
+    $fixnum.Int64? lastActivityMs,
+    $core.bool? isGroup,
+    $core.bool? isChannel,
+    $core.bool? isFavorite,
+    $core.int? unreadCount,
+    $core.List<$core.int>? configJson,
+    $fixnum.Int64? count,
+    $fixnum.Int64? oldestMs,
+    $fixnum.Int64? bytes,
+  }) {
+    final $result = create();
+    if (convId != null) {
+      $result.convId = convId;
+    }
+    if (displayName != null) {
+      $result.displayName = displayName;
+    }
+    if (lastActivityMs != null) {
+      $result.lastActivityMs = lastActivityMs;
+    }
+    if (isGroup != null) {
+      $result.isGroup = isGroup;
+    }
+    if (isChannel != null) {
+      $result.isChannel = isChannel;
+    }
+    if (isFavorite != null) {
+      $result.isFavorite = isFavorite;
+    }
+    if (unreadCount != null) {
+      $result.unreadCount = unreadCount;
+    }
+    if (configJson != null) {
+      $result.configJson = configJson;
+    }
+    if (count != null) {
+      $result.count = count;
+    }
+    if (oldestMs != null) {
+      $result.oldestMs = oldestMs;
+    }
+    if (bytes != null) {
+      $result.bytes = bytes;
+    }
+    return $result;
+  }
+  ReconcileChat._() : super();
+  factory ReconcileChat.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileChat.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileChat', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'convId', $pb.PbFieldType.OY)
+    ..aOS(2, _omitFieldNames ? '' : 'displayName')
+    ..aInt64(3, _omitFieldNames ? '' : 'lastActivityMs')
+    ..aOB(4, _omitFieldNames ? '' : 'isGroup')
+    ..aOB(5, _omitFieldNames ? '' : 'isChannel')
+    ..aOB(6, _omitFieldNames ? '' : 'isFavorite')
+    ..a<$core.int>(7, _omitFieldNames ? '' : 'unreadCount', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'configJson', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(9, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aInt64(10, _omitFieldNames ? '' : 'oldestMs')
+    ..a<$fixnum.Int64>(11, _omitFieldNames ? '' : 'bytes', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileChat clone() => ReconcileChat()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileChat copyWith(void Function(ReconcileChat) updates) => super.copyWith((message) => updates(message as ReconcileChat)) as ReconcileChat;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileChat create() => ReconcileChat._();
+  ReconcileChat createEmptyInstance() => create();
+  static $pb.PbList<ReconcileChat> createRepeated() => $pb.PbList<ReconcileChat>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileChat getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileChat>(create);
+  static ReconcileChat? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get convId => $_getN(0);
+  @$pb.TagNumber(1)
+  set convId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasConvId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConvId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get displayName => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set displayName($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDisplayName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDisplayName() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get lastActivityMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set lastActivityMs($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasLastActivityMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLastActivityMs() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get isGroup => $_getBF(3);
+  @$pb.TagNumber(4)
+  set isGroup($core.bool v) { $_setBool(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasIsGroup() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearIsGroup() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get isChannel => $_getBF(4);
+  @$pb.TagNumber(5)
+  set isChannel($core.bool v) { $_setBool(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasIsChannel() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearIsChannel() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.bool get isFavorite => $_getBF(5);
+  @$pb.TagNumber(6)
+  set isFavorite($core.bool v) { $_setBool(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasIsFavorite() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearIsFavorite() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.int get unreadCount => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set unreadCount($core.int v) { $_setUnsignedInt32(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasUnreadCount() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearUnreadCount() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get configJson => $_getN(7);
+  @$pb.TagNumber(8)
+  set configJson($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasConfigJson() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearConfigJson() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $fixnum.Int64 get count => $_getI64(8);
+  @$pb.TagNumber(9)
+  set count($fixnum.Int64 v) { $_setInt64(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasCount() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearCount() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get oldestMs => $_getI64(9);
+  @$pb.TagNumber(10)
+  set oldestMs($fixnum.Int64 v) { $_setInt64(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasOldestMs() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearOldestMs() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $fixnum.Int64 get bytes => $_getI64(10);
+  @$pb.TagNumber(11)
+  set bytes($fixnum.Int64 v) { $_setInt64(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasBytes() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearBytes() => clearField(11);
+}
+
+/// §13.5.2 phase 2: one entry per message, without the body.
+class ReconcileManifest extends $pb.GeneratedMessage {
+  factory ReconcileManifest({
+    $core.List<$core.int>? fetchId,
+    $core.Iterable<ReconcileManifestChat>? chats,
+  }) {
+    final $result = create();
+    if (fetchId != null) {
+      $result.fetchId = fetchId;
+    }
+    if (chats != null) {
+      $result.chats.addAll(chats);
+    }
+    return $result;
+  }
+  ReconcileManifest._() : super();
+  factory ReconcileManifest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileManifest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileManifest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fetchId', $pb.PbFieldType.OY)
+    ..pc<ReconcileManifestChat>(2, _omitFieldNames ? '' : 'chats', $pb.PbFieldType.PM, subBuilder: ReconcileManifestChat.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileManifest clone() => ReconcileManifest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileManifest copyWith(void Function(ReconcileManifest) updates) => super.copyWith((message) => updates(message as ReconcileManifest)) as ReconcileManifest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileManifest create() => ReconcileManifest._();
+  ReconcileManifest createEmptyInstance() => create();
+  static $pb.PbList<ReconcileManifest> createRepeated() => $pb.PbList<ReconcileManifest>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileManifest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileManifest>(create);
+  static ReconcileManifest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fetchId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fetchId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFetchId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFetchId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<ReconcileManifestChat> get chats => $_getList(1);
+}
+
+class ReconcileManifestChat extends $pb.GeneratedMessage {
+  factory ReconcileManifestChat({
+    $core.List<$core.int>? convId,
+    $core.Iterable<ReconcileEntry>? entries,
+    $core.bool? complete,
+  }) {
+    final $result = create();
+    if (convId != null) {
+      $result.convId = convId;
+    }
+    if (entries != null) {
+      $result.entries.addAll(entries);
+    }
+    if (complete != null) {
+      $result.complete = complete;
+    }
+    return $result;
+  }
+  ReconcileManifestChat._() : super();
+  factory ReconcileManifestChat.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileManifestChat.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileManifestChat', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'convId', $pb.PbFieldType.OY)
+    ..pc<ReconcileEntry>(2, _omitFieldNames ? '' : 'entries', $pb.PbFieldType.PM, subBuilder: ReconcileEntry.create)
+    ..aOB(3, _omitFieldNames ? '' : 'complete')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileManifestChat clone() => ReconcileManifestChat()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileManifestChat copyWith(void Function(ReconcileManifestChat) updates) => super.copyWith((message) => updates(message as ReconcileManifestChat)) as ReconcileManifestChat;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileManifestChat create() => ReconcileManifestChat._();
+  ReconcileManifestChat createEmptyInstance() => create();
+  static $pb.PbList<ReconcileManifestChat> createRepeated() => $pb.PbList<ReconcileManifestChat>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileManifestChat getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileManifestChat>(create);
+  static ReconcileManifestChat? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get convId => $_getN(0);
+  @$pb.TagNumber(1)
+  set convId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasConvId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConvId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<ReconcileEntry> get entries => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.bool get complete => $_getBF(2);
+  @$pb.TagNumber(3)
+  set complete($core.bool v) { $_setBool(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasComplete() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearComplete() => clearField(3);
+}
+
+class ReconcileEntry extends $pb.GeneratedMessage {
+  factory ReconcileEntry({
+    $core.List<$core.int>? id,
+    $fixnum.Int64? tsMs,
+    $core.List<$core.int>? sender,
+    $core.int? type,
+    $core.int? size,
+  }) {
+    final $result = create();
+    if (id != null) {
+      $result.id = id;
+    }
+    if (tsMs != null) {
+      $result.tsMs = tsMs;
+    }
+    if (sender != null) {
+      $result.sender = sender;
+    }
+    if (type != null) {
+      $result.type = type;
+    }
+    if (size != null) {
+      $result.size = size;
+    }
+    return $result;
+  }
+  ReconcileEntry._() : super();
+  factory ReconcileEntry.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileEntry.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileEntry', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OY)
+    ..aInt64(2, _omitFieldNames ? '' : 'tsMs')
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'sender', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'type', $pb.PbFieldType.OU3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'size', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileEntry clone() => ReconcileEntry()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileEntry copyWith(void Function(ReconcileEntry) updates) => super.copyWith((message) => updates(message as ReconcileEntry)) as ReconcileEntry;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileEntry create() => ReconcileEntry._();
+  ReconcileEntry createEmptyInstance() => create();
+  static $pb.PbList<ReconcileEntry> createRepeated() => $pb.PbList<ReconcileEntry>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileEntry getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileEntry>(create);
+  static ReconcileEntry? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get id => $_getN(0);
+  @$pb.TagNumber(1)
+  set id($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get tsMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set tsMs($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasTsMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTsMs() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get sender => $_getN(2);
+  @$pb.TagNumber(3)
+  set sender($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSender() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSender() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get type => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set type($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasType() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearType() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get size => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set size($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasSize() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSize() => clearField(5);
+}
+
+/// The new device asks; one open fetch per source (§20.2). A repeat after a
+/// restart carries the same fetch_id, a reissue after 7 days a new one.
+class ReconcileFetch extends $pb.GeneratedMessage {
+  factory ReconcileFetch({
+    $core.List<$core.int>? fetchId,
+    ReconcileFetch_Kind? kind,
+    $core.Iterable<$core.List<$core.int>>? convIds,
+    $fixnum.Int64? beforeMs,
+    $core.Iterable<$core.List<$core.int>>? ids,
+    $core.int? newest,
+    $core.int? window,
+    $fixnum.Int64? sinceMs,
+  }) {
+    final $result = create();
+    if (fetchId != null) {
+      $result.fetchId = fetchId;
+    }
+    if (kind != null) {
+      $result.kind = kind;
+    }
+    if (convIds != null) {
+      $result.convIds.addAll(convIds);
+    }
+    if (beforeMs != null) {
+      $result.beforeMs = beforeMs;
+    }
+    if (ids != null) {
+      $result.ids.addAll(ids);
+    }
+    if (newest != null) {
+      $result.newest = newest;
+    }
+    if (window != null) {
+      $result.window = window;
+    }
+    if (sinceMs != null) {
+      $result.sinceMs = sinceMs;
+    }
+    return $result;
+  }
+  ReconcileFetch._() : super();
+  factory ReconcileFetch.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileFetch.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileFetch', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fetchId', $pb.PbFieldType.OY)
+    ..e<ReconcileFetch_Kind>(2, _omitFieldNames ? '' : 'kind', $pb.PbFieldType.OE, defaultOrMaker: ReconcileFetch_Kind.MANIFEST, valueOf: ReconcileFetch_Kind.valueOf, enumValues: ReconcileFetch_Kind.values)
+    ..p<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'convIds', $pb.PbFieldType.PY)
+    ..aInt64(4, _omitFieldNames ? '' : 'beforeMs')
+    ..p<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'ids', $pb.PbFieldType.PY)
+    ..a<$core.int>(6, _omitFieldNames ? '' : 'newest', $pb.PbFieldType.OU3)
+    ..a<$core.int>(7, _omitFieldNames ? '' : 'window', $pb.PbFieldType.OU3)
+    ..aInt64(8, _omitFieldNames ? '' : 'sinceMs')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileFetch clone() => ReconcileFetch()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileFetch copyWith(void Function(ReconcileFetch) updates) => super.copyWith((message) => updates(message as ReconcileFetch)) as ReconcileFetch;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileFetch create() => ReconcileFetch._();
+  ReconcileFetch createEmptyInstance() => create();
+  static $pb.PbList<ReconcileFetch> createRepeated() => $pb.PbList<ReconcileFetch>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileFetch getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileFetch>(create);
+  static ReconcileFetch? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fetchId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fetchId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFetchId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFetchId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  ReconcileFetch_Kind get kind => $_getN(1);
+  @$pb.TagNumber(2)
+  set kind(ReconcileFetch_Kind v) { setField(2, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasKind() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearKind() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.List<$core.int>> get convIds => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get beforeMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set beforeMs($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasBeforeMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearBeforeMs() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.List<$core.int>> get ids => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.int get newest => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set newest($core.int v) { $_setUnsignedInt32(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasNewest() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearNewest() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.int get window => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set window($core.int v) { $_setUnsignedInt32(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasWindow() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearWindow() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get sinceMs => $_getI64(7);
+  @$pb.TagNumber(8)
+  set sinceMs($fixnum.Int64 v) { $_setInt64(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSinceMs() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSinceMs() => clearField(8);
+}
+
+/// §13.5.2 phase 3: the records, newest first.
+class ReconcileDeliver extends $pb.GeneratedMessage {
+  factory ReconcileDeliver({
+    $core.List<$core.int>? fetchId,
+    $core.Iterable<ReconcileMessage>? messages,
+    $core.Iterable<$core.List<$core.int>>? tooLarge,
+    $core.Iterable<$core.List<$core.int>>? held,
+    $core.Iterable<$core.List<$core.int>>? deleted,
+    $core.Iterable<ReconcileExpired>? expired,
+    $core.bool? complete,
+    $core.int? seq,
+    $core.bool? roundEnd,
+  }) {
+    final $result = create();
+    if (fetchId != null) {
+      $result.fetchId = fetchId;
+    }
+    if (messages != null) {
+      $result.messages.addAll(messages);
+    }
+    if (tooLarge != null) {
+      $result.tooLarge.addAll(tooLarge);
+    }
+    if (held != null) {
+      $result.held.addAll(held);
+    }
+    if (deleted != null) {
+      $result.deleted.addAll(deleted);
+    }
+    if (expired != null) {
+      $result.expired.addAll(expired);
+    }
+    if (complete != null) {
+      $result.complete = complete;
+    }
+    if (seq != null) {
+      $result.seq = seq;
+    }
+    if (roundEnd != null) {
+      $result.roundEnd = roundEnd;
+    }
+    return $result;
+  }
+  ReconcileDeliver._() : super();
+  factory ReconcileDeliver.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileDeliver.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileDeliver', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fetchId', $pb.PbFieldType.OY)
+    ..pc<ReconcileMessage>(2, _omitFieldNames ? '' : 'messages', $pb.PbFieldType.PM, subBuilder: ReconcileMessage.create)
+    ..p<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'tooLarge', $pb.PbFieldType.PY)
+    ..p<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'held', $pb.PbFieldType.PY)
+    ..p<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'deleted', $pb.PbFieldType.PY)
+    ..pc<ReconcileExpired>(6, _omitFieldNames ? '' : 'expired', $pb.PbFieldType.PM, subBuilder: ReconcileExpired.create)
+    ..aOB(7, _omitFieldNames ? '' : 'complete')
+    ..a<$core.int>(8, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU3)
+    ..aOB(9, _omitFieldNames ? '' : 'roundEnd')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileDeliver clone() => ReconcileDeliver()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileDeliver copyWith(void Function(ReconcileDeliver) updates) => super.copyWith((message) => updates(message as ReconcileDeliver)) as ReconcileDeliver;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileDeliver create() => ReconcileDeliver._();
+  ReconcileDeliver createEmptyInstance() => create();
+  static $pb.PbList<ReconcileDeliver> createRepeated() => $pb.PbList<ReconcileDeliver>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileDeliver getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileDeliver>(create);
+  static ReconcileDeliver? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fetchId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fetchId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFetchId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFetchId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<ReconcileMessage> get messages => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.List<$core.int>> get tooLarge => $_getList(2);
+
+  /// §9.5 (answer to a SINCE fetch), first packet of the answer:
+  @$pb.TagNumber(4)
+  $core.List<$core.List<$core.int>> get held => $_getList(3);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.List<$core.int>> get deleted => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.List<ReconcileExpired> get expired => $_getList(5);
+
+  /// §9.5: the packets of an answer are numbered from 0; `round_end` closes a
+  /// round (at most 4 packets, §20.2), `complete` the answer.
+  @$pb.TagNumber(7)
+  $core.bool get complete => $_getBF(6);
+  @$pb.TagNumber(7)
+  set complete($core.bool v) { $_setBool(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasComplete() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearComplete() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get seq => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set seq($core.int v) { $_setUnsignedInt32(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSeq() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSeq() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.bool get roundEnd => $_getBF(8);
+  @$pb.TagNumber(9)
+  set roundEnd($core.bool v) { $_setBool(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasRoundEnd() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearRoundEnd() => clearField(9);
+}
+
+/// §21.5.3, §9.5: how many of the party's own messages in one conversation of
+/// the pair's scope expired there before they were acknowledged — the number,
+/// nothing of their content. conv_id empty: the conversation of the pair.
+class ReconcileExpired extends $pb.GeneratedMessage {
+  factory ReconcileExpired({
+    $core.List<$core.int>? convId,
+    $core.int? count,
+  }) {
+    final $result = create();
+    if (convId != null) {
+      $result.convId = convId;
+    }
+    if (count != null) {
+      $result.count = count;
+    }
+    return $result;
+  }
+  ReconcileExpired._() : super();
+  factory ReconcileExpired.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileExpired.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileExpired', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'convId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileExpired clone() => ReconcileExpired()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileExpired copyWith(void Function(ReconcileExpired) updates) => super.copyWith((message) => updates(message as ReconcileExpired)) as ReconcileExpired;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileExpired create() => ReconcileExpired._();
+  ReconcileExpired createEmptyInstance() => create();
+  static $pb.PbList<ReconcileExpired> createRepeated() => $pb.PbList<ReconcileExpired>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileExpired getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileExpired>(create);
+  static ReconcileExpired? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get convId => $_getN(0);
+  @$pb.TagNumber(1)
+  set convId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasConvId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearConvId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get count => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set count($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCount() => clearField(2);
+}
+
+/// A record in the store's form: the columns and `extra` as JSON.
+class ReconcileMessage extends $pb.GeneratedMessage {
+  factory ReconcileMessage({
+    $core.List<$core.int>? id,
+    $core.List<$core.int>? convId,
+    $core.List<$core.int>? sender,
+    $fixnum.Int64? tsMs,
+    $core.int? type,
+    $core.bool? outgoing,
+    $core.String? status,
+    $core.String? text,
+    $core.List<$core.int>? extraJson,
+  }) {
+    final $result = create();
+    if (id != null) {
+      $result.id = id;
+    }
+    if (convId != null) {
+      $result.convId = convId;
+    }
+    if (sender != null) {
+      $result.sender = sender;
+    }
+    if (tsMs != null) {
+      $result.tsMs = tsMs;
+    }
+    if (type != null) {
+      $result.type = type;
+    }
+    if (outgoing != null) {
+      $result.outgoing = outgoing;
+    }
+    if (status != null) {
+      $result.status = status;
+    }
+    if (text != null) {
+      $result.text = text;
+    }
+    if (extraJson != null) {
+      $result.extraJson = extraJson;
+    }
+    return $result;
+  }
+  ReconcileMessage._() : super();
+  factory ReconcileMessage.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileMessage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileMessage', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'convId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'sender', $pb.PbFieldType.OY)
+    ..aInt64(4, _omitFieldNames ? '' : 'tsMs')
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'type', $pb.PbFieldType.OU3)
+    ..aOB(6, _omitFieldNames ? '' : 'outgoing')
+    ..aOS(7, _omitFieldNames ? '' : 'status')
+    ..aOS(8, _omitFieldNames ? '' : 'text')
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'extraJson', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileMessage clone() => ReconcileMessage()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileMessage copyWith(void Function(ReconcileMessage) updates) => super.copyWith((message) => updates(message as ReconcileMessage)) as ReconcileMessage;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileMessage create() => ReconcileMessage._();
+  ReconcileMessage createEmptyInstance() => create();
+  static $pb.PbList<ReconcileMessage> createRepeated() => $pb.PbList<ReconcileMessage>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileMessage getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileMessage>(create);
+  static ReconcileMessage? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get id => $_getN(0);
+  @$pb.TagNumber(1)
+  set id($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get convId => $_getN(1);
+  @$pb.TagNumber(2)
+  set convId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasConvId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearConvId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get sender => $_getN(2);
+  @$pb.TagNumber(3)
+  set sender($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSender() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSender() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get tsMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set tsMs($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTsMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTsMs() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get type => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set type($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasType() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearType() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.bool get outgoing => $_getBF(5);
+  @$pb.TagNumber(6)
+  set outgoing($core.bool v) { $_setBool(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasOutgoing() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearOutgoing() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.String get status => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set status($core.String v) { $_setString(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasStatus() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearStatus() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.String get text => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set text($core.String v) { $_setString(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasText() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearText() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get extraJson => $_getN(8);
+  @$pb.TagNumber(9)
+  set extraJson($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasExtraJson() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearExtraJson() => clearField(9);
+}
+
+/// The recipient's progress report: the source fills again only on it
+/// (§14.6.3). It stands in for the receipt a twin sync does not carry (D-37).
+class ReconcileProgress extends $pb.GeneratedMessage {
+  factory ReconcileProgress({
+    $core.List<$core.int>? fetchId,
+    $core.int? received,
+    $core.Iterable<$core.List<$core.int>>? delivered,
+  }) {
+    final $result = create();
+    if (fetchId != null) {
+      $result.fetchId = fetchId;
+    }
+    if (received != null) {
+      $result.received = received;
+    }
+    if (delivered != null) {
+      $result.delivered.addAll(delivered);
+    }
+    return $result;
+  }
+  ReconcileProgress._() : super();
+  factory ReconcileProgress.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileProgress.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileProgress', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fetchId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'received', $pb.PbFieldType.OU3)
+    ..p<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'delivered', $pb.PbFieldType.PY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileProgress clone() => ReconcileProgress()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileProgress copyWith(void Function(ReconcileProgress) updates) => super.copyWith((message) => updates(message as ReconcileProgress)) as ReconcileProgress;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileProgress create() => ReconcileProgress._();
+  ReconcileProgress createEmptyInstance() => create();
+  static $pb.PbList<ReconcileProgress> createRepeated() => $pb.PbList<ReconcileProgress>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileProgress getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileProgress>(create);
+  static ReconcileProgress? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fetchId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fetchId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFetchId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFetchId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get received => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set received($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasReceived() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearReceived() => clearField(2);
+
+  /// §9.5 "reports the messages as delivered": identifiers of the answering
+  /// party's messages the requester holds now — taken from the packets this
+  /// report covers, or held before.
+  @$pb.TagNumber(3)
+  $core.List<$core.List<$core.int>> get delivered => $_getList(2);
+}
+
+class ReconcileCancel extends $pb.GeneratedMessage {
+  factory ReconcileCancel() => create();
+  ReconcileCancel._() : super();
+  factory ReconcileCancel.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileCancel.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileCancel', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileCancel clone() => ReconcileCancel()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileCancel copyWith(void Function(ReconcileCancel) updates) => super.copyWith((message) => updates(message as ReconcileCancel)) as ReconcileCancel;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileCancel create() => ReconcileCancel._();
+  ReconcileCancel createEmptyInstance() => create();
+  static $pb.PbList<ReconcileCancel> createRepeated() => $pb.PbList<ReconcileCancel>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileCancel getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileCancel>(create);
+  static ReconcileCancel? _defaultInstance;
+}
+
 class TwinSyncEnvelope extends $pb.GeneratedMessage {
   factory TwinSyncEnvelope({
     $core.List<$core.int>? syncId,
@@ -8796,6 +9374,7 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     $fixnum.Int64? timestamp,
     TwinSyncType? syncType,
     $core.List<$core.int>? payload,
+    $core.List<$core.int>? deliveryId,
   }) {
     final $result = create();
     if (syncId != null) {
@@ -8813,6 +9392,9 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     if (payload != null) {
       $result.payload = payload;
     }
+    if (deliveryId != null) {
+      $result.deliveryId = deliveryId;
+    }
     return $result;
   }
   TwinSyncEnvelope._() : super();
@@ -8825,6 +9407,7 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..e<TwinSyncType>(4, _omitFieldNames ? '' : 'syncType', $pb.PbFieldType.OE, defaultOrMaker: TwinSyncType.CONTACT_ADDED, valueOf: TwinSyncType.valueOf, enumValues: TwinSyncType.values)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'deliveryId', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -8893,6 +9476,19 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
   $core.bool hasPayload() => $_has(4);
   @$pb.TagNumber(5)
   void clearPayload() => clearField(5);
+
+  /// DELIVERY_MIRROR only (§20.2): the 8-byte delivery identifier of the
+  /// delivery that carried the mirrored frame, so the twin checks and
+  /// keeps it in the same received memory as the device that received
+  /// it first. Not written by any other type.
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get deliveryId => $_getN(5);
+  @$pb.TagNumber(6)
+  set deliveryId($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasDeliveryId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearDeliveryId() => clearField(6);
 }
 
 class DeviceRecord extends $pb.GeneratedMessage {
@@ -9043,10 +9639,10 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     $core.List<$core.int>? newMlDsaPk,
     $core.List<$core.int>? newX25519Pk,
     $core.List<$core.int>? newMlKemPk,
-    $core.List<$core.int>? oldSignatureEd25519,
-    $core.List<$core.int>? newSignatureEd25519,
     $core.Iterable<RotationApprovalToken>? approvalTokens,
     $core.int? preRotationDeviceCount,
+    KeyRotationMode? mode,
+    $core.bool? emergency,
   }) {
     final $result = create();
     if (newEd25519Pk != null) {
@@ -9061,17 +9657,17 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     if (newMlKemPk != null) {
       $result.newMlKemPk = newMlKemPk;
     }
-    if (oldSignatureEd25519 != null) {
-      $result.oldSignatureEd25519 = oldSignatureEd25519;
-    }
-    if (newSignatureEd25519 != null) {
-      $result.newSignatureEd25519 = newSignatureEd25519;
-    }
     if (approvalTokens != null) {
       $result.approvalTokens.addAll(approvalTokens);
     }
     if (preRotationDeviceCount != null) {
       $result.preRotationDeviceCount = preRotationDeviceCount;
+    }
+    if (mode != null) {
+      $result.mode = mode;
+    }
+    if (emergency != null) {
+      $result.emergency = emergency;
     }
     return $result;
   }
@@ -9084,10 +9680,10 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'newX25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'oldSignatureEd25519', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'newSignatureEd25519', $pb.PbFieldType.OY)
     ..pc<RotationApprovalToken>(7, _omitFieldNames ? '' : 'approvalTokens', $pb.PbFieldType.PM, subBuilder: RotationApprovalToken.create)
     ..a<$core.int>(8, _omitFieldNames ? '' : 'preRotationDeviceCount', $pb.PbFieldType.OU3)
+    ..e<KeyRotationMode>(9, _omitFieldNames ? '' : 'mode', $pb.PbFieldType.OE, defaultOrMaker: KeyRotationMode.KEY_ROTATION_MODE_UNSPECIFIED, valueOf: KeyRotationMode.valueOf, enumValues: KeyRotationMode.values)
+    ..aOB(10, _omitFieldNames ? '' : 'emergency')
     ..hasRequiredFields = false
   ;
 
@@ -9148,36 +9744,41 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
   @$pb.TagNumber(4)
   void clearNewMlKemPk() => clearField(4);
 
-  @$pb.TagNumber(5)
-  $core.List<$core.int> get oldSignatureEd25519 => $_getN(4);
-  @$pb.TagNumber(5)
-  set oldSignatureEd25519($core.List<$core.int> v) { $_setBytes(4, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasOldSignatureEd25519() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearOldSignatureEd25519() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get newSignatureEd25519 => $_getN(5);
-  @$pb.TagNumber(6)
-  set newSignatureEd25519($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasNewSignatureEd25519() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearNewSignatureEd25519() => clearField(6);
-
   /// §7.5 Device Co-Authorization: Device-Sig countersigs from authorized devices
   @$pb.TagNumber(7)
-  $core.List<RotationApprovalToken> get approvalTokens => $_getList(6);
+  $core.List<RotationApprovalToken> get approvalTokens => $_getList(4);
 
   @$pb.TagNumber(8)
-  $core.int get preRotationDeviceCount => $_getIZ(7);
+  $core.int get preRotationDeviceCount => $_getIZ(5);
   @$pb.TagNumber(8)
-  set preRotationDeviceCount($core.int v) { $_setUnsignedInt32(7, v); }
+  set preRotationDeviceCount($core.int v) { $_setUnsignedInt32(5, v); }
   @$pb.TagNumber(8)
-  $core.bool hasPreRotationDeviceCount() => $_has(7);
+  $core.bool hasPreRotationDeviceCount() => $_has(5);
   @$pb.TagNumber(8)
   void clearPreRotationDeviceCount() => clearField(8);
+
+  /// §4.5.4 — see `KeyRotationMode`. Set BEFORE the two signatures are
+  /// formed, so both cover it.
+  @$pb.TagNumber(9)
+  KeyRotationMode get mode => $_getN(6);
+  @$pb.TagNumber(9)
+  set mode(KeyRotationMode v) { setField(9, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasMode() => $_has(6);
+  @$pb.TagNumber(9)
+  void clearMode() => clearField(9);
+
+  /// An Emergency Key Rotation (all four keys, §4.5.4) — set by
+  /// `rotateIdentityKeys`; absent on the routine KEM notice, which the same
+  /// dispatcher parses under this message.
+  @$pb.TagNumber(10)
+  $core.bool get emergency => $_getBF(7);
+  @$pb.TagNumber(10)
+  set emergency($core.bool v) { $_setBool(7, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasEmergency() => $_has(7);
+  @$pb.TagNumber(10)
+  void clearEmergency() => clearField(10);
 }
 
 class CalendarReminderOffset extends $pb.GeneratedMessage {

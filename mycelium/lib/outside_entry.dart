@@ -275,6 +275,21 @@ Map<String, dynamic> entryFilter(int channel,
       'limit': limit,
     };
 
+/// The NIP-01 filter for the record of ONE publisher (§15.2: "a recipient
+/// whose invitation addresses no longer answer looks the current ones up
+/// under it"): `authors` = the card's publisher key as hex, the same kind and
+/// keyword as [entryFilter]. A relay keeps one record per key (kind 30078 is
+/// addressable), so one per relay is enough.
+Map<String, dynamic> publisherFilter(int channel, String publisherHex,
+        {int? now}) =>
+    {
+      'kinds': [kEntryKind],
+      'authors': [publisherHex],
+      '#d': [entryKeyword(channel)],
+      'since': (now ?? nowSeconds()) - kEntryLifetime,
+      'limit': 1,
+    };
+
 String _id(String pub, int created, int kind, List<List<String>> tags,
         String content) =>
     hexFrom(hashFrom(Uint8List.fromList(utf8.encode(

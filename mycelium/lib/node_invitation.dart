@@ -1,7 +1,7 @@
 
 import 'dart:typed_data';
 
-import 'package:mycelium/neighbourhood_card.dart';
+import 'package:mycelium/invitation_way_in.dart' show invitationNeighbourNow;
 import 'package:mycelium/invitation.dart' as inv;
 import 'package:mycelium/first_contact.dart';
 import 'package:mycelium/identity.dart';
@@ -10,6 +10,10 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/neighbourhood.dart' show Neighbour;
 import 'package:mycelium/own_entries.dart' show cardOwnAddresses;
 import 'package:mycelium/node_helpers.dart';
+import 'package:mycelium/node_outside.dart' show NodeOutside;
+import 'package:mycelium/node_first_contact_box.dart';
+import 'package:mycelium/bundle.dart'
+    show invitationBoxFresh, invitationKemFresh;
 import 'package:mycelium/ladder.dart' show Shipment;
 import 'package:mycelium/envelope.dart' show Address;
 
@@ -88,6 +92,8 @@ extension NodeInvitation on Node {
             unlimited: unlimited,
             label: label);
     asValue.invitations.admit(e);
+    e.kem = invitationKemFresh(); // its own sealing keys, at random (R-b)
+    e.box = invitationBoxFresh(); // its own box key pair, at random (E-A4)
     // S392: the neighbour is the FIXED one (§15.2, W7), and "confirmed" is
     // ASKED, not assumed (§22.7.1) — `fixed` survives the restart, the
     // proof does not. Why no falling back to another one, and what a card
@@ -96,9 +102,7 @@ extension NodeInvitation on Node {
     // V7: NEVER a private one — only one reachable from the open network
     // (`Neighbourhood.openNetwork`); without it the card names no neighbour.
     // And never a contact's device (proposal 6.5, `neighbourhood_card.dart`).
-    final firstNeighbour = cardSeatForStrangers(neighbourhood)?.cardAddress((a) =>
-        readiness.responding.contains(a.key) &&
-        neighbourhood.openNetwork(a.address));
+    final firstNeighbour = invitationNeighbourNow(this); // invitation_way_in.dart
     e.cardNeighbour = firstNeighbour; // V6: the seat keeps it while e stands
     // The own addresses (§15.2, §22.6), the confirmed public one in front,
     // only of own address families (§11.1 V1) — `own_entries.dart`.
@@ -109,6 +113,7 @@ extension NodeInvitation on Node {
       addresses,
       neighbour: firstNeighbour,
       relay: knownRelay,
+      publisherKey: publisherKey, // §15.2: only while the record stands (§11.9)
     );
     _waitingCreate(asValue, e);
     return (card, e);
@@ -181,26 +186,17 @@ extension NodeInvitation on Node {
     _issued[waiting] = _nextNumber++;
   }
 
-  /// Give an arriving first-contact packet to the join or the
-  /// invitation it BELONGS to — not to the first open
-  /// state of any identity (until S385, W1.a.4).
-  ///
-  /// By what it is recognisable, measured per packet:
-  ///  * (1) bundle — by the 16 random bytes of the join;
-  ///  * (2) request — by the proof of computation, which is bound to the code;
-  ///  * (3) answer, (4) receipt — by the seal: to whom sealed, by whom
-  ///    signed. The trial unsealing changes no state.
-  ///  * (0) bundle request — by NOTHING. Per document the packet is 17/40/52 B without
-  ///    identity (v42 ch15 §15.1). See [_bundleFor].
-  ///
-  /// If nothing fits, it is reported, not guessed.
+  /// Give an arriving first-contact packet to the join or the invitation it
+  /// BELONGS to (until S385 the first open state of any identity got it):
+  /// (1) bundle by the join's 16 random bytes; (2) request by the proof,
+  /// bound to the code; (3) answer, (4) receipt by the seal (a trial
+  /// unsealing, no state changed); (0) bundle request by NOTHING (§15.1,
+  /// [_bundleFor]). If nothing fits, it is reported, not guessed.
   ///
   /// [origin] is WHERE the packet came from; [returnRoute] the same, but only
-  /// when the address belongs to the COUNTERPART — with a forwarded
-  /// (§8.1) or collected (§8.2) packet it belongs to the third party
-  /// (`assign`, `withoutReturnRoute`). The [Join] therefore gets
-  /// [returnRoute] and not [origin]: from it, it remembers the only evidence
-  /// it has about the route to the counterpart.
+  /// when the address belongs to the COUNTERPART — with a forwarded (§8.1) or
+  /// collected (§8.2) packet it belongs to the third party. A request that
+  /// came out of a post box is flagged ([feedingCollected], proposal E).
   void firstContact(Uint8List data, CardAddress origin,
       [CardAddress? returnRoute]) {
     final kind = PacketKind.fromCode(data[0]);
@@ -214,7 +210,9 @@ extension NodeInvitation on Node {
       }
       for (final e in i.open.values) {
         if (kind == PacketKind.request && e.fitsProofOfWork(data)) {
-          e.receive(data, origin);
+          // Forwarded (§8.1) or collected (§8.2): the source is the forwarder's
+          // or holder's, never the requester's — no address evidence (§15.5).
+          e.receive(data, origin, collected: feedingCollected || returnRoute == null);
           return;
         }
         final from = kind == PacketKind.receipt ? e.receiptFrom(data) : null;
@@ -273,10 +271,11 @@ extension NodeInvitation on Node {
       [for (final e in i.open.values) ...e.waiting]
         ..sort((a, b) => a.at.compareTo(b.at));
 
-  /// Who learns of an ACCEPTED request — immediately or later.
-  /// [an] is the inviting identity. Set by the host.
+  /// Who learns of an ACCEPTED request — immediately or later. [to] is the
+  /// inviting identity; [origin] `null` for a request from a post box
+  /// (proposal E: no evidence of an address). Set by the host.
   set onAccepted(
-          void Function(Address to, Address who, CardAddress origin)? f) =>
+          void Function(Address to, Address who, CardAddress? origin)? f) =>
       _onAccepted[this] = f;
 
   /// Is [wer] already a contact of [an] with the same keys (§15.5
@@ -292,13 +291,12 @@ extension NodeInvitation on Node {
       _onContactRequest[this] = f;
 
   /// ES-6 (a), owner decision 15.09.2026: the acceptance (3) goes via the
-  /// ladder — directly to [origin] first, after the offset of the ladder into the
-  /// post box under the identifier of [who], which has been known since the request.
-  /// Until S388 it went ONCE directly to [origin]; behind NAT the
-  /// mapping expired, and the joiner never sends again (§5.3). The
-  /// receipt (4) ends the sending ([firstContact]). No timer of its own.
+  /// ladder — directly to [origin] first (none for a request from a post
+  /// box, proposal E), after the offset into the post box under [who]'s day
+  /// value, known since the request. The receipt (4) ends the sending
+  /// ([firstContact]). No timer of its own.
   void _acceptanceRoute(
-      Uint8List p, CardAddress origin, Address who, Address to) {
+      Uint8List p, CardAddress? origin, Address who, Address to) {
     final open = _acceptances[this] ??= {};
     open.remove(hexFrom(who.identifier))?.giveUp(); // the newer one replaces it
     open[hexFrom(who.identifier)] = answerViaLadder(p, origin, who, to);
@@ -388,7 +386,7 @@ int _nextNumber = 0;
 
 /// The callbacks of the host per node — next to the node instead of in it:
 /// `node.dart` is at the line budget.
-final Expando<void Function(Address, Address, CardAddress)> _onAccepted =
+final Expando<void Function(Address, Address, CardAddress?)> _onAccepted =
     Expando('onAccepted');
 final Expando<void Function(Address, ContactRequest)> _onContactRequest =
     Expando('onContactRequest');

@@ -1,8 +1,23 @@
 import 'dart:typed_data';
 
 import 'package:cleona/core/service/sender_identity_snapshot.dart';
+import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+
+/// Length of the file identifier a waiting message carries (§9.4 "Nothing
+/// overtakes a file": "carries the file's identifier (8 B)").
+const int kAfterFileLength = 8;
+
+/// Length of the post identifier of a group post (§16.2: "The author draws
+/// 16 random bytes per post and carries them in every leg").
+const int kPostIdLength = 16;
+
+/// Length of the DELIVERY identifier a mycelium message carries
+/// (`mycelium/lib/message.dart`, `kIdentifierLength`) — the same 8 B the
+/// identity's received memory keeps a row of (§20.2, `received_ids`,
+/// schema 4). NOT the length of [HarvestEvent.messageId].
+const int kDeliveryIdLength = 8;
 
 /// V4 architecture §15.5.3 — the receive side of the seam.
 ///
@@ -61,23 +76,35 @@ class HarvestEvent {
   /// violation — it is a rename that has not happened yet).
   final proto.MessageTypeV3 type;
 
+  /// The raw type number when THIS build's [proto.MessageTypeV3] does not
+  /// know it, otherwise `null`.
+  ///
+  /// protobuf keeps an unknown enum value in `unknownFields` and leaves the
+  /// field unset, so [type] then reads the zero value `MTV3_TEXT` (the same
+  /// measurement as `twinSyncTypeIsUnknown` in `twin_sync_wire.dart`). A
+  /// frame of a reserved or future type would be shown as a text message
+  /// made of its payload bytes. `handleApplicationFrame` discards every event
+  /// that carries a value here (S398, finding R-1: the reserved restore
+  /// types 30 and 31).
+  final int? unknownType;
+
   /// Decompressed, decrypted, signature-checked.
   final Uint8List payload;
 
   final Uint8List messageId;
 
-  /// LOCAL arrival time, observed. Per §15.5.3 the only time value that
-  /// display, sorting and expiry rules may rely on.
+  /// LOCAL arrival time, observed. Per §22.5.3 the only time value that
+  /// display, sorting and expiry rules may rely on. The bubble of a received
+  /// text, reply, channel post, lane 1 file and file announcement takes its
+  /// timestamp from here (`smoke_display_time_arrival.dart`).
   final DateTime harvestedAt;
 
   /// The sender's own assertion, with no evidence behind it. Anyone who sorts
-  /// by this sorts by something the sender is free to choose (§15.5.3).
+  /// by this sorts by something the sender is free to choose (§22.5.3).
   ///
-  /// **Not yet the situation in the code.** Six call sites still build their
-  /// display timestamp from this value, exactly as they did from the wire
-  /// frame. Moving them to [harvestedAt] changes visible behaviour and is
-  /// therefore not part of AP-1, which is a behaviour-neutral refactoring
-  /// against a green test base.
+  /// Two readers remain, neither of them display, sorting or expiry: the age
+  /// of a call `INVITE` (`call_service.dart`) and the notification quiet
+  /// rule of the start phase (`CleonaService._claimedSendTimeMs`).
   final DateTime? claimedSentAt;
 
   /// Set for group and channel traffic, `null` for direct messages.
@@ -95,6 +122,34 @@ class HarvestEvent {
   /// decides whether a handler may act in a trust-elevating way (§15.5.3).
   final SenderTrust senderTrust;
 
+  /// §9.4 "Nothing overtakes a file" (D-34, S398-W5): the message waited at
+  /// the sender behind the file whose message identifier starts with these
+  /// 8 bytes (same conversation, same leg). `null` for every other message.
+  final Uint8List? afterFile;
+
+  /// §16.2 "A group post carries one post identifier": the 16 bytes the
+  /// author drew for this group post, the same in every leg. `null` for
+  /// everything that is not a group post, and for a group post of a sender
+  /// that does not carry the field — such a post is known by the identifier
+  /// of its leg only.
+  final Uint8List? postId;
+
+  /// The 8-byte DELIVERY identifier of the delivery that carried this
+  /// frame — drawn by the sender's mycelium per message; retries carry
+  /// the same one (D-44). **NOT the 16-byte [messageId]**: that names
+  /// the MESSAGE, and an edit or a deletion travels under the identifier
+  /// of its target (§20.2, S403 decision 1).
+  ///
+  /// `null` when the layer below the seam has ALREADY kept this
+  /// identifier — mycelium marks every inbound of a sender it knows
+  /// (contact, group pair, or a sender the application has marked) in
+  /// the identity's received memory before the callback — or when the
+  /// caller has no delivery context at all (a direct call, a replay in
+  /// a guard). Then the receive path checks and keeps NOTHING, by
+  /// contract: no layer keeps an identifier twice, and no direct call
+  /// needs a delivery to measure a handler.
+  final Uint8List? deliveryId;
+
   const HarvestEvent({
     required this.senderUserId,
     required this.senderDeviceId,
@@ -107,7 +162,14 @@ class HarvestEvent {
     required this.rosterVersion,
     required this.contentMetadata,
     required this.senderTrust,
+    this.afterFile,
+    this.postId,
+    this.deliveryId,
+    this.unknownType,
   });
+
+  /// [postId] as the hex form a message is kept under, or `null`.
+  String? get postIdHex => postId == null ? null : bytesToHex(postId!);
 
   /// Returns a copy with [contentMetadata] replaced. The type is immutable by
   /// design (§15.5.3 makes the event an observation, not a mutable buffer);
@@ -127,6 +189,10 @@ class HarvestEvent {
       rosterVersion: rosterVersion,
       contentMetadata: metadata,
       senderTrust: senderTrust,
+      afterFile: afterFile,
+      postId: postId,
+      deliveryId: deliveryId,
+      unknownType: unknownType,
     );
   }
 
@@ -142,6 +208,7 @@ class HarvestEvent {
     required proto.ApplicationFrameV3 frame,
     required Uint8List? senderDeviceId,
     required SenderIdentitySnapshot snapshot,
+    Uint8List? deliveryId,
   }) {
     return HarvestEvent(
       senderUserId: Uint8List.fromList(frame.senderUserId),
@@ -161,7 +228,33 @@ class HarvestEvent {
       rosterVersion: RosterVersion.fromV3Frame(frame),
       contentMetadata: frame.hasContentMetadata() ? frame.contentMetadata : null,
       senderTrust: _trustFromV3(snapshot),
+      // Exactly 8 bytes or nothing: any other length names no file.
+      afterFile: frame.afterFile.length == kAfterFileLength
+          ? Uint8List.fromList(frame.afterFile)
+          : null,
+      // Exactly 16 bytes in a frame that names a group, or nothing (§16.2):
+      // only a group post carries a post identifier.
+      postId: frame.postId.length == kPostIdLength && frame.groupId.isNotEmpty
+          ? Uint8List.fromList(frame.postId)
+          : null,
+      // Exactly 8 bytes or nothing: any other length names no delivery,
+      // and without one the receive path checks and keeps nothing (see
+      // the field).
+      deliveryId: deliveryId != null && deliveryId.length == kDeliveryIdLength
+          ? Uint8List.fromList(deliveryId)
+          : null,
+      unknownType: _unknownFrameType(frame),
     );
+  }
+
+  /// The field number of `ApplicationFrameV3.message_type`
+  /// (`proto/transport_v3.proto`).
+  static const int _kFrameTypeField = 6;
+
+  static int? _unknownFrameType(proto.ApplicationFrameV3 frame) {
+    final raw = frame.unknownFields.getField(_kFrameTypeField);
+    if (raw == null || raw.varints.isEmpty) return null;
+    return raw.varints.last.toInt();
   }
 
   /// V3 has two reachable outcomes, not three.

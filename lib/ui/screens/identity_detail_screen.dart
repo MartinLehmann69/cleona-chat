@@ -10,7 +10,7 @@ import 'package:cleona/main.dart';
 import 'package:cleona/ui/components/invitation_card_view.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/theme/skins.dart';
@@ -269,7 +269,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     final name = _nameController.text.trim();
     if (name.isNotEmpty && name != _identity.displayName) {
       // Service.updateDisplayName is authoritative: it persists to
-      // identities.json via IdentityManager AND broadcasts PROFILE_UPDATE.
+      // the list of identities (device database) via IdentityManager AND
+      // broadcasts PROFILE_UPDATE.
       widget.service.updateDisplayName(name);
       appState.refresh();
       setState(() {
@@ -506,6 +507,20 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     }
   }
 
+  /// Reads the picture the camera laid down as a file and deletes that
+  /// file: from here on the picture lives in memory and, once set, in the
+  /// store (area `profile`). The ONE place for both platforms' branches of
+  /// [_captureFromCamera]. `discardSurface` deletes only the surface's own
+  /// plaintext in transit (the transient directory; on Android/iOS also
+  /// the app's cache, where the picker puts the photo).
+  Future<Uint8List> _readCameraPicture(String path) async {
+    try {
+      return await File(path).readAsBytes();
+    } finally {
+      TransientFiles.discardSurface(path);
+    }
+  }
+
   Future<void> _captureFromCamera(BuildContext context) async {
     final locale = AppLocale.read(context);
 
@@ -515,7 +530,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
         final photo = await picker.pickImage(source: ImageSource.camera, maxWidth: 512, imageQuality: 75);
         if (photo == null) return;
 
-        var bytes = await File(photo.path).readAsBytes();
+        var bytes = await _readCameraPicture(photo.path);
         if (bytes.length > 64 * 1024) {
           bytes = await _resizeImage(bytes, 200, 75);
           if (bytes.length > 64 * 1024) {
@@ -541,9 +556,13 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     }
 
     try {
-      final tmpPath = '${AppPaths.tempDir}/cleona_camera_capture.jpg';
+      // The picture lies in the surface's transient directory, not in the
+      // system temp directory (S401).
+      final tmpPath = TransientFiles.surfacePath(
+          'camera_${DateTime.now().millisecondsSinceEpoch}.jpg');
       final proc = await Process.run('fswebcam', ['-r', '320x240', '--jpeg', '75', '--no-banner', tmpPath]);
       if (proc.exitCode != 0) {
+        TransientFiles.discardSurface(tmpPath);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(locale.get('camera_unavailable'))),
@@ -553,7 +572,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       }
 
       if (!await File(tmpPath).exists()) return;
-      var bytes = await File(tmpPath).readAsBytes();
+      var bytes = await _readCameraPicture(tmpPath);
       if (bytes.length > 64 * 1024) {
         bytes = await _resizeImage(bytes, 200, 75);
         if (bytes.length > 64 * 1024) {

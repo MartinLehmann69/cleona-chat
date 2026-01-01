@@ -450,6 +450,110 @@ extension V3MessageStateOps on CleonaService {
     }
   }
 
+  /// A mycelium receipt (0x11) for which no shipment is open — the normal
+  /// case after a restart of this device (S398-OP30; measured in the running
+  /// process too, for an entry whose first shipment is no longer open): the
+  /// shipment and its
+  /// `Outbound` lived in memory, the message itself lives in the history of
+  /// the peer (`history.dart`, in the store). mycelium hands it here
+  /// (`Messages.onReceiptUnknown`) instead of discarding it.
+  ///
+  /// §9.2, row by row:
+  ///  * [from] is proven: the receipt was unsealed and its signature checked
+  ///    before mycelium called. It counts only for an own message in THE
+  ///    HISTORY OF [from] whose frame names [from] as its recipient — a
+  ///    receipt for another party's message is not found there and is
+  ///    reported as discarded.
+  ///  * an identifier the history does not know: discarded, no error.
+  ///  * already `delivered`: a duplicate, ignored.
+  ///  * already `failed`: the application closed it (§9.3, 14 days). A
+  ///    closed entry keeps its identifier and no frame (`history.dart`,
+  ///    §21.4.2), so there is no message of the app left to assign the
+  ///    receipt to here: reported, nothing changes. The display follows the
+  ///    application's DELIVERY_RECEIPT, which names the message itself.
+  ///
+  /// What it does: the history entry becomes `delivered` (the same entry the
+  /// mailbox's `stateCheck` would have closed with the open shipment), so
+  /// the next edge does not send an acknowledged message again; and the
+  /// proof is noted for [_myceliumDeliveryProven]. The DISPLAY flips with
+  /// the application's DELIVERY_RECEIPT as before
+  /// ([_handleDeliveryReceiptV3]) — only it carries the recipient's
+  /// disclosure bit (§16.2.3); flipping on the 0x11 alone would show what a
+  /// withholding recipient chose to conceal. `true` if the entry was closed.
+  bool _myceliumReceiptLate(Uint8List identifier, mycelium.Address from) {
+    final p = myceliumMailbox;
+    if (p == null) return false;
+    final peer = mycelium.identifierFrom(from);
+    final short = bytesToHex(identifier.sublist(0, 3));
+    if (p.contactOrNull(peer) == null && p.groupPairOrNull(peer) == null) {
+      _log.info('mycelium: receipt $short from ${peer.substring(0, 8)} — '
+          'neither a contact nor a group pair. Discarded (§9.2).');
+      return false;
+    }
+    final history = p.historyFor(from);
+    final entry = history.entries
+        .where((e) => e.outgoing && constantTimeEquals(e.identifier, identifier))
+        .firstOrNull;
+    if (entry == null) {
+      _log.info('mycelium: receipt $short from ${peer.substring(0, 8)} — no '
+          'own message to this party under this identifier. Discarded (§9.2).');
+      return false;
+    }
+    if (entry.state == mycelium.DeliveryState.delivered) return false;
+    if (!entry.open) {
+      _log.info('mycelium: receipt $short from ${peer.substring(0, 8)} — its '
+          'message was closed as ${entry.state?.name} before. Nothing '
+          'changes (§9.2, §9.3).');
+      return false;
+    }
+    if (entry.content.isEmpty) {
+      // A PLACED message whose copy for sending again was dropped (§9.3:
+      // "dropped at the next edge once the placing is more than 7 days
+      // old"; `mycelium/lib/history.dart`). The entry stands in the history
+      // WITH [from], so it went to that party; the frame that named the
+      // app's message is gone with the copy. The entry is closed — an
+      // acknowledged message is not open —, and the display follows the
+      // application's DELIVERY_RECEIPT, which names the message itself.
+      try {
+        history.stateChange(identifier, mycelium.DeliveryState.delivered);
+      } catch (e) {
+        _log.warn('mycelium: receipt $short — history not closed: $e');
+        return false;
+      }
+      _log.event('mycelium: receipt $short from ${peer.substring(0, 8)} for '
+          'a placed message whose copy was dropped — delivered in the '
+          'history (§9.2, §9.3)');
+      return true;
+    }
+    final proto.ApplicationFrameV3 frame;
+    try {
+      frame = proto.ApplicationFrameV3.fromBuffer(entry.content);
+    } catch (_) {
+      return false; // not an application frame: nothing of the app's
+    }
+    if (!constantTimeEquals(
+        Uint8List.fromList(frame.recipientUserId), userIdFrom(from))) {
+      _log.warn('mycelium: receipt $short from ${peer.substring(0, 8)} — the '
+          'message names another recipient. Discarded (§9.2).');
+      return false;
+    }
+    try {
+      history.stateChange(identifier, mycelium.DeliveryState.delivered);
+    } catch (e) {
+      _log.warn('mycelium: receipt $short — history not closed: $e');
+      return false;
+    }
+    final idHex = bytesToHex(Uint8List.fromList(frame.messageId));
+    _myceliumAcknowledged.add(idHex);
+    while (_myceliumAcknowledged.length > _kMyceliumOutboundsMax) {
+      _myceliumAcknowledged.remove(_myceliumAcknowledged.first);
+    }
+    _log.event('mycelium: receipt $short from ${peer.substring(0, 8)} for '
+        '${frame.messageType.name} ${idHex.substring(0, 8)} without an open '
+        'shipment — delivered in the history (§9.2)');
+    return true;
+  }
+
   /// May the display for [messageIdHex] switch to `delivered`?
   ///
   /// `true` also when the register does NOT know the identifier — see the
@@ -527,6 +631,12 @@ extension V3MessageStateOps on CleonaService {
 
     final known = <MessageStatus>[];
     for (final id in legIdsHex) {
+      // S398-W5: a leg waiting behind a file (§9.4) is not sent yet —
+      // `resting` (§9.1), and the weakest leg counts (§16.2.3).
+      if (_fileOrderWaiting.contains(id)) {
+        known.add(MessageStatus.resting);
+        continue;
+      }
       final s = _v41StatusFor(id);
       if (s != null) known.add(s);
     }
@@ -539,6 +649,11 @@ extension V3MessageStateOps on CleonaService {
     if (msg.status == fresh) return false;
     if (msg.status.canTransitionTo(fresh)) {
       msg.status = fresh;
+      // §12.2 "warning mark and its reason" (S398-W1): the delivery layer
+      // gave up — no rung carried it.
+      if (fresh == MessageStatus.failed) {
+        msg.failureReason ??= FailureReason.noRoute;
+      }
       // §21.4.1: every change to a message goes into the store.
       // `conversationId` stands at the object itself — the method does not
       // get it passed through, and pulling it from the caller would be a
@@ -626,10 +741,96 @@ extension V3MessageStateOps on CleonaService {
   }
 
 
+  /// THE ONE ROUTE on which a message leaves this profile (§21.5.2, level 1:
+  /// "The message disappears from the user's own profile. Immediately and
+  /// completely.") — the own deletion, the author's deletion at the
+  /// recipient, the mirror from an own device, a retracted system-channel
+  /// post and the per-chat expiry all end here.
+  ///
+  /// Gone are the row in the store (`forgetMessage`: `SECURE_DELETE`
+  /// overwrites the pages, §21.4), text, preview image, transcript, quote,
+  /// link preview, reactions, file name and the attachment file itself —
+  /// and the message, its edits and the reactions to it in the history of
+  /// the delivery layer, which keeps the content of every message sent and
+  /// received and re-dispatches an open own one at every edge
+  /// (`_myceliumForget`; §9.3 "it stops the sending").
+  ///
+  /// Nothing of the message stays in the conversation — no row "message
+  /// deleted" either (owner decision 01.10.2026). What keeps a second copy
+  /// of the same message (post box, mirror of an own device) from being
+  /// shown again is a mark outside the conversation: identifier and delete
+  /// time, kept as long as the identity exists
+  /// (`cleona_service_deletion_marks.dart`, §21.5.2, §20.2).
+  ///
+  /// [byAuthor]: the user deleted an own message — the mark keeps, for a
+  /// party that catches up later (§9.5), who held it
+  /// ([DeletionMarkOps._markDeletedAndForget]).
+  void _eraseMessageLocally(String conversationId, UiMessage msg,
+      {bool byAuthor = false}) {
+    final path = msg.filePath;
+    final conv = conversations[conversationId];
+    if (conv != null) {
+      // Every caller has loaded the history to find [msg]; the second call
+      // is free, and the removal below must never meet a history that
+      // holds only its youngest row.
+      ensureLoaded(conversationId);
+      final before = conv.messages.length;
+      conv.messages.removeWhere((m) => m.id == msg.id);
+      if (conv.messages.length < before) {
+        if (conv.totalMessages > 0) conv.totalMessages--;
+        // Counted as unread when it came (`_addMessageToConversation`) and
+        // not read since: the count must not point at a message that is no
+        // longer there.
+        if (!msg.isOutgoing &&
+            msg.readAt == null &&
+            conv.unreadCount > 0 &&
+            !SystemChannels.isSystemChannel(conversationId)) {
+          conv.unreadCount--;
+          _updateBadgeCount();
+        }
+      }
+    }
+    forgetMessage(msg.id);
+    _markDeletedAndForget(conversationId, msg, byAuthor: byAuthor);
+    _voiceTranscription?.forget(msg.id);
+    // The archive row, the sender record of the media lanes and the entry
+    // of an object still in collection (`cleona_service_conversation_end
+    // .dart`): "completely" names them too.
+    _eraseStateOfMessage(msg.id);
+    if (path != null) _eraseAttachmentUnlessHeld(path);
+  }
+
+  /// Removes an attachment file — unless another message still points to it.
+  /// One rule for one file and for the files of a whole conversation:
+  /// [ConversationEndOps._eraseAttachmentsUnlessHeld].
+  void _eraseAttachmentUnlessHeld(String path) =>
+      _eraseAttachmentsUnlessHeld([path]);
+
+  /// The user has read [conv] at [at]: every incoming message not yet read
+  /// starts its expiry deadline now (§21.5.3). Independent of whether read
+  /// receipts are sent — the deadline is local.
+  bool _stampIncomingRead(Conversation conv, DateTime at) {
+    ensureLoaded(conv.id);
+    var stamped = false;
+    for (final msg in conv.messages) {
+      if (msg.isOutgoing || msg.readAt != null) continue;
+      msg.readAt = at;
+      persistMessage(conv.id, msg);
+      stamped = true;
+    }
+    return stamped;
+  }
+
   /// Check for expired messages and delete them.
-  void _checkMessageExpiry() {
-    final now = DateTime.now().millisecondsSinceEpoch;
+  ///
+  /// [at] is the moment the sweep takes as "now"; only the guard
+  /// (`debugCheckMessageExpiry`) passes one.
+  void _checkMessageExpiry({DateTime? at}) {
+    final now = (at ?? DateTime.now()).millisecondsSinceEpoch;
     var changed = false;
+
+    // The marks of deleted messages are not swept here, nor anywhere: they
+    // stay as long as the identity exists (§21.5.2, §20.2).
 
     // ── THE DEADLINE OF THE OUTBOX (§21.2/§21.5.5) ─────────────────────────
     //
@@ -656,22 +857,55 @@ extension V3MessageStateOps on CleonaService {
           'state change — §9.3)');
     }
 
+    // ── PER-CHAT EXPIRY (§21.5.3) ─────────────────────────────────────────
+    //
+    // Every message carries the deadline that applied when it entered the
+    // conversation (`UiMessage.expiryMs`), and the deadline runs PER COPY:
+    // a received message from the moment it was READ here
+    // (`UiMessage.readAt`), an own one from the moment it was SENT
+    // (`UiMessage.sentAt`) — whatever the recipient reports or withholds.
+    // Without its anchor a message does not expire: unread, or not left
+    // ("A message that has not left does not expire" — `resting`, and
+    // `failed` without ever having left). The conversation's current
+    // deadline decides nothing for an existing message — except for a row
+    // written before the deadline was kept per message: it has none
+    // recorded, and takes the conversation's the first time it is seen
+    // here.
     for (final conv in conversations.values) {
-      final expiryMs = conv.config.expiryDurationMs;
-      if (expiryMs == null || expiryMs <= 0) continue;
+      final current = conv.config.expiryDurationMs;
+      final hasCurrent = current != null && current > 0;
+      if (!hasCurrent && !conv.expiryPending) continue;
 
-      ensureAllLoaded();
-      for (final msg in conv.messages) {
-        if (msg.isDeleted) continue;
-        if (msg.readAt == null) continue;
-        final elapsed = now - msg.readAt!.millisecondsSinceEpoch;
-        if (elapsed >= expiryMs) {
-          msg.text = '';
-          msg.isDeleted = true;
-          changed = true;
+      ensureLoaded(conv.id);
+      var stillPending = false;
+      for (final msg in List<UiMessage>.of(conv.messages)) {
+        if (msg.expiryMs == null) {
+          msg.expiryMs = hasCurrent ? current : 0;
           persistMessage(conv.id, msg);
-          _log.debug('Message ${msg.id.substring(0, 8)} expired after ${elapsed}ms');
         }
+        final deadline = msg.expiryMs!;
+        if (deadline <= 0) continue;
+        final anchor = msg.isOutgoing ? msg.sentAt : msg.readAt;
+        if (anchor == null) {
+          stillPending = true;
+          continue;
+        }
+        final elapsed = now - anchor.millisecondsSinceEpoch;
+        if (elapsed >= deadline) {
+          // §21.5.3: an own copy that expires before the message was
+          // acknowledged leaves a count for its recipient — the number,
+          // nothing of the content (`cleona_service_catch_up_source.dart`).
+          _catchUpExpiredCount(conv, msg);
+          _eraseMessageLocally(conv.id, msg);
+          changed = true;
+          _log.debug('Message ${msg.id.substring(0, 8)} expired after ${elapsed}ms');
+        } else {
+          stillPending = true;
+        }
+      }
+      if (conv.expiryPending != stillPending) {
+        conv.expiryPending = stillPending;
+        changed = true;
       }
     }
 
@@ -780,7 +1014,6 @@ extension V3MessageStateOps on CleonaService {
       final senderContact = _contacts[senderUserHex];
       if (senderContact != null) {
         senderContact.lastAckedAt = DateTime.now();
-        _staleWarningWrittenFor.remove(senderUserHex);
         if (senderContact.autoRepairAttempted) {
           senderContact.autoRepairAttempted = false;
         }

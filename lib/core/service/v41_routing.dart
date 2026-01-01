@@ -454,7 +454,8 @@ bool isAckWorthyV3(pe.MessageTypeV3 type) {
     // Content
     case pe.MessageTypeV3.MTV3_TEXT:
     case pe.MessageTypeV3.MTV3_MEDIA_INLINE:
-    case pe.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
+    // NOT `MTV3_MEDIA_ANNOUNCE` (S398 P2b, Q1): its receipt goes only once
+    // the object decodes (§9.4, D-29) — `cleona_service_bulk.dart` sends it.
     case pe.MessageTypeV3.MTV3_MEDIA_REQUEST:
     case pe.MessageTypeV3.MTV3_EDIT:
     case pe.MessageTypeV3.MTV3_DELETE:
@@ -463,6 +464,7 @@ bool isAckWorthyV3(pe.MessageTypeV3 type) {
     case pe.MessageTypeV3.MTV3_GROUP_CREATE:
     case pe.MessageTypeV3.MTV3_GROUP_INVITE:
     case pe.MessageTypeV3.MTV3_GROUP_LEAVE:
+    case pe.MessageTypeV3.MTV3_GROUP_JOIN: // B-3: the explicit join (§16.2.2)
     // Channel lifecycle
     case pe.MessageTypeV3.MTV3_CHANNEL_INVITE:
     case pe.MessageTypeV3.MTV3_CHANNEL_LEAVE:
@@ -483,7 +485,6 @@ bool isAckWorthyV3(pe.MessageTypeV3 type) {
     // Identity-layer infra warranting confirmation
     case pe.MessageTypeV3.MTV3_PROFILE_UPDATE:
     case pe.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
-    case pe.MessageTypeV3.MTV3_RESTORE_BROADCAST:
     case pe.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE:
     case pe.MessageTypeV3.MTV3_IDENTITY_DELETED:
       return true;

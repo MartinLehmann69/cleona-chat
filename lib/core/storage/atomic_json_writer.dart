@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/storage/atomic_replace.dart';
 
 /// Atomically writes/reads JSON files with crash-recovery from sidecars.
@@ -74,7 +75,7 @@ class AtomicJsonWriter {
     if (canonical.existsSync()) {
       final parsed = tryParse(canonical);
       if (parsed != null) return parsed;
-      stderr.writeln(
+      RedactedConsole.err(
           '[AtomicJsonWriter] WARNING: $path corrupt — attempting sidecar-recovery.');
     }
     for (final suffix in ['.tmp', '.old']) {
@@ -82,7 +83,7 @@ class AtomicJsonWriter {
       if (!side.existsSync()) continue;
       final parsed = tryParse(side);
       if (parsed != null) {
-        stderr.writeln(
+        RedactedConsole.err(
             '[AtomicJsonWriter] INFO: recovered $path from $suffix sidecar.');
         writeJsonFile(path, parsed);
         return parsed;

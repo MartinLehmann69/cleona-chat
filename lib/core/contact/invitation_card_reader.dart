@@ -17,6 +17,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:cleona/core/service/invitation_card_types.dart';
+import 'package:mycelium/bundle.dart' show lineBundleFits;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/card_expiry.dart';
 import 'package:mycelium/card_text.dart';
@@ -28,7 +29,23 @@ class InvitationReading {
     this.error,
     this.cardChannel,
     this.daysLeft,
+    this.pkInv,
+    this.keyBundle,
+    this.lineSignature,
+    this.lineChain,
   });
+
+  /// The line's Ed25519 signature (T-a) — the join re-forms the line with it.
+  final Uint8List? lineSignature;
+
+  /// The issuer's rotation chain in wire form (§15.6, D-33) — the join
+  /// re-forms the line with it; one byte (count 0) while it never rotated.
+  final Uint8List? lineChain;
+
+  /// From a `cleona:2:` line (proposal E, `card_text.dart`): `pk_inv` and
+  /// the issuer's key bundle; both `null` for `cleona:1:`, QR and NFC.
+  final Uint8List? pkInv;
+  final Uint8List? keyBundle;
 
   /// The card that was read — also set for [InvitationReadError.expired],
   /// so that the UI can explain WHAT has expired
@@ -59,15 +76,19 @@ int invitationChannelByte({required bool isBeta}) =>
 String invitationChannelName(int channel) =>
     channel == Card.channelBeta ? 'Beta' : 'Live';
 
-/// Reads an invitation from arbitrary text (§15.6, tolerant).
+/// Reads an invitation from arbitrary text (§15.6, tolerant). [verify] checks
+/// the signature of a `cleona:2:` line (T-a) — passed by whoever redeems; the
+/// reading for display passes none and stays without a crypto library.
 InvitationReading readInvitationText(
   String input, {
   required int ownChannel,
   required int nowUnixSeconds,
+  LineVerify? verify,
 }) {
-  final Card card;
+  final CardLine line;
   try {
-    card = outInvitationText(input, expectedChannel: ownChannel);
+    line = outInvitationLine(input,
+        expectedChannel: ownChannel, verify: verify);
   } on CardTextError catch (e) {
     if (e.kind == CardTextErrorKind.wrongVersion) {
       // `outInvitationText` deliberately reports a foreign channel as
@@ -88,7 +109,25 @@ InvitationReading readInvitationText(
     }
     return InvitationReading._(error: _fromKind(e.kind));
   }
-  return _withExpiry(card, nowUnixSeconds);
+  // §15.6 "altered": whoever redeems (a verifier is passed) also checks that
+  // the bundle founds the fingerprint or its chain leads there (D-33).
+  if (verify != null && !lineBundleFits(line)) {
+    return InvitationReading._(
+        error: _fromKind(CardTextErrorKind.badSignature));
+  }
+  final r = _withExpiry(line.card, nowUnixSeconds);
+  // A `cleona:2:` line (proposal E) also carries pk_inv and the key bundle —
+  // the join then needs no bundle round trip.
+  return line.bundle == null
+      ? r
+      : InvitationReading._(
+          card: r.card,
+          error: r.error,
+          daysLeft: r.daysLeft,
+          pkInv: line.pkInv,
+          keyBundle: line.bundle,
+          lineSignature: line.signature,
+          lineChain: line.chain);
 }
 
 /// Reads a packed card (QR binary form, NFC record, §15.2).
@@ -134,4 +173,5 @@ InvitationReadError _fromKind(CardTextErrorKind kind) => switch (kind) {
       CardTextErrorKind.tampered => InvitationReadError.corrupted,
       CardTextErrorKind.wrongVersion => InvitationReadError.wrongVersion,
       CardTextErrorKind.brokenChars => InvitationReadError.badCharacters,
+      CardTextErrorKind.badSignature => InvitationReadError.altered,
     };

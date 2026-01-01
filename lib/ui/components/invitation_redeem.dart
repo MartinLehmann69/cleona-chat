@@ -37,6 +37,13 @@ class InvitationRedeem {
       r.error == InvitationReadError.expired ||
       r.error == InvitationReadError.wrongChannel;
 
+  /// Whether a SCANNED card sends at once (owner decision 06.10.2026, S405
+  /// V3; §15.5: a QR shown face to face is accepted at the issuer without
+  /// a second dialogue, so the scan itself is the act): redeemable and no
+  /// expiry warning. Otherwise the screen shows the reason or the warning
+  /// (§15.3 "before any packet leaves") and the user decides.
+  static bool sendsAtOnce(InvitationReading r) => r.ok && !r.expiresSoon;
+
   /// The sentence for the finding, `null` if the card is redeemable.
   static String? errorOf(AppLocale l, InvitationReading r) => r.ok
       ? null
@@ -61,7 +68,9 @@ class InvitationRedeem {
     final r = text != null
         ? await service.redeemInvitationText(text)
         : await service.redeemInvitationCardBytes(packed!);
-    final ok = r.outcome == InvitationRedeemOutcome.requestSent;
+    // S405 F-1: a resting request is saved and goes out by itself — no error (§12.2).
+    final ok = r.outcome == InvitationRedeemOutcome.requestSent ||
+        r.outcome == InvitationRedeemOutcome.requestResting;
     messenger?.showSnackBar(SnackBar(
       backgroundColor: ok ? null : errorColor,
       content: Text(invitationRedeemText(locale, r)),

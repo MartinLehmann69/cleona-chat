@@ -48,11 +48,11 @@ import 'package:mycelium/cover_stream_content.dart';
 /// ── CONTENT (§5.5, W4) ────────────────────────────────────────────────────
 ///
 /// A drawn packet carries, in this order of checking:
-/// a piece of the code registration, if the target is the fixed neighbour and
-/// [registrationFor] yields one (§8.1, S391); otherwise address entries, if the addresses have changed since the last packet to
+/// address entries, if the addresses have changed since the last packet to
 /// THIS target; otherwise an update piece, if
 /// [nextPiece] yields one; otherwise filling. No content ever creates
-/// a send time of its own (§5.5 rule 1).
+/// a send time of its own (§5.5 rule 1). The code registration is NOT
+/// cover content (§5.5, F-B): it travels as `0x24` (`node_codes.dart`).
 ///
 /// ── FEWER EMPTY PACKETS (§5.1) ──────────────────────────────────────────
 ///
@@ -124,20 +124,6 @@ class CoverStream {
   /// of its own).
   void Function(Uint8List piece, InternetAddress from, int fromPort)? onPiece;
 
-  /// The next piece of the code registration for [target] — not `null` only for the
-  /// fixed neighbour (`node_codes.dart`). If it goes out,
-  /// [registrationSent] follows. [fillSend] asks too: the
-  /// keep-alive carries the registration along (§3.1 — it does not depend solely
-  /// on this stream).
-  Uint8List? Function(Neighbour target)? registrationFor;
-  void Function(Neighbour target)? registrationSent;
-
-  /// A received code registration. [from]:[fromPort] is the address under
-  /// which the device is sending AT THE MOMENT — WHICH device it is is said solely by the
-  /// device code in the piece (§8.1, S392; `code_registration.dart`).
-  void Function(Uint8List piece, InternetAddress from, int fromPort)?
-      onRegistration;
-
   /// A received keep-alive (§8.1): device code 16 B + token 8 B, read by
   /// the fixed neighbour (`mapping_echo.dart`).
   void Function(Uint8List content, InternetAddress from, int fromPort)?
@@ -145,7 +131,6 @@ class CoverStream {
 
   /// Counters for probes and the network statistics (§5.6, §25) — read only.
   int sent = 0;
-  int sentRegistration = 0;
   int sentFill = 0;
   int sentPiece = 0;
   int sentEntries = 0;
@@ -234,8 +219,6 @@ class CoverStream {
     if (e != null && !e.isEmpty) onEntries?.call(e, from, fromPort);
     final s = t.piece;
     if (s != null && s.isNotEmpty) onPiece?.call(s, from, fromPort);
-    final a = t.registration;
-    if (a != null && a.isNotEmpty) onRegistration?.call(a, from, fromPort);
     final o = t.keepAlive;
     if (o != null) onKeepAlive?.call(o, from, fromPort);
   }
@@ -276,10 +259,7 @@ class CoverStream {
     final list = _entriesNow(target);
     final fingerprint = _fingerprint(list);
     var entriesIncluded = false;
-    final registration = registrationFor?.call(target);
-    if (registration != null) {
-      payload = _withRegistration(registration);
-    } else if (!list.isEmpty && _entriesTo[_who(target)] != fingerprint) {
+    if (!list.isEmpty && _entriesTo[_who(target)] != fingerprint) {
       payload = coverPayloadBuild(kContentEntries, _random, entries: list);
       entriesIncluded = true;
     } else {
@@ -302,7 +282,6 @@ class CoverStream {
     // packet to this target.
     if (!_send(payload, target)) return false;
     _lastTo[_who(target)] = DateTime.now();
-    if (registration != null) _registrationOut(target);
     if (entriesIncluded) {
       _entriesTo[_who(target)] = fingerprint;
       sentEntries++;
@@ -318,41 +297,14 @@ class CoverStream {
   /// the path.
   DateTime? lastTo(Neighbour target) => _lastTo[_who(target)];
 
-  /// ONE fill packet to [target], outside the clock — the keep-alive (§8.1)
-  /// thus looks like cover on the wire. Independent of whether the
-  /// stream runs. `true` if it went out.
-  /// Carries a piece of the code registration if one is pending for [target].
-  bool fillSend(Neighbour target) {
-    final registration = registrationFor?.call(target);
-    final payload = registration != null
-        ? _withRegistration(registration)
-        : coverPayloadBuild(kContentFill, _random);
-    if (!_send(payload, target)) return false;
-    _lastTo[_who(target)] = DateTime.now();
-    if (registration != null) _registrationOut(target);
-    return true;
-  }
-
-  /// ONE keep-alive to [target] (§8.1): content `0x04` with [content]
-  /// (device code + token) — or the pending registration piece, which the
-  /// neighbour follows the same way. `true` if it went out.
+  /// ONE keep-alive to [target] (§8.1), outside the clock: content `0x04`
+  /// with [content] (device code + token), so it looks like cover on the
+  /// wire. Independent of whether the stream runs. `true` if it went out.
   bool keepAliveSend(Neighbour target, Uint8List content) {
-    final registration = registrationFor?.call(target);
-    final payload = registration != null
-        ? _withRegistration(registration)
-        : coverPayloadBuild(kContentKeepAlive, _random, piece: content);
+    final payload = coverPayloadBuild(kContentKeepAlive, _random, piece: content);
     if (!_send(payload, target)) return false;
     _lastTo[_who(target)] = DateTime.now();
-    if (registration != null) _registrationOut(target);
     return true;
-  }
-
-  Uint8List _withRegistration(Uint8List a) =>
-      coverPayloadBuild(kContentRegistration, _random, piece: a);
-
-  void _registrationOut(Neighbour target) {
-    sentRegistration++;
-    registrationSent?.call(target);
   }
 
   static String _who(Neighbour n) => '${n.$1.address}:${n.$2}';

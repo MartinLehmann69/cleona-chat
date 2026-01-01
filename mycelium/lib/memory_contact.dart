@@ -10,9 +10,12 @@
 /// of the file layout including the type it carries. `memory.dart` re-exports
 /// this file.
 ///
-/// ── FILE LAYOUT PER CONTACT (version 16) ───────────────────────────────
+/// ── FILE LAYOUT PER CONTACT (version 17) ───────────────────────────────
 /// ```
-/// name: u16 length + UTF-8 | address (Address.length) | since (u64 ms)
+/// name: u16 length + UTF-8
+/// | address (Address.length, 3240 B since version 17: with the identifier)
+/// | its rotation chain (1 + 5357·n B)        — version 17
+/// | since (u64 ms)
 /// | lastSeen (flag + address)                — version 12
 /// | card addresses (count byte + addresses)  — version 13
 /// | neighbours (count byte 0..3 + addresses) — version 16 (was one, v11)
@@ -20,12 +23,15 @@
 /// | day keys: count (1 B), per day (u32) + key 32 B
 /// | own day keys last sent (u64 ms, 0 = never)
 /// | never a fixed neighbour (1 B, 0x00/0x01) — version 16
+/// | own chain acknowledged (1 B, 0x00/0x01)  — version 17
 /// ```
 library;
 
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/oqs_ffi.dart';
+import 'package:cleona/core/identity/rotation_chain.dart';
 import 'package:mycelium/memory_invitation.dart' show MemoryError, Reader;
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/pair.dart' show kPairRandomLength;
@@ -98,6 +104,12 @@ class Contact {
   /// day keys — `null`: never.
   final DateTime? dayKeySent;
 
+  /// The contact has acknowledged an envelope that carried THIS identity's
+  /// rotation chain (§4.5.4, E-A7): from then on envelopes to it leave the
+  /// chain out. Set back for every contact at the next rotation
+  /// (`mailbox_rotation.dart`).
+  final bool chainAcked;
+
   Contact({
     required this.address,
     required this.displayName,
@@ -109,6 +121,7 @@ class Contact {
     this.pairRandom,
     Map<int, Uint8List> dayKey = const {},
     this.dayKeySent,
+    this.chainAcked = false,
   })  : cardsAddresses = List.unmodifiable(cardsAddresses),
         neighbours = List.unmodifiable(neighbours),
         dayKey = Map.unmodifiable(dayKey) {
@@ -138,7 +151,58 @@ class Contact {
       neverFixedNeighbour: neverFixedNeighbour,
       pairRandom: pairRandom,
       dayKey: dayKey,
-      dayKeySent: dayKeySent);
+      dayKeySent: dayKeySent,
+      chainAcked: chainAcked);
+}
+
+/// The same contact with the chain acknowledgement [acked] and — with
+/// [dayKeysDue] — no record of the last day-key shipment: what an Emergency
+/// Key Rotation sets back for every contact (§4.5.4, §8.2).
+Contact contactWithChainState(Contact k,
+        {required bool acked, bool dayKeysDue = false}) =>
+    Contact(
+        address: k.address,
+        displayName: k.displayName,
+        since: k.since,
+        lastSeen: k.lastSeen,
+        cardsAddresses: k.cardsAddresses,
+        neighbours: k.neighbours,
+        neverFixedNeighbour: k.neverFixedNeighbour,
+        pairRandom: k.pairRandom,
+        dayKey: k.dayKey,
+        dayKeySent: dayKeysDue ? null : k.dayKeySent,
+        chainAcked: acked);
+
+/// An address as memory keeps it: its bytes, then its rotation chain in the
+/// wire form (`rotation_chain.dart`, 1 B for none). Every place that keeps
+/// an address keeps its proof — without it a rotated contact would lose its
+/// founding key and with it `K_AB` (§4.3) at the next restart.
+void addressChainWrite(BytesBuilder b, Address a) {
+  b.add(a.toBytes());
+  b.add(a.chain.toWire());
+}
+
+/// Counterpart to [addressChainWrite]. The chain was checked when the
+/// address was accepted; memory is this device's own encrypted file, so it
+/// is not checked again (`proven`) — only its form.
+Address addressChainRead(Reader l) {
+  final raw = l.bytes(Address.length);
+  final n = l.byte();
+  if (n > kRotationChainMaxLinks) {
+    throw MemoryError('chain of $n links, at most $kRotationChainMaxLinks');
+  }
+  final wire = (BytesBuilder()
+        ..addByte(n)
+        ..add(l.bytes(kChainLinkWireLength * n)))
+      .toBytes();
+  final keys = ChainKeys(Uint8List.sublistView(raw, 32, 64),
+      Uint8List.sublistView(raw, 64, 64 + OqsFFI.mlDsaPublicKeyLength));
+  try {
+    return Address.outBytes(raw,
+        chain: RotationChain.fromWire(wire, keys), proven: true);
+  } on RotationChainError catch (e) {
+    throw MemoryError('$e');
+  }
 }
 
 /// Writes [k] in the layout from the header of this file.
@@ -146,7 +210,7 @@ void contactWrite(BytesBuilder b, Contact k) {
   final name = utf8.encode(k.displayName);
   b.add(_u16(name.length));
   b.add(name);
-  b.add(k.address.toBytes());
+  addressChainWrite(b, k.address);
   b.add(_u64(k.since.millisecondsSinceEpoch));
   optionalAddressWrite(b, k.lastSeen);
   addressesWrite(b, k.cardsAddresses);
@@ -162,13 +226,14 @@ void contactWrite(BytesBuilder b, Contact k) {
   }
   b.add(_u64(k.dayKeySent?.millisecondsSinceEpoch ?? 0));
   b.addByte(k.neverFixedNeighbour ? 1 : 0);
+  b.addByte(k.chainAcked ? 1 : 0);
 }
 
 /// Reads a contact. Throws [MemoryError] (via [Reader]) or
 /// a format exception that the caller reports as damaged.
 Contact contactRead(Reader l) {
   final name = utf8.decode(l.bytes(l.u16()));
-  final address = Address.outBytes(l.bytes(Address.length));
+  final address = addressChainRead(l);
   final since = DateTime.fromMillisecondsSinceEpoch(l.u64());
   final seen = optionalAddressRead(l.bytes, 'zuletztGesehen');
   final card = addressesRead(l.bytes);
@@ -199,7 +264,13 @@ Contact contactRead(Reader l) {
     1 => true,
     final f => throw MemoryError('invalid never-fixed flag $f'),
   };
+  final acked = switch (l.byte()) {
+    0 => false,
+    1 => true,
+    final f => throw MemoryError('invalid chain-acknowledged flag $f'),
+  };
   return Contact(
+    chainAcked: acked,
     address: address,
     displayName: name,
     since: since,
@@ -220,3 +291,17 @@ Uint8List _u32(int v) =>
     (ByteData(4)..setUint32(0, v, Endian.big)).buffer.asUint8List();
 Uint8List _u64(int v) =>
     (ByteData(8)..setUint64(0, v, Endian.big)).buffer.asUint8List();
+
+/// The same contact without its last observed address (S405 V2,
+/// `memory_last_seen_clear.dart`).
+Contact contactWithoutLastSeen(Contact k) => Contact(
+    address: k.address,
+    displayName: k.displayName,
+    since: k.since,
+    cardsAddresses: k.cardsAddresses,
+    neighbours: k.neighbours,
+    neverFixedNeighbour: k.neverFixedNeighbour,
+    pairRandom: k.pairRandom,
+    dayKey: k.dayKey,
+    dayKeySent: k.dayKeySent,
+    chainAcked: k.chainAcked);

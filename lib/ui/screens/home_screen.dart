@@ -14,6 +14,8 @@ import 'package:cleona/ui/screens/chat_screen.dart';
 import 'package:cleona/ui/screens/contacts_screen.dart';
 import 'package:cleona/ui/screens/settings_screen.dart';
 import 'package:cleona/ui/components/language_selector.dart';
+import 'package:cleona/ui/components/tab_with_badge.dart';
+import 'package:cleona/ui/components/system_notice_text.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:cleona/ui/theme/skins.dart';
@@ -23,6 +25,7 @@ import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
 import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/components/reduced_mode_banner.dart';
+import 'package:cleona/ui/components/enrolment_banner.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
@@ -268,7 +271,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final channelConvs = sortUnreadFirst(allConvs.where((c) => c.isChannel).toList());
     final favConvs = sortUnreadFirst(allConvs.where((c) => c.isFavorite).toList());
 
-    final pendingCount = service.pendingContacts.length;
+    final pendingCount = service.pendingContacts.length +
+        service.enrolmentView.requests.length; // B-4b: enrolment requests
     final totalUnread = allConvs.fold<int>(0, (s, c) => s + c.unreadCount);
     final dmUnread = dmConvs.fold<int>(0, (s, c) => s + c.unreadCount);
     final groupUnread = groupConvs.fold<int>(0, (s, c) => s + c.unreadCount);
@@ -365,6 +369,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           // (limited)". Send/receive of user-messages is short-circuited
           // until the next restart (which re-shows the splash).
           if (service.reducedMode) const ReducedModeBanner(),
+          EnrolmentBanner(service: service), // B-4b, §13.0, D-40
           // Identity tabs
           SizedBox(
             height: 36,
@@ -386,12 +391,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             labelColor: tabLabelStyle.color ?? colorScheme.onSurface,
             unselectedLabelColor: tabUnselectedStyle.color ?? colorScheme.onSurface.withValues(alpha: 0.7),
             tabs: [
-              _tabWithBadge(locale.get('tab_recent'), totalUnread),
+              tabWithBadge(locale.get('tab_recent'), totalUnread),
               Tab(text: locale.get('tab_favorites')),
-              _tabWithBadge(locale.get('tab_chats'), dmUnread),
-              _tabWithBadge(locale.get('tab_groups'), groupUnread),
-              _tabWithBadge(locale.get('tab_channels'), channelUnread),
-              _tabWithBadge(locale.get('tab_inbox'), pendingCount),
+              tabWithBadge(locale.get('tab_chats'), dmUnread),
+              tabWithBadge(locale.get('tab_groups'), groupUnread),
+              tabWithBadge(locale.get('tab_channels'), channelUnread),
+              tabWithBadge(locale.get('tab_inbox'), pendingCount),
             ],
           ),
           Expanded(
@@ -421,19 +426,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       ),
       floatingActionButton: _buildFab(context, service),
     ),
-    );
-  }
-
-  Tab _tabWithBadge(String label, int count) {
-    if (count == 0) return Tab(text: label);
-    return Tab(
-      child: Badge(
-        label: Text('$count'),
-        child: Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: Text(label),
-        ),
-      ),
     );
   }
 
@@ -510,7 +502,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       itemBuilder: (_, i) {
                         final c = contacts[i];
                         return CheckboxListTile(
-                          title: Text(c.displayName),
+                          title: Text(shownContactName(c.displayName, locale)),
                           value: selected.contains(c.nodeIdHex),
                           onChanged: (v) => setDialogState(() {
                             if (v == true) {
@@ -667,7 +659,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         itemBuilder: (_, i) {
                           final c = contacts[i];
                           return CheckboxListTile(
-                            title: Text(c.displayName),
+                            title: Text(shownContactName(c.displayName, locale)),
                             value: selected.contains(c.nodeIdHex),
                             dense: true,
                             onChanged: (v) => setDialogState(() {
@@ -816,7 +808,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               controller: controller,
               decoration: InputDecoration(
                 labelText: locale.get('card_paste_label'),
-                hintText: 'cleona:1:…',
+                hintText: 'cleona:2:…',
                 border: const OutlineInputBorder(),
               ),
               minLines: 2,
@@ -1496,7 +1488,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
       if (c.displayName.toLowerCase().contains(q)) return true;
       if (c.messages.isNotEmpty) {
         final lastMsg = c.messages.last;
-        if (!lastMsg.isDeleted && lastMsg.text.toLowerCase().contains(q)) return true;
+        if (lastMsg.text.toLowerCase().contains(q)) return true;
       }
       return false;
     }).toList();
@@ -1795,7 +1787,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${locale.get('original_name')}: ${contact.displayName}',
+            Text('${locale.get('original_name')}: ${shownContactName(contact.displayName, locale)}',
               style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
                 color: Theme.of(ctx).colorScheme.outline,
               ),
@@ -1839,7 +1831,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(locale.get('delete_contact_title')),
-        content: Text(locale.tr('delete_contact_confirm', {'name': conv.displayName})),
+        content: Text(locale.tr('delete_contact_confirm', {'name': shownContactName(conv.displayName, locale)})),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
           FilledButton(
@@ -2038,7 +2030,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
               final c = candidates[i];
               return ListTile(
                 leading: const Icon(Icons.person),
-                title: Text(c.displayName),
+                title: Text(shownContactName(c.displayName, locale)),
                 onTap: () async {
                   Navigator.pop(ctx);
                   await service.inviteToGroup(groupIdHex, c.nodeIdHex);
@@ -2204,7 +2196,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
               final c = candidates[i];
               return ListTile(
                 leading: const Icon(Icons.person),
-                title: Text(c.displayName),
+                title: Text(shownContactName(c.displayName, locale)),
                 onTap: () async {
                   Navigator.pop(ctx);
                   await service.inviteToChannel(channelIdHex, c.nodeIdHex);
@@ -2302,9 +2294,10 @@ class _ConversationListViewState extends State<_ConversationListView> {
 
   String _lastMessagePreview(BuildContext context, UiMessage msg) {
     final locale = AppLocale.read(context);
-    if (msg.isDeleted) return locale.get('message_deleted');
     if (msg.isMedia) return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}📎 ${msg.filename ?? locale.get('file_fallback')}';
-    if (msg.senderNodeIdHex.isEmpty) return msg.text; // System message
+    if (msg.senderNodeIdHex.isEmpty) {
+      return systemNoticeText(locale, msg.text); // System message
+    }
     return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
   }
 
@@ -2337,7 +2330,12 @@ class _InboxView extends StatelessWidget {
         ? Colors.white.withValues(alpha: 0.7)
         : null;
 
-    if (pending.isEmpty) {
+    // B-4b (§14.6.1 step 3, E-1 = A): a new device of this identity asks to
+    // be added — name, platform, DeviceID; nothing is handed over before the
+    // user accepts.
+    final enrol = service.enrolmentView.requests;
+
+    if (pending.isEmpty && enrol.isEmpty) {
       return _EmptyState(
         icon: Icons.inbox_outlined,
         text: locale.get('inbox_empty'),
@@ -2347,6 +2345,59 @@ class _InboxView extends StatelessWidget {
 
     return ListView(
       children: [
+        for (final r in enrol)
+          Card(
+            key: Key('enrol_request_${r.requestIdHex}'),
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Icon(Icons.devices, color: colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        locale.tr('enrol_request_title',
+                            {'name': r.deviceName, 'platform': r.platform}),
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 6),
+                  Text(locale.get('enrol_request_device_id'),
+                      style: theme.textTheme.labelSmall),
+                  SelectableText(r.deviceIdHex,
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 12)),
+                  const SizedBox(height: 6),
+                  Text(locale.get('enrol_request_hint'),
+                      style: theme.textTheme.bodySmall),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        key: Key('enrol_reject_${r.requestIdHex}'),
+                        onPressed: () =>
+                            service.enrolmentDecide(r.requestIdHex, false),
+                        child: Text(locale.get('reject')),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        key: Key('enrol_accept_${r.requestIdHex}'),
+                        onPressed: () =>
+                            service.enrolmentDecide(r.requestIdHex, true),
+                        child: Text(locale.get('accept')),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (pending.isNotEmpty)
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Text(

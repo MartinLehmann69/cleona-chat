@@ -3,7 +3,8 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/post_box_disk.dart' show kIdLength, kValueLength;
-import 'package:mycelium/pair.dart' show deriveDayKey, dayValue, utcDay;
+import 'package:mycelium/pair.dart'
+    show dayKeyFrom, deriveDayKey, dayValue, utcDay;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/envelope.dart' show PostBox;
 import 'package:mycelium/update_manifest_compartment.dart' show isManifestValue;
@@ -22,13 +23,15 @@ import 'package:mycelium/update_manifest_compartment.dart' show isManifestValue;
 ///
 /// ```
 /// collector                                 holder
-/// 0x32 count | 7 × value (114 B)       ──►
-///                                      ◄──  0x35 random | node (33 B)  [30 s, once per value]
+/// 0x32 count | 7 × value | request (122 B) ──►
+///                                      ◄──  0x35 random | node | request (41 B)
+///                                           [30 s; a repeated proof is answered again]
 /// 0x36 value|random|pk_d|signature (129 B) ──►  per value; checks: task open,
 ///                                           same source, value asked,
 ///                                           dayValue(pk_d) == value,
 ///                                           Ed25519 over [proofData]
-///                                      ◄──  0x33 value|id|… / 0x34 value   [only now]
+///                                      ◄──  0x33 value|id|count|request|… /
+///                                           0x34, 0x37 value|request (25 B)  [only now]
 /// 0x31 id|signature (73 B)             ──►  Ed25519 with pk_d over [deleteData] → delete
 /// ```
 ///
@@ -56,8 +59,17 @@ const int kDayPkLength = 32;
 /// At most this many values are asked by a 0x32 — the retention (7 days).
 const int kAtMostValues = 7;
 
-/// 0x32 `Sorte | Anzahl | 7 × Wert` — always this length.
-const int kCollectLength = 1 + 1 + kAtMostValues * kValueLength;
+/// The identifier of a collect request (S399 step 4; §8.2 "collection ends",
+/// owner 02.10.2026): every packet a holder sends back names the question
+/// that packet answers — the task `0x35` the question it was issued for,
+/// `0x33`, `0x34` and `0x37` the question of the task the proof came under.
+/// Zero where there is no such question: a proof under a task the holder
+/// does not know, and the receipt `0x31` of a deposit.
+const int kRequestIdLength = 8;
+
+/// 0x32 `Sorte | Anzahl | 7 × Wert | Anfragekennung 8` — always this length.
+const int kCollectLength =
+    1 + 1 + kAtMostValues * kValueLength + kRequestIdLength;
 
 /// 0x31 as delete receipt: `Sorte | id | Zeichnung`. The deposited
 /// receipt (holder to sender) is `Sorte | id | Knoten` — the length separates them.
@@ -81,6 +93,20 @@ List<Question> ownAsk(PostBox me, DateTime now) {
   return [
     for (var d = 0; d < kAtMostValues; d++)
       _question(deriveDayKey(me, today - d)),
+  ];
+}
+
+/// The second question of the 7 days after an Emergency Key Rotation (§8.2
+/// "the identity asks under its previous day keys for 7 more days", E-A6):
+/// the same seven days under the REPLACED signing key — post a contact left
+/// before it had the new day keys. Empty outside those 7 days.
+List<Question> previousAsk(PostBox me, DateTime now) {
+  final seed = me.previousDaySeed?.seed;
+  if (seed == null) return const [];
+  final today = utcDay(now);
+  return [
+    for (var d = 0; d < kAtMostValues; d++)
+      _question(dayKeyFrom(seed, today - d)),
   ];
 }
 
@@ -125,8 +151,14 @@ Uint8List collectPacket(List<Question> ask, Uint8List random) {
   }
   final free = (kAtMostValues - ask.length) * kValueLength;
   if (free > 0) b.add(Uint8List.sublistView(random, 0, free));
+  // The request identifier: the last bytes of [random] (kCollectLength long).
+  b.add(Uint8List.sublistView(random, random.length - kRequestIdLength));
   return b.toBytes();
 }
+
+/// The request identifier of a 0x32 (its last [kRequestIdLength] B).
+Uint8List collectRequestId(Uint8List p) =>
+    Uint8List.fromList(p.sublist(p.length - kRequestIdLength));
 
 /// The asked values of a 0x32, or `null`.
 List<Uint8List>? collectValuesRead(Uint8List p) {
@@ -139,13 +171,15 @@ List<Uint8List>? collectValuesRead(Uint8List p) {
   ];
 }
 
-/// 0x35 `Sorte | Zufall 16 | Knotenkennung 16`. The node identifier of the
-/// holder (B1, S388) is not signed; the proof binds only the random value.
-Uint8List taskPacket(Uint8List random, Uint8List node) =>
+/// 0x35 `Sorte | Zufall 16 | Knotenkennung 16 | Anfragekennung 8`. The node
+/// identifier of the holder (B1, S388) is not signed; the proof binds only
+/// the random value.
+Uint8List taskPacket(Uint8List random, Uint8List node, Uint8List request) =>
     (BytesBuilder()
           ..addByte(kinds.kCollectTask)
           ..add(random)
-          ..add(node))
+          ..add(node)
+          ..add(request))
         .toBytes();
 
 /// The proof for [f] on [random]. Without pair (manifest compartment) zeros.

@@ -33,8 +33,8 @@
 #                              App Store / TestFlight rejects development-signed IPAs.
 #   CERT_P12_PASSWORD        — Password for the .p12 file
 #   PROVISIONING_PROFILE_B64 — APP STORE provisioning profile (base64) for bundle id
-#                              chat.cleona.cleona, named "Cleona App Store" (the name
-#                              referenced in ios/ExportOptions.plist). A Development or
+#                              chat.cleona.cleona, named "Cleona Distribution" (the
+#                              name in ios/ExportOptions.plist and the Xcode project). A Development or
 #                              Ad-Hoc profile will NOT work for TestFlight upload.
 #
 # Parallelization (S206):
@@ -230,6 +230,31 @@ jobs:
       # matches — the mock must never enter a signed IPA. Open:
       # BUGFIX_CURRENT.md AV-V0.3 §5 / AV-V1.3 §1.
 
+      - name: Print restricted entitlements a release profile must contain
+        # VERIFY counterpart to the gate in "Install provisioning profile"
+        # below. An unsigned build never touches the profile, so here the
+        # restricted keys can only be SHOWN, not checked. 25.09.2026 (S397)
+        # was exactly this blind spot: Runner.entitlements carried the
+        # multicast key, the profile did not, the VERIFY run was green and
+        # only the RELEASE run died at codesign. This print at least puts
+        # the requirement in front of every push run; the hard check runs
+        # where the profile is in hand.
+        if: env.IS_RELEASE != 'true'
+        run: |
+          echo "=== Restricted entitlements in ios/Runner/Runner.entitlements ==="
+          echo "The App Store provisioning profile (secret PROVISIONING_PROFILE_B64)"
+          echo "must contain every one of these, or the RELEASE run fails at the gate."
+          # plutil re-serialises WITHOUT comments — the history comments in
+          # Runner.entitlements quote <key> snippets that must not reach
+          # this list as phantom keys.
+          RESTRICTED="$(plutil -convert xml1 -o - ios/Runner/Runner.entitlements \
+            | sed -n 's/.*<key>\(com\.apple\.developer\.[^<]*\)<\/key>.*/\1/p')"
+          if [ -n "$RESTRICTED" ]; then
+            echo "$RESTRICTED" | sed 's/^/  /'
+          else
+            echo "  (none)"
+          fi
+
       - name: Install distribution certificate
         # VERIFY runs build unsigned — see "Build IPA" below.
         if: env.IS_RELEASE == 'true'
@@ -260,8 +285,45 @@ jobs:
           PP_PATH="$RUNNER_TEMP/cleona.mobileprovision"
           echo "$PROVISIONING_PROFILE_B64" | base64 --decode > "$PP_PATH"
 
+          # ── ENTITLEMENTS GATE (S403) ─────────────────────────────────────
+          # Every key of Runner.entitlements must also stand in the profile's
+          # Entitlements dict, or codesign dies only at the very end of the
+          # release run. 25.09.2026 (S397): Runner.entitlements carried
+          # com.apple.developer.networking.multicast, Apple had granted no
+          # capability, and the run failed after the build with
+          # "Provisioning profile 'Cleona Distribution' doesn't include the
+          # Multicast Networking capability" — while the unsigned VERIFY run
+          # had gone green. The profile is in hand here, so the failure dies
+          # BEFORE the ~40-minute build, with a message naming the fix
+          # (portal capability, profile regeneration, secret update).
+          PROFILE_PLIST="$RUNNER_TEMP/profile-decoded.plist"
+          security cms -D -i "$PP_PATH" > "$PROFILE_PLIST"
+
+          # plutil re-serialises WITHOUT comments — the history comments in
+          # Runner.entitlements quote <key> snippets that must not reach
+          # the key list as phantom keys.
+          APP_KEYS="$(plutil -convert xml1 -o - ios/Runner/Runner.entitlements \
+            | sed -n 's/.*<key>\(.*\)<\/key>.*/\1/p')"
+
+          PP_NAME="$(plutil -extract Name raw - "$PROFILE_PLIST" 2>/dev/null || echo '?')"
+          MISSING=0
+          for KEY in $APP_KEYS; do
+            # PlistBuddy fails (non-zero) when the key does not exist —
+            # exactly the check; its output is discarded.
+            if ! /usr/libexec/PlistBuddy -c "Print :Entitlements:$KEY" \
+                "$PROFILE_PLIST" > /dev/null 2>&1; then
+              echo "::error::Entitlement '$KEY' (ios/Runner/Runner.entitlements) is missing from provisioning profile '$PP_NAME'. Enable the matching capability for App ID chat.cleona.cleona in the Apple Developer portal (Identifiers → Additional Capabilities), regenerate the App Store distribution profile, and update the PROVISIONING_PROFILE_B64 secret."
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Entitlements gate passed — profile '$PP_NAME' covers every key of Runner.entitlements:"
+          echo "$APP_KEYS" | sed 's/^/  OK: /'
+
+          UUID="$(plutil -extract UUID raw - "$PROFILE_PLIST")"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          UUID="$(security cms -D -i "$PP_PATH" | plutil -extract UUID raw -)"
           cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID.mobileprovision"
           echo "PROVISIONING_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
 

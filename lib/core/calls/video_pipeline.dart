@@ -598,6 +598,33 @@ class VideoReport {
   String toString() => toLogLine();
 }
 
+// ── Why a video session did not start ────────────────────────────────
+
+/// Why the own video did not come up, as far as the ABI says it
+/// (`cleona_video.h`, "WHICH CODE FOR WHICH CASE"). The call service turns
+/// it into the reason of `CALL_MEDIA_STATE` (S399, owner C8: "the reason is
+/// not unknown — name it"). A rate that is unachievable at open is not here:
+/// it has its own path (`VideoOpenRateUnachievable` -> `onVideoShutdown`).
+enum VideoStartFailure {
+  /// This device has no video path at all: `CLEONA_VIDEO_ERR_UNSUPPORTED`,
+  /// or no video backend library. A property of the device.
+  unsupported,
+
+  /// The device is capable, this attempt failed: `CLEONA_VIDEO_ERR_BACKEND`
+  /// (camera busy, codec init refused, allocation), or any other failure
+  /// while opening or starting the session.
+  failed;
+
+  /// Classifies an exception of [VideoPipeline.open]/[VideoPipeline.start].
+  static VideoStartFailure of(Object e) {
+    if (e is VideoLibraryNotAvailable) return unsupported;
+    if (e is VideoPipelineException && e.code == _kErrUnsupported) {
+      return unsupported;
+    }
+    return failed;
+  }
+}
+
 // ── Exceptions ───────────────────────────────────────────────────────
 
 /// The native video library could not be loaded. The caller degrades to

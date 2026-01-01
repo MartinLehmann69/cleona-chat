@@ -19,7 +19,9 @@ Future<ContactIssueDialogResult> showContactIssueDialog({
   required ContactIssueReport report,
   required String contactNodeIdHex,
 }) async {
-  final locale = AppLocale.of(context);
+  // Reached from a menu handler (`_showContactIssueReport`), so this is a
+  // handler-side read, not a build-time watch.
+  final locale = AppLocale.read(context);
   // §22.7.2: the same predicate as in
   // `contact_issue_reporter.dart` (`canPostToBugLog`) — one definition,
   // two callers. Before, the condition stood here a second time, and

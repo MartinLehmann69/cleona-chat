@@ -3,7 +3,9 @@ import 'dart:typed_data';
 
 import 'package:mycelium/first_contact.dart' show ContactRequest;
 import 'package:mycelium/memory.dart';
+import 'package:mycelium/memory_last_seen_clear.dart';
 import 'package:mycelium/memory_enforcer.dart' show legacyDataClear;
+import 'package:mycelium/mailbox_format_reset.dart';
 import 'package:mycelium/message.dart' show Inbound;
 import 'package:mycelium/amendment.dart' show Edit, ReadMark, Reaction;
 import 'package:mycelium/envelope.dart';
@@ -38,6 +40,18 @@ class MailboxDetails {
   final void Function(Edit)? onEdit;
   final void Function(ReadMark)? onReadMark;
 
+  /// A join restored after a restart has ended with the contact (proposal
+  /// E): the issuer accepted while this process was gone, and nobody waits
+  /// for the future of `MailboxInvitation.join` any more. A join of the
+  /// running process ends in that future instead.
+  final void Function(Contact k)? onJoinCompleted;
+
+  /// A FORK (§4.5.4, E-A9): an envelope for a known identifier carried a
+  /// chain that does not pass through the keys held for it — two successors
+  /// of one key, evidence that the old keys are in other hands. Discarded in
+  /// any case; this callback shows it (`mailbox_book.dart`).
+  final void Function(Address held, Address claimed)? onFork;
+
   const MailboxDetails(
     this.directory,
     this.key, {
@@ -48,6 +62,8 @@ class MailboxDetails {
     this.onReaction,
     this.onEdit,
     this.onReadMark,
+    this.onJoinCompleted,
+    this.onFork,
   });
 }
 
@@ -58,19 +74,27 @@ class MailboxDetails {
     MailboxDetails a, void Function(String)? report) {
   // Legacy data of a foreign version goes before `open` rejects it and takes the
   // service down with it (S391). NOTHING is rescued here: unlike with the
-  // host, every field of this file depends on the version. What is lost in the process
-  // is replaceable — post box and previous generation are passed in again by the app
-  // at start (`postBoxFrom`), a contact is made known again by it
-  // when sending (`contactRemember`); what remains lost are the remembered
-  // routes and the remembered invitations.
-  legacyDataClear(
+  // host, every field of this file depends on the version. The post box is
+  // passed in again by the app at start (`postBoxFrom`); what is lost for
+  // good is every contact's `s_AB` and day keys, the routes, the invitations
+  // and their waiting requests. A contact made known again without `s_AB`
+  // never reaches post box or step 3 — so the reset is REPORTED to the
+  // application (owner decision W-a, `mailbox_format_reset.dart`), which
+  // ends the affected contacts instead of carrying them on half.
+  if (legacyDataClear(
     directory: a.directory,
     fileName: kFileMailbox,
     runningVersion: kVersionMailbox,
     key: a.key,
     report: report,
-  );
-  final g = Memory.open(a.directory, a.key);
+  )) {
+    formatResetNote(a, FormatReset.memory);
+  }
+  // The secret keys are written only where this file is the one place the
+  // identity lives — a node without an app. A caller that passes its
+  // identity ([MailboxDetails.me]) keeps the keys itself (S401).
+  final g = Memory.open(a.directory, a.key, secretKeys: a.me == null);
+  lastSeenClearAtUpgrade(a.directory, a.key, g, report); // S405 V2: once, at the upgrade
   return (g, postBoxFetch(g, a.wordSequence, report, given: a.me));
 }
 
@@ -94,15 +118,18 @@ PostBox postBoxFetch(
   PostBox? given,
 }) {
   if (given != null) {
-    final parts = given.secretParts();
-    memory.ownPostBox = (
-      address: given.address,
-      ed25519Sk: parts.ed25519Sk,
-      x25519Sk: parts.x25519Sk,
-      mlKemSk: parts.mlKemSk,
-      mlDsaSk: parts.mlDsaSk,
-      previous: parts.previous,
-    );
+    // The previous day-key seed is the delivery layer's own state (§8.2):
+    // the app does not keep it, so it comes from memory while its 7 days
+    // run — the same identity, the same founding key. It is ALL this path
+    // reads of the stored post box, and all it writes besides the address
+    // (S401): the keys come from [given] at every start.
+    final kept = memory.ownKept;
+    if (kept != null &&
+        kept.address.sameIdentity(given.address) &&
+        given.previousDaySeed == null) {
+      given.previousDaySeedKeep(kept.previousDaySeed);
+    }
+    memory.ownPostBox = ownPostBoxOf(given);
     memory.save();
     report?.call('Post box taken over from the caller '
         '(${memory.contacts.length} contact(s))');
@@ -112,14 +139,15 @@ PostBox postBoxFetch(
   if (own != null) {
     report?.call('Post box loaded (${memory.contacts.length} '
         'contact(s))');
-    return PostBox.outSplit(
-      address: own.address,
-      ed25519Sk: own.ed25519Sk,
-      x25519Sk: own.x25519Sk,
-      mlKemSk: own.mlKemSk,
-      mlDsaSk: own.mlDsaSk,
-      previous: own.previous,
-    );
+    return postBoxOutOwn(own);
+  }
+  if (memory.ownKept != null) {
+    // A memory written for a caller that holds its identity itself: there
+    // are no keys here. Drawing a fresh identity over its contacts would be
+    // a second identity for the same human — refused, loudly.
+    throw MemoryError('this memory holds no secret keys — it belongs to a '
+        'caller that passes its identity (MailboxDetails.me), and none was '
+        'passed');
   }
 
   // Derive from the word sequence if one is given — that is at the same time
@@ -130,15 +158,7 @@ PostBox postBoxFetch(
   if (wordSequence != null) {
     report?.call('Identity derived from the word sequence');
   }
-  final parts = me.secretParts();
-  memory.ownPostBox = (
-    address: me.address,
-    ed25519Sk: parts.ed25519Sk,
-    x25519Sk: parts.x25519Sk,
-    mlKemSk: parts.mlKemSk,
-    mlDsaSk: parts.mlDsaSk,
-    previous: parts.previous,
-  );
+  memory.ownPostBox = ownPostBoxOf(me);
   memory.save();
   report?.call('new post box created');
   return me;

@@ -39,22 +39,36 @@ import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/identity/identity_context.dart';
+import 'package:cleona/core/identity/rotation_chain.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/service/mycelium_device_records.dart';
+import 'package:cleona/core/service/mycelium_history_store.dart';
 import 'package:cleona/core/service/port_mapping.dart';
 import 'package:cleona/core/service/port_mapping_setting.dart';
+import 'package:cleona/core/service/cover_reduce_setting.dart';
 import 'package:cleona/core/update/binary_http_server.dart';
 import 'package:cleona/core/update/data_port_http.dart';
+import 'package:cleona/core/sync/cover_stream.dart' show CoverSaver;
 import 'package:cleona/core/util/network_metered.dart' show coverMeteredRead;
+import 'package:cleona/core/util/uplink_state.dart' show NetworkKind;
+import 'package:mycelium/bulk_piece.dart' show BulkClass;
+import 'package:mycelium/device_records.dart' show DeviceRecords;
 import 'package:mycelium/update.dart' show updateAttach;
 import 'package:mycelium/readiness.dart' show ReadinessState;
 import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/node_helpers.dart' show cardChannel;
 import 'package:mycelium/node_cover.dart' show NodeCover;
+import 'package:mycelium/node_collect_answered.dart' show NodeCollectAnswered;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_start.dart';
 import 'package:mycelium/envelope.dart';
+import 'package:mycelium/history_store.dart' show historyStoreGive;
 import 'package:mycelium/update_cover_route.dart' show updateCoverRouteAttach;
 import 'package:mycelium/host.dart';
+import 'package:mycelium/host_stream.dart' show HostStreamOn;
+import 'package:mycelium/invitation_way_in.dart' show wayInEdge;
+import 'package:mycelium/trace.dart' show kTraceLinePrefix;
 
 /// The contact does not carry all three keys — then there is no address,
 /// and a fallback would be worse than the error: it would seal against the
@@ -76,27 +90,31 @@ class SeamError implements Exception {
 //   * the fingerprint of the card
 // are THE SAME value. Until S388 three different calculations stood here
 // and a translation between them. The seam therefore no longer computes
-// anything: [userIdFrom] IS the identifier, and [addressHeardTo] compares
-// by the anchor Ed25519 + ML-DSA — the same keys from which the
-// identifier follows.
+// anything: [userIdFrom] IS the identifier, [addressHeardTo] compares it,
+// and [addressKeysOf] compares the current signing keys.
+//
+// SINCE S398 (proposal A, D-33) the identifier is the FOUNDING value on
+// both sides, also after an Emergency Key Rotation: mycelium's address
+// carries it next to the current keys, and the rotation chain connects
+// them. The limit that stood here ("mycelium keeps a NEW identifier after a
+// change of the signing keys") is gone.
 
 /// The app's UserID for the identity behind [a] — the mycelium identifier
 /// itself, no second calculation path.
-///
-/// LIMIT, named (step C, not to be decided here): the app computes its
-/// OWN UserID via the FOUNDING keys (rotation chain, v4.2 §4.1 "stable
-/// anchor"), mycelium keeps a NEW identifier after a change of the signing
-/// keys (owner decision 14.09.2026, `address.dart`). After an emergency
-/// rotation [a] returns the current keys and thus a different identifier
-/// than the pinned UserID. For the routine rotation (§4.5.4) that does not
-/// apply: it only changes X25519 + ML-KEM, and those do not belong in the
-/// identifier.
 Uint8List userIdFrom(Address a) => a.identifier;
 
-/// Does [a] belong to [k]? The anchor is compared — Ed25519 AND ML-DSA —,
-/// not the KEM generation (it rotates, the identity stays). `false` if the
-/// contact record does not carry the anchor.
-bool addressHeardTo(Address a, ContactInfo k) {
+/// Does [a] belong to [k]? The IDENTIFIER is compared (§4.1: the founding
+/// value, stable across every rotation) — not the keys, not the KEM
+/// generation. Whether [a] carries the keys the contact record holds says
+/// [addressKeysOf].
+bool addressHeardTo(Address a, ContactInfo k) =>
+    k.nodeId.length == 32 && constantTimeEquals(a.identifier, k.nodeId);
+
+/// Does [a] carry the signing keys the contact record holds — Ed25519 AND
+/// ML-DSA? `false` if the record does not carry them. A difference under the
+/// same identifier is an Emergency Key Rotation, adopted only with its chain
+/// (`CleonaServiceMycelium._adoptChainedKeys`, §4.5.4).
+bool addressKeysOf(Address a, ContactInfo k) {
   final ed = k.ed25519Pk;
   final dsa = k.mlDsaPk;
   if (ed == null || ed.isEmpty || dsa == null || dsa.isEmpty) return false;
@@ -122,7 +140,12 @@ Address addressFrom(ContactInfo k) {
         'mlKem: ${kem != null}, mlDsa: ${dsa != null}, '
         'state: ${state != null}) — before first contact this is normal');
   }
+  // The identifier is the contact's UserID (§4.1) — also for a contact that
+  // rotated: the app adopted its keys only with the chain (§4.5.4). This
+  // copy carries no chain; mycelium keeps the one it checked with the
+  // contact (`memory_contact.dart`).
   return Address(
+      identifier: k.nodeId.length == 32 ? k.nodeId : null,
       ed25519Pk: ed,
       mlDsaPk: dsa,
       x25519Pk: x,
@@ -141,14 +164,34 @@ PostBox postBoxFrom(IdentityContext id) {
   if (state == null) {
     throw SeamError('Identity without the time of its KEM generation');
   }
+  // After an Emergency Key Rotation (§4.5.4, D-33): the founding identifier,
+  // the hybrid chain and the founding secret key — all from the ONE source,
+  // `IdentityContext` (§2.10 of proposal A). Without a derivable founding
+  // key mycelium could not form `K_AB` (§4.3); the rotation refuses exactly
+  // that case (`rotateIdentityKeys`), so it can only meet an identity that
+  // rotated elsewhere (a linked device after LD-8, which has no sender).
+  final Uint8List? foundingSk;
+  if (id.hasRotated) {
+    foundingSk = id.foundingEd25519SecretKeyDerived;
+    if (foundingSk == null) {
+      throw SeamError('rotated identity whose founding secret key cannot be '
+          'derived here — the delivery layer cannot form K_AB (§4.3)');
+    }
+  } else {
+    foundingSk = null;
+  }
   return PostBox.outSplit(
     address: Address(
+      // Before any rotation the keys found the identifier themselves.
+      identifier: id.hasRotated ? id.userId : null,
       ed25519Pk: id.ed25519PublicKey,
       mlDsaPk: id.mlDsaPublicKey,
       x25519Pk: id.x25519PublicKey,
       mlKemPk: id.mlKemPublicKey,
       state: state.millisecondsSinceEpoch,
+      chain: RotationChain.fromStored(id.rotationChain),
     ),
+    foundingEd25519Sk: foundingSk,
     ed25519Sk: id.ed25519SecretKey,
     x25519Sk: id.x25519SecretKey,
     mlKemSk: id.mlKemSecretKey,
@@ -162,14 +205,24 @@ PostBox postBoxFrom(IdentityContext id) {
   );
 }
 
-/// The host's directory: `<baseDir>/mycelium` — `host.enc` (fixed port,
-/// neighbours) and `post_box.enc` (what this node holds for third
-/// parties). It belongs to the DEVICE, not to an identity (V4.2 §4.5.1).
+/// The host's directory: `<baseDir>/mycelium` — the pieces held for others
+/// (`bulk/`, lane 3, v4_2 §4.5.2). It belongs to the DEVICE, not to an
+/// identity (V4.2 §4.5.1). The node's own state does NOT lie here any more
+/// but in the device database ([hostRecordsIn], S403).
 Directory hostDirectoryIn(String baseDir) =>
     Directory('$baseDir/mycelium')..createSync(recursive: true);
 
-/// The directory of an identity's mailbox: `<profileDir>/mycelium` — memory
-/// (post box, contacts, invitations) and histories.
+/// Where the host keeps its own state — fixed port and neighbours, its post
+/// box, the key of its address record: the area `node` of the device
+/// database of [baseDir] (v4_2 §4.5.3 form 2, D-51; S403 G-1 = A). [key] is
+/// [hostKey], the key of the device database.
+DeviceRecords hostRecordsIn(String baseDir, Uint8List key) =>
+    MyceliumDeviceRecords(baseDir, key);
+
+/// The directory of an identity's mailbox: `<profileDir>/mycelium` — what
+/// v4_2 §4.5.2 names for it: memory (post box, contacts' delivery state,
+/// invitations), group pairs, first contact, parked cells. NOT the
+/// histories: they lie in the identity's store ([mailboxDetailsFor]).
 Directory mailboxDirectoryIn(String profileDir) =>
     Directory('$profileDir/mycelium')..createSync(recursive: true);
 
@@ -209,18 +262,46 @@ Uint8List hostKey(String baseDir, Uint8List? masterSeed) =>
 /// Until S387 it said here that mycelium accepts by itself (`?? true`) —
 /// that only held before `029c2c55` and after the merge made every join
 /// wait without end.
-MailboxDetails mailboxDetailsFor(CleonaService service) => MailboxDetails(
+///
+/// ── THE HISTORY LIES IN THE STORE OF THE IDENTITY (S401) ────────────────
+///
+/// What the mailbox keeps of its conversations — the frame of every own
+/// message still open, the identifier of everything else — goes into
+/// `messages.db` of THIS identity (v4_2 §4.5.3 form 1), not into a file in
+/// the mailbox's directory: the store is handed to the mailbox WITH its
+/// registration (`mycelium_history_store.dart`). It must be there at that
+/// moment, not at the attach: the host sends every open message again as
+/// soon as the mailbox exists (`Host.start`), before `myceliumAttach` runs.
+/// `service.store` opens the store if it is not open and THROWS without a
+/// seed (§21.4.1) — there is no registration that keeps its history
+/// somewhere else.
+MailboxDetails mailboxDetailsFor(CleonaService service) => historyStoreGive(
+    MailboxDetails(
       mailboxDirectoryIn(service.profileDir),
       service.fileEnc.effectiveKey,
       me: postBoxFrom(service.identity),
       onContactRequest: service.takeMyceliumContactRequest,
       onMessage: service.takeMyceliumInbound,
-    );
+      // Proposal E: a join restored after a restart whose answer came later.
+      onJoinCompleted: service.takeMyceliumJoinCompleted,
+      // §4.5.4 (E-A9): a fork mycelium's acceptance found — shown.
+      onFork: (held, _) => service.takeMyceliumFork(identifierFrom(held)),
+    ),
+    DeliveryHistoryStore(() => service.store,
+        log: CLogger.get('DeliveryHistory', profileDir: service.profileDir)));
 
 /// The services per host — for the ONE readiness edge the host has
 /// (`Host.onReadiness`, one receiver). An `Expando`, because the host
 /// belongs to mycelium and carries no field for the app.
 final Expando<Set<CleonaService>> _servicesPerHost = Expando('mycelium-services');
+
+/// The services attached to [host] — every identity this device hosts
+/// (B-4b: the enrolment window opens for all of them, §14.6.1). [self]
+/// when the host knows none (a probe that attached by hand).
+List<CleonaService> servicesOnHost(Host host, CleonaService self) {
+  final s = _servicesPerHost[host];
+  return s == null || s.isEmpty ? [self] : List.of(s);
+}
 
 /// Starts the ONE host of this process with one mailbox per service.
 ///
@@ -247,13 +328,35 @@ final Expando<Set<CleonaService>> _servicesPerHost = Expando('mycelium-services'
 /// no port and no variable that prescribes an entry. The node finds
 /// neighbours via the sources of §11.8: remembered, call, cards, and only
 /// when those yield nothing, the external entries (§11.9).
+///
+/// [bulkCacheBytes] is the bulk cache of lane 3 (§9.4, §21.3.3): what this
+/// device holds for others. The start paths pass [bulkCacheBytesForPlatform];
+/// the default 0 holds nothing (probes). [bulkClass] is
+/// what a `0x53` states ([bulkClassForPlatform]); [bulkServeAllowed] tells a
+/// phone whether it may hold and hand out now ([bulkServeAllowedNow], D-32).
+///
+/// [traceReport] takes the diagnosis lines of the beta network (every line
+/// that starts with [kTraceLinePrefix], `mycelium/lib/trace.dart`) instead
+/// of [report] — the start paths pass the TRACE level of their logger, so
+/// the lines stay in the log file but stay out of the console and out of the
+/// crash-report ring (`clogger.dart`, S406). Without it (probes, the iOS
+/// wake-up, which has no log file) they go to [report] like every other line.
 Future<Host> hostStart({
   required List<CleonaService> services,
   required String baseDir,
   required Uint8List key,
   int port = 0,
+  int bulkCacheBytes = 0,
+  BulkClass bulkClass = BulkClass.desktop,
+  bool Function()? bulkServeAllowed,
   void Function(String)? report,
+  void Function(String)? traceReport,
 }) async {
+  final hostReport = report == null || traceReport == null
+      ? report
+      : (String line) => line.startsWith(kTraceLinePrefix)
+          ? traceReport(line)
+          : report(line);
   if (services.isEmpty) {
     throw StateError('a host needs at least one service — without a '
         'mailbox the node would start up mute');
@@ -307,6 +410,7 @@ Future<Host> hostStart({
   final host = await Host.start(
     hostDirectoryIn(baseDir),
     key,
+    records: hostRecordsIn(baseDir, key),
     port: port,
     onFirstCollection: firstCollection,
     // The relays of the own card (V4.2 §11.9 "which relays"). The ONE
@@ -314,14 +418,56 @@ Future<Host> hostStart({
     // (environment, file in the device folder, built-in list); the card
     // takes the first three of it (§15.2).
     relay: RendezvousRelays.forNode(baseDir, onNote: report),
-    report: report,
+    report: hostReport,
     first: mailboxDetailsFor(first),
     onReadiness: readinessChanged,
+    bulkCacheBytes: bulkCacheBytes,
+    bulkClass: bulkClass,
+    bulkServeAllowed: bulkServeAllowed,
   );
   _servicesPerHost[host] = attached;
+  // §8.2 "After more than 7 days" (D-48): the node says when a collection of
+  // an identity ended with an answer from at least one holder; the service
+  // of THAT identity keeps the moment and checks its age (§9.5). The edge of
+  // §8.2 it hangs on runs anyway — no clock, no packet. Set here, with no
+  // `await` since `Host.start`: a round needs a network round trip to end.
+  host.node.onCollectionAnswered = (identity) {
+    for (final d in List.of(attached)) {
+      if (identical(d.myceliumMailbox?.identity, identity)) {
+        d.collectionAnswered();
+      }
+    }
+  };
+  // Lane 2 (§17.6, D-31): every inbound-reachable always-on node is a
+  // volunteer, with no switch. "Always-on" is the desktop class (the same
+  // one the bulk cache follows, §21.3.3); "inbound-reachable" the volunteer
+  // checks itself at every ask (`HostStream.reachable`: evidenced
+  // reachability, §11.8a) and refuses without it. A phone never volunteers.
+  host.stream.volunteer = bulkClass == BulkClass.desktop;
+  // Lane 3 (§9.4), S401: a collection belongs to ONE identity, and which
+  // collections are open stands in ONE place — the store area
+  // `kBulkIncomingArea` of that identity. The delivery layer remembers none
+  // across a restart; every service hands its own over again at its attach
+  // (`_bulkResume`), with its own callbacks, to the collector of its own
+  // mailbox. So there is no collection without an owner any more, and no
+  // host-wide callback that would have to ask every identity whose it is.
+  //
+  // S398-W1: the edges of §8.2 also resume every sender's interrupted
+  // lane 2/3 transfer (§9.4 "The rest goes into the network"). No clock.
+  host.bulk.onEdge = () {
+    for (final d in List.of(attached)) {
+      d.bulkEdge();
+    }
+  };
   // The cover rate follows the network kind (V4.2 §5.3, W1): read now and
   // at every `Host.networkChanged` (`node_cover.dart`), never on a clock.
   host.node.coverAttach(coverMeteredRead);
+  // §12.7 (S398-W4): the device's two switches of this seam remember where
+  // their setting lies (the device database of this profile, S403), and
+  // "fewer empty cover packets on W/LAN" takes effect
+  // from the start (default off).
+  _switchPlace[host] = (baseDir: baseDir, key: key);
+  host.node.coverStream.emptyReduce = coverReduceConfigured(baseDir, key);
   first.myceliumAttach(host.mailboxes.first);
   attached.add(first);
   for (final d in services.skip(1)) {
@@ -329,6 +475,38 @@ Future<Host> hostStart({
   }
   return host;
 }
+
+bool get _mobile => Platform.isAndroid || Platform.isIOS;
+
+/// Stops [host] and, before it, the session clocks of lane 2 (§17.6) —
+/// `HostStream` lives beside the host (`host_stream.dart`), and `host.dart`
+/// is at its line budget. An open volunteer or reception timer would
+/// otherwise keep the Dart VM alive. The ONE stop path of the start paths.
+///
+/// Completes once begun transmissions have left whole (R-1, S399 finding
+/// 6); a caller that does not await it stays correct, the closing follows.
+Future<void> hostStop(Host host) async {
+  host.stream.stop();
+  await host.stop();
+}
+
+/// The bulk cache of lane 3 for this platform (§21.3.1, §21.3.3 item 3,
+/// D-32): 1 GB on desktop installations, 100 MB on phones. It lies in the
+/// device folder of the host (`hostDirectoryIn`), on every platform.
+int bulkCacheBytesForPlatform() => _mobile ? 100 << 20 : 1 << 30;
+
+/// The class this device states in `0x53` (§9.4, D-30).
+BulkClass bulkClassForPlatform() =>
+    _mobile ? BulkClass.phone : BulkClass.desktop;
+
+/// D-32 (§21.3.3 item 3, §24.4.2): a phone neither accepts nor hands out
+/// bulk pieces while data-saving mode is on AND the connection is metered.
+/// Read at the moment a packet asks — no clock. The metered flag is the one
+/// the cover stream reads at its edges ([coverMeteredRead] -> [NetworkKind]);
+/// unknown counts as metered on a phone, the same direction as there. A
+/// desktop holder never asks (`bulk_hold.dart`).
+bool bulkServeAllowedNow() =>
+    !(CoverSaver.instance.active && (NetworkKind.instance.metered ?? _mobile));
 
 /// Binds the public update (M1+/P1, §26.5.4/§26.6.1) to the host — for ONE
 /// service per process, [service] (the start paths pass the first: it
@@ -341,13 +519,26 @@ Future<Host> hostStart({
 /// The four moments, each once, no additional traffic:
 /// * start: setting `updateCarrier` asks (behind the start collection of
 ///   `Host.start` in the same sequence).
-/// * new neighbour: [Host.onNewNeighbours], set here.
-/// * network change and app open: the start paths call
-///   `updateManifestAsk()` after the end of `networkChanged` or
-///   `collect` respectively.
+/// * new neighbour: [Host.onNewNeighbours], set here — it calls [moment]
+///   like every other moment.
+/// * network change and app open: the start paths call [moment] after the
+///   end of `networkChanged` or `collect` respectively.
+///
+/// [moment] is the start path's ONE moment function: it asks the manifest
+/// of every service AND presents the known target to the offer again
+/// (`UpdateOffer.againTry`). Until S406 the new neighbour only asked the
+/// manifest, so a collection that had ended without the object was not
+/// retried there (S406-UPD2 finding B-6; S406-UPDPKG P5).
+///
+/// The partial state of the update target lies in the service's profile,
+/// `update-target/` (P2).
 void attachUpdateToService(Host host, CleonaService service,
-    {void Function(String)? report}) {
-  final a = updateAttach(host, channel: cardChannel, report: report);
+    {required Future<void> Function(String moment) moment,
+    void Function(String)? report}) {
+  final a = updateAttach(host,
+      channel: cardChannel,
+      partialDir: '${service.profileDir}${Platform.pathSeparator}update-target',
+      report: report);
   service.updateCarrier = a;
   // §5.5 rule 2: a drawn cover packet carries a piece of the update instead
   // of filling. That is NOT a delivery path — the fetch path above runs
@@ -362,7 +553,7 @@ void attachUpdateToService(Host host, CleonaService service,
   final mobil = Platform.isAndroid || Platform.isIOS;
   updateCoverRouteAttach(host.node.coverStream, a.holder, a.assembler,
       pushes: () => !mobil);
-  host.onNewNeighbours = () => unawaited(service.updateManifestAsk());
+  host.onNewNeighbours = () => unawaited(moment('new neighbour'));
 }
 
 /// Registers the mailbox of [service] at runtime at the running host —
@@ -382,6 +573,11 @@ void serviceDeregister(Host host, CleonaService service,
   _servicesPerHost[host]?.remove(service);
   final p = service.myceliumDetach();
   if (p == null) return;
+  // Lane 3 (S401): the collections of this identity end with its service —
+  // also for the last mailbox, which stays at the node: nobody hears their
+  // result any more, and nothing may be written into a profile folder that
+  // is removed next (§21.4.1).
+  host.bulk.release(p.ownIdentifier);
   if (host.mailboxes.length <= 1) {
     report?.call('mycelium:last mailbox stays until the host is stopped');
     return;
@@ -476,6 +672,7 @@ Future<PortMapping> portMappingToEdge(
             CardAddress(Uint8List.fromList(outside.rawAddress), outsidePort);
       }
       host.addressLearned();
+      wayInEdge(host.node); // §12.4: a granted mapping can be a way in
     };
   }
   await p.toEdge();
@@ -492,4 +689,55 @@ Future<void> portMappingLayDown(Host host) async {
   if (p == null) return;
   await p.layDown();
   _portMappingPerHost[host] = null;
+}
+
+// ── THE NETWORK SWITCHES OF §12.7 (S398-W4) ─────────────────────────────
+//
+// Three switches, two places: external records live in the host's own
+// memory (`Host.outsideSourceOn`); router mapping and fewer empty cover
+// packets are rows of the app's device database (S403; `port_mapping_setting
+// .dart`, `cover_reduce_setting.dart`), whose key IS the host's key.
+// `hostStart` records the profile and the key; the setters below write
+// there and act at once.
+
+final Expando<({String baseDir, Uint8List key})> _switchPlace =
+    Expando('network_switches');
+
+/// §12.7 "router mapping": the stored setting (default on).
+bool portMappingSetting(Host host) {
+  final at = _switchPlace[host];
+  return at == null ? true : portMappingConfigured(at.baseDir, at.key);
+}
+
+/// §12.7 "router mapping" — ONLY from a user action. Off: the mapping and
+/// pinhole are laid down now (§7.3: "no mapping or pinhole is requested").
+/// On: asked now, not at the next network change. `false` without a
+/// started host (nothing to write to).
+Future<bool> portMappingSet(Host host, bool on,
+    {void Function(String)? report}) async {
+  final at = _switchPlace[host];
+  if (at == null) return false;
+  portMappingConfigure(at.baseDir, at.key, on);
+  await portMappingLayDown(host);
+  unawaited(portMappingToEdge(host,
+          baseDir: at.baseDir, key: at.key, report: report)
+      .then((_) {}, onError: (Object e) => report?.call('Port mapping: $e')));
+  return true;
+}
+
+/// §12.7 "fewer empty cover packets on W/LAN": the stored wish (default off).
+bool coverReduceSetting(Host host) => host.node.coverStream.emptyReduce;
+
+/// Whether the reduction TAKES EFFECT now — only on unmetered links
+/// (`CoverStream.reduced`). The surface shows this, not the wish.
+bool coverReduceActive(Host host) => host.node.coverStream.reduced;
+
+/// §12.7 "fewer empty cover packets on W/LAN" — ONLY from a user action.
+/// `false` without a started host.
+bool coverReduceSet(Host host, bool on) {
+  final at = _switchPlace[host];
+  if (at == null) return false;
+  coverReduceConfigure(at.baseDir, at.key, on);
+  host.node.coverStream.emptyReduce = on;
+  return true;
 }

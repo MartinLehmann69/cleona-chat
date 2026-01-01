@@ -13,6 +13,7 @@ import 'package:meta/meta.dart';
 
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/share_identity.dart';
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/platform/process_runner.dart';
 
 /// Callback for upload/download progress: (bytesTransferred, totalBytes).
@@ -31,6 +32,20 @@ Future<ProcessResult?> _defaultRun(String executable, List<String> args,
         {required Duration timeout, Map<String, String>? environment}) =>
     ProcessRunner.run(executable, args,
         timeout: timeout, environment: environment);
+
+/// A file `smbclient`, `sftp` or `curl` must read or write as a FILE: the
+/// decrypted attachment on its way to or from the share, the SFTP batch
+/// file (it names identity and conversation in the remote path, §21.6),
+/// the SMB marker.
+///
+/// It lies in [tempDir] — the identity's transient directory
+/// (`TransientFiles`, owner-only), NOT the system temp directory: on Linux
+/// every account of the machine can list `/tmp` and, with the usual umask,
+/// read a file in it. Every caller deletes its file in a `finally`; what a
+/// crash leaves is cleared at the next start of the identity's service
+/// (`TransientFiles.sweepServiceAtStart`).
+File _transientFile(String tempDir, String name) =>
+    File('${TransientFiles.ensure(tempDir).path}/$name');
 
 /// The file that pins the SFTP host key — one per identity, in its profile
 /// (§21.6: "SFTP: the host key"). Not the user's `~/.ssh/known_hosts`: that
@@ -156,16 +171,21 @@ abstract class ArchiveTransport {
   /// Create transport instance for a specific protocol.
   ///
   /// [profileDir] is required: the SFTP host key is pinned in a file of the
-  /// identity's profile ([archiveKnownHostsPath]).
+  /// identity's profile ([archiveKnownHostsPath]), and what a helper
+  /// program must read as a file lies in the identity's transient
+  /// directory (`TransientFiles`).
   static ArchiveTransport forProtocol(ArchiveProtocol protocol,
       {required String profileDir}) {
+    final tempDir = TransientFiles.directoryIn(profileDir).path;
     switch (protocol) {
       case ArchiveProtocol.smb:
-        return SmbTransport();
+        return SmbTransport(tempDir: tempDir);
       case ArchiveProtocol.sftp:
-        return SftpTransport(knownHostsFile: archiveKnownHostsPath(profileDir));
+        return SftpTransport(
+            knownHostsFile: archiveKnownHostsPath(profileDir),
+            tempDir: tempDir);
       case ArchiveProtocol.ftps:
-        return FtpsTransport();
+        return FtpsTransport(tempDir: tempDir);
       case ArchiveProtocol.http:
         return HttpTransport();
     }
@@ -228,8 +248,11 @@ Future<({bool reachable, ShareIdentityState? identity})> testArchiveConnection(
 /// that relays to the real share passes. The marker is checked once per run
 /// and per retrieval, not per smbclient call.
 class SmbTransport extends ArchiveTransport {
-  SmbTransport({ArchiveProcessRun? run}) : _run = run ?? _defaultRun;
+  SmbTransport({required this.tempDir, ArchiveProcessRun? run})
+      : _run = run ?? _defaultRun;
 
+  /// Where the files `smbclient` reads and writes lie ([_transientFile]).
+  final String tempDir;
   final ArchiveProcessRun _run;
   String _host = '';
   String _basePath = '';
@@ -269,8 +292,8 @@ class SmbTransport extends ArchiveTransport {
   Map<String, String>? get _smbEnv =>
       _password != null ? {'PASSWD': _password!} : null;
 
-  File _tmp(String tag) => File('${Directory.systemTemp.path}/cleona_smb_'
-      '${tag}_${DateTime.now().microsecondsSinceEpoch}');
+  File _tmp(String tag) => _transientFile(tempDir,
+      'cleona_smb_${tag}_${DateTime.now().microsecondsSinceEpoch}');
 
   /// Reads the marker: its hex, `''` when the share says it is not there,
   /// `null` when the share could not be asked (login, reachability).
@@ -364,7 +387,8 @@ class SmbTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SMB upload');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_upload_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(
+        tempDir, 'cleona_upload_${DateTime.now().millisecondsSinceEpoch}');
     try {
       await tmpFile.writeAsBytes(data);
       onProgress?.call(0, data.length);
@@ -423,7 +447,8 @@ class SmbTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SMB download');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_download_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(
+        tempDir, 'cleona_download_${DateTime.now().millisecondsSinceEpoch}');
     try {
       final share = _basePath.split('/').first;
       final deadline = ArchiveTransport.downloadTimeout;
@@ -532,10 +557,16 @@ class SmbTransport extends ArchiveTransport {
 /// BEFORE authenticating ("Host key verification failed"). "Rebind" is
 /// deleting that file.
 class SftpTransport extends ArchiveTransport {
-  SftpTransport({required this.knownHostsFile, ArchiveProcessRun? run})
+  SftpTransport(
+      {required this.knownHostsFile,
+      required this.tempDir,
+      ArchiveProcessRun? run})
       : _run = run ?? _defaultRun;
 
   final String knownHostsFile;
+
+  /// Where the files `sftp` reads and writes lie ([_transientFile]).
+  final String tempDir;
   final ArchiveProcessRun _run;
   String _host = '';
   String _basePath = '';
@@ -640,8 +671,10 @@ class SftpTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SFTP upload');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_sftp_upload_${DateTime.now().millisecondsSinceEpoch}');
-    final batchFile = File('${Directory.systemTemp.path}/cleona_sftp_batch_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(tempDir,
+        'cleona_sftp_upload_${DateTime.now().millisecondsSinceEpoch}');
+    final batchFile = _transientFile(
+        tempDir, 'cleona_sftp_batch_${DateTime.now().millisecondsSinceEpoch}');
     try {
       await tmpFile.writeAsBytes(data);
       onProgress?.call(0, data.length);
@@ -652,7 +685,9 @@ class SftpTransport extends ArchiveTransport {
 
       final commands = StringBuffer();
       commands.writeln('-mkdir $dirPath');
-      commands.writeln('put ${tmpFile.path} $_basePath$remotePath');
+      // The local path is quoted: it lies in the profile, and a profile
+      // path may carry a space (a Windows account name).
+      commands.writeln('put "${tmpFile.path}" $_basePath$remotePath');
 
       await batchFile.writeAsString(commands.toString());
 
@@ -684,11 +719,14 @@ class SftpTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SFTP download');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_sftp_download_${DateTime.now().millisecondsSinceEpoch}');
-    final batchFile = File('${Directory.systemTemp.path}/cleona_sftp_dbatch_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(tempDir,
+        'cleona_sftp_download_${DateTime.now().millisecondsSinceEpoch}');
+    final batchFile = _transientFile(tempDir,
+        'cleona_sftp_dbatch_${DateTime.now().millisecondsSinceEpoch}');
     try {
       final target = _username != null ? '$_username@$_host' : _host;
-      await batchFile.writeAsString('get $_basePath$remotePath ${tmpFile.path}\n');
+      await batchFile
+          .writeAsString('get $_basePath$remotePath "${tmpFile.path}"\n');
 
       final deadline = ArchiveTransport.downloadTimeout;
       final result = await _run(
@@ -788,9 +826,12 @@ class SftpTransport extends ArchiveTransport {
 /// checks after the handshake and BEFORE it sends `USER`/`PASS`. curl's CA
 /// check stays as it was (§21.6 asks for the pin, not for dropping it).
 class FtpsTransport extends ArchiveTransport {
-  FtpsTransport({ArchiveProcessRun? run, this._context})
+  FtpsTransport({required this.tempDir, ArchiveProcessRun? run, this._context})
       : _run = run ?? _defaultRun;
 
+  /// Where the files `curl` reads and writes lie ([_transientFile]) —
+  /// the credential file among them.
+  final String tempDir;
   final ArchiveProcessRun _run;
   final SecurityContext? _context;
   String _host = '';
@@ -826,7 +867,8 @@ class FtpsTransport extends ArchiveTransport {
   /// finally block via [_cleanupNetrc].
   File? _createNetrcFile() {
     if (_username == null) return null;
-    final tmpDir = Directory.systemTemp.createTempSync('cleona_ftps_');
+    final tmpDir =
+        TransientFiles.ensure(tempDir).createTempSync('cleona_ftps_');
     final netrcFile = File('${tmpDir.path}/.netrc');
     netrcFile.writeAsStringSync(
       'machine $_host login $_username password ${_password ?? ''}\n',
@@ -839,7 +881,7 @@ class FtpsTransport extends ArchiveTransport {
       Process.runSync('icacls', [netrcFile.path, '/inheritance:r',
           '/grant:r', '%USERNAME%:F']);
     }
-    // Android/iOS: rely on systemTemp directory permissions (app-private).
+    // Android/iOS: the profile is app-private.
     return netrcFile;
   }
 
@@ -897,7 +939,8 @@ class FtpsTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('FTPS upload');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_ftps_upload_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(tempDir,
+        'cleona_ftps_upload_${DateTime.now().millisecondsSinceEpoch}');
     File? netrc;
     try {
       await tmpFile.writeAsBytes(data);
@@ -932,7 +975,8 @@ class FtpsTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('FTPS download');
-    final tmpFile = File('${Directory.systemTemp.path}/cleona_ftps_download_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpFile = _transientFile(tempDir,
+        'cleona_ftps_download_${DateTime.now().millisecondsSinceEpoch}');
     File? netrc;
     try {
       netrc = _createNetrcFile();

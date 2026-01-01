@@ -1,29 +1,25 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/codec/reed_solomon.dart';
+import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/core/rendezvous/rendezvous_provider.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
+    show EndpointAddress;
 import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/install_source.dart';
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:mycelium/update_trace.dart';
 
-Uint8List _sha256InIsolate(Uint8List binary) => SodiumFFI().sha256(binary);
-
-Future<Uint8List> _sha256InIsolateAsync(Uint8List binary) =>
-    Isolate.run(() => _sha256InIsolate(binary));
-
-/// §19.6 — orchestrates in-network binary updates: checks a verified
-/// [UpdateManifest] against the per-platform binary marker, fetches erasure-coded
-/// fragments from peers, assembles + verifies the binary, and hands a
-/// ready-to-install path back to the caller. Pure state machine — no
-/// network transport of its own (fetches happen via injected callback).
+/// §26.6.1 — the state machine of an in-network update: checks a verified
+/// [UpdateManifest] against the per-platform binary marker, verifies the
+/// collected binary, and hands a ready-to-install path back to the caller.
+/// No network transport of its own: the object is collected by the update
+/// carrier of the delivery layer (`cleona_service_update.dart`).
 enum BinaryUpdateState {
   idle,
   checking,
@@ -34,7 +30,11 @@ enum BinaryUpdateState {
   failed,
 }
 
-/// Describes which fragments a particular node can serve.
+/// Describes which Reed-Solomon parts a node can serve over HTTP.
+///
+/// Since S406-UPDPKG (P4) only [DeltaUpdateManager]'s HTTP download uses it;
+/// that path is the delta order's to replace (E-1 B, §26.6.2: "A delta is
+/// simply a smaller object on the same path as the full binary").
 class FragmentSource {
   final EndpointAddress address;
   final List<int> fragmentIndices;
@@ -48,8 +48,6 @@ class FragmentSource {
 }
 
 class BinaryUpdateManager {
-  static const int _maxConcurrentFetches = 4;
-
   final BinaryFragmentStore _store;
   final UpdateChecker _checker;
   final CLogger _log;
@@ -101,8 +99,8 @@ class BinaryUpdateManager {
     //
     // And a NEWER manifest during a run is no "already
     // in transit": it is checked like any other and becomes the new
-    // target (Z1, §26.6.1). The superseded download aborts at
-    // [_superseded].
+    // target (Z1, §26.6.1). The service ends the superseded collection
+    // (`_updateTargetSet`, S406-UPDPKG).
     final runs = _state == BinaryUpdateState.downloading ||
         _state == BinaryUpdateState.assembling ||
         _state == BinaryUpdateState.verifying ||
@@ -173,275 +171,77 @@ class BinaryUpdateManager {
     }
   }
 
-  /// A run for [version] is superseded: aborted, or a newer
-  /// manifest has moved the target (Z1, §26.6.1 "switches to the newest
-  /// target at once"). Until S387 the download only knew [_cancelled], and
-  /// every new run resets that — an old one then kept running and
-  /// fetched pieces for a version that nobody wants any more.
-  bool _superseded(String version) =>
-      _cancelled || _targetVersion != version;
+  // ── NO DOWNLOAD, NO ASSEMBLY HERE (S406-UPDPKG, P4) ───────────────
+  //
+  // `startDownload` (HTTP: full binary or Reed-Solomon parts from the
+  // Nostr rendezvous and the entry cascade) and `assemble` (Reed-Solomon
+  // decode into `complete.bin`) stood here. An update arrives only through
+  // the fetch path of the delivery layer and cover fill (v4_2 §26.6.1,
+  // §26.6.7 stages 5/6); §26.6.4 "This design uses no external rendezvous
+  // channel such as Nostr here", and §26.6.8 gives HTTP to "first
+  // installation and foreign-platform fetch" only. That source asked by
+  // version, not by object, and on 07.10.2026 20:39 assembled a binary that
+  // was neither the old nor the new one (S406-UPD2 finding B-5; owner
+  // decision E-2 A, 07.10.2026). The HTTP server and the browser assembler
+  // stay for first installation and the foreign platform (§26.6.5).
 
-  /// Fetch fragments from [sources] until K are available, then hand off to
-  /// [assemble]. [fetchFragment] performs the actual network I/O.
-  Future<void> startDownload({
+  /// Checks the binary at [path] for [version] on [platform]: SHA-256
+  /// (streamed — the file is never held in memory, S406-UPD2 finding B-8)
+  /// against [expectedHash] (hex), and the maintainer's Ed25519 signature
+  /// over that hash. `true` leaves the state at `verifying`: the caller
+  /// stores the file and then calls [markReady]; `false` sets `failed`.
+  Future<bool> verifyFile(
+    String path, {
     required String platform,
     required String version,
-    required int n,
-    required int k,
     required String expectedHash,
-    required List<FragmentSource> sources,
-    required Future<Uint8List?> Function(
-            EndpointAddress address, String platform, int index)
-        fetchFragment,
-    Future<Uint8List?> Function(
-            EndpointAddress address, String platform, int index,
-            {int? expectedSize})?
-        fetchWithSize,
-    int? expectedSize,
+    required Uint8List maintainerSignature,
   }) async {
+    _targetPlatform = platform;
+    _targetVersion = version;
     _cancelled = false;
-    _targetPlatform = platform;
-    _targetVersion = version;
-    _setState(BinaryUpdateState.downloading, 0.0);
-
-    try {
-      // Prefer a node that has the full binary — one shot, no reconstruction.
-      // Try ALL full-binary sources (different addresses of the same or
-      // different endpoints) before falling back to fragment assembly.
-      //
-      // ── THE CONTENT IS CHECKED HERE, NOT ONLY AT THE CALLER (S372)
-      //
-      // Until S372 this loop was asymmetric: a wrong LENGTH
-      // led to `continue`, a wrong CONTENT with the right length
-      // to `return`. The content was in fact not looked at at all — that
-      // only happened one level higher in `_startInNetworkUpdate`
-      // step 8, and there the source list no longer exists. Whoever
-      // authenticated could not page on; whoever could page on
-      // did not know whether what was procured was any good.
-      //
-      // Consequence: ONE source that delivered something wrong of exactly matching length
-      // ended the whole click path — `verify` failed,
-      // `deleteVersion` cleaned up, and the remaining sources never got their turn.
-      // That is a defect in a flow that is kept as MANDATORY
-      // ("user clicks download -> auto-install", reminder
-      // `project_android_update_flow_v145.md`).
-      //
-      // Ae-1 of the same session enlarged the source set by up to twelve
-      // addresses from the entry cascade (§26.6.4). Whoever
-      // raises the number of providers must repair the loop that gives up at the
-      // first bad provider — otherwise the improvement is
-      // a deterioration.
-      //
-      // ── NO CHECK IS DROPPED, IT ONLY TAKES EFFECT EARLIER ────────────
-      //
-      // The chain stays complete and three-stage: [expectedSize] against
-      // `binarySizes`, SHA-256 against `binaryHashes`, and the
-      // maintainer signature over exactly this hash. The third stage
-      // stays with the caller ([verify]), because installation is
-      // decided there; the second stands from now on ADDITIONALLY here. The
-      // caller checks it a second time afterwards — that is intended
-      // (defence in depth) and costs one hash run over a
-      // file that already came through checked.
-      //
-      // ── THE ABORT STILL COMES ─────────────────────────────────
-      //
-      // The loop runs over a FINITE list. After it,
-      // it is over, and the message says what the cause was — no endless
-      // trying through, no silent exit.
-      final fullSources = sources.where((s) => s.hasFullBinary).toList();
-      var hashRejections = 0;
-      for (final src in fullSources) {
-        _log.info('Fetching full binary from ${src.address.ip}:${src.address.port}');
-        final data = fetchWithSize != null
-            ? await fetchWithSize(src.address, platform, -1,
-                expectedSize: expectedSize)
-            : await fetchFragment(src.address, platform, -1);
-        if (_superseded(version)) return;
-        if (data != null) {
-          if (expectedSize != null && data.length != expectedSize) {
-            _log.warn('Full-binary from ${src.address.ip} truncated: '
-                'got ${data.length}B, expected ${expectedSize}B — trying next');
-            continue;
-          }
-          // The hash run lies in an isolate — the same design as in
-          // [verify]. A synchronous SHA-256 over ~90 MB would otherwise block
-          // the event loop in the middle of the click path.
-          if (expectedHash.isNotEmpty) {
-            final isHex = bytesToHex(await _sha256InIsolateAsync(data));
-            if (_superseded(version)) return;
-            if (isHex.toLowerCase() != expectedHash.toLowerCase()) {
-              hashRejections++;
-              _log.warn('Full-binary from ${src.address.ip}: SHA-256 $isHex '
-                  '!= expected $expectedHash — discarded, next source');
-              continue;
-            }
-          } else {
-            // No anchor in the manifest: then nothing can be checked here,
-            // and the caller rejects it. Make it visible,
-            // do not silently let it through.
-            _log.warn('Full-binary from ${src.address.ip}: no expected '
-                'hash passed — content unchecked here');
-          }
-          await _store.storeComplete(platform, version, data);
-          _setState(BinaryUpdateState.downloading, 1.0);
-          return;
-        }
-        _log.warn('Full-binary fetch from ${src.address.ip} failed, trying next');
-      }
-      if (fullSources.isNotEmpty) {
-        _log.warn('All ${fullSources.length} full-binary sources exhausted '
-            '($hashRejections of them with wrong content at matching '
-            'length) — fallback to fragments');
-      }
-
-      final have = (await _store.availableFragments(platform, version)).toSet();
-      final needed = <int>[];
-      for (var i = 0; i < n && have.length + needed.length < k; i++) {
-        if (!have.contains(i)) needed.add(i);
-      }
-
-      // Map each needed fragment index to a source that can serve it.
-      final plan = <int, EndpointAddress>{};
-      for (final index in needed) {
-        final source = sources.firstWhere(
-          (s) => s.fragmentIndices.contains(index),
-          orElse: () => const FragmentSource(
-              address: EndpointAddress('', 0), fragmentIndices: [], hasFullBinary: false),
-        );
-        if (source.address.port != 0) {
-          plan[index] = source.address;
-        }
-      }
-
-      if (have.length + plan.length < k) {
-        _fail('Not enough fragment sources: have=${have.length} planned=${plan.length} need=$k');
-        return;
-      }
-
-      var completed = 0;
-      final total = plan.length;
-      final entries = plan.entries.toList();
-      for (var i = 0; i < entries.length; i += _maxConcurrentFetches) {
-        if (_superseded(version)) return;
-        final batch = entries.skip(i).take(_maxConcurrentFetches);
-        await Future.wait(batch.map((entry) async {
-          if (_superseded(version)) return;
-          try {
-            final data = await fetchFragment(entry.value, platform, entry.key);
-            if (data != null) {
-              try {
-                await _store.storeFragment(platform, version, entry.key, data);
-              } catch (e) {
-                _log.warn('Fragment ${entry.key} store failed: $e');
-              }
-            } else {
-              _log.warn('Fragment ${entry.key} fetch returned null');
-            }
-          } catch (e) {
-            _log.warn('Fragment ${entry.key} fetch failed: $e');
-          }
-          completed++;
-          if (_superseded(version)) return;
-          _setState(BinaryUpdateState.downloading,
-              total == 0 ? 1.0 : completed / total);
-        }));
-      }
-      if (_superseded(version)) return;
-
-      final gotCount = (await _store.availableFragments(platform, version)).length;
-      if (gotCount < k) {
-        _fail('Download incomplete: got $gotCount fragments, need $k');
-        return;
-      }
-      _setState(BinaryUpdateState.downloading, 1.0);
-    } catch (e) {
-      _fail('startDownload failed: $e');
-    }
-  }
-
-  /// Assemble the binary from downloaded fragments via Reed-Solomon decode.
-  Future<Uint8List?> assemble(
-    String platform,
-    String version,
-    int n,
-    int k,
-    int originalSize,
-  ) async {
-    _targetPlatform = platform;
-    _targetVersion = version;
-    _setState(BinaryUpdateState.assembling, 0.0);
-    try {
-      final existing = await _store.getComplete(platform, version);
-      if (existing != null) {
-        _setState(BinaryUpdateState.assembling, 1.0);
-        return existing;
-      }
-
-      final available = await _store.availableFragments(platform, version);
-      if (available.length < k) {
-        _fail('Cannot assemble: have ${available.length} fragments, need $k');
-        return null;
-      }
-
-      final fragments = <int, Uint8List>{};
-      for (final index in available) {
-        final data = await _store.getFragment(platform, version, index);
-        if (data != null) fragments[index] = data;
-        if (fragments.length >= k) break;
-      }
-      if (fragments.length < k) {
-        _fail('Cannot assemble: only ${fragments.length} fragments loaded, need $k');
-        return null;
-      }
-
-      final binary = n == ReedSolomon.defaultN && k == ReedSolomon.defaultK
-          ? ReedSolomon().decode(fragments, originalSize)
-          : ReedSolomon.decodeWithParams(fragments, originalSize, n, k);
-
-      await _store.storeComplete(platform, version, binary);
-      _setState(BinaryUpdateState.assembling, 1.0);
-      return binary;
-    } catch (e) {
-      _fail('assemble failed: $e');
-      return null;
-    }
-  }
-
-  /// Verify assembled binary: SHA-256 hash against [expectedHash] (hex) and
-  /// Ed25519 signature by the maintainer key over that hash.
-  Future<bool> verify(
-    Uint8List binary,
-    String expectedHash,
-    Uint8List maintainerSignature,
-  ) async {
     _setState(BinaryUpdateState.verifying, 0.0);
     try {
-      final hash = await _sha256InIsolateAsync(binary);
+      final size = await File(path).length();
+      final hash = await sha256OfFile(path);
       final hashHex = bytesToHex(hash);
-      if (hashHex.toLowerCase() != expectedHash.toLowerCase()) {
+      final hashOk = hashHex.toLowerCase() == expectedHash.toLowerCase();
+      final key = hexToBytes(UpdateChecker.maintainerPublicKeyHex);
+      final signed =
+          hashOk && SodiumFFI().verifyEd25519(hash, maintainerSignature, key);
+      updateTrace('verify',
+          version: version,
+          object: expectedHash,
+          platform: platform,
+          reason: '$size B, SHA-256 expected '
+              '${updateObjectShort(expectedHash)} got '
+              '${updateObjectShort(hashHex)} '
+              '${hashOk ? 'MATCHES' : 'DOES NOT MATCH'}, signature '
+              '${!hashOk ? 'not checked' : signed ? 'valid' : 'NOT valid'}');
+      if (!hashOk) {
         _fail('Hash mismatch: expected=$expectedHash got=$hashHex');
         return false;
       }
-
-      final pubKey = hexToBytes(UpdateChecker.maintainerPublicKeyHex);
-      final ok = SodiumFFI().verifyEd25519(hash, maintainerSignature, pubKey);
-      if (!ok) {
+      if (!signed) {
         _fail('Signature verification failed');
         return false;
-      }
-
-      _setState(BinaryUpdateState.ready, 1.0);
-      if (_targetVersion != null && !Platform.isAndroid) {
-        getVerifiedBinaryPath(_targetPlatform ?? '', _targetVersion!).then((path) {
-          if (path != null) {
-            onUpdateReady?.call(_targetVersion!, path);
-          }
-        });
       }
       return true;
     } catch (e) {
       _fail('verify failed: $e');
       return false;
+    }
+  }
+
+  /// The checked binary lies in the store: `ready` — the banner may show
+  /// (v4_2 §26.6.1 step 5).
+  void markReady() {
+    _setState(BinaryUpdateState.ready, 1.0);
+    final target = _targetVersion;
+    if (target != null && !Platform.isAndroid) {
+      getVerifiedBinaryPath(_targetPlatform ?? '', target).then((path) {
+        if (path != null) onUpdateReady?.call(target, path);
+      });
     }
   }
 

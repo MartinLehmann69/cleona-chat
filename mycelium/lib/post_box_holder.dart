@@ -1,26 +1,27 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:mycelium/device_records.dart' show DeviceRecords;
+import 'package:mycelium/split_flow.dart' show SendEnd;
 import 'package:mycelium/post_box_proof.dart';
 import 'package:mycelium/post_box_proof_of_work.dart';
 import 'package:mycelium/post_box_disk.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/update_manifest_compartment.dart'
-    show isManifestValue, manifestVerifier;
+    show isManifestValue, kManifestAtMost, manifestVerifier;
 
 /// The holder role of the post box: what I hold for others.
 ///
-/// Split off from `post_box_deposit.dart` (S385, proposal holder, step
-/// 0), because both roles together stood at the line budget (399/400) and
-/// every safeguard of the holder would have blown it. The cut follows the
-/// question WHO processes a packet:
+/// Split off from `post_box_deposit.dart` (S385) for the line budget. The
+/// cut follows the question WHO processes a packet:
 ///
 /// | Role | Packets | File |
 /// |---|---|---|
 /// | holder | accept 0x30, 0x32 → 0x35, 0x36 → 0x33/0x34, delete receipt | here |
 /// | sender | send 0x30, count deposited receipt (0x31) | `post_box_deposit.dart` |
-/// | collector | send 0x32, 0x35 → 0x36, accept 0x33/0x34, send 0x31 | `post_box_deposit.dart` |
+/// | collector | send 0x32, 0x35 → 0x36, accept 0x33/0x34/0x37, send 0x31 | `post_box_collect.dart` |
 ///
 /// **Handed out and deleted only against a proof** (S385, B1/B2):
 /// whoever collects answers a task of this holder per value with the
@@ -31,15 +32,17 @@ import 'package:mycelium/update_manifest_compartment.dart'
 /// **The holder sees no identifier** (§8.2): holding, counting and writing to
 /// disk happens solely by the 16-B day value.
 ///
-/// 0x31 carries two roles; the switch is in the deposit, because only it
-/// knows the own running deposits. Only what was none of
-/// them arrives here. [_Entry.content] stays opaque.
+/// 0x31 carries two roles; the switch is in the deposit, which knows its own
+/// running deposits — only the rest arrives here. [_Entry.content] stays opaque.
 
 /// A neighbour: only its network address — the neighbour sees only day values
 /// and opaque bytes, the caller does not need more here either.
 typedef Neighbour = (InternetAddress address, int port);
 
-typedef Send = void Function(Uint8List packet, Neighbour target);
+/// Sends [packet] to [target]. What it returns — in the node the splitter's
+/// [SendEnd] — only the hand-out waits for (§8.2); everybody else fires and
+/// forgets.
+typedef Send = FutureOr<void> Function(Uint8List packet, Neighbour target);
 
 /// The cap per day value (§8.2: 100 packets).
 const int kAtMostProValue = 100;
@@ -49,36 +52,35 @@ const Duration kAtMostAge = Duration(days: 7);
 /// proof of computation 16 = 41 B. The one place where that is written.
 const int kDepositHeader = 1 + kIdLength + kValueLength + kProofOfWorkLength;
 
-/// Header of a 0x33 before the content: kind 1 + day value 16 + id 8 + count 1.
-const int kHereItIsHeader = 1 + kValueLength + kIdLength + 1;
+/// Header of a 0x33 before the content: kind 1 + day value 16 + id 8 + count 1
+/// + request identifier 8.
+const int kHereItIsHeader = 1 + kValueLength + kIdLength + 1 + kRequestIdLength;
 
-/// How long a task stays open and a proven collection stays entitled to delete.
-/// A collection takes at most `kAbholenFrist` (2 s); 30 s
-/// leave room for a slow cellular round trip and late delete receipts,
-/// without an overheard receipt being worth anything for long.
+/// How long a task stays open and a proven collection stays entitled to
+/// delete: room for a hand-out entry by entry and late delete receipts. A
+/// hand-out that outlasts it has its later deletions refused: those entries
+/// come again at the next collection.
 const Duration kProofDeadline = Duration(seconds: 30);
 
 /// At most this many open tasks — and separately this many proven
-/// collections — a holder keeps (V4.2 R-2). Roughly 100 B per entry, so
-/// at most roughly 100 KB per table. On overflow the oldest drops:
-/// an attacker who floods the table delays a collection until the
-/// next edge, he captures and deletes nothing.
+/// collections — a holder keeps (V4.2 R-2), ≈ 100 KB per table. On overflow
+/// the oldest drops: a flood delays a collection, it captures nothing.
 const int kAtMostOpen = 1024;
 
 class _Entry {
   final Uint8List id;
 
-  /// The day value under which this entry lies — in the map key of
-  /// `_storage` it stands as hex text, here as the 16 bytes that go to
-  /// disk.
+  /// The day value of this entry — hex in the key of `_storage`, here the
+  /// 16 bytes that go to disk.
   final Uint8List value;
   final Uint8List content;
   final DateTime inserted;
   _Entry(this.id, this.value, this.content, this.inserted);
 }
 
-/// An open task: to whom, for which values not yet proven, until when.
-typedef _Task = ({String source, Set<String> values, DateTime until});
+/// An open task: to whom, for which values, until when — and the question it
+/// was issued for: every packet sent back under it names that (§8.2).
+typedef _Task = ({String source, Set<String> values, DateTime until, Uint8List request});
 typedef _Proven = ({Uint8List pk, Uint8List random, DateTime until});
 
 class PostBoxHolder {
@@ -101,33 +103,37 @@ class PostBoxHolder {
   /// Proven collections: `quelle|wert(hex)` -> day pubkey and random.
   final Map<String, _Proven> _proven = {};
 
+  /// Hand-outs running right now (`quelle|wert`), and of those the ones a
+  /// proof was repeated for meanwhile, with that proof's question: no second
+  /// runs beside the first, the repetition is answered ONCE after it (§8.2).
+  final Set<String> _running = {};
+  final Map<String, Uint8List> _again = {};
+
   /// How many deposits this holder has accepted — pure
   /// diagnostics, so that the re-deposit loop from S384 is measurable.
   int deposits = 0;
 
-  /// Without [directory] everything stays in memory. With [directory]
-  /// [key] is mandatory (32 B, as `FileEncryption` takes it); the
-  /// constructor then READS and throws [DepositError] instead of a half-
-  /// filled holder.
+  /// Entries pushed out by the per-value cap [kAtMostProValue] — eviction
+  /// under budget pressure, which §21.3.3 item 4 requires to be visible in
+  /// the network statistics (§25). Expiry by age is not counted.
+  int evicted = 0;
+
+  /// The same, summed over every holder of this process: the app reads it
+  /// (one host per device, §4.5.1), because the holder instance sits behind
+  /// the node's deposit and has no outside reader.
+  static int evictedInProcess = 0;
+
+  /// Without [records] everything stays in memory. With them (in the app
+  /// the device database, `device_records.dart`) the constructor READS and
+  /// throws [DepositError] instead of a half-filled holder.
   PostBoxHolder({
     required this.send,
     required this.now,
     required this.nodeIdentifier,
-    Directory? directory,
-    Uint8List? key,
+    DeviceRecords? records,
   }) {
-    if (directory == null) {
-      if (key != null) {
-        throw ArgumentError('key without folder: there is nothing to '
-            'encrypt, the stock would stay in memory');
-      }
-      return;
-    }
-    if (key == null) {
-      throw ArgumentError('folder without key: this class derives '
-          'no key, it comes from outside');
-    }
-    final p = PostBoxDisk.open(directory, key);
+    if (records == null) return;
+    final p = PostBoxDisk.on(records);
     // The deadline already applies HERE: otherwise an entry would become
     // immortal because the holder restarts often.
     for (final s in p.load(limit: now().subtract(kAtMostAge))) {
@@ -181,45 +187,11 @@ class PostBoxHolder {
       if (known == valueHex) send(receiptPacket(id, nodeIdentifier), from);
       return;
     }
-    // ── THE PUBLIC MANIFEST COMPARTMENT: CHECKED, AND ONLY THE NEWEST ──
-    //
-    // Decision 20 (owner, 15.09.2026) on finding B-2 (S388): until then
-    // the holder accepted under this value everything that carried a
-    // proof of computation, and passed it on to every asker — a stranger
-    // could fill the compartment with forgeries and old versions (measured:
-    // five 0x33 instead of one, `smoke_update_manifest_compartment` (11.5)).
-    //
-    // The holder may check this without violating §8.2 „The holder cannot read the
-    // content": the manifest is public, its value is
-    // computed by every node, and every asker checks against the maintainer key
-    // anyway. Private post stays untouched — under every
-    // other value the holder still sees only opaque bytes.
-    //
-    // REJECTION IS SILENT, as with a missing proof of computation (above):
-    // an answer to an unchecked sender address would be an oracle
-    // („your forgery was detected") and an amplifier. The sender
-    // learns it from the missing receipt — `deposit` returns to him
-    // (false, 0). A rejection via the ladder is NOT buildable here:
-    // a 0x30 carries the value of the RECIPIENT compartment, never an identifier of the
-    // sender, and `Knoten.antwortUeberLeiter` needs exactly that
-    // (S389 report, section "Ablehnung").
-    if (isManifestValue(value)) {
-      final sequence = manifestVerifier(content);
-      if (sequence == null) return;
-      final held = _storage[valueHex];
-      if (held != null && held.isNotEmpty) {
-        // At most one entry — the sequence is recomputed from what is held
-        // instead of remembered: a remembered value survives neither
-        // the restart (disk) nor a key change, and the
-        // recomputation costs one check per incoming 0x30.
-        final old = manifestVerifier(held.last.content);
-        if (old != null && sequence <= old) return;
-        for (final e in held) {
-          _idToValue.remove(_hex(e.id));
-        }
-        held.clear();
-      }
-    }
+    // The public manifest compartment: checked, only the newest (decision 20,
+    // B-2); §8.2 "cannot read the content" is for private post — the manifest
+    // is public. Rejected silently like a missing proof of computation: an
+    // answer to an unchecked address would be an oracle and an amplifier.
+    if (isManifestValue(value) && !_manifestAdmits(valueHex, content)) return;
     deposits++;
     final list = _storage.putIfAbsent(valueHex, () => []);
     _purge(list);
@@ -228,6 +200,8 @@ class PostBoxHolder {
     while (list.length > kAtMostProValue) {
       final old = list.removeAt(0); // oldest in first, out first
       _idToValue.remove(_hex(old.id));
+      evicted++;
+      evictedInProcess++;
     }
     // Save BEFORE the receipt: the receipt is the promise that I hold the
     // piece.
@@ -235,46 +209,88 @@ class PostBoxHolder {
     send(receiptPacket(id, nodeIdentifier), from);
   }
 
-  /// 0x32 `Sorte | Anzahl | 7 × Wert`: NO handing out, only ONE task
-  /// (33 B) for all asked values. Whether something lies there is learned only by whoever
-  /// has proven himself per value.
+  /// The manifest check (decision 20): signed and newer than the ONE held
+  /// entry ([orSame]: or as new), recomputed from it, never remembered.
+  /// Clears what it displaces; says whether [content] may be stored.
+  bool _manifestAdmits(String valueHex, Uint8List content, {bool orSame = false}) {
+    final sequence = manifestVerifier(content);
+    if (sequence == null) return false;
+    final held = _storage[valueHex];
+    if (held == null || held.isEmpty) return true;
+    final old = manifestVerifier(held.last.content);
+    if (old != null && (sequence < old || (sequence == old && !orSame))) return false;
+    for (final e in held) {
+      _idToValue.remove(_hex(e.id));
+    }
+    held.clear();
+    return true;
+  }
+
+  /// §26.5.4 (owner 07.10.2026): a node holding a verified manifest keeps it
+  /// in its OWN post box under the public value — no packet, no proof of
+  /// computation, the check of [onDeposit]. The same sequence renews the
+  /// entry: the retention of §8.2 runs from the last time the node knew it.
+  bool holdOwn(Uint8List value, Uint8List content) {
+    if (!isManifestValue(value) || content.length > kManifestAtMost) return false;
+    final valueHex = _hex(value);
+    if (!_manifestAdmits(valueHex, content, orSame: true)) return false;
+    final id = SodiumFFI().sha256(content).sublist(0, kIdLength);
+    _storage.putIfAbsent(valueHex, () => []).add(_Entry(
+        id, Uint8List.fromList(value), Uint8List.fromList(content), now()));
+    _idToValue[_hex(id)] = valueHex;
+    _save();
+    return true;
+  }
+
+  /// 0x32 `Sorte | Anzahl | 7 × Wert | Anfragekennung`: NO handing out, only ONE
+  /// task (41 B) for all asked values, naming this question. Whether something
+  /// lies there is learned only by whoever has proven himself per value.
   void onCollect(Uint8List packet, Neighbour from) {
     final values = collectValuesRead(packet);
     if (values == null) return;
     final random = SodiumFFI().randomBytes(kRandomLength);
+    final request = collectRequestId(packet);
     final t = now();
     _tasks.removeWhere((_, a) => !a.until.isAfter(t));
     _tasks[_hex(random)] = (
       source: _source(from),
       values: {for (final w in values) _hex(w)},
       until: t.add(kProofDeadline),
+      request: request,
     );
     while (_tasks.length > kAtMostOpen) {
       _tasks.remove(_tasks.keys.first);
     }
-    send(taskPacket(random, nodeIdentifier), from);
+    send(taskPacket(random, nodeIdentifier, request), from);
   }
 
   /// 0x36: the proof for ONE value of a task. If it holds, the
-  /// holder hands out what lies under this value.
+  /// holder hands out what lies under this value; otherwise it refuses the
+  /// value explicitly (`0x37`, 25 B, smaller than the proof) — a holder never
+  /// stays silent to a request (owner, 30.09.2026). Only an unparseable
+  /// packet stays unanswered (§11.6).
   void onProof(Uint8List packet, Neighbour from) {
     final b = proofRead(packet);
     if (b == null) return;
     final randomHex = _hex(b.random);
     final a = _tasks[randomHex];
     final source = _source(from);
-    if (a == null || a.source != source) return;
     final valueHex = _hex(b.value);
-    // Once per value — even if the proof does not hold.
-    if (!a.values.remove(valueHex)) return;
-    if (a.values.isEmpty) _tasks.remove(randomHex);
-    if (!a.until.isAfter(now())) return;
-    if (!proofCarries(b)) return;
+    // A task this holder does not know — or one of another source — names no
+    // question: refused with the identifier left zero (§8.2).
+    if (a == null || a.source != source) {
+      return _refuse(b.value, from, Uint8List(kRequestIdLength));
+    }
+    // The task belongs to one question of one collector and lives until its
+    // deadline; a proof repeated under it is answered as the first was (§8.2).
+    if (!a.values.contains(valueHex) || !a.until.isAfter(now()) || !proofCarries(b)) {
+      return _refuse(b.value, from, a.request);
+    }
+    final key = '$source|$valueHex';
     // Under the manifest compartment nothing is ever deleted (§26.5.4): no proof to remember.
     if (!isManifestValue(b.value)) {
       final t = now();
       _proven.removeWhere((_, x) => !x.until.isAfter(t));
-      final key = '$source|$valueHex';
       _proven.remove(key);
       _proven[key] =
           (pk: b.pk, random: b.random, until: t.add(kProofDeadline));
@@ -282,19 +298,27 @@ class PostBoxHolder {
         _proven.remove(_proven.keys.first);
       }
     }
-    _handOut(b.value, valueHex, from);
+    _running.contains(key) ? _again[key] = a.request : _answer(b.value, key, from, a.request);
   }
 
-  void _handOut(Uint8List value, String valueHex, Neighbour from) {
+  void _answer(Uint8List value, String key, Neighbour from, Uint8List request) {
+    _running.add(key);
+    unawaited(_handOut(value, _hex(value), from, request).whenComplete(() {
+      _running.remove(key);
+      if (_again.remove(key) case final again?) _answer(value, key, from, again);
+    }));
+  }
+
+  /// Entry by entry, under the flow of §11.3, never as a burst (§8.2): each
+  /// 0x33 waits until the one before it has ended (S398 OP-33 R9: a burst
+  /// brought 5/100 and 14/100). [request]: the question of the proof's task.
+  Future<void> _handOut(
+      Uint8List value, String valueHex, Neighbour from, Uint8List request) async {
     final list = _storage[valueHex];
     if (list != null && _purge(list)) _save();
     if (list == null || list.isEmpty) {
-      send(
-          (BytesBuilder()
-                ..addByte(kinds.kNothingThere)
-                ..add(value))
-              .toBytes(),
-          from);
+      send((BytesBuilder()..addByte(kinds.kNothingThere)..add(value)..add(request))
+          .toBytes(), from);
       return;
     }
     final count = list.length; // <= kAtMostProValue (100), fits in 1 B
@@ -306,8 +330,14 @@ class PostBoxHolder {
         ..add(value)
         ..add(e.id)
         ..addByte(count)
+        ..add(request)
         ..add(e.content);
-      send(p.toBytes(), from);
+      final sending = send(p.toBytes(), from);
+      if (sending is! Future) continue; // a send without flow (probes)
+      final end = await sending;
+      // Unreachable or the bound for others (§20.2): the holder hands out
+      // later — no refusal (`0x37` is only for a proof, owner 30.09.2026).
+      if (end == SendEnd.unreachable || end == SendEnd.refused) return;
     }
   }
 
@@ -333,6 +363,11 @@ class PostBoxHolder {
     _save();
   }
 
+  /// `0x37 | value | request`: this value is not handed out now.
+  void _refuse(Uint8List value, Neighbour to, Uint8List request) =>
+      send((BytesBuilder()..addByte(kinds.kRefused)..add(value)..add(request))
+          .toBytes(), to);
+
   /// Throws away what is older than [kAtMostAge]. Reports back whether
   /// something dropped out in the process — only then does the disk have to be
   /// touched.
@@ -348,18 +383,15 @@ class PostBoxHolder {
   }
 }
 
-/// 0x31 `Sorte | id | Knotenkennung 16` — the deposited receipt of the
-/// holder to the sender. The node identifier (B1, S388) lets the sender
-/// count two receipts of THE SAME node under two addresses as one.
-Uint8List receiptPacket(Uint8List id, Uint8List node) =>
-    (BytesBuilder()
-          ..addByte(kinds.kDeposited)
-          ..add(id)
-          ..add(node))
-        .toBytes();
+/// 0x31 `Sorte | id | Knotenkennung 16 | Anfragekennung 8` — the deposited
+/// receipt; the node identifier (B1, S388) counts one node under two
+/// addresses once. It answers a deposit, not a question: the request
+/// identifier is carried as zero (§8.2).
+Uint8List receiptPacket(Uint8List id, Uint8List node) => (BytesBuilder()
+      ..addByte(kinds.kDeposited)..add(id)..add(node)..add(Uint8List(kRequestIdLength)))
+    .toBytes();
 
-/// Length of the node identifier in `0x31` and `0x35` (as in the neighbour call, there
-/// as text).
+/// Length of the node identifier in `0x31` and `0x35` (text in the call).
 const int kNodeIdentifierLength = 16;
 
 String _source(Neighbour n) => '${n.$1.address}:${n.$2}';

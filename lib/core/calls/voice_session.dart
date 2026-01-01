@@ -343,8 +343,17 @@ class VoiceNativeLibrary {
   late final _TwoIntOutDart _pollEvent;
   late final _GetReportDart _getReport;
 
-  /// The real platform backend (V1.1-V1.4).
-  static VoiceNativeLibrary platform() => _load('cleona_voice');
+  /// The real platform backend (V1.1-V1.4) — or, in a probe, what
+  /// [platformForTesting] names.
+  static VoiceNativeLibrary platform() =>
+      platformForTesting?.call() ?? _load('cleona_voice');
+
+  /// Probes only: which library [platform] hands out. `CallService` and
+  /// `AudioMixer` ask [platform] and nothing else; a probe that runs a
+  /// real call between two services sets this to [mock] so that the
+  /// voice chain runs without hardware (S398-W2). `null` in the product.
+  @visibleForTesting
+  static VoiceNativeLibrary Function()? platformForTesting;
 
   /// The hardware-free mock (`native/cleona_voice/mock/`).
   ///

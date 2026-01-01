@@ -27,13 +27,17 @@
 ///             | atMost (u16) | accepted (u16)
 ///             | revoked (1 B: 0 | 1)
 ///             | inPerson (1 B: 0 | 1)   — since version 7 (S388, ES-12)
+///               2 = in person AND shown, followed by the moment it was shown
+///               (u64, Unix ms) — STILL version 17 (S406, §15.3 "lives 60 s")
 ///             | label: u16 length + UTF-8  — since version 10 (S390)
 ///             | requests: count (1 B)     — since version 9 (S389, E-1)
 ///               per request: who (Address.length)
 ///                         | origin: type (1 B: 4 | 6) | address (4 | 16)
 ///                                | port (u16)
 ///                         | arrived (u64, milliseconds)
-///                         | introduction: u16 length + bytes (0 = none)
+///                         | introduction: u16 length + bytes
+///                           (0 = none — the writer writes 0 since S403;
+///                            content lives in the message store, §21.4.2)
 ///                         | neighbour, answer code — since version 14,
 ///                           layout in `memory_request.dart`
 ///             | card neighbour: flag (1 B) | address — since version 15
@@ -57,7 +61,11 @@ import 'dart:typed_data';
 import 'package:mycelium/invitation.dart' as inv;
 import 'package:mycelium/memory_request.dart';
 import 'package:mycelium/card_address.dart'
-    show CardAddress, CardFormatError, optionalAddressRead, optionalAddressWrite;
+    show
+        CardAddress,
+        CardFormatError,
+        optionalAddressRead,
+        optionalAddressWrite;
 
 /// The file is there, but unusable: wrong key, truncated,
 /// unknown version, bent bytes. Thrown from `Memory.open`
@@ -143,6 +151,7 @@ typedef RememberedInvitation = ({
   String label,
   List<inv.WaitingRequest> requests,
   CardAddress? cardNeighbour,
+  int? shownAtMs,
 });
 
 /// The values of a living invitation as they go to disk.
@@ -158,6 +167,7 @@ RememberedInvitation rememberedFrom(inv.Invitation e) => (
       label: e.label,
       requests: e.requests.all,
       cardNeighbour: e.cardNeighbour,
+      shownAtMs: e.shownAtMs,
     );
 
 /// The living invitation for a remembered entry — the path at start.
@@ -174,6 +184,7 @@ inv.Invitation invitationFromRemembered(RememberedInvitation g) =>
       label: g.label,
       waitingRequests: g.requests,
       cardNeighbour: g.cardNeighbour,
+      shownAtMs: g.shownAtMs,
     );
 
 /// How many invitations lie on disk at most.
@@ -238,7 +249,18 @@ Uint8List invitationsEncode(Iterable<RememberedInvitation> list) {
     b.add(_u16(e.atMost));
     b.add(_u16(e.accepted));
     b.addByte(e.revoke ? 1 : 0);
-    b.addByte(e.inPerson ? 1 : 0);
+    // §15.3 "lives 60 s" (S406): the moment of showing rides on the
+    // in-person byte as a third value, as the post box flag took its second
+    // in S401 — a version 17 file without it is read as before. Written only
+    // while its clock runs: closed, revoked or redeemed, the moment says
+    // nothing any more, and the file keeps the old layout.
+    final shown = e.revoke || e.accepted > 0 ? null : e.shownAtMs;
+    if (shown != null && (!e.inPerson || shown < 0)) {
+      throw ArgumentError('shownAtMs only for an in-person invitation, '
+          'not negative, was $shown');
+    }
+    b.addByte(!e.inPerson ? 0 : (shown == null ? 1 : 2));
+    if (shown != null) b.add(_u64(shown));
     final label = utf8.encode(e.label);
     if (label.length > inv.kLabelAtMostBytes) {
       throw ArgumentError('label ${label.length} B, at most '
@@ -291,9 +313,10 @@ List<RememberedInvitation> invitationsDecode(
       throw MemoryError('invalid revoke flag $revokeByte');
     }
     final inPersonByte = l.byte();
-    if (inPersonByte > 1) {
+    if (inPersonByte > 2) {
       throw MemoryError('invalid in-person flag $inPersonByte');
     }
+    final shownAtMs = inPersonByte == 2 ? l.u64() : null;
     final label = _labelRead(l);
     final requests = requestsDecode(l);
     final CardAddress? cardNeighbour;
@@ -313,10 +336,11 @@ List<RememberedInvitation> invitationsDecode(
       atMost: atMost,
       accepted: accepted,
       revoke: revokeByte == 1,
-      inPerson: inPersonByte == 1,
+      inPerson: inPersonByte != 0,
       label: label,
       requests: requests,
       cardNeighbour: cardNeighbour,
+      shownAtMs: shownAtMs,
     );
     if (timeOver(e, now) || exhausted(e)) continue;
     out.add(e);

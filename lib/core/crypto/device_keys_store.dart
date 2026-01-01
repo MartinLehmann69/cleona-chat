@@ -1,67 +1,65 @@
-// V3.0 Device-Keys persistence (Architecture v3.0 §3.5 + §3.5b + §3.6 #5).
+// Device-keys persistence (v4_2 §4.4.2, §4.5.2 "Fail-loud is normative").
 //
-// Holds the device-bound keypair container per Daemon
-// (`<baseDir>/device_keys.bin.enc`, shared across all hosted user identities
-// — DeviceID is device-bound, not identity-bound). The container carries
-// BOTH:
+// Holds the device-bound keypair container of this device — shared across
+// all hosted user identities; the DeviceID is device-bound, not
+// identity-bound. The container carries BOTH:
 //
 //   * Device-Sig keypair (Ed25519 + ML-DSA-65)  — see device_signature.dart
 //   * Device-KEM keypair (X25519 + ML-KEM-768)  — see device_kem.dart
 //
-// Lazy-create-on-first-start: if the encrypted blob does not exist, both
-// keypairs are generated via DeviceKeyPair.generate() / DeviceKemKeyPair.generate()
-// (OS CSPRNG, NOT seed-derived per §3.6 #5) and persisted atomically before
-// returning them.
+// Lazy-create-on-first-start: if no container is stored, both keypairs are
+// generated via DeviceKeyPair.generate() / DeviceKemKeyPair.generate()
+// (OS CSPRNG, NOT seed-derived, §4.4.2) and stored before they are
+// returned.
 //
-// On-disk container layout (after FileEncryption.writeBinaryFile applies the
-// XSalsa20-Poly1305 envelope):
+// ── WHERE IT LIES (S403) ───────────────────────────────────────────────
 //
-//   v2 (current — wave 5):
-//     [4B magic = "CLDK" / 0x43 0x4C 0x44 0x4B]
-//     [4B u32 little-endian version = 2]
-//     [DeviceKeyPair.serializedLength bytes  : Device-Sig keypair]
-//     [DeviceKemKeyPair.serializedLength bytes: Device-KEM keypair]
+// In the device database, `<baseDir>/device.db` (v4_2 §4.5.2, §4.5.3 form
+// 2, §21.4.1, D-51): ONE row, area `DeviceStore.areaDeviceKeys`, the
+// container below as base64. Until S403 the container was the file
+// `<baseDir>/device_keys.bin.enc`; nothing reads that file any more, and
+// the start removes it (`superseded_device_files.dart`). There is no
+// takeover: a device that carried the file gets new device keys.
 //
-//   v1 (legacy — pre-wave-5):
-//     [DeviceKeyPair.serializedLength bytes  : Device-Sig keypair only]
-//     (no header, no magic, fixed length)
+// The state table takes JSON, hence base64 (4/3 of 6 104 B). The row is
+// written once at first start and once more when the admission nonce is
+// added.
 //
-// v1 → v2 migration: if [loadOrCreate] reads a blob that does not start with
-// the magic and matches the v1 length exactly, it is treated as a legacy
-// v1-only container. The Sig keypair is parsed, a fresh KEM keypair is
-// generated (CSPRNG, this is a hard-cut: there is no v1 KEM keypair to
-// migrate), and the combined v2 blob is rewritten in place. This is the
-// hard-cut-friendly path: existing devices upgrade in place at first launch
-// after the wave 5 deployment, without requiring a manual reset of the
-// daemon's key material.
+// Container layout:
 //
-// Storage uses the same XSalsa20-Poly1305 file encryption as the rest of the
-// profile — see FileEncryption.writeBinaryFile. Write is crash-atomic
-// (tmp + rename), recovery probes `.enc.tmp` / `.enc.old` sidecars on read.
+//   [4B magic = "CLDK" / 0x43 0x4C 0x44 0x4B]
+//   [4B u32 little-endian version = 2 or 3]
+//   [DeviceKeyPair.serializedLength bytes  : Device-Sig keypair]
+//   [DeviceKemKeyPair.serializedLength bytes: Device-KEM keypair]
+//   [8B admission nonce — version 3 only]
 //
-// THE ENVELOPE KEY IS NOT `db.key` (corrected S362 — this header said it was).
-// The caller supplies it, and the caller is `identity_context.dart:407-409`:
-// `HdWallet.deriveSharedFileEncKey(masterSeed)`, the daemon-global,
-// seed-recoverable key. `db.key` appears exactly once below, in the
-// S106 fallback inside [loadOrCreate], and that occurrence is DELIBERATE —
-// see the comment there.
+// The unheadered v1 container (Sig keypair only) and the fallback to a
+// found `db.key` are gone with the file: both were takeovers of stock from
+// before this line, reachable only through a file this build no longer
+// reads.
 //
-// Threading: callers must serialize calls to [loadOrCreate] from a single
-// daemon-startup path; concurrent invocations would race on the
-// generate-and-persist branch. Until the CUT of 2026-08-31 this guarantee
-// came from `CleonaNode.start()`, which awaited the call before every
-// `registerIdentity`; `CleonaNode` is deleted (`lib/core/node/`:
-// zero files, measured 2026-09-03). **The condition is therefore not
-// fulfilled but unproven** — it stands here as an open item and not as
-// done.
+// THE KEY of the database is not chosen here. The caller supplies it, and
+// the caller is `IdentityContext.initKeys`:
+// `HdWallet.deriveSharedFileEncKey(masterSeed)`, the device-wide,
+// seed-recoverable key.
+//
+// ── TWO CALLERS AT ONCE ────────────────────────────────────────────────
+//
+// [loadOrCreate] reads and, if nothing is there, generates and writes — in
+// ONE transaction of the device database, which holds the write lock from
+// its start. Two identities whose keys are initialised at the same time,
+// or two programs on the same profile, cannot both find "nothing there" and
+// each write a pair of their own: the second one waits and reads what the
+// first one wrote. Until S403 that hung on the callers running one after
+// the other, and this header carried it as an open item.
 
-import 'dart:io';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/admission_pow.dart';
 import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_signature.dart';
-import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/storage/device_store.dart';
 
 /// Combined device keypair bundle (Sig + KEM). What [DeviceKeysStore.loadOrCreate]
 /// returns — a single value to wire into the startup path without two
@@ -80,12 +78,10 @@ class DeviceKeyBundle {
 }
 
 class DeviceKeysStore {
-  /// On-disk filename (relative to baseDir). The `.enc` suffix is appended
-  /// by FileEncryption.writeBinaryFile.
-  static const String _filename = 'device_keys.bin';
+  /// The field of the row that carries the container, base64.
+  static const String _field = 'container';
 
-  /// Container magic — ASCII "CLDK" (Cleona Device Keys). Distinguishes
-  /// v2+ containers (with header) from the unheadered v1 layout.
+  /// Container magic — ASCII "CLDK" (Cleona Device Keys).
   static const List<int> _magic = [0x43, 0x4C, 0x44, 0x4B];
 
   /// Current container format version (v3 = v2 + 8-byte admission nonce, D3).
@@ -94,9 +90,6 @@ class DeviceKeysStore {
   /// D3 Admission-PoW nonce length (§13.1.2).
   static const int _nonceLength = 8;
 
-  /// v1 container length (Sig keypair only, no header).
-  static int get _v1Length => DeviceKeyPair.serializedLength;
-
   /// v2 container length (header + Sig + KEM).
   static int get _v2Length =>
       _magic.length + 4 + DeviceKeyPair.serializedLength + DeviceKemKeyPair.serializedLength;
@@ -104,117 +97,77 @@ class DeviceKeysStore {
   /// v3 container length (v2 + admission nonce).
   static int get _v3Length => _v2Length + _nonceLength;
 
-  /// Load the daemon's Device-Sig + Device-KEM keypair bundle from disk, or
-  /// generate-and-persist a fresh one if none exists. If a legacy v1 blob
-  /// (Sig only) is found, it is migrated in place by generating a fresh
-  /// KEM keypair and rewriting the file as v2.
+  /// Loads the device's Device-Sig + Device-KEM keypair bundle from the
+  /// device database of [baseDir], or generates and stores a fresh one if
+  /// none is stored. [key] is the key of the device database.
   ///
-  /// On read of an existing blob, deserialize-failures throw rather than
-  /// silently regenerating — a corrupt key store usually means the wrong
-  /// `db.key` is present (e.g. profile cross-contamination), which would
-  /// silently break Auth-Manifest replay if we just generated a new one.
+  /// **Fail-loud (§4.5.2).** Keys are generated only when the database
+  /// opens and holds no container. A database that lies there and does not
+  /// open under [key] THROWS (`DeviceStoreException`); a stored container
+  /// that does not decode THROWS ([DeviceKeysStoreException]). New keys in
+  /// either case would change the device node id behind the back of
+  /// everything that knows the old one.
   static DeviceKeyBundle loadOrCreate(
-      {required String baseDir, required FileEncryption fileEnc}) {
-    final path = '$baseDir/$_filename';
-    final encFile = File('$path.enc');
-    final existing = fileEnc.readBinaryFile(path);
-
-    if (existing == null && encFile.existsSync()) {
-      // S106 defence-in-depth: .enc file exists but decrypt failed.
-      // Most likely cause: wrong encryption key (seed-derived vs db.key
-      // mismatch). Try legacy db.key as fallback before giving up.
-      //
-      // INTENT, NOT AN OVERSIGHT (S362): the fallback MUST use the old
-      // key. It reads a legacy container that the derived key has just NOT
-      // been able to open; if it succeeds, the `fileEnc.writeBinaryFile(...)`
-      // a few lines further on immediately rewrites the bundle under the
-      // CALLER'S key, and the old envelope is gone in the same call. Passing
-      // a derived key in here would make the fallback identical to the
-      // read that just failed — so no fallback at all, and a device that
-      // loses its DeviceID and thus its routing.
-      //
-      // S368: `FileEncryption(baseDir: baseDir)` has become
-      // `FileEncryption.legacyOrNull(baseDir)`. The difference is not
-      // cosmetic — the old form CREATED a `db.key` if there was none, and
-      // then failed on the ciphertext: a freshly generated plaintext key
-      // as a side effect of a failed read attempt. Now it returns `null`,
-      // and the fail-loud throw below is the right answer.
-      final legacyEnc = FileEncryption.legacyOrNull(baseDir);
-      final legacy = legacyEnc?.readBinaryFile(path);  // V3-TOUCH-OK: legacy key fallback, normative in v4_1 §4.5.3 (db.key is one of the six files that never move into the database)
-      if (legacy != null) {
-        final bundle = _hasMagic(legacy) ? _decodeVersioned(legacy)
-            : legacy.length == _v1Length
-                ? DeviceKeyBundle(sig: DeviceKeyPair.deserialize(legacy), kem: DeviceKemKeyPair.generate())
-                : throw DeviceKeysStoreException('unrecognised legacy container: ${legacy.length} bytes');
-        fileEnc.writeBinaryFile(path, _encodeBundle(bundle));
-        return bundle;
+      {required String baseDir, required Uint8List key}) {
+    final store = DeviceStore.at(baseDir, key);
+    return store.transaction(() {
+      final row =
+          store.entry(DeviceStore.areaDeviceKeys, DeviceStore.keySingle);
+      if (row == null) {
+        // Genuine first start of this device — nothing stored.
+        final fresh = DeviceKeyBundle(
+          sig: DeviceKeyPair.generate(),
+          kem: DeviceKemKeyPair.generate(),
+        );
+        _write(store, fresh);
+        return fresh;
       }
-      throw DeviceKeysStoreException(
-          'device_keys.bin.enc exists (${encFile.lengthSync()} bytes) but '
-          'cannot be decrypted with seed-derived key or legacy db.key — '
-          'will NOT regenerate (would change deviceNodeId and break routing)');
-    }
-
-    if (existing == null) {
-      // Genuine fresh install — no .enc file on disk.
-      final fresh = DeviceKeyBundle(
-        sig: DeviceKeyPair.generate(),
-        kem: DeviceKemKeyPair.generate(),
-      );
-      fileEnc.writeBinaryFile(path, _encodeBundle(fresh));
-      return fresh;
-    }
-
-    // Detect format: v2/v3 start with magic; v1 is exactly _v1Length bytes
-    // and lacks the magic prefix.
-    if (_hasMagic(existing)) {
-      return _decodeVersioned(existing);
-    }
-
-    if (existing.length == _v1Length) {
-      // Legacy v1: parse the Sig keypair, generate fresh KEM, rewrite as v2.
-      // deserialize throws DeviceSignatureException on length-mismatch — let
-      // it propagate so the daemon fails loud rather than silently rotating
-      // the device identity (which would orphan the Auth-Manifest).
-      final sig = DeviceKeyPair.deserialize(existing);
-      final kem = DeviceKemKeyPair.generate();
-      final bundle = DeviceKeyBundle(sig: sig, kem: kem);
-      // Rewrite atomically as v2 — on next launch the versioned path is taken.
-      fileEnc.writeBinaryFile(path, _encodeBundle(bundle));
-      return bundle;
-    }
-
-    // Unknown shape: not v2 magic, not v1 length. Fail loud — silently
-    // regenerating would orphan the Auth-Manifest.
-    throw DeviceKeysStoreException(
-        'unrecognised device key container at $path: '
-        '${existing.length} bytes, no "CLDK" magic, not a v1-sized blob '
-        '(expected $_v1Length or $_v2Length bytes for v2)');
+      final Uint8List bytes;
+      try {
+        bytes = base64Decode(row[_field] as String);
+      } catch (e) {
+        throw DeviceKeysStoreException(
+            'the device key container in the device database of $baseDir '
+            'is not readable ($e) — will NOT regenerate (would change the '
+            'device node id)');
+      }
+      if (!_hasMagic(bytes)) {
+        // Unknown shape. Fail loud — silently regenerating would change
+        // the device node id.
+        throw DeviceKeysStoreException(
+            'unrecognised device key container in the device database of '
+            '$baseDir: ${bytes.length} bytes, no "CLDK" magic (expected '
+            '$_v2Length or $_v3Length bytes)');
+      }
+      return _decodeVersioned(bytes);
+    });
   }
 
+  static void _write(DeviceStore store, DeviceKeyBundle bundle) =>
+      store.putEntry(DeviceStore.areaDeviceKeys, DeviceStore.keySingle,
+          {_field: base64Encode(_encodeBundle(bundle))});
+
   /// Re-persist an in-memory bundle. Useful only for explicit rotation
-  /// flows (currently none — V3.0 has no automatic device-key rotation; if
-  /// added later it lives in a separate device_revocation flow per §7.4).
+  /// flows (currently none — there is no automatic device-key rotation).
   static void persist(
       {required String baseDir,
-      required FileEncryption fileEnc,
+      required Uint8List key,
       required DeviceKeyBundle bundle}) {
-    fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
+    _write(DeviceStore.at(baseDir, key), bundle);
   }
 
   /// D3 (§13.1.2): make sure the admission PoW nonce exists.
-  /// Lazy path for existing devices (v1/v2 container) AND fresh installs:
-  /// grinds in the isolate (~50-100ms desktop, <=2s mobile, once) and
-  /// persists the container as v3. No-op if the nonce is already there.
+  /// Grinds in the isolate (~50-100ms desktop, <=2s mobile, once) and
+  /// stores the container as v3. No-op if the nonce is already there.
   static Future<void> ensureAdmissionNonce(
       {required DeviceKeyBundle bundle,
       required String baseDir,
-      required FileEncryption fileEnc}) async {
+      required Uint8List key}) async {
     if (bundle.admissionNonce != null) return;
     final nonce =
         await AdmissionPow.computeAsync(bundle.sig.ed25519PublicKey);
     bundle.admissionNonce = nonce;
-    fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
+    _write(DeviceStore.at(baseDir, key), bundle);
   }
 
   // DROPPED ON 09.09.2026 (S378): no caller in lib/ or test/.

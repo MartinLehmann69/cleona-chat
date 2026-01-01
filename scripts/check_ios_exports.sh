@@ -37,7 +37,18 @@ fi
 # symbols CANNOT exist in the iOS image — exactly the case
 # that EXCLUDE_PATTERN is there for, and not the case that
 # OPTIONAL_SYMBOLS below rightly refuses.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_send_path\.dart|dpapi_ffi\.dart"
+#
+# ADDED S403 (02.10.2026): `process_hardening.dart` binds `prctl` from the
+# process's own libc — a LINUX system call wrapper (prctl(2)); iOS has no
+# such function, and the file returns before the lookup on every platform
+# but Linux (`Platform.isLinux`). The symbol cannot exist in the iOS image.
+#
+# ADDED S403 (02.10.2026): `libsecret_ffi.dart` binds libsecret-1.so.0 and
+# libglib-2.0.so.0 for the Linux keyring store (S402-1). Both are Linux
+# desktop libraries; neither is built into the iOS image, and the file is
+# only reached from the Linux branch of `KeyringService.init`
+# (`Platform.isLinux`). Its symbols cannot exist in the iOS image.
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_send_path\.dart|dpapi_ffi\.dart|process_hardening\.dart|libsecret_ffi\.dart"
 
 # Symbols this gate deliberately does NOT require in the exports file.
 # Currently empty, and the bar for adding one is high.

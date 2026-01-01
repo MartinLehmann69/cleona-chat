@@ -10,7 +10,7 @@ import 'identity_manager.dart';
 /// upwards via [CleonaService.onIdentityDeletedRemotely]. What is then
 /// still pending belongs to a layer above and is exactly this here:
 ///
-///   1. the entry in `identities.json` (encrypted: `.enc`),
+///   1. the entry in the list of identities (device database, S403),
 ///   2. the profile directory itself — and with it the attachments
 ///      (`<profileDir>/media/*.cmenc`, `media_store.dart:25`).
 ///
@@ -71,7 +71,7 @@ int remoteDeletionRemoveEntry({
 
   final remaining = mgr.loadIdentities().length;
   log?.call('Remote deletion carried out: ${match.length} entry/entries '
-      'removed from identities.json, profile directory deleted — '
+      'removed from the list of identities, profile directory deleted — '
       '$remaining identity(ies) remain');
 
   // Only a MEASUREMENT, not a second deletion path: if the directory stays

@@ -398,7 +398,11 @@ class _GlobalCoAuthWarningBanner extends StatelessWidget {
     // a dialog may briefly show and take away again.
     final rotations = appState.contactRotationNotices;
     final rejections = appState.rotationRejections;
-    if (warnings.isEmpty && rotations.isEmpty && rejections.isEmpty) {
+    final forks = appState.keyForks;
+    if (warnings.isEmpty &&
+        rotations.isEmpty &&
+        rejections.isEmpty &&
+        forks.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -410,7 +414,17 @@ class _GlobalCoAuthWarningBanner extends StatelessWidget {
       children: [
         // Order by severity: an ACTIVE rejection by a device
         // is the strongest theft signal (§7.5), the missed quorum the
-        // second strongest, the mere rotation the weakest.
+        // second strongest, the mere rotation the weakest. A FORK (§4.5.4)
+        // stands first: two successors of one key are evidence, not a
+        // suspicion.
+        for (final f in forks)
+          _line(
+            cs: cs,
+            icon: Icons.call_split,
+            title: locale.get('contact_key_fork_title'),
+            body: locale.tr('contact_key_fork_body', {'name': f.displayName}),
+            close: () => appState.dismissKeyFork(f.contactNodeIdHex),
+          ),
         for (final r in rejections)
           _line(
             cs: cs,

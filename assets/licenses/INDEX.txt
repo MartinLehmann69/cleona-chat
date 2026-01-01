@@ -1,0 +1,19 @@
+# Third-party licenses
+
+The license texts of the native libraries shipped with Cleona, each taken verbatim from the
+upstream source at the version or commit the build pins (fetched 03.10.2026).
+
+| File | Library | Version | Source of the text |
+|---|---|---|---|
+| `libsodium.txt` | libsodium (ISC) | 1.0.20 | `github.com/jedisct1/libsodium/blob/1.0.20-RELEASE/LICENSE` |
+| `liboqs.txt` | liboqs (MIT) | 0.15.0 | `github.com/open-quantum-safe/liboqs/blob/0.15.0/LICENSE.txt` |
+| `zstd.txt` | Zstandard (BSD) | 1.5.6 | `github.com/facebook/zstd/blob/v1.5.6/LICENSE` |
+| `opus.txt` | Opus (BSD-3-Clause) | 1.5.2 | `github.com/xiph/opus/blob/v1.5.2/COPYING` |
+| `whisper_cpp.txt` | whisper.cpp + GGML (MIT) | v1.8.4 | `github.com/ggml-org/whisper.cpp/blob/v1.8.4/LICENSE` |
+| `sqlite3mc.txt` | SQLite3 Multiple Ciphers (MIT) | 2.5.1 | `github.com/utelle/SQLite3MultipleCiphers/blob/v2.5.1/LICENSE` |
+| `sqlite3.txt` | SQLite (public domain) | 3.53.4 | blessing from the SQLite amalgamation, `native/cleona_store/vendor/sqlite3mc/` |
+| `monocypher.txt` | Monocypher (BSD-2-Clause / CC0) | 4.0.3 | `native/cleona_link/vendor/monocypher/LICENCE.md` |
+| `libogg.txt` | libogg (BSD-3-Clause), Windows sound helper | 1.3.6 (`be05b13e`) | `github.com/xiph/ogg/blob/be05b13e98b048f0b5a0f5fa8ce514d56db5f822/COPYING` |
+| `libvorbis.txt` | libvorbis (BSD-3-Clause), Windows sound helper | 1.3.7 (`0657aee6`) | `github.com/xiph/vorbis/blob/0657aee69dec8508a0011f47f3b69d7538e9d262/COPYING` |
+
+The Flutter and Dart packages bring their own license texts; Flutter shows them on its license page.

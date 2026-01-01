@@ -1,20 +1,39 @@
 /// The invitation as TEXT — for copying and pasting instead of scanning.
 ///
-/// Form: `cleona:1:<base64url without padding>`, payload =
-/// `Card.pack()` + 2 bytes CRC-16 (little endian). CRC instead of hash: no
-/// callback needed (card.dart deliberately keeps SHA-256 external, see the
-/// "OPEN SEAM" there), ten lines suffice, detects truncation/modification.
+/// Two forms (V4.2 §15.6):
+///  * `cleona:1:<base64url>` — payload = `Card.pack()` + 2 B CRC-16;
+///  * `cleona:2:<base64url>` — payload = `Card.pack()` ‖ `pk_inv` (32 B) ‖
+///    key bundle (3168 B) ‖ Ed25519 signature (64 B) ‖ the issuer's rotation
+///    chain (1 + 5357·n B, §4.5.4; count 0 while it never rotated) ‖ CRC-16
+///    (proposal E, owner approval 28.09.2026; signature: owner decision T-a;
+///    chain: proposal A, D-33).
+///    With it a requester needs no bundle round trip (packets (0)/(1)) and
+///    can leave its request in the issuer's invitation post box while the
+///    issuer is off. QR and NFC keep carrying only the packed card.
+///
+/// **The signature (T-a).** The line's sealing keys are the invitation's own
+/// (R-b) and not covered by the fingerprint; whoever alters the line in
+/// transit could swap them and read the request. The issuer's identity
+/// Ed25519 key — bound to the fingerprint — signs [lineSignedData]; the
+/// reader checks it against the Ed25519 key in the line's bundle BEFORE
+/// anything is sealed ([CardTextErrorKind.badSignature]). Ed25519 only: it is
+/// checked once, at redemption, and protects the line only in transit.
+///
+/// The CRC is little endian, over everything before it — no hash callback
+/// needed (card.dart keeps SHA-256 external), detects truncation/modification.
 ///
 /// [outInvitationText] is TOLERANT: line breaks in the middle of the text,
 /// embedding in other text, quotation marks/brackets around it,
 /// invisible characters, missing prefix. Errors: [CardTextError], five
 /// kinds. LENGTH BEFORE CHECKSUM: the size of a complete card
 /// follows unambiguously from version byte, address count byte including type bytes,
-/// neighbour flag and the count and length bytes of the relay list (90 B without
-/// address and without relays up to 380 B, V4.2 §15.2, each + 2 B CRC) — without
-/// parsing the card. If the length
-/// does not fit: [truncated] (too short or too long). If the length fits but
-/// not the checksum: [tampered] — the text is complete, but
+/// neighbour flag, publisher-key flag and the count and length bytes of the relay
+/// list (91 B without address, key and relays up to 413 B, V4.2 §15.2, §15.6, each
+/// + 2 B CRC) — without
+/// parsing the card; a `cleona:2:` line adds [kLineKeysLength], the chain's
+/// count byte and 5357 B per link, the count read at its fixed offset. If the
+/// length does not fit: [truncated] (too short or too long). If the length fits
+/// but not the checksum: [tampered] — the text is complete, but
 /// changed. Two causes, two pieces of advice ("copy more" vs.
 /// "copy again"), which one would otherwise confuse.
 library;
@@ -22,11 +41,13 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cleona/core/identity/rotation_chain.dart'
+    show kChainLinkWireLength, kRotationChainMaxLinks;
 import 'package:mycelium/card.dart';
 
-/// The five distinguishable error causes when reading an invitation text.
+/// The distinguishable error causes when reading an invitation text.
 enum CardTextErrorKind {
-  /// Neither "cleona:1:" prefix nor plausible base64url text found.
+  /// Neither "cleona:1:"/"cleona:2:" prefix nor plausible base64url text found.
   notFound,
 
   /// The length computed from version byte + address flags does NOT fit the
@@ -46,6 +67,11 @@ enum CardTextErrorKind {
   /// No valid base64url text (wrong length or characters outside
   /// the alphabet after cleaning).
   brokenChars,
+
+  /// A `cleona:2:` line whose signature does not verify against the
+  /// Ed25519 key in its own bundle — its keys were altered (T-a). Checked
+  /// only where a verifier is passed ([outInvitationLine]).
+  badSignature,
 }
 
 class CardTextError implements Exception {
@@ -56,41 +82,127 @@ class CardTextError implements Exception {
   String toString() => 'KartentextFehler(${kind.name}): $message';
 }
 
-final _withPreamble = RegExp(r'cleona:1:([A-Za-z0-9_-]+)');
+final _withPreamble = RegExp(r'cleona:([12]):([A-Za-z0-9_-]+)');
 final _withoutPreamble = RegExp(r'[A-Za-z0-9_-]{40,}');
 
-/// Creates the invitation as one line of text.
-String asInvitationText(Card k) {
-  final payload = k.pack();
+/// Length of `pk_inv` in a `cleona:2:` line.
+const int kLineInvitationKeyLength = 32;
+
+/// Length of the key bundle in a `cleona:2:` line: Ed25519 32 + ML-KEM-768
+/// 1184 + ML-DSA-65 1952 (V4.2 §15.1). `bundle.dart` builds it and checks
+/// its result against this number.
+const int kLineBundleLength = 3168;
+
+/// Length of the Ed25519 signature in a `cleona:2:` line (T-a).
+const int kLineSignatureLength = 64;
+
+/// What a `cleona:2:` line carries beyond the card: 32 + 3168 + 64 = 3264.
+const int kLineKeysLength =
+    kLineInvitationKeyLength + kLineBundleLength + kLineSignatureLength;
+
+/// Ed25519 32 B at the front of the bundle, then ML-KEM-768 1184 B.
+const int _bundleEdLength = 32;
+const int _bundleKemLength = 1184;
+
+/// A read invitation line: the card, and for `cleona:2:` also `pk_inv`, the
+/// key bundle, the signature and the rotation chain (wire form); all `null`
+/// for `cleona:1:`.
+typedef CardLine = ({
+  Card card,
+  Uint8List? pkInv,
+  Uint8List? bundle,
+  Uint8List? signature,
+  Uint8List? chain,
+});
+
+/// Checks an Ed25519 [signature] over [data] with [publicKey] — passed in by
+/// the caller, so this file stays without a crypto library.
+typedef LineVerify = bool Function(
+    Uint8List data, Uint8List signature, Uint8List publicKey);
+
+/// What the issuer signs (T-a): domain ‖ channel ‖ code ‖ expiry (u32 LE) ‖
+/// pk_inv ‖ the invitation's X25519 key (the card's letter key) ‖ its
+/// ML-KEM key (from the bundle).
+Uint8List lineSignedData(Card k, Uint8List pkInv, Uint8List bundle) =>
+    (BytesBuilder()
+          ..add(utf8.encode('mycelium-line-v1'))
+          ..addByte(k.channel)
+          ..add(k.code)
+          ..add((ByteData(4)..setUint32(0, k.expiryUnixSeconds, Endian.little))
+              .buffer
+              .asUint8List())
+          ..add(pkInv)
+          ..add(k.letterKeyX25519)
+          ..add(Uint8List.sublistView(
+              bundle, _bundleEdLength, _bundleEdLength + _bundleKemLength)))
+        .toBytes();
+
+/// Creates the invitation as one line of text in the card-only form
+/// `cleona:1:` — still read everywhere; the issuer hands out [asInvitationLine].
+String asInvitationText(Card k) => _line(1, k.pack());
+
+/// Creates the `cleona:2:` line: card ‖ [pkInv] ‖ [bundle] ‖ [signature] ‖
+/// [chain] (proposal E, T-a, A); [signature] over [lineSignedData], [chain]
+/// the issuer's rotation chain in wire form (without it: count 0).
+String asInvitationLine(
+    Card k, Uint8List pkInv, Uint8List bundle, Uint8List signature,
+    {Uint8List? chain}) {
+  final c = chain ?? Uint8List(1);
+  if (pkInv.length != kLineInvitationKeyLength ||
+      bundle.length != kLineBundleLength ||
+      signature.length != kLineSignatureLength ||
+      c.isEmpty ||
+      c.length != 1 + kChainLinkWireLength * c[0]) {
+    throw ArgumentError('pk_inv ${pkInv.length} B / bundle ${bundle.length} B '
+        '/ signature ${signature.length} B, expected $kLineInvitationKeyLength '
+        '/ $kLineBundleLength / $kLineSignatureLength');
+  }
+  return _line(2, (BytesBuilder()
+        ..add(k.pack())
+        ..add(pkInv)
+        ..add(bundle)
+        ..add(signature)
+        ..add(c))
+      .toBytes());
+}
+
+String _line(int version, Uint8List payload) {
   final checksum = _crc16(payload);
   final total = Uint8List(payload.length + 2);
   total.setRange(0, payload.length, payload);
   total[payload.length] = checksum & 0xFF;
   total[payload.length + 1] = (checksum >> 8) & 0xFF;
   final b64 = base64Url.encode(total).replaceAll('=', '');
-  return 'cleona:1:$b64';
+  return 'cleona:$version:$b64';
 }
 
 /// Reads an invitation from arbitrary text, throws [CardTextError].
 ///
 /// [expectedChannel] is the channel in which reading happens (live/beta). A
 /// card with a foreign channel comes back as [CardTextErrorKind.wrongVersion]
-/// — with the message from [CardChannelError], which names the channel
-/// by name. Deliberately NO sixth error kind: the advice to the
-/// user is the same as for a foreign version ("this invitation
-/// does not belong in this app"), and every existing caller still catches
-/// exactly five kinds.
-Card outInvitationText(String input, {int expectedChannel = Card.channelLive}) {
+/// — with the message from [CardChannelError], which names the channel. No
+/// error kind of its own: the advice is the same as for a foreign version
+/// ("this invitation does not belong in this app").
+Card outInvitationText(String input, {int expectedChannel = Card.channelLive}) =>
+    outInvitationLine(input, expectedChannel: expectedChannel).card;
+
+/// Like [outInvitationText], and for a `cleona:2:` line also `pk_inv`, the
+/// key bundle and the signature. Without a prefix the length decides: exactly
+/// the card, or the card plus [kLineKeysLength]. With [verify] the signature
+/// of a `cleona:2:` line is checked ([CardTextErrorKind.badSignature]).
+CardLine outInvitationLine(String input,
+    {int expectedChannel = Card.channelLive, LineVerify? verify}) {
   final purged = _purge(input).trim();
   if (purged.isEmpty) {
     throw CardTextError(CardTextErrorKind.notFound, 'empty input — no invitation');
   }
 
-  final candidate = _withPreamble.firstMatch(purged)?.group(1) ??
-      _withoutPreamble.firstMatch(purged)?.group(0);
+  final prefixed = _withPreamble.firstMatch(purged);
+  final candidate =
+      prefixed?.group(2) ?? _withoutPreamble.firstMatch(purged)?.group(0);
   if (candidate == null) {
     throw CardTextError(CardTextErrorKind.notFound,
-        'neither "cleona:1:…" prefix nor base64url text found in the given text');
+        'neither "cleona:1:…"/"cleona:2:…" prefix nor base64url text found in the given text');
   }
 
   final bytes = _debase64(candidate);
@@ -100,7 +212,24 @@ Card outInvitationText(String input, {int expectedChannel = Card.channelLive}) {
   }
 
   final payload = Uint8List.sublistView(bytes, 0, bytes.length - 2);
-  final expectedLength = _expectedLength(payload);
+  final cardLength = _expectedLength(payload);
+  final lineLength = cardLength == null ? null : _lineLength(payload, cardLength);
+  // `cleona:2:` by its prefix; without one, by the length alone.
+  final two = prefixed != null
+      ? prefixed.group(1) == '2'
+      : lineLength != null && payload.length == lineLength;
+  final expectedLength =
+      cardLength == null ? null : (two ? lineLength : cardLength);
+  final receivedCrc = bytes[bytes.length - 2] | (bytes[bytes.length - 1] << 8);
+  // A complete text of another card version (its checksum holds over all of
+  // it): its layout is unknown, so its length says nothing — "wrong version",
+  // not "truncated" (§15.6; E-3 A1: a 0x01 card is "unknown card version").
+  if (payload.isNotEmpty &&
+      payload[0] != Card.version &&
+      _crc16(payload) == receivedCrc) {
+    throw CardTextError(CardTextErrorKind.wrongVersion,
+        'unknown card version: ${payload[0]} (expected ${Card.version})');
+  }
   if (expectedLength != null && expectedLength != payload.length) {
     final toFew = payload.length < expectedLength;
     throw CardTextError(CardTextErrorKind.truncated,
@@ -110,7 +239,6 @@ Card outInvitationText(String input, {int expectedChannel = Card.channelLive}) {
   }
 
   final expectedCrc = _crc16(payload);
-  final receivedCrc = bytes[bytes.length - 2] | (bytes[bytes.length - 1] << 8);
   if (expectedCrc != receivedCrc) {
     // Length demonstrably matches (see above), yet wrong checksum -> the
     // text arrived completely, but was changed on the way. Without a
@@ -126,30 +254,55 @@ Card outInvitationText(String input, {int expectedChannel = Card.channelLive}) {
         'truncated on insertion or altered on the way');
   }
 
+  final cardBytes =
+      two ? Uint8List.sublistView(payload, 0, cardLength) : payload;
+  final CardLine line;
   try {
-    return Card.unpack(payload, expectedChannel: expectedChannel);
+    final card = Card.unpack(cardBytes, expectedChannel: expectedChannel);
+    if (!two) {
+      return (card: card, pkInv: null, bundle: null, signature: null, chain: null);
+    }
+    var i = cardLength!;
+    Uint8List cut(int n) =>
+        Uint8List.fromList(Uint8List.sublistView(payload, i, i += n));
+    line = (
+      card: card,
+      pkInv: cut(kLineInvitationKeyLength),
+      bundle: cut(kLineBundleLength),
+      signature: cut(kLineSignatureLength),
+      chain: cut(payload.length - i),
+    );
   } on CardFormatError catch (e) {
     throw CardTextError(CardTextErrorKind.wrongVersion,
         'Length and checksum match, but the card cannot be unpacked: '
         '${e.message}');
   }
+  // T-a: before anything is sealed to its keys. No verifier (the pure reading
+  // for display) checks nothing; whoever redeems passes one.
+  if (verify != null &&
+      !verify(lineSignedData(line.card, line.pkInv!, line.bundle!),
+          line.signature!,
+          Uint8List.sublistView(line.bundle!, 0, _bundleEdLength))) {
+    throw CardTextError(CardTextErrorKind.badSignature,
+        'the signature of the line does not verify — its keys were altered');
+  }
+  return line;
 }
 
 /// Reads version byte, the count byte of the own addresses with their
-/// type bytes, the neighbour flag and count and length bytes of the relay list from
-/// [payload] and computes from them the length of a COMPLETE card —
-/// without parsing it.
-/// `null` if [payload] is too short for that, the neighbour flag lies outside
-/// 0/1, a type byte is unknown, the address count byte is above 4
-/// or the relay list is invalid (count byte > 3, length 0 or > 64);
-/// then the caller falls back on the checksum alone.
+/// type bytes, the neighbour flag, the publisher-key flag and count and length
+/// bytes of the relay list from [payload] and computes from them the length of
+/// a COMPLETE card — without parsing it (V4.2 §15.6; the version byte is not
+/// among the bytes read, so a damaged one stays "tampered").
+/// `null` if [payload] is too short for that, a flag lies outside 0/1, a type
+/// byte is unknown, the address count byte is above 4 or the relay list is invalid
+/// (count byte > 3, length 0 or > 64); then the checksum alone decides.
 ///
 /// Layout (card.dart `pack`): version(1)+channel(1)+letter key(32)+
 /// fingerprint(32) = 66 B, then count byte (0-4) and per own address
 /// type(1)+address(4/16)+port(2), then neighbour flag + possibly the same 7/19 B,
-/// then relay list (count byte + per length byte + text), then
-/// difficulty(1)+code(16)+expiry(4).
-/// Yields 90 B (no address, no relays) up to 380 B (V4.2 §15.2).
+/// then publisher-key flag + possibly 32 B, then relay list (count byte + per
+/// length byte + text), then difficulty(1)+code(16)+expiry(4): 91 to 413 B.
 int? _expectedLength(Uint8List payload) {
   const beforeCountByte =
       1 + 1 + Card.letterKeyLength + Card.fingerprintLength;
@@ -172,25 +325,41 @@ int? _expectedLength(Uint8List payload) {
     afterAddresses += 1 + kind.addressLength + 2;
   }
 
+  // Publisher-key flag (§15.2), then 0 or 32 B.
+  if (payload.length <= afterAddresses) return null;
+  final publisherFlag = payload[afterAddresses];
+  if (publisherFlag != 0 && publisherFlag != 1) return null;
+  afterAddresses += 1 + (publisherFlag == 1 ? Card.publisherKeyLength : 0);
+
   // Relay list, then difficulty(1) + code(16) + expiry(4).
   final relay = relaysLengthFrom(payload, afterAddresses);
   if (relay == null) return null;
   return afterAddresses + relay + 1 + Card.codeLength + 4;
 }
 
+/// The payload length of a complete `cleona:2:` line whose card is
+/// [cardLength] B: card + [kLineKeysLength] + the chain, whose count byte
+/// stands at its fixed offset (§15.6). A payload that ends before it is
+/// expected to carry at least the count byte; a count above
+/// [kRotationChainMaxLinks] gives `null` (the checksum decides).
+int? _lineLength(Uint8List payload, int cardLength) {
+  final at = cardLength + kLineKeysLength;
+  if (payload.length <= at) return at + 1;
+  final n = payload[at];
+  if (n > kRotationChainMaxLinks) return null;
+  return at + 1 + kChainLinkWireLength * n;
+}
+
 /// Removes invisible characters (zero-width space, BOM) and line breaks
-/// (\r, \n) — turns a line wrapped by the mail program in the middle of the base64url text
-/// back into a contiguous one. Real spaces/tabs
-/// stay: never part of the alphabet, they act by themselves as a delimiter when searching (see below)
-/// — also for brackets around it or a second
-/// occurrence (the first find ends where the alphabet ends).
+/// (\r, \n) — a line wrapped by a mail program becomes contiguous again.
+/// Spaces/tabs stay: outside the alphabet, they delimit the search (also
+/// against brackets or a second occurrence).
 String _purge(String input) => input
     .replaceAll('​', '')
     .replaceAll('﻿', '')
     .replaceAll('\r', '')
     .replaceAll('\n', '');
 
-/// Bring base64url without padding to a valid multiple of 4.
 Uint8List _debase64(String candidate) {
   final rest = candidate.length % 4;
   final String padded;
@@ -213,8 +382,7 @@ Uint8List _debase64(String candidate) {
   }
 }
 
-/// CRC-16 (reflected, polynomial 0xA001, init 0xFFFF), appended little
-/// endian. Own implementation, see class doc above.
+/// CRC-16 (reflected, polynomial 0xA001, init 0xFFFF), see the library doc.
 int _crc16(Uint8List data) {
   var crc = 0xFFFF;
   for (final byte in data) {

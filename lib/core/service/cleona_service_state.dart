@@ -37,6 +37,10 @@ extension V3StateSnapshotOps on CleonaService {
       // `profileDir` getter for identity-scoped GUI-side bridges (e.g.
       // AndroidCalendarBridge) that must not fall back to the process-log.
       'profileDir': profileDir,
+      // §13.3.4 (B-1): the rescue bundle's state belongs in the UI — ms, or
+      // null for "no bundle in the network".
+      'recoveryBundleUntil':
+          recoveryBundleValidUntil?.millisecondsSinceEpoch,
       'displayName': displayName,
       'port': port,
       'publicIp': publicIp,
@@ -86,11 +90,10 @@ extension V3StateSnapshotOps on CleonaService {
       'mobileFallbackActive': false,
       'fragmentCount': fragmentCount,
       'isRunning': isRunning,
-      'isLinkedDevice': isLinkedDevice,
-      'linkedDeviceStatus': linkedDeviceStatus.toJson(),
+      // B-4b (§14.6.1, D-39, D-40): the enrolment for the interface.
+      'enrolment': enrolmentView.toJson(),
       'profilePicture': _profilePictureBase64,
       'profileDescription': _profileDescription,
-      'isGuardianSetUp': isGuardianSetUp,
       // AP-5a: `pendingJuryRequests` is a SYNCHRONOUS interface getter, so the
       // client cannot await the existing `get_jury_requests` verb inside it.
       // It rides the snapshot that `_scheduleRefresh()` already fetches on
@@ -98,7 +101,13 @@ extension V3StateSnapshotOps on CleonaService {
       // stays as the async accessor the TS-E2E client uses.
       'pendingJuryRequests':
           pendingJuryRequests.map((r) => r.toJson()).toList(),
-      'groups': _groups.map((k, v) => MapEntry(k, v.toJson())),
+      // Without the signed member entries (B-3): the GUI never needs them.
+      'groups':
+          _groups.map((k, v) => MapEntry(k, v.toJson(withEntries: false))),
+      // §16.2.2 (S403, V2): the groups this device was REMOVED from. The
+      // GUI's chat screen blocks writing on this mark — over the IPC
+      // trench only the snapshot crosses, not the store.
+      'groupsRemovedFrom': _groupsRemovedFrom().toList(),
       'channels': _channels.map((k, v) => MapEntry(k, v.toJson())),
       'conversations': conversations.map((k, v) => MapEntry(k, v.toJson())),
       'acceptedContacts': acceptedContacts.map((c) => c.toJson()).toList(),
@@ -119,11 +128,13 @@ extension V3StateSnapshotOps on CleonaService {
         for (final k in entrySeedCandidates)
           {'n': k.nodeIdHex, 'a': k.addresses, 'x': k.expiryMs},
       ],
-      'typingContacts': _typingTimestamps.entries
-          .where((e) => DateTime.now().difference(e.value).inSeconds < 5)
-          .map((e) => e.key)
-          .toList(),
+      'typingContacts': _typing.typingNow,
       'mediaSettings': _mediaSettings.toJson(),
+      // S398-W4 (finding B11): the IPC client has always read this key
+      // (`ipc_client.dart`, `state['linkPreviewSettings']`); the snapshot
+      // never carried it, so the GUI on daemon platforms always showed the
+      // defaults.
+      'linkPreviewSettings': _linkPreviewSettings.toJson(),
       'multiInterfaceMode': MultiInterfaceMode.modeToString(_multiInterfaceMode),
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),

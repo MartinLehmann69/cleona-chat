@@ -22,19 +22,19 @@
 ///
 /// ── NO CLOCK ────────────────────────────────────────────────────────
 ///
-/// No clock, no packet at idle (working rule 5). [codesChanged]
-/// empties the day cache and forgets the registration state; sending happens
-/// only if the cover stream is STOPPED (`CodeRoute.edge`) — it always runs
-/// (§5.1, `node.dart` starts it), so each of these edges costs
-/// zero packets and zero bytes. The registration rides along in the next cover draw
-/// (§5.5). The UTC day change likewise needs no clock: every
-/// reader computes `_today` fresh.
+/// No packet at idle (working rule 5). [codesChanged] empties the day cache
+/// and forgets the registration state; the registration then goes out as
+/// `0x24` packets to each fixed neighbour, each answered with `0x25`
+/// (§8.1, `CodeRoute.edge`, `code_registration_send.dart`) — at the edges
+/// of §8.1 only, never inside cover (§5.5). The UTC day change is one of
+/// those edges: one timer per day (`UtcDayEdge`).
 library;
 
 import 'package:mycelium/node_post_box.dart';
 import 'package:mycelium/node_helpers.dart' show hexFrom;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_pair.dart';
+import 'package:mycelium/mailbox_group_pair.dart';
 import 'package:mycelium/host.dart';
 
 extension HostCodes on Host {
@@ -94,25 +94,37 @@ extension HostCodes on Host {
       }
       return null;
     };
-    // Step 4 names only the identifier (`ladder.dart`, `DepositSend`), never
-    // the sending identity — so ask every mailbox until one knows the
-    // contact.
+    // Step 4 names the identifier, never the sending identity — so ask every
+    // mailbox until one knows the contact. A line join's request never asks
+    // here: it carries its invitation value (`node_step_four.dart`, OP-20).
     node.contactFrom = (identifier) {
       final hex = hexFrom(identifier);
       for (final p in mailboxes) {
-        final k = p.contactOrNull(hex);
-        if (k != null) return k.address;
+        final k = p.contactOrNull(hex)?.address ??
+            p.groupPairOrNull(hex)?.address; // §8.2: group pairs too (§4.3)
+        if (k != null) return k;
       }
       return null;
     };
     // §8.2 (proposal 6.4): step 4 leaves post first with the recipient's
-    // fixed neighbours as it told them — the first mailbox that knows it.
+    // fixed neighbours as it told them — the first mailbox that knows it —
+    // and never with the recipient's own device (OP-19 part B: last seen and
+    // card addresses, only to leave them out).
     node.neighboursFrom = (contact) {
       for (final p in mailboxes) {
         final k = p.contactOrNull(identifierFrom(contact));
-        if (k != null) return k.neighbours;
+        if (k != null) {
+          return (
+            named: k.neighbours,
+            at: [if (k.lastSeen case final s?) s, ...k.cardsAddresses],
+          );
+        }
+        // A group pair has no device address to leave out, only the
+        // neighbours it named (via the inviter or in its messages).
+        final g = p.groupPairOrNull(identifierFrom(contact));
+        if (g != null) return (named: g.neighbours, at: const []);
       }
-      return const [];
+      return (named: const [], at: const []);
     };
   }
 

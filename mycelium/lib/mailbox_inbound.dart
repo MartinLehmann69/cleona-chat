@@ -1,7 +1,7 @@
-import 'package:mycelium/message.dart' show Inbound, kModeRoutesApplyFurther;
+import 'package:mycelium/message.dart' show Inbound;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_pair.dart' show MailboxPair;
-import 'package:mycelium/history.dart' show HistoryEntry;
+import 'package:mycelium/mailbox_group_pair.dart' show MailboxGroupPair;
 
 /// The inbound of the mailbox: what arrives for THIS identity, and what
 /// of it goes upwards.
@@ -38,89 +38,82 @@ import 'package:mycelium/history.dart' show HistoryEntry;
 ///
 /// ── WHERE THE MEMORY COMES FROM ───────────────────────────────────────
 ///
-/// From the [History] and from nowhere else: it carries the identifier anyway
-/// and is restart-proof (one encrypted file per peer). There is
-/// therefore NO deadline, NO ring size and NO second storage
-/// that someone would have to maintain — the memory span is not a number
-/// but a statement: as long as the message stands in the conversation,
-/// a second copy is not accepted again (S390, B2-3 variant A,
-/// owner decision 16.09.2026).
+/// From the identity's received memory and from nowhere else
+/// ([HistoryStore.incomingKnown]): every delivery the layer below
+/// accepts is checked against it, and every sender that is kept gets its
+/// identifier put into it ([HistoryStore.incomingKeep]). The memory is
+/// the IDENTITY's, not a peer's (§20.2, owner decision 02.10.2026, V-1 =
+/// B, V-3 = a): no per-peer record, no arrival time (V-4), no cap and no
+/// deadline — its span is the statement "as long as the identity
+/// exists", not a number. The application serves it from the
+/// `received_ids` table of the message store (schema 4), so it survives
+/// the restart; a lab tool gets [HistoryStoreMemory].
 ///
-/// **Two named limits, both accepted:**
+/// THE IDENTIFIER, NOT THE CONTENT (S401): of a received delivery only
+/// the identifier is kept — the content goes upwards, into the
+/// application's message store, and has no second place here (V4.2
+/// §21.4.2; `history.dart`, "WHAT AN ENTRY KEEPS").
 ///
-///  1. If the user deletes a message and a late copy arrives afterwards,
-///     it appears again. The alternative would be a
-///     tombstone per deleted message — more state than the case is
-///     worth.
-///  2. An UNKNOWN sender has no history and thus no
-///     memory (§12.5: mycelium makes nobody a contact). Its
-///     copies ALL go upwards until the application has decided and
-///     called [MailboxInbound.inboundMark]; from then on the
-///     check applies to it too. Before that there is nothing in the mailbox by which
-///     a copy could be recognised, and creating a storage for unknown senders
-///     would mean giving the gate for unknown senders (§15.7) a storage
-///     that a stranger can fill.
+/// **Two named limits, both changed by the same decision:**
+///
+///  1. The user deletes a CONTACT: its records leave the store with it
+///     (`MailboxOutbound.forget` names entries, `mailbox.dart` ends the
+///     history), but the identifiers it once delivered STAY in the
+///     identity's memory (V-3 = a) — a late copy from a post box is
+///     still refused, still acknowledged. Until S403 the memory fell
+///     with the contact's history and the copy went up a second time
+///     (`mycelium/test/smoke_received_ids.dart`, statement 2).
+///  2. An UNKNOWN sender is not admitted by its packets alone (§12.5:
+///     mycelium makes nobody a contact): its copies ALL go upwards until
+///     the application has decided and called [MailboxInbound.inboundMark];
+///     from then on the check applies to it too. The check itself runs
+///     for every sender — checking is not keeping, and creating a
+///     storage a stranger could fill is the other thing §15.7 forbids:
+///     nothing of an undecided sender is ever KEPT here.
 extension MailboxInbound on Mailbox {
   /// An inbound with `to` = this identity.
   ///
-  /// A KNOWN sender: address via the adoption rule, entry in the
-  /// history. An UNKNOWN one does NOT become a contact here (§12.5, product rule
-  /// 15.09.2026: mycelium makes nobody a contact) and gets no
-  /// history — the inbound only goes upwards, and there the decision is made:
-  /// if the application keeps it as a contact, it marks it with
-  /// [inboundMark], otherwise it discards it (§15.7). Until S388
-  /// every proven sender made itself a contact here (S388-BAU-NAHT B-2).
+  /// A KNOWN sender: address via the adoption rule, identifier into the
+  /// identity's received memory. An UNKNOWN one does NOT become a
+  /// contact here (§12.5, product rule 15.09.2026: mycelium makes
+  /// nobody a contact) and is not kept either — the inbound only goes
+  /// upwards, and there the decision is made: if the application keeps
+  /// it as a contact, it marks it with [inboundMark], otherwise it
+  /// discards it (§15.7). Until S388 every proven sender made itself a
+  /// contact here (S388-BAU-NAHT B-2).
   ///
-  /// SECOND COPY (S390, B2-3 variant A): §7.1 starts all steps
-  /// SIMULTANEOUSLY, the same message therefore arrives several times in normal operation.
-  /// It goes upwards EXACTLY ONCE — checked against the
-  /// [History], which carries the identifier anyway and survives the restart;
-  /// there is no second storage with its own deadline for this. EVERY copy
-  /// is RECEIPTED: `message.dart` does that AFTER this callback, and
-  /// §9.2 means by "exactly one packet" the FORM of the receipt, not an
-  /// upper bound over time — if the first gets lost, the second
-  /// copy is the second chance. LIMIT, named: if the user deletes a
-  /// message and a late copy arrives afterwards, it appears
-  /// again; the alternative would be a tombstone per deleted message.
-  /// An UNKNOWN sender has no history and thus also no
-  /// memory — its copies all go upwards until the application
-  /// has decided and called [inboundMark].
+  /// SECOND COPY (S390, B2-3 variant A; §20.2): §7.1 starts all steps
+  /// SIMULTANEOUSLY, the same message therefore arrives several times in
+  /// normal operation. It goes upwards EXACTLY ONCE — checked against
+  /// the identity's received memory, which survives the restart and the
+  /// end of a contact; there is no second storage with its own deadline
+  /// for this. The check stands BEFORE the branches on the sender: it
+  /// applies to EVERY delivery, the deleted contact's late copy just as
+  /// much as the stranger's — being checked costs a stranger nothing,
+  /// nothing is kept for it. EVERY copy is RECEIPTED: `message.dart`
+  /// does that AFTER this callback, and §9.2 means by "exactly one
+  /// packet" the FORM of the receipt, not an upper bound over time — if
+  /// the first gets lost, the second copy is the second chance.
   void inboundAccept(Inbound e) {
-    if (e.mode != null) return _announcementAccept(e);
     if (e.kind != null) return pairNoticeAccept(e);
+    if (histories.store.incomingKnown(e.identifier)) return;
     if (contactOrNull(identifierFrom(e.from)) != null) {
-      if (historyFor(e.from).alreadyIncoming(e.identifier)) return;
       inboundMark(e);
+    } else if (groupPairOrNull(identifierFrom(e.from)) != null) {
+      // A group pair (§4.3) has a history but never becomes a contact: what
+      // it may carry into the application is decided there (§15.7).
+      if (!groupPairInbound(e)) return;
     }
     onMessage?.call(e);
   }
 
-  /// Remembers the sender of [e] and puts the inbound into its history —
-  /// for a known contact, or if it has been DECIDED above that the
-  /// sender is a contact.
+  /// Remembers the sender of [e] and puts the identifier of its delivery
+  /// into the identity's received memory — for a known contact, or if it
+  /// has been DECIDED above that the sender is a contact. The IDENTIFIER
+  /// only, no content and no time (file header): the content is the
+  /// application's, the time is not stored at all (V-2 = b, V-4).
   void inboundMark(Inbound e) {
     contactRemember(e.from);
-    historyFor(e.from).append(HistoryEntry(
-      identifier: e.identifier,
-      outgoing: false,
-      content: e.content,
-      instant: e.at,
-    ));
+    histories.store.incomingKeep(e.identifier);
   }
-
-  /// A publication (0x15): no history entry, no callback
-  /// upwards — only the address, only for a KNOWN contact, and only by
-  /// the adoption rule. An unknown sender does not create a contact this way.
-  void _announcementAccept(Inbound e) {
-    if (contactOrNull(identifierFrom(e.from)) == null) {
-      report?.call('Announcement from unknown identifier — discarded');
-      return;
-    }
-    if (e.mode != kModeRoutesApplyFurther) {
-      report?.call('Announcement with unknown mode ${e.mode} — '
-          'address nevertheless by the adoption rule');
-    }
-    if (!contactRemember(e.from)) {
-      report?.call('Announcement without higher state — nothing taken over');
-    }
-  }}
+}

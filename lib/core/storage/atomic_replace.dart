@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:cleona/core/log/redacted_console.dart';
+
 /// Replaces the target with the sidecar file — **ONE** `renameSync`, with
 /// retry. The one place in this tree where a write
 /// becomes visible.
@@ -78,7 +80,7 @@ void atomicReplace(File tmp, File target) {
       return;
     } on FileSystemException catch (e) {
       if (attempt >= atomicReplaceAttempts) rethrow;
-      stderr.writeln(
+      RedactedConsole.err(
           '$atomicReplaceRetryMark $attempt/$atomicReplaceAttempts: '
           '${tmp.path} -> ${target.path} failed ($e) — new attempt in '
           '${atomicReplacePauseMs}ms');

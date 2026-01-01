@@ -293,7 +293,19 @@ abstract class CallTransport {
   /// ,connection lost'), independent of signaling." For the call layer
   /// it is the same event as the V3 route downgrade: the call no longer
   /// holds.
+  ///
+  /// Fires only for a session armed with [watchMediaLoss].
   set onMediaPathLost(void Function(String peerHex)? cb);
+
+  /// Arms §17.4's loss detection for the session to [peerHex]: from now on,
+  /// 10 s without a valid media frame fire [onMediaPathLost] once.
+  ///
+  /// Called by the 1:1 call once the punch window has found a carrying pair
+  /// (§17.3) — not before: the window itself may run 30 s without a media
+  /// frame. Ends with the session ([forgetParticipant]). A group call does
+  /// not arm it: there a participant legitimately receives no media from a
+  /// peer that is not its neighbour in the tree (§17.7).
+  void watchMediaLoss(String peerHex);
 
   /// Cost estimate for the path to a participant, for building the
   /// overlay multicast tree of a group call. [fallback] is

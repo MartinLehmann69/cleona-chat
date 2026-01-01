@@ -6,8 +6,6 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/sodium_ffi.dart';
-
 // ---------------------------------------------------------------------------
 // RendezvousProvider Interface (§4.11.2)
 // ---------------------------------------------------------------------------
@@ -152,53 +150,9 @@ class SignedEndpointRecord {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Encrypt / Decrypt helpers
-// ---------------------------------------------------------------------------
-
-/// Encrypts an [EndpointRecord] into a [SignedEndpointRecord].
-///
-/// Uses AES-256-GCM with AAD = lookupTag (binds the ciphertext to the
-/// specific tag, preventing record relocation attacks).
-SignedEndpointRecord encryptEndpointRecord(
-  EndpointRecord record,
-  Uint8List rendezvousSecret,
-  Uint8List lookupTag,
-) {
-  final sodium = SodiumFFI();
-  final plaintext = record.serialize();
-  final nonce = sodium.generateNonce(); // 12 bytes for AES-256-GCM
-  final ciphertext = sodium.aesGcmEncrypt(
-    plaintext,
-    rendezvousSecret,
-    nonce,
-    ad: lookupTag,
-  );
-  return SignedEndpointRecord(
-    nonce: nonce,
-    ciphertext: ciphertext,
-    seq: record.seq,
-  );
-}
-
-/// Decrypts a [SignedEndpointRecord] back to an [EndpointRecord].
-///
-/// Returns null if decryption or authentication fails (wrong key, tampered
-/// data, or lookupTag mismatch).
-EndpointRecord? decryptEndpointRecord(
-  SignedEndpointRecord record,
-  Uint8List rendezvousSecret,
-  Uint8List lookupTag,
-) {
-  try {
-    final plaintext = SodiumFFI().aesGcmDecrypt(
-      record.ciphertext,
-      rendezvousSecret,
-      record.nonce,
-      ad: lookupTag,
-    );
-    return EndpointRecord.deserialize(plaintext);
-  } catch (_) {
-    return null;
-  }
-}
+// `encryptEndpointRecord` / `decryptEndpointRecord` stood here and are gone
+// (S403, owner decision 5 = B of 02.10.2026). No reading of the norm needs
+// them: the one path that seals a record for a relay is the binary
+// distribution, and it seals with its own two functions
+// (`encryptBinaryRecord` / `decryptBinaryRecord`,
+// `binary_rendezvous_manager.dart`).

@@ -51,15 +51,6 @@ const String kMailboxTransitionArea = 'mailbox_transition';
 /// `membership_resend.json`), §5.8.
 const String kMembershipResendArea = 'membership_resend';
 
-/// Pending two-stage media sends (formerly
-/// `pending_media_sends.json`), §5.5/§5.6.
-///
-/// Unlike the four named above, this file did NOT lie encrypted in the
-/// profile, but naked: `writeAsStringSync(jsonEncode(...))`, neither via
-/// `FileEncryption` nor atomically. It named in plaintext the storage
-/// location and the file name of every pending attachment.
-const String kPendingMediaSendsArea = 'pending_media_sends';
-
 /// The key of an area that carries EXACTLY ONE state.
 ///
 /// A single state is not a collection: it gets a fixed key, so that a
@@ -155,24 +146,31 @@ extension PureServiceOps on CleonaService {
   // `requestNatWizard` and the two test hooks write it, and the user
   // expects a "never again" to survive a restart.
 
-  /// Area of the store for the NAT wizard setting (§21.4.1).
+  /// The NAT wizard setting: "until when to no longer ask".
   ///
   /// S362, section 2.3: the file lay open in the profile. It carries a
-  /// timestamp ("until when to no longer ask") and thus the statement that
-  /// this device sits behind a NAT that allows no direct connections — a
-  /// property of the network environment.
+  /// timestamp and thus the statement that this device sits behind a NAT
+  /// that allows no direct connections — a property of the network
+  /// environment, i.e. of the DEVICE.
   ///
-  /// S366: it no longer lies in its own file, but in the encrypted store.
-  /// A state with ONE field — hence one entry under `_` and `replaceArea`,
-  /// as with the other settings. A loss is bearable: the wizard then asks
-  /// again, which is annoying, but destroys nothing. A data-loss latch
-  /// would therefore not be a protection here, just an additional source
-  /// of errors.
-  static const String _areaNatWizard = 'nat_wizard_settings';
+  /// S366: from its own file into the encrypted store — the store of ONE
+  /// identity, area `nat_wizard_settings`: with N identities N independent
+  /// values of one device property.
+  ///
+  /// S403: one row of the DEVICE database (`DeviceStore.areaSettings`, key
+  /// [kNatWizardSettingKey]; v4_2 §4.5.3 form 2: "device-wide settings").
+  /// What the database of an identity still carries under the old area is
+  /// removed at the start of its service, not read
+  /// ([_removeSupersededDeviceSettings]). A loss is bearable: the wizard
+  /// then asks again, which is annoying, but destroys nothing. A data-loss
+  /// latch would therefore not be a protection here, just an additional
+  /// source of errors.
+  static const String kNatWizardSettingKey = 'nat_wizard';
 
   void _loadNatWizardSettings() {
     try {
-      final j = store.loadArea(_areaNatWizard)['_'];
+      final j = identity.deviceStoreOrNull
+          ?.entry(DeviceStore.areaSettings, kNatWizardSettingKey);
       if (j != null) {
         _natWizardDismissedUntilMs =
             (j['nat_wizard_dismissed_until'] as num?)?.toInt() ?? 0;
@@ -184,11 +182,49 @@ extension PureServiceOps on CleonaService {
 
   void _saveNatWizardSettings() {
     try {
-      store.replaceArea(_areaNatWizard, {
-        '_': {'nat_wizard_dismissed_until': _natWizardDismissedUntilMs},
-      });
+      final device = identity.deviceStoreForWrite();
+      if (device == null) {
+        _log.debug('NAT wizard setting not stored: no master seed, so no '
+            'device database');
+        return;
+      }
+      device.putEntry(DeviceStore.areaSettings, kNatWizardSettingKey,
+          {'nat_wizard_dismissed_until': _natWizardDismissedUntilMs});
     } catch (e) {
       _log.debug('Failed to save nat wizard settings: $e');
+    }
+  }
+
+  /// Only for the guards: the stored "do not ask until", read from the
+  /// device database the way the next start reads it.
+  @visibleForTesting
+  int get natWizardDismissedUntilMsForTesting {
+    _loadNatWizardSettings();
+    return _natWizardDismissedUntilMs;
+  }
+
+  /// The areas under which the database of an identity carried settings of
+  /// the DEVICE until S403. Their rows are removed at the start of the
+  /// service and not read — the values lie in the device database, and a
+  /// value of one identity is not taken over as the value of the device.
+  static const List<String> supersededDeviceSettingAreas = [
+    'nat_wizard_settings',
+    'multi_interface_mode',
+  ];
+
+  void _removeSupersededDeviceSettings() {
+    final s = storeOrNull;
+    if (s == null) return;
+    for (final area in supersededDeviceSettingAreas) {
+      try {
+        if (s.countArea(area) == 0) continue;
+        s.replaceArea(area, const {});
+        _log.info('Removed the area "$area" from the store of this identity '
+            '— a setting of the device, which lies in the device database '
+            'since S403');
+      } catch (e) {
+        _log.debug('Could not remove the area "$area": $e');
+      }
     }
   }
 
@@ -607,23 +643,14 @@ extension PureServiceOps on CleonaService {
       final Uint8List inviteBytes;
       final proto.MessageTypeV3 msgType;
       final bool Function(String) isMember;
-      final Uint8List? Function(String) memberX25519;
-      final Uint8List? Function(String) memberMlKem;
-      final Uint8List? Function(String) memberEd25519;
       if (group != null) {
         inviteBytes = _buildSignedGroupInviteBytes(group);
         msgType = proto.MessageTypeV3.MTV3_GROUP_INVITE;
         isMember = group.members.containsKey;
-        memberX25519 = (h) => group.members[h]?.x25519Pk;
-        memberMlKem = (h) => group.members[h]?.mlKemPk;
-        memberEd25519 = (h) => group.members[h]?.ed25519Pk;
       } else {
         inviteBytes = _buildSignedChannelInviteBytes(channel!);
         msgType = proto.MessageTypeV3.MTV3_CHANNEL_INVITE;
         isMember = channel.members.containsKey;
-        memberX25519 = (h) => channel.members[h]?.x25519Pk;
-        memberMlKem = (h) => channel.members[h]?.mlKemPk;
-        memberEd25519 = (h) => channel.members[h]?.ed25519Pk;
       }
       final entityIdBytes = hexToBytes(entityId);
       for (final recipientHex in recipients) {
@@ -631,20 +658,12 @@ extension PureServiceOps on CleonaService {
           stale.add(recipientHex);
           continue;
         }
-        final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(recipientHex,
-            memberX25519Pk: memberX25519(recipientHex),
-            memberMlKemPk: memberMlKem(recipientHex),
-            memberEd25519Pk: memberEd25519(recipientHex));
-        if (x25519Pk == null || mlKemPk == null) continue;
         try {
           final ok = await sendToUser(
             recipientUserId: hexToBytes(recipientHex),
             messageType: msgType,
             payload: inviteBytes,
             groupId: entityIdBytes,
-            recipientX25519PkOverride: x25519Pk,
-            recipientMlKemPkOverride: mlKemPk,
-            recipientEd25519PkOverride: ed25519Pk,
           );
           if (ok) {
             succeeded.add(recipientHex);
@@ -837,7 +856,7 @@ extension PureServiceOps on CleonaService {
       ensureLoaded(conv.id);
       for (final m in conv.messages) {
         final mText = m.text;
-        if (mText.isEmpty || m.isDeleted) continue;
+        if (mText.isEmpty) continue;
         if (!mText.contains(fp)) continue;
         try {
           final mj = jsonDecode(mText) as Map<String, dynamic>;
@@ -855,21 +874,17 @@ extension PureServiceOps on CleonaService {
     } catch (_) {}
     return text;
   }
-  /// D2: marks the bridged conversation message of a retracted record as
-  /// deleted (tombstone effect in the UI).
+  /// D2: removes the bridged conversation message of a retracted record
+  /// (`_eraseMessageLocally`, §21.5.2).
   void _applySysChanRetract(String channelIdHex, String targetRecordIdHex) {
     final conv = conversations[channelIdHex];
     if (conv == null) return;
     ensureLoaded(channelIdHex);
-    for (final m in conv.messages) {
-      if (m.id == targetRecordIdHex && !m.isDeleted) {
-        m.text = '';
-        m.isDeleted = true;
-        persistMessage(channelIdHex, m);
-        _saveConversations();
-        break;
-      }
-    }
+    final m =
+        conv.messages.where((m) => m.id == targetRecordIdHex).firstOrNull;
+    if (m == null) return;
+    _eraseMessageLocally(channelIdHex, m);
+    _saveConversations();
   }
 
   /// §9.5.7 immediate propagation of a new record — SWITCHED OFF.
@@ -931,20 +946,23 @@ extension PureServiceOps on CleonaService {
       if (storeRes == FragmentStoreResult.stored) {
         _log.info('[update] Manifest v${manifest.version} stored locally');
       }
-      if (isNew || storeRes == FragmentStoreResult.stored) {
-        // FORMERLY: `_pushManifestToPeers(data)` — the fragment push to all
-        // confirmed peers, so that an update spreads virally instead of
-        // every node polling. It ran via `node.routingTable.allPeers` +
-        // `node.sendInfraTo` (`FRAGMENT_STORE`) and fell with
-        // `lib/core/network/`.
-        //
-        // **Gap G-18.** The manifest lies locally and is checked locally;
-        // OTHER nodes no longer learn of it. The in-network update path
-        // (§19.6) is thus one-sided: this node can still offer what it has,
-        // but it distributes no manifests.
-        _log.warn('[update] Manifest v${manifest.version} stays local — '
-            'V4.1 has no fragment push (gap G-18).');
+      // S406-UPD, finding U-3: the carrier gets the manifest at once, so
+      // the next moment of §26.5.4 places it in the post box. Without a
+      // carrier (start, before the host runs) the setter reads the file.
+      final carrier = _updateCarrierField[this];
+      if (carrier != null) {
+        carrier.manifestKnown(data);
+        _ownObjectsHold(carrier);
+        _log.info('[update] Manifest v${manifest.version} handed to the '
+            'update carrier');
+        return;
       }
+      // FORMERLY `_pushManifestToPeers(data)` (gap G-18, fell with
+      // `lib/core/network/`). Since S387 the update carrier places the
+      // manifest in the post box (§26.5.4); since S406 it gets it from here
+      // (above) or, at start, from the file (`ownManifestsToCarrier`).
+      _log.info('[update] Manifest v${manifest.version} stored locally; '
+          'the update carrier takes it over when the host starts');
     } catch (e) {
       _log.debug('[update] Self-publish manifest failed: $e');
     }
@@ -1023,11 +1041,11 @@ extension PureServiceOps on CleonaService {
       final expectedHash = _latestManifest?.binaryHashes?[platform];
       final profileDir = _binaryFragmentStore!.profileDir;
       final maxFragments = Platform.isAndroid ? 2 : 8;
-      final count = await CleonaService._runSeedIsolate(
+      final result = await CleonaService._runSeedIsolate(
           binaryPath, profileDir, platform, version, maxFragments,
           expectedHash: expectedHash);
-      if (count > 0) {
-        _log.info('[update] Self-seeded $count fragments for $platform/$version');
+      if (result != null && result.fragmentCount > 0) {
+        _log.info('[update] Self-seeded ${result.fragmentCount} fragments for $platform/$version');
         binaryHasContentToShare = true;
         _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
         _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
@@ -1078,12 +1096,14 @@ extension PureServiceOps on CleonaService {
   /// but never delivered. An answer that names its own input values is
   /// the right side of this contradiction.
   ///
-  /// (2) The file is read ONCE, not twice. The original computed the hash
-  /// with a second `readAsBytesSync` after the isolate run; with a ~90 MB
-  /// binary that is an avoidable complete second pass. The hash computed
-  /// here is at the same time passed to the isolate as `expectedHash` and
-  /// is thus in addition a probe that the file has not changed between
-  /// measurement and encoding.
+  /// (2) The file is read ZERO times in the caller (S404). Until S404 this
+  /// method did a `readAsBytes` only to compute the SHA-256 — with a ~200 MB
+  /// APK that was the first of three full copies in memory and contributed
+  /// to the OOM kill of the bootstrap daemon (515.7 MB peak, 03.10.2026).
+  /// Today the isolate streams the file (hash and encoding, see
+  /// [seedBinaryFileToStore]) and returns count AND hash, so the answer
+  /// still names the hash of the file that was actually encoded — no
+  /// measurement before, no encoding after, no gap between the two.
   ///
   /// (3) [maxFragments] can be overridden instead of being hard-wired. The
   /// wire command already carries the field — `IpcClient.seedBinary` has
@@ -1106,24 +1126,21 @@ extension PureServiceOps on CleonaService {
     if (store == null) return {'error': 'fragment store not initialized'};
     final file = File(filePath);
     // Wording "file not found" deliberately kept: it is the distinguishable
-    // case compared with "could not encode" — the isolate returns only 0
-    // for both.
+    // case compared with "could not encode" — the isolate returns only
+    // null (missing file / hash mismatch) or a result for both others.
     if (!file.existsSync()) return {'error': 'file not found: $filePath'};
     try {
-      final binary = await file.readAsBytes();
-      final hash = bytesToHex(SodiumFFI().sha256(binary));
-      final count = await CleonaService._runSeedIsolate(
-          filePath, store.profileDir, platform, version, maxFragments,
-          expectedHash: hash);
-      if (count == 0) {
+      final result = await CleonaService._runSeedIsolate(
+          filePath, store.profileDir, platform, version, maxFragments);
+      if (result == null || result.fragmentCount == 0) {
         return {'error': 'seeding produced no fragments for $platform/$version'};
       }
       binaryHasContentToShare = true;
       _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
       _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
       return {
-        'fragmentCount': count,
-        'hash': hash,
+        'fragmentCount': result.fragmentCount,
+        'hash': result.binaryHash,
         'platform': platform,
         'version': version,
       };

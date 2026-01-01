@@ -7,11 +7,13 @@
 /// TODAY and TOMORROW (UTC). One list per day, padded with random codes
 /// to a multiple of [kCodesPerPiece] (at least one), so that its
 /// length says little about the number of contacts. A piece carries exactly
-/// [kCodesPerPiece] codes and fits into ONE cover packet (content byte `0x03`):
+/// [kCodesPerPiece] codes and travels in ONE packet of its own, `0x24`,
+/// which the fixed neighbour answers with `0x25` (§8.1 table):
 ///
 /// ```
-/// day u32 BE | piece u8 | pieces u8 | count u8 | device code 16 B
-///                                              | count × 16 B
+/// 0x24 | day u32 BE | piece u8 | pieces u8 | count u8 | device code 16 B
+///                                                     | count × 16 B
+/// 0x25 | day u32 BE | piece u8
 /// ```
 ///
 /// Every piece stands for itself: the neighbour registers what arrives, and
@@ -38,10 +40,14 @@
 ///
 /// ── WHEN ─────────────────────────────────────────────────────────────────
 ///
-/// No packet of its own. The pieces travel in packets that go to the
-/// fixed neighbour anyway (cover stream, keep-alive). A rebuild happens when
-/// one of the lists, the UTC day or the fixed neighbour has changed —
-/// measured by a fingerprint that is recomputed at every opportunity.
+/// At the edges of §8.1 only — the list changed, the UTC day changed, a
+/// fixed neighbour is new — never on a timer of its own and never inside
+/// cover (§5.5; F-B, owner 06.10.2026: until then the pieces rode cover and
+/// keep-alive packets without an answer, so a lost one was never sent again
+/// and an answered one confirmed nothing). A rebuild happens when one of the
+/// lists, the UTC day or the fixed neighbour has changed — measured by a
+/// fingerprint. Sending, answer deadline and the one re-send:
+/// `code_registration_send.dart`.
 library;
 
 import 'dart:convert';
@@ -50,6 +56,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/code_table.dart' show kCodesPerDevice;
+import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/pair.dart' show kCodeLength;
 
 /// Codes per piece — and the multiple to which padding happens.
@@ -62,9 +69,36 @@ const int kCodesPerDay = kCodesPerDevice ~/ 2;
 const int _kBeforeCode = 4 + 1 + 1 + 1;
 const int _kHeader = _kBeforeCode + kCodeLength;
 
-/// Length of a piece: 23 + 64 × 16 = 1047 B (limit 1156 B,
-/// `tarnstrom_inhalt.dart`).
+/// Length of a piece: 23 + 64 × 16 = 1047 B; behind its kind byte one
+/// `0x24` of 1048 B, one part of the splitter (`kMaxPayload`, 1158 B).
 const int kPieceLength = _kHeader + kCodesPerPiece * kCodeLength;
+
+/// Length of a `0x25`: kind, day, piece.
+const int kRegisteredLength = 1 + 4 + 1;
+
+/// The `0x24` that carries [piece] (`registrationBuild`).
+Uint8List registrationPacket(Uint8List piece) =>
+    Uint8List(1 + piece.length)
+      ..[0] = kinds.kRegistration
+      ..setRange(1, 1 + piece.length, piece);
+
+/// The `0x25` answering the piece [piece] of day [day].
+Uint8List registeredPacket(int day, int piece) {
+  final p = Uint8List(kRegisteredLength)..[0] = kinds.kRegistered;
+  ByteData.sublistView(p).setUint32(1, day);
+  p[5] = piece;
+  return p;
+}
+
+/// Reads a `0x25`; `null` if it is none. Never throws.
+({int day, int piece})? registeredRead(Uint8List p) {
+  if (p.length != kRegisteredLength || p[0] != kinds.kRegistered) return null;
+  return (day: ByteData.sublistView(p).getUint32(1), piece: p[5]);
+}
+
+/// Day and piece of a piece (`registrationBuild`) — the key its `0x25` names.
+({int day, int piece}) pieceKey(Uint8List piece) =>
+    (day: ByteData.sublistView(piece).getUint32(0), piece: piece[4]);
 
 /// A read piece.
 typedef RegisterPiece = ({

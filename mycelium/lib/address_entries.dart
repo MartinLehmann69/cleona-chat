@@ -39,6 +39,7 @@ import 'dart:typed_data';
 import 'package:mycelium/card_address.dart'
     show CardAddress, CardFormatError, addressRead, addressWrite;
 import 'package:mycelium/neighbourhood.dart' show Neighbour;
+import 'package:mycelium/wire_target.dart' show asAddressKind;
 
 /// Maximum number of entries per list — the same number as the neighbourhood
 /// (§11.8), a node cannot have confirmed more.
@@ -73,6 +74,24 @@ class AddressEntry {
     return AddressEntry(a.asCardAddress, now.difference(a.last).inMinutes);
   }
 }
+
+/// Whether [address] may stand as an entry between this node and [reader] —
+/// when sending, [reader] is the target; when receiving, it is the sender of
+/// the list (both sides of one exchange are on the same machine exactly when
+/// it runs over loopback).
+///
+/// §5.5: an entry says the device "answers under exactly that address". A
+/// loopback address answers only on the machine of whoever reads it, so it
+/// travels only between loopback partners. Lab S398 (OP-21): a smoke node
+/// on the workstation passed on its neighbours under 127.0.0.1, node1 took
+/// them as hints and sent handshakes and post-box collections to its own
+/// loopback interface. Both sides go through [asAddressKind], so that
+/// `::ffff:127.0.0.1` counts as loopback like `127.0.0.1`. Probes on
+/// 127.0.0.1 are untouched: there the reader is loopback too.
+bool entryFor(CardAddress address, InternetAddress reader) =>
+    !asAddressKind(InternetAddress.fromRawAddress(address.address))
+        .isLoopback ||
+    asAddressKind(reader).isLoopback;
 
 /// What one packet carries: the sender's own addresses and its neighbours.
 class AddressList {

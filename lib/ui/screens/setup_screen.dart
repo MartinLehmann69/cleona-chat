@@ -382,15 +382,11 @@ class _RestoreScreenState extends State<_RestoreScreen> {
   final _nameController = TextEditingController();
   bool _loading = false;
   String? _error;
-  int _contactsRestored = 0;
-  int _messagesRestored = 0;
   bool _restoreStarted = false;
-  // §7.1.3 (P2): null = user has not answered yet (forced choice, no
-  // preselected default — see `_restore()` validation). `true` = "I still
-  // have my other device" (this device withholds the AuthManifest publish
-  // until paired). `false` = "my old device is gone" (this device takes
-  // over immediately, today's behaviour).
-  bool? _isAdditionalDevice;
+  // B-4b (§13.0, D-39, D-40): no question up front any more — whether this
+  // is an added device or a recovery is decided by the bundle the device
+  // finds and, without a window, by the user's explicit choice afterwards
+  // (the enrolment banner on the home screen).
 
   @override
   Widget build(BuildContext context) {
@@ -464,35 +460,6 @@ class _RestoreScreenState extends State<_RestoreScreen> {
                   ),
                 ),
 
-                const SizedBox(height: 24),
-                Text(
-                  locale.get('restore_device_question_title'),
-                  style: Theme.of(context).textTheme.titleSmall,
-                  textAlign: TextAlign.left,
-                ),
-                const SizedBox(height: 4),
-                Card(
-                  margin: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      RadioListTile<bool>(
-                        value: true,
-                        groupValue: _isAdditionalDevice,
-                        title: Text(locale.get('restore_additional_device_label')),
-                        subtitle: Text(locale.get('restore_additional_device_subtitle')),
-                        onChanged: (v) => setState(() => _isAdditionalDevice = v),
-                      ),
-                      RadioListTile<bool>(
-                        value: false,
-                        groupValue: _isAdditionalDevice,
-                        title: Text(locale.get('restore_replacement_device_label')),
-                        subtitle: Text(locale.get('restore_replacement_device_subtitle')),
-                        onChanged: (v) => setState(() => _isAdditionalDevice = v),
-                      ),
-                    ],
-                  ),
-                ),
-
                 if (_error != null) ...[
                   const SizedBox(height: 12),
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
@@ -508,9 +475,6 @@ class _RestoreScreenState extends State<_RestoreScreen> {
                         children: [
                           Text(locale.get('restore_in_progress'),
                               style: Theme.of(context).textTheme.titleSmall),
-                          const SizedBox(height: 8),
-                          Text(locale.tr('contacts_restored', {'count': '$_contactsRestored'})),
-                          Text(locale.tr('messages_restored', {'count': '$_messagesRestored'})),
                           const SizedBox(height: 8),
                           const LinearProgressIndicator(),
                         ],
@@ -556,14 +520,6 @@ class _RestoreScreenState extends State<_RestoreScreen> {
     // Validate seed phrase
     if (!SeedPhrase.isValid(words)) {
       setState(() => _error = locale.get('invalid_recovery_phrase'));
-      return;
-    }
-
-    // §7.1.3 (P2): forced choice, no default — publishing behaviour depends
-    // on it (see IdentityPublisher._isPrimaryDevice), so an unanswered
-    // question must not silently resolve to either case.
-    if (_isAdditionalDevice == null) {
-      setState(() => _error = locale.get('please_select_device_option'));
       return;
     }
 
@@ -620,27 +576,15 @@ class _RestoreScreenState extends State<_RestoreScreen> {
       // restored identity look alike afterwards: seed there,
       // no contacts). Exactly that is where the old probe failed.
       //
-      // `_isAdditionalDevice` stays the SECOND, independent question:
-      // is there still a device under this phrase? Yes -> the data
-      // comes from there (§14.4). No -> recovery case.
-      await identityMgr.createIdentity(name,
-          restoreAwaitingPairing: _isAdditionalDevice!,
-          restoredFromPhrase: true);
+      // Whether another device still runs under this phrase is NOT asked
+      // here (B-4b, §13.0, D-40): the device searches for the bundle and
+      // collects no post until the bundle or the user decides.
+      await identityMgr.createIdentity(name, restoredFromPhrase: true);
 
       setState(() => _restoreStarted = true);
 
       final appState = context.read<CleonaAppState>();
       await appState.initialize();
-
-      // Listen for restore progress
-      appState.service?.onRestoreProgress = (phase, contacts, messages) {
-        if (mounted) {
-          setState(() {
-            _contactsRestored += contacts;
-            _messagesRestored += messages;
-          });
-        }
-      };
 
       // §6.4.3: Recover additional identities from DHT registry (fire-and-forget).
       // Runs in background — DHT lookup takes 30-60s. Primary identity is

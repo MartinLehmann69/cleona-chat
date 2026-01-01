@@ -26,10 +26,10 @@ library;
 /// The version of this build, as a string.
 ///
 /// **It MUST match the `version:` field in `pubspec.yaml`**
-/// (there `4.2.0+1`; the build number after the `+` does not belong to it).
+/// (there `4.2.3+4`; the build number after the `+` does not belong to it).
 /// `scripts/preflight.sh` holds both against each other and blocks the
 /// commit on deviation.
-const String kAppVersion = '4.2.0';
+const String kAppVersion = '4.2.3';
 
 /// The own version as `major * 1000 + minor`.
 ///

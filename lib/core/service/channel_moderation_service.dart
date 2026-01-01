@@ -171,14 +171,25 @@ class ChannelModerationService {
     return null;
   }
 
-  Future<bool> reportChannel(String channelIdHex, int category, List<String> evidencePostIds, {String? description}) async {
+  /// §16.4 channel report. S398-W4 (seam report B-9): this answered `true` for a
+  /// report that never left the device — no sender for
+  /// `MTV3_CHANNEL_REPORT`, and §16.4 does not want one anyway: a channel
+  /// report is a PUBLIC cell under `tag_report`, signed by the registered
+  /// reporter pseudonym (§16.5). Neither the public tag cell nor the
+  /// registry has a carrier in the 4.2 delivery layer, so the report cannot
+  /// be sent according to the norm, and a private substitute path (e.g. to
+  /// the channel owner) would be a different procedure. The best case is
+  /// therefore [ChannelReportOutcome.notSent]: checked and kept here — it
+  /// counts in this node's own tally like every report cell it sees — and
+  /// said so.
+  Future<ChannelReportOutcome> reportChannel(String channelIdHex, int category, List<String> evidencePostIds, {String? description}) async {
     _resetDailyReportCountsIfNeeded();
 
     // Rate limit
     final dailyCount = _dailyReportCounts[_ctx.identity.userIdHex] ?? 0;
     if (dailyCount >= 5) {
       _log.warn('Daily report limit reached');
-      return false;
+      return ChannelReportOutcome.rateLimited;
     }
 
     // Reporter qualification
@@ -186,13 +197,15 @@ class ChannelModerationService {
     final qualError = _checkReporterQualification(cat);
     if (qualError != null) {
       _log.warn('Reporter not qualified: $qualError');
-      return false;
+      return ChannelReportOutcome.notQualified;
     }
 
-    // Validate evidence (3-10 posts for channel reports)
+    // Validate evidence. §16.4 asks for 3-10 posts; the check has said 1-10
+    // since before S398 and the E2E suites pass one — recorded in
+    // `S398-W4-BERICHT.md`, not changed here.
     if (evidencePostIds.isEmpty || evidencePostIds.length > 10) {
       _log.warn('Channel report needs 1-10 evidence posts');
-      return false;
+      return ChannelReportOutcome.evidenceInvalid;
     }
 
     final reportId = bytesToHex(SodiumFFI().randomBytes(16));
@@ -214,12 +227,14 @@ class ChannelModerationService {
       persistCsam(_ctx.identity.userIdHex);
     }
 
-    _log.info('Channel report $reportId filed for $channelIdHex (category: ${cat.name})');
+    _log.info('Channel report $reportId kept locally for $channelIdHex '
+        '(category: ${cat.name}) — NOT published: no carrier for tag_report '
+        '(§16.4) in this version');
 
     // Check if jury threshold reached
     _checkJuryThreshold(channelIdHex);
 
-    return true;
+    return ChannelReportOutcome.notSent;
   }
 
   Future<bool> reportPost(String channelIdHex, String postId, int category, {String? description}) async {
@@ -611,65 +626,12 @@ class ChannelModerationService {
   // thus does not only fall away because its carrier is missing — it was also
   // defective in the shipped form.
   //
-  // THE RECEIVE SIDE STAYS: `handleChannelIndexExchange` below is
-  // pure protobuf work without network relation and will get a producer
-  // again as soon as §16.0 is built.
-
-  /// Handle incoming channel index exchange from a peer.
-  ///
-  /// V3-direct: [payload] is the raw `ChannelIndexExchange` proto bytes
-  /// from the InfrastructureFrame body (gossip-style, untrusted by design
-  /// — handler only merges entries into `_channelIndex`). No sender
-  /// argument needed — the entry payload is self-describing per channel.
-  void handleChannelIndexExchange(Uint8List payload) {
-    try {
-      final exchange = proto.ChannelIndexExchange.fromBuffer(payload);
-      var added = 0;
-      for (final e in exchange.entries) {
-        // Phase 1 (§9.3.1a): log unproven badge/tombstone entries.
-        // Badge ≥ 1 or tombstone (badge 3) without moderation_proof_hash
-        // are accepted but flagged — Phase 2 will reject them.
-        final hasModerationProof = e.moderationProofHash.isNotEmpty;
-        if (e.badBadgeLevel > 0 && !hasModerationProof) {
-          _log.warn('Channel index gossip: badge=${e.badBadgeLevel} for '
-              '${bytesToHex(Uint8List.fromList(e.channelId)).substring(0, 16)} '
-              'WITHOUT moderation proof — accepted (Phase 1 observe-only)');
-        }
-
-        final entry = ChannelIndexEntry(
-          channelIdHex: bytesToHex(Uint8List.fromList(e.channelId)),
-          name: e.name,
-          language: e.language,
-          isAdult: e.isAdult,
-          description: e.description.isEmpty ? null : e.description,
-          subscriberCount: e.subscriberCount,
-          badBadgeLevel: e.badBadgeLevel,
-          badBadgeSince: e.badBadgeSinceMs.toInt() > 0
-              ? DateTime.fromMillisecondsSinceEpoch(e.badBadgeSinceMs.toInt())
-              : null,
-          correctionSubmitted: e.correctionSubmitted,
-          ownerNodeIdHex: bytesToHex(Uint8List.fromList(e.ownerNodeId)),
-          createdAt: DateTime.fromMillisecondsSinceEpoch(
-              e.createdAtMs.toInt() > 0 ? e.createdAtMs.toInt() : 0),
-        );
-        final existing = _ctx.channelIndex.get(entry.channelIdHex);
-        if (existing == null || existing.subscriberCount < entry.subscriberCount ||
-            existing.badBadgeLevel != entry.badBadgeLevel) {
-          _ctx.channelIndex.upsert(entry);
-          added++;
-        }
-      }
-      if (added > 0) {
-        // S366: every `upsert` above has already written its row.
-        // A full write stood here precisely for the case that is the
-        // most expensive — a reconciliation with a neighbour that changes two of
-        // hundreds of entries.
-        _log.info('Channel index gossip: merged $added entries from peer');
-      }
-    } catch (e) {
-      _log.debug('Channel index exchange error: $e');
-    }
-  }
+  // THE RECEIVE SIDE FELL TOO (S398 P1): `handleChannelIndexExchange`
+  // merged V3 `ChannelIndexExchange` entries (with a subscriber count) and
+  // had no caller — no `case` in the receive switch, no sender. v4_2 §16.3
+  // makes the directory a durable object per channel, reconciled by
+  // anti-entropy between relay pairs (§16.0), and states "A subscriber
+  // count does not exist"; the V3 gossip format is not that carrier.
 
   // ── Channel Join Request (owner side) ─────────────────────────
 
@@ -1678,9 +1640,7 @@ class ChannelModerationService {
               'within tolerance set) — consequence NOT applied');
         case VerdictVerification.legacyUnproven:
           // No juror attached a hybrid signature at all — Phase 1
-          // observe-only, same posture as the channel-index gossip's own
-          // missing-`moderationProofHash` case
-          // (`handleChannelIndexExchange`): accepted, but flagged.
+          // observe-only: accepted, but flagged.
           _log.warn('Jury ${session.juryId}: verdict has NO juror '
               'signatures — applying unproven (Phase 1 observe-only, §9.3.1a)');
           _applyJuryConsequence(session);
@@ -2001,7 +1961,7 @@ class ChannelModerationService {
   // ZERO callers in `lib/`+`bin/`, on this branch as on `v4/knoten-host`,
   // and only passed `frame.payload` through to `handleChannelIndexExchange`.
   // The frame type itself falls with it. `handleChannelIndexExchange` (without
-  // `Infra`) STAYS — it is the live entrance.
+  // `Infra`) followed in S398 P1 — it had no caller either.
 
   /// V3-direct dispatcher for MTV3_CHANNEL_JURY_VOTE. The wire-type is
   /// overloaded by the V3 sender (cleona_service Z.~5023) — it carries
@@ -2060,7 +2020,7 @@ class ChannelModerationService {
   /// is optional (§14.1: the V4.1 path knows no device) — a
   /// log line is no reason to insert an untruth.
   static String _hexShort(Uint8List? bytes) {
-    if (bytes == null) return 'kein-Geraet';
+    if (bytes == null) return 'no-device';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

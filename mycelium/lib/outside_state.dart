@@ -52,23 +52,28 @@
 /// thrown error the whole start of the host.
 library;
 
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/secp256k1_schnorr.dart'
     show generateSecp256k1Keypair, secp256k1PubkeyFromSecret;
-import 'package:mycelium/outside_entry.dart' show kEntryAddressesAtMost;
+import 'package:mycelium/device_records.dart';
+import 'package:mycelium/outside_address.dart' show addressesEqual;
+import 'package:mycelium/outside_entry.dart'
+    show kEntryAddressesAtMost, kEntryLifetime;
 import 'package:mycelium/card.dart' show CardAddress, CardAddressType;
 import 'package:mycelium/node_helpers.dart' show hexFrom;
 
-/// [FileEncryption] appends `.enc` itself: on disk `aussen.enc`.
-const String _fileName = 'outside';
 const int _version = 1;
 
+/// §11.9: "less than 80 % of the record's lifetime has elapsed" — as a fraction,
+/// so that the computation stays integral and does not round.
+const int kRefreshCounter = 4;
+const int kRefreshDenominator = 5;
+
 class OutsideState {
-  final FileEncryption? _enc;
-  final String? _path;
+  /// Where the record lies ([kRecordOutside]) — in the app the device
+  /// database; `null` for [OutsideState.ephemeral].
+  final DeviceRecords? _records;
 
   /// The secret key (32 B) under which this node publishes.
   final Uint8List secret;
@@ -78,6 +83,41 @@ class OutsideState {
   /// entry is recognised when reading (D2-6).
   final String publicHex;
 
+  /// The x-only public key (32 B) — what an issued card carries as its
+  /// publisher key (§15.2) while [publishedAt] holds.
+  Uint8List get publicKey => secp256k1PubkeyFromSecret(secret);
+
+  /// Does a record of this node stand at the relays at [now] (Unix
+  /// seconds)? One was deposited, not withdrawn, and its day (§11.9
+  /// "lifetime of a record: 1 day") is not over. Only then may a card name
+  /// the key (§15.2): a key without a record points to nothing.
+  bool publishedAt(int now) {
+    final created = lastCreated;
+    return created != null &&
+        lastAddresses.isNotEmpty &&
+        now - created < kEntryLifetime;
+  }
+
+  /// The refresh gate of §11.9, decided from this state alone: `null` =
+  /// write [fresh] at [now] (Unix seconds); otherwise the reason why not —
+  /// byte-identical to the last record AND under 80 % of its lifetime
+  /// elapsed, BOTH must apply. It sits next to [publishedAt]: both answer
+  /// from what was last deposited and when (`host_outside.dart` writes).
+  String? refreshInhibit(List<CardAddress> fresh, int now) {
+    final created = lastCreated;
+    if (created == null) return null;
+    if (!addressesEqual(fresh, lastAddresses)) return null;
+    final elapsed = now - created;
+    // A clock set backwards does not fall into the gate: otherwise the
+    // entry would expire without ever being refreshed.
+    if (elapsed < 0) return null;
+    if (elapsed * kRefreshDenominator >= kRefreshCounter * kEntryLifetime) {
+      return null;
+    }
+    return 'unchanged, ${elapsed}s of $kEntryLifetime s '
+        'elapsed (< $kRefreshCounter/$kRefreshDenominator)';
+  }
+
   /// The addresses of the last deposited entry, in the order in
   /// which they stood in it. Empty as long as none was ever deposited.
   List<CardAddress> lastAddresses = const [];
@@ -86,28 +126,22 @@ class OutsideState {
   /// `null`.
   int? lastCreated;
 
-  OutsideState._(this._enc, this._path, this.secret)
+  OutsideState._(this._records, this.secret)
       : publicHex = hexFrom(secp256k1PubkeyFromSecret(secret));
 
-  /// The state from [directory], or a fresh key if none lies
+  /// The state from [records], or a fresh key if none lies
   /// there. The fresh one is NOT saved immediately: a node behind CGNAT
-  /// runs with it without ever creating a file (§11.9: „needs no key").
+  /// runs with it without ever creating a record (§11.9: „needs no key").
   /// Saving happens at the first [remember].
-  static OutsideState open(Directory directory, Uint8List key) {
-    directory.createSync(recursive: true);
-    final path = '${directory.path}/$_fileName';
-    final enc = FileEncryption(baseDir: directory.path, key: key);
-    if (File('$path.enc').existsSync()) {
-      final bytes = enc.readBinaryFile(path);
-      final g = bytes == null ? null : _read(enc, path, bytes);
-      if (g != null) return g;
-    }
-    return OutsideState._(enc, path, generateSecp256k1Keypair().secretKey);
+  static OutsideState open(DeviceRecords records) {
+    final bytes = records.read(kRecordOutside);
+    final g = bytes == null ? null : _read(records, bytes);
+    return g ?? OutsideState._(records, generateSecp256k1Keypair().secretKey);
   }
 
-  /// A state without disk — for probes and for a node without a folder.
+  /// A state without storage — for probes and for a node without one.
   factory OutsideState.ephemeral() =>
-      OutsideState._(null, null, generateSecp256k1Keypair().secretKey);
+      OutsideState._(null, generateSecp256k1Keypair().secretKey);
 
   /// Records what was just deposited, and saves it immediately. Immediately,
   /// because a crash in between would, at the next start, produce exactly the entry
@@ -127,12 +161,7 @@ class OutsideState {
     save();
   }
 
-  void save() {
-    final enc = _enc;
-    final path = _path;
-    if (enc == null || path == null) return;
-    enc.writeBinaryFile(path, _encode());
-  }
+  void save() => _records?.write(kRecordOutside, _encode());
 
   Uint8List _encode() {
     final b = BytesBuilder()
@@ -158,7 +187,7 @@ class OutsideState {
     return b.toBytes();
   }
 
-  static OutsideState? _read(FileEncryption enc, String path, Uint8List b) {
+  static OutsideState? _read(DeviceRecords records, Uint8List b) {
     var i = 0;
     Uint8List take(int n) {
       if (i + n > b.length) throw const FormatException('too short');
@@ -169,7 +198,7 @@ class OutsideState {
 
     try {
       if (take(1)[0] != _version) return null;
-      final g = OutsideState._(enc, path, take(32));
+      final g = OutsideState._(records, take(32));
       if (take(1)[0] == 0) {
         if (i != b.length) return null;
         return g;

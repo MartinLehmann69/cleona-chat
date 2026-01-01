@@ -33,10 +33,14 @@ class ContactRequest implements inv.WaitingRequest {
   final CardAddress? neighbour;
   @override
   final Uint8List? answerCode;
+  @override
+  final Map<int, Uint8List> dayKeys;
+  @override
+  final bool collected;
 
   /// On a card handed over in person (§15.5)? Accepted without a second question.
   bool get inPerson => invitation.entry?.inPerson ?? false;
 
   ContactRequest.buffered(this.invitation, this.who, this.origin, this.introduction,
-      this.at, this.neighbour, this.answerCode);
+      this.at, this.neighbour, this.answerCode, this.dayKeys, this.collected);
 }

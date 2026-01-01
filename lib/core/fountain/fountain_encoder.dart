@@ -4,6 +4,10 @@ import 'block_xor.dart';
 import 'degree_distribution.dart';
 import 'fountain_block.dart';
 
+/// Fills [into] completely with the object bytes from [offset] on — the
+/// source of [FountainEncoder.reader].
+typedef FountainRangeRead = void Function(int offset, Uint8List into);
+
 /// Encoding side of the rateless codec (§9, E-42: LT codes in pure Dart).
 ///
 /// ── WHAT "RATELESS" MEANS HERE ───────────────────────────────────────
@@ -22,15 +26,22 @@ import 'fountain_block.dart';
 ///
 /// ── LIFETIME AND MEMORY ─────────────────────────────────────────
 ///
-/// The encoder holds the **whole** object in memory (for every block it
-/// needs random access to up to `k` source blocks). For today's consumers
-/// — media bulk and binary distribution up to ~200 MB — that is
-/// acceptable; a file-backed version is open work and noted as such in
-/// `test/perf/perf_fountain.dart`.
+/// Every block needs random access to up to `k` source blocks. There are
+/// two ways to give it that:
 ///
-/// The source blocks are **views** onto the passed buffer, not copies.
-/// Only the last block is copied, because it must be padded with zeros
-/// to 1024 B.
+/// * [FountainEncoder.new] holds the **whole** object in memory. The
+///   source blocks are **views** onto the passed buffer, not copies; only
+///   the last block is copied, because it must be padded with zeros to
+///   1024 B. Right for small objects (media bulk, probes).
+/// * [FountainEncoder.reader] holds **nothing** of the object: every
+///   source block a block needs is read through a [FountainRangeRead]
+///   into one 1024 B scratch buffer. Memory is O(1 block) instead of
+///   O(object). The update holder serves a ~200 MB APK this way — held in
+///   memory, that object OOM-killed the bootstrap daemon (1.6 GB RAM, no
+///   swap, S406-OOM, 07.10.2026).
+///
+/// Both produce the same bytes for the same seed — the block format does
+/// not know where the source came from.
 class FountainEncoder {
   /// Prefix of the content hash; goes unchanged into every block header.
   final Uint8List objectId;
@@ -44,7 +55,14 @@ class FountainEncoder {
   /// Degree distribution of this object.
   final DegreeDistribution distribution;
 
-  final List<Uint8List> _source;
+  /// In-memory source blocks — `null` for [FountainEncoder.reader].
+  final List<Uint8List>? _source;
+
+  /// Range read of [FountainEncoder.reader] — `null` for the in-memory one.
+  final FountainRangeRead? _read;
+
+  /// One source block of a reader encoder, reused for every read.
+  final Uint8List _scratch = Uint8List(kFountainBlockPayloadBytes);
 
   FountainEncoder._(
     this.objectId,
@@ -52,7 +70,49 @@ class FountainEncoder {
     this.sourceBlocks,
     this.distribution,
     this._source,
+    this._read,
   );
+
+  /// Encoder that reads the object through [read] instead of holding it.
+  ///
+  /// [read] must fill `into` completely with the object bytes from
+  /// `offset` on; the encoder never asks beyond [objectLength] and pads
+  /// the last block with zeros itself. Whatever [read] throws comes out of
+  /// [blockAt] unchanged — the caller decides what an unreadable source
+  /// means.
+  factory FountainEncoder.reader({
+    required Uint8List objectId,
+    required int objectLength,
+    required FountainRangeRead read,
+    double c = DegreeDistribution.defaultC,
+    double failureBound = DegreeDistribution.defaultFailureBound,
+  }) {
+    _checkObject(objectId, objectLength);
+    final k = FountainBlock.sourceBlockCount(objectLength);
+    return FountainEncoder._(
+      Uint8List.fromList(objectId),
+      objectLength,
+      k,
+      DegreeDistribution(k, c: c, failureBound: failureBound),
+      null,
+      read,
+    );
+  }
+
+  static void _checkObject(Uint8List objectId, int objectLength) {
+    if (objectId.length != kFountainObjectIdBytes) {
+      throw ArgumentError('objectId must be $kFountainObjectIdBytes B');
+    }
+    if (objectLength <= 0) {
+      throw ArgumentError('empty object has nothing to encode');
+    }
+    if (objectLength > kFountainMaxObjectBytes) {
+      throw ArgumentError(
+        'Object larger than $kFountainMaxObjectBytes B — '
+        'the object length in the block header is 4 B wide',
+      );
+    }
+  }
 
   /// Encoder for [data].
   ///
@@ -67,18 +127,7 @@ class FountainEncoder {
     double c = DegreeDistribution.defaultC,
     double failureBound = DegreeDistribution.defaultFailureBound,
   }) {
-    if (objectId.length != kFountainObjectIdBytes) {
-      throw ArgumentError('objectId must be $kFountainObjectIdBytes B');
-    }
-    if (data.isEmpty) {
-      throw ArgumentError('empty object has nothing to encode');
-    }
-    if (data.length > kFountainMaxObjectBytes) {
-      throw ArgumentError(
-        'Object larger than $kFountainMaxObjectBytes B — '
-        'the object length in the block header is 4 B wide',
-      );
-    }
+    _checkObject(objectId, data.length);
 
     final k = FountainBlock.sourceBlockCount(data.length);
     final src = <Uint8List>[];
@@ -109,6 +158,7 @@ class FountainEncoder {
       k,
       DegreeDistribution(k, c: c, failureBound: failureBound),
       src,
+      null,
     );
   }
 
@@ -126,9 +176,18 @@ class FountainEncoder {
     }
     final neigh = distribution.neighbours(blockSeed);
     final payload = Uint8List(kFountainBlockPayloadBytes);
-    payload.setRange(0, kFountainBlockPayloadBytes, _source[neigh[0]]);
-    for (var i = 1; i < neigh.length; i++) {
-      BlockXor.xorInto(payload, _source[neigh[i]]);
+    final source = _source;
+    if (source != null) {
+      payload.setRange(0, kFountainBlockPayloadBytes, source[neigh[0]]);
+      for (var i = 1; i < neigh.length; i++) {
+        BlockXor.xorInto(payload, source[neigh[i]]);
+      }
+    } else {
+      _readBlock(neigh[0], payload);
+      for (var i = 1; i < neigh.length; i++) {
+        _readBlock(neigh[i], _scratch);
+        BlockXor.xorInto(payload, _scratch);
+      }
     }
     return FountainBlock(
       objectId: objectId,
@@ -136,6 +195,21 @@ class FountainEncoder {
       blockSeed: blockSeed,
       payload: payload,
     );
+  }
+
+  /// Source block [index] into [into] (1024 B) through [_read]; the tail
+  /// of the last block is zero, exactly like the padded in-memory copy.
+  void _readBlock(int index, Uint8List into) {
+    final start = index * kFountainBlockPayloadBytes;
+    final n = objectLength - start < kFountainBlockPayloadBytes
+        ? objectLength - start
+        : kFountainBlockPayloadBytes;
+    if (n < kFountainBlockPayloadBytes) {
+      into.fillRange(n, kFountainBlockPayloadBytes, 0);
+      _read!(start, Uint8List.view(into.buffer, into.offsetInBytes, n));
+    } else {
+      _read!(start, into);
+    }
   }
 
   /// Consecutive blocks from [startSeed], generated lazily.

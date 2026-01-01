@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/platform/process_runner.dart';
 
 /// Content extracted from the system clipboard.
@@ -426,11 +427,16 @@ class ClipboardHelper {
 
   /// Save clipboard content to a temporary file. Returns the file path.
   /// For file-manager copies (filePath set), returns the original path directly.
+  ///
+  /// The file is the pasted content in plaintext. It lies in the surface's
+  /// transient directory (`TransientFiles`), and the caller's send funnel
+  /// deletes it after the hand-over (`chat_screen.dart`, `_sendMedium`).
   static Future<String?> saveToTempFile(ClipboardContent content) async {
     if (content.filePath != null) return content.filePath;
     if (content.data == null) return null;
-    final filename = content.suggestedFilename ?? 'clipboard_${DateTime.now().millisecondsSinceEpoch}';
-    final tmpPath = '${Directory.systemTemp.path}/$filename';
+    final filename = p.basename(content.suggestedFilename ??
+        'clipboard_${DateTime.now().millisecondsSinceEpoch}');
+    final tmpPath = TransientFiles.surfacePath(filename);
     await File(tmpPath).writeAsBytes(content.data!);
     return tmpPath;
   }

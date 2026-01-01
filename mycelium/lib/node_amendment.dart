@@ -4,6 +4,7 @@ import 'package:mycelium/identity.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/envelope.dart';
+import 'package:mycelium/parked.dart' show NodeParking;
 
 /// The amendment side of the node — reactions, edits,
 /// read marks.
@@ -25,7 +26,7 @@ extension NodeAmendments on Node {
       origin.toString(),
       (i) => i.amendments.receive(data, origin),
     );
-    if (hit == null) {
+    if (hit == null && !parkUnopened(data, origin)) {
       report('Amendment for none of the ${identities.length} identities');
     }
   }
@@ -63,7 +64,9 @@ extension NodeAmendments on Node {
       origin.toString(),
       (i) => i.messages.receive(data, returnRoute),
     );
-    if (hit == null) {
+    // D-40: a collected cell no held generation opens may wait for Type 19
+    // (`parked.dart`); with one device nothing is parked.
+    if (hit == null && !parkUnopened(data, origin)) {
       report('Packet for none of the ${identities.length} identities');
     }
   }

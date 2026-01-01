@@ -114,6 +114,16 @@ import Network
           } catch {
             result(Int64(0))
           }
+        } else if call.method == "getDeviceName" {
+          // S398, B-3: the device's name for the device set and the
+          // enrolment request (device_name.dart chooses; never "localhost").
+          // Since iOS 16 `name` is the generic model name ("iPhone") unless
+          // the app holds the user-assigned-device-name entitlement.
+          result([
+            "name": UIDevice.current.name,
+            "manufacturer": "Apple",
+            "model": UIDevice.current.model,
+          ])
         } else {
           result(FlutterMethodNotImplemented)
         }

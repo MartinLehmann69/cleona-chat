@@ -57,9 +57,9 @@ bool alwaysPush() => true;
 /// `UpdateCoverFill.pushes`.
 ///
 /// **Only the giving is levelled.** Taking happens on every level, because the
-/// assembler accepts only pieces of an object that the node
-/// itself has already fetched anyway — i.e. „only their own platform's pieces"
-/// (see [UpdateAssembler.aside]).
+/// assembler keeps only pieces of the node's own update target — i.e. „only
+/// their own platform's pieces" — on disk, also while fetching is locked
+/// (§24.4.2; see [UpdateAssembler.aside], S406-UPDPKG).
 void updateCoverRouteAttach(
   CoverStream stream,
   UpdateHolder holder,

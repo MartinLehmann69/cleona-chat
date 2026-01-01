@@ -296,15 +296,16 @@ class LegacyKeyPurge {
 
   /// The identity profile directories of **this** profile.
   ///
-  /// `identities.json` is read via [IdentityManager] — the same source
-  /// from which the rest of the start obtains them. If that fails, it
+  /// The list of identities is read via [IdentityManager] — the same
+  /// source from which the rest of the start obtains them (since S403 the
+  /// device database, before that the file `identities.json.enc`). If that fails, it
   /// falls back to `identities/*`: a cleaner that does NOT find the
   /// directories would otherwise report "hangs on nothing", although it
   /// only did not look.
   ///
   /// ── WHY FILTERING HAPPENS HERE (S370, finding W-4) ──────────────────
   ///
-  /// `profileDir` stands in `identities.json` **absolute**
+  /// `profileDir` stands in the list of identities **absolute**
   /// (`identity_manager.dart:71`). On a taken-over, copied or moved
   /// profile this path points elsewhere; on the Windows machine, measured
   /// on 05.09.2026, there stood
@@ -338,7 +339,7 @@ class LegacyKeyPurge {
     try {
       for (final i in IdentityManager(baseDir: baseDir).loadIdentities()) {
         if (!_restsUnder(i.profileDir, baseDir)) {
-          log.warn('identities.json lists "${i.profileDir}" — this path '
+          log.warn('The list of identities names "${i.profileDir}" — this path '
               'is NOT under "$baseDir" and is NOT checked. The '
               'entry comes from a foreign or relocated store; '
               'a verdict on this cleanup run must not depend on a '
@@ -348,7 +349,7 @@ class LegacyKeyPurge {
         out.add(i.profileDir);
       }
     } catch (e) {
-      log.warn('identities.json not readable ($e) — looking via the '
+      log.warn('The list of identities is not readable ($e) — looking via the '
           'directory instead');
     }
     final under = Directory('$baseDir${sep}identities');

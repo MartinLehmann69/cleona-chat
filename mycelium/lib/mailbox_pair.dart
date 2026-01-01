@@ -10,7 +10,8 @@
 ///    needs for a contact;
 ///  * [MailboxPair.dayKeyDistribute] — the own public
 ///    day keys to the contacts, only at edges and at most every
-///    14 days per contact (no clock, working rule 5);
+///    14 days per contact (no clock, working rule 5); a first contact needs
+///    none — its request (2) and acceptance (3) carry them (proposal E);
 ///  * [MailboxPair.neighboursHeard] — a contact's fixed neighbours, as they
 ///    ride sealed in its messages and acknowledgements (§9.2, proposal
 ///    "contacts as fixed neighbours" rule 5 — the former notice `0x17` sent to
@@ -19,6 +20,10 @@
 ///    fixed neighbours once more, when NO route carries any more: as the
 ///    content of a `0x23` (§8.1), sealed symmetrically under `K_AB`.
 ///
+/// Each of them also serves the GROUP PAIRS (§4.3, D-36,
+/// `mailbox_group_pair.dart`): a co-member who is not a contact has a
+/// `K_AB`, codes and day keys, never a route or a fixed seat.
+///
 /// The day key notice is an ordinary sealed message with its own kind
 /// (`kinds.dart`), receipted like any, without a history entry.
 /// The `0x23` content is explicitly NOT — it is no
@@ -26,24 +31,24 @@
 /// [suchContentSeal].
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/first_contact_pair.dart';
 import 'package:mycelium/invitation.dart' as inv show kGracePeriodSeconds;
-import 'package:mycelium/memory.dart' show Reader, kDayKeyAtMost;
+import 'package:mycelium/memory.dart' show Reader;
+import 'package:mycelium/mailbox_group_pair.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/message.dart' show Inbound;
 import 'package:mycelium/neighbour_list.dart';
 import 'package:mycelium/neighbourhood_card.dart';
 import 'package:mycelium/pair.dart';
 import 'package:mycelium/mailbox.dart';
+import 'package:mycelium/node_first_contact_box.dart';
 import 'package:mycelium/host_contact_seats.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/envelope.dart';
-
-/// How many days one shipment of the own day keys covers.
-const int kDayKeyDays = 31;
 
 /// Earlier than after this interval no new shipment of the day keys
 /// goes out to the same contact.
@@ -58,18 +63,31 @@ extension MailboxPair on Mailbox {
       // EDGE (§8.1): with `s_AB` the code contact→me arises. Without the
       // report it would stay unknown for up to one second, and exactly in
       // this second the answer of the first contact comes.
-      onPair: (who, s, neighbour) {
+      // Proposal E: the requester's day keys from its request are kept — the
+      // acceptance goes into the post box under them — and the own ones go
+      // in the acceptance: that IS the edge "new contact", no day-key
+      // message of its own follows.
+      onPair: (who, s, neighbour, dayKeys) {
         contactRemember(who,
-            pairRandom: s, neighbours: neighbour == null ? null : [neighbour]);
+            pairRandom: s,
+            neighbours: neighbour == null ? null : [neighbour],
+            dayKey: dayKeys,
+            dayKeySent: DateTime.now());
         node.codeRoute.codesChanged();
       },
       onContactStands: (who) {
-        dayKeyDistribute(only: who);
         host.contactSeatsEdge(); // §5.2: the new contact may take a seat
         node.codeRoute.codesChanged(); // EDGE (§8.1), receipt (4)
       },
+      namedNeighbours: () => ownNeighbours, // §9.2, in the acceptance
+      boxSend: (packet, value, named) =>
+          unawaited(node.depositNamed(packet, value, named)),
       // In the clear to a stranger's neighbour: never a contact (6.5).
-      ownNeighbour: () => cardSeatForStrangers(node.neighbourhood)?.asCardAddress,
+      // §15.5: the address that answered the registration (F-B).
+      ownNeighbour: () => switch (cardSeatForStrangers(node.neighbourhood)) {
+            final n? => node.codeRoute.registration.namedAddress(n),
+            null => null,
+          },
       underCodeSend: (code, neighbour, packet) {
         final f = underCodeSend;
         f == null
@@ -90,12 +108,12 @@ extension MailboxPair on Mailbox {
     final now =
         nowSeconds ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
     return [
-      for (final k in contacts)
-        if (k.pairRandom case final s?)
-          pairCode(pairSecret(me, k.address, s),
-              fromPk: k.address.ed25519Pk,
-              toPk: me.address.ed25519Pk,
-              day: day),
+      // Contacts AND group pairs (§4.3, D-36): both form a `K_AB`.
+      for (final k in pairPartners)
+        pairCode(pairSecret(me, k.address, k.s),
+            fromPk: foundingPk(k.address),
+            toPk: foundingPk(me.address),
+            day: day),
       for (final e in identity.invitations.all)
         if (!e.revoke &&
             now <= e.expiryUnixSeconds + inv.kGracePeriodSeconds)
@@ -107,11 +125,22 @@ extension MailboxPair on Mailbox {
 
   /// `K_AB` and fixed neighbours of a contact, or `null` without `s_AB`.
   /// Step 3 names each of them in its one `0x22` (§8.1, `code_send.dart`).
-  ({Uint8List kAB, List<CardAddress> neighbours})? pairFrom(Address contact) {
-    final k = contactOrNull(identifierFrom(contact));
-    final s = k?.pairRandom;
-    if (k == null || s == null) return null;
-    return (kAB: pairSecret(identity.postBox, k.address, s), neighbours: k.neighbours);
+  ({Uint8List kAB, List<CardAddress> neighbours, Uint8List foundingPk})?
+      pairFrom(Address contact) {
+    final id = identifierFrom(contact);
+    final k = contactOrNull(id);
+    // A contact keeps its own `s_AB`; a group pair has the inviter's (§4.3).
+    final p = k == null ? groupPairOrNull(id) : null;
+    final address = k?.address ?? p?.address;
+    final s = k?.pairRandom ?? p?.pairRandom;
+    if (address == null || s == null || address.foundingEd25519Pk == null) {
+      return null;
+    }
+    return (
+      kAB: pairSecret(identity.postBox, address, s),
+      neighbours: k?.neighbours ?? p!.neighbours,
+      foundingPk: foundingPk(address),
+    );
   }
 
   /// The fixed neighbours this identity names to its contacts (D3):
@@ -128,7 +157,8 @@ extension MailboxPair on Mailbox {
   /// hint costs a `0x21`, no error (§15.2).
   bool neighboursHeard(Address from, List<CardAddress> list) {
     final k = contactOrNull(identifierFrom(from));
-    if (k == null || list.isEmpty || neighbourListEqual(k.neighbours, list)) {
+    if (k == null) return groupPairNeighbours(from, list);
+    if (list.isEmpty || neighbourListEqual(k.neighbours, list)) {
       return false;
     }
     contactRemember(k.address, neighbours: neighbourListClean(list));
@@ -172,14 +202,12 @@ extension MailboxPair on Mailbox {
       {DateTime? now}) {
     final me = identity.postBox;
     final today = utcDay(now ?? DateTime.now());
-    for (final k in contacts) {
-      final s = k.pairRandom;
-      if (s == null) continue;
-      final kAB = pairSecret(me, k.address, s);
+    for (final k in pairPartners) {
+      final kAB = pairSecret(me, k.address, k.s);
       for (var day = today - 1; day <= today + 1; day++) {
         final c = pairCode(kAB,
-            fromPk: k.address.ed25519Pk,
-            toPk: me.address.ed25519Pk,
+            fromPk: foundingPk(k.address),
+            toPk: foundingPk(me.address),
             day: day);
         if (!_equal(c, code)) continue;
         final n = suchContentOpen(kAB, content);
@@ -188,7 +216,9 @@ extension MailboxPair on Mailbox {
               'seal does not open — discarded');
           return null;
         }
-        contactRemember(k.address, neighbours: n);
+        contactOrNull(identifierFrom(k.address)) == null
+            ? groupPairNeighbours(k.address, n) // never makes a contact
+            : contactRemember(k.address, neighbours: n);
         return n;
       }
     }
@@ -197,7 +227,8 @@ extension MailboxPair on Mailbox {
 
   /// The public day key of a contact for the day, or `null`.
   Uint8List? dayPkFrom(Address contact, int day) =>
-      contactOrNull(identifierFrom(contact))?.dayKey[day];
+      (contactOrNull(identifierFrom(contact))?.dayKey ??
+          groupPairOrNull(identifierFrom(contact))?.dayKey)?[day];
 
   /// Edge "start", "network change" or "new contact": gives every contact
   /// (with [only]: only this one) the own day keys of the next
@@ -214,7 +245,9 @@ extension MailboxPair on Mailbox {
                     kDayKeyInterval))
           k,
     ];
-    if (due.isEmpty) return 0;
+    // §8.2: "each contact and each group pair" (`mailbox_group_pair.dart`).
+    final pairs = groupPairsDue(only: only, at: at);
+    if (due.isEmpty && pairs.isEmpty) return 0;
     final today = utcDay(at);
     final content = dayKeyBuild({
       for (var t = today; t < today + kDayKeyDays; t++)
@@ -225,13 +258,23 @@ extension MailboxPair on Mailbox {
           forField: identity, kind: kinds.kDayKey);
       contactRemember(k.address, dayKeySent: at);
     }
-    return due.length;
+    for (final p in pairs) {
+      groupPairDayKeysSend(p, content);
+    }
+    return due.length + pairs.length;
   }
 
   /// A pair notice has arrived ([Inbound.kind]). Only from a
   /// KNOWN contact; no history entry, no callback upwards.
   void pairNoticeAccept(Inbound e, {DateTime? now}) {
     final k = contactOrNull(identifierFrom(e.from));
+    final today = utcDay(now ?? DateTime.now());
+    try {
+      if (k == null && groupPairNoticeAccept(e, today)) return;
+    } on Object catch (f) {
+      report?.call('Pair notice discarded: $f');
+      return;
+    }
     if (k == null) {
       report?.call('Pair notice from unknown identifier — discarded');
       return;
@@ -239,14 +282,8 @@ extension MailboxPair on Mailbox {
     try {
       switch (e.kind) {
         case kinds.kDayKey:
-          final today = utcDay(now ?? DateTime.now());
-          final fresh = dayKeyRead(e.content);
-          final all = {...k.dayKey, ...fresh}
-            ..removeWhere((t, _) => t < today - 1 || t > today + kDayKeyDays);
-          final days = all.keys.toList()..sort();
-          contactRemember(k.address, dayKey: {
-            for (final t in days.take(kDayKeyAtMost)) t: all[t]!,
-          });
+          contactRemember(k.address,
+              dayKey: dayKeysMerge(k.dayKey, dayKeyRead(e.content), today));
         default:
           report?.call('pair notice of unknown kind ${e.kind} — discarded');
       }

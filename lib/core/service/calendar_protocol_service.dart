@@ -92,6 +92,12 @@ class CalendarProtocolService {
 
   // ── Senders ───────────────────────────────────────────────────────
 
+  /// The group a group event belongs to, for the frame — so that a co-member
+  /// who is not a contact is reached as a group pair (B-3, §16.2.2
+  /// "calendar entry of a group event"). `null` for a 1:1 event.
+  Uint8List? _groupIdOf(CalendarEvent event) =>
+      event.groupId == null ? null : hexToBytes(event.groupId!);
+
   List<String> _resolveRecipients(CalendarEvent event) {
     if (event.groupId != null) {
       final group = _ctx.groups[event.groupId!];
@@ -144,6 +150,7 @@ class CalendarProtocolService {
         hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
         Uint8List.fromList(payload),
+        groupId: _groupIdOf(event),
       );
     }
 
@@ -181,6 +188,7 @@ class CalendarProtocolService {
         hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
         Uint8List.fromList(payload),
+        groupId: _groupIdOf(event),
       );
     }
 
@@ -221,6 +229,7 @@ class CalendarProtocolService {
         hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
         Uint8List.fromList(payload),
+        groupId: _groupIdOf(event),
       );
     }
 
@@ -248,6 +257,7 @@ class CalendarProtocolService {
           hexToBytes(recipientHex),
           proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
           Uint8List.fromList(payload),
+          groupId: _groupIdOf(event),
         );
       }
     }
@@ -288,6 +298,34 @@ class CalendarProtocolService {
       final invite = proto.CalendarInviteMsg.fromBuffer(harvest.payload);
       final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
       final eventIdHex = bytesToHex(Uint8List.fromList(invite.eventId));
+
+      // §16.2.2: "Posts from non-members are silently discarded." — the
+      // calendar entry of a group event is a group type.
+      if (invite.groupId.isNotEmpty) {
+        final group =
+            _ctx.groups[bytesToHex(Uint8List.fromList(invite.groupId))];
+        if (group != null && !group.members.containsKey(senderHex)) {
+          _log.warn('CALENDAR_INVITE from non-member '
+              '${senderHex.substring(0, 8)} in "${group.name}" — dropped');
+          return;
+        }
+      }
+      // §18.1.3 rule 3: a delete dominates — a cell of the one who deleted
+      // that arrives after (or was overtaken by) the delete does not bring
+      // the event back.
+      if (calendarManager.deleteMarkerOf(eventIdHex)?.deletedByHex ==
+          senderHex) {
+        _log.info('CALENDAR_INVITE for deleted event $eventIdHex — dropped');
+        return;
+      }
+      // §18.1.2 role logic: a held event belongs to its creator; an
+      // invitation of someone else does not replace it.
+      final held = calendarManager.events[eventIdHex];
+      if (held != null && held.createdBy != senderHex) {
+        _log.warn('CALENDAR_INVITE for held event $eventIdHex from '
+            '${senderHex.substring(0, 8)}, not its creator — dropped');
+        return;
+      }
 
       final event = CalendarEvent(
         eventId: eventIdHex,
@@ -341,9 +379,15 @@ class CalendarProtocolService {
       final eventIdHex = bytesToHex(Uint8List.fromList(rsvp.eventId));
 
       final status = RsvpStatus.values[rsvp.response.value.clamp(0, RsvpStatus.values.length - 1)];
+      final event = calendarManager.events[eventIdHex];
+      // §18.1.2 role logic: only someone invited answers.
+      if (event != null && !_isInvited(event, senderHex)) {
+        _log.warn('CALENDAR_RSVP for $eventIdHex from '
+            '${senderHex.substring(0, 8)}, not invited — dropped');
+        return;
+      }
       calendarManager.setRsvp(eventIdHex, senderHex, status);
 
-      final event = calendarManager.events[eventIdHex];
       if (event?.groupId != null && _ctx.conversations.containsKey(event!.groupId)) {
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         final statusText = switch (status) {
@@ -382,8 +426,23 @@ class CalendarProtocolService {
         _log.debug('CALENDAR_UPDATE for unknown event $eventIdHex');
         return;
       }
+      final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
+      // §18.1.2 role logic: only the creator edits.
+      if (event.createdBy != senderHex) {
+        _log.warn('CALENDAR_UPDATE for $eventIdHex from '
+            '${senderHex.substring(0, 8)}, not its creator — dropped');
+        return;
+      }
+      // §18.1.3 rule 2: last-write-wins on the creator's `updatedAt`.
+      final updatedAt = update.updatedAt.toInt();
+      if (updatedAt <= event.creatorUpdatedAt) {
+        _log.info('CALENDAR_UPDATE for $eventIdHex not newer '
+            '($updatedAt <= ${event.creatorUpdatedAt}) — dropped');
+        return;
+      }
 
       calendarManager.updateEvent(eventIdHex,
+        creatorUpdatedAt: updatedAt,
         title: update.title.isNotEmpty ? update.title : null,
         description: update.description.isNotEmpty ? update.description : null,
         location: update.location.isNotEmpty ? update.location : null,
@@ -399,7 +458,6 @@ class CalendarProtocolService {
 
       if (event.groupId != null && _ctx.conversations.containsKey(event.groupId)) {
         final action = update.cancelled ? 'cancelled the event' : 'changed the event';
-        final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         _ctx.addMessageToConversation(event.groupId!, UiMessage(
           id: bytesToHex(SodiumFFI().randomBytes(16)),
@@ -427,9 +485,19 @@ class CalendarProtocolService {
       final del = proto.CalendarDeleteMsg.fromBuffer(harvest.payload);
       final eventIdHex = bytesToHex(Uint8List.fromList(del.eventId));
 
+      final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
       final event = calendarManager.events[eventIdHex];
+      // §18.1.2 role logic: only the creator deletes.
+      if (event != null && event.createdBy != senderHex) {
+        _log.warn('CALENDAR_DELETE for $eventIdHex from '
+            '${senderHex.substring(0, 8)}, not its creator — dropped');
+        return;
+      }
+      // §18.1.3 rule 3: the marker outlives the event. For an event not
+      // held here it stands against the invitation the delete overtook; it
+      // names the one who deleted, so it binds only that sender's cells.
+      calendarManager.markDeleted(eventIdHex, senderHex);
       if (event != null && event.groupId != null) {
-        final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         _ctx.addMessageToConversation(event.groupId!, UiMessage(
           id: bytesToHex(SodiumFFI().randomBytes(16)),
@@ -525,11 +593,25 @@ class CalendarProtocolService {
 
   // ── Private helpers ───────────────────────────────────────────────
 
+  /// §18.1.2 "Recipient resolution": who is invited to [event] — for a
+  /// group event every member of the group, otherwise the attendees; the
+  /// creator answers its own event too. A group not held here is not
+  /// judged.
+  bool _isInvited(CalendarEvent event, String senderHex) {
+    if (senderHex == event.createdBy) return true;
+    final groupId = event.groupId;
+    if (groupId != null) {
+      final group = _ctx.groups[groupId];
+      return group == null || group.members.containsKey(senderHex);
+    }
+    return event.attendeeNodeIds.contains(senderHex);
+  }
+
   /// Short form for log lines. Tolerates `null`, since the device identifier
   /// is optional (§14.1: the V4.1 path knows no device) — a
   /// log line is no reason to insert an untruth.
   static String _hexShort(Uint8List? bytes) {
-    if (bytes == null) return 'kein-Geraet';
+    if (bytes == null) return 'no-device';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

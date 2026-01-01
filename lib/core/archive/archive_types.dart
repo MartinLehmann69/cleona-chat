@@ -8,6 +8,29 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/archive/archive_config.dart';
 
+/// What the service answered when asked to start a retrieval (§21.6).
+///
+/// The distinction between the first two is not cosmetic: on
+/// [ArchiveRetrievalStart.alreadyRunning] a run IS in flight in the service,
+/// so the ring must stay; on [ArchiveRetrievalStart.unavailable] nothing is
+/// running anywhere and the ring must go, or the tile hangs on the first
+/// dropped connection.
+///
+/// Lives here and not beside the tile (S398-W4): the service
+/// (`CleonaService.requestArchiveRetrieval`) and the IPC client both produce
+/// it, and neither may import `lib/ui/`.
+enum ArchiveRetrievalStart {
+  /// This call started the run (`{started: true}`).
+  started,
+
+  /// A run was already in flight for this message (`{alreadyRunning: true}`).
+  alreadyRunning,
+
+  /// No run exists and none was started — the command failed, the archive is
+  /// off, or the daemon is gone.
+  unavailable,
+}
+
 /// An archived media entry.
 class ArchiveEntry {
   final String messageId;

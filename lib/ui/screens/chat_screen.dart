@@ -28,17 +28,24 @@ import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
+import 'package:cleona/ui/components/forward_picker.dart';
+import 'package:cleona/ui/components/media_consent_dialog.dart';
 import 'package:cleona/ui/components/message_bubble.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/contact_name.dart';
+import 'package:cleona/ui/components/system_notice_text.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/media/clipboard_helper.dart';
 import 'package:cleona/core/media/media_store.dart';
 import 'package:cleona/core/media/media_vault.dart';
+import 'package:cleona/core/media/transient_files.dart';
+import 'package:cleona/core/platform/app_screenshot.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/archive/archive_placeholder.dart';
 import 'package:cleona/ui/components/archive_placeholder_tile.dart';
 import 'package:cleona/ui/components/archive_retrieval_state.dart';
+import 'package:cleona/ui/components/media_missing_tile.dart';
+import 'package:cleona/ui/components/transfer_progress_state.dart';
 import 'package:cleona/ui/components/poll_card.dart';
 import 'package:cleona/ui/components/calendar_event_card.dart';
 import 'package:cleona/ui/screens/poll_editor_screen.dart';
@@ -121,6 +128,17 @@ class _ChatScreenState extends State<ChatScreen> {
     if (widget.isGroup || widget.isChannel) return false;
     return service?.getContact(widget.conversationId)?.isDeleted ?? false;
   }
+
+  /// §16.2.2 (S403, owner decision 03.10.2026, V2 = B): this device was
+  /// removed from this group (or left channel) by an owner or an admin.
+  /// The conversation STAYS readable, marked as removed — writing is
+  /// blocked at the service (it no longer holds the group, every send
+  /// path asks first) and here in the UI, like `_isDeletedContactChat`
+  /// above: send, edit, delete, react, reply, poll, call — reading and
+  /// exporting stay.
+  bool _isRemovedFromGroup(ICleonaService? service) =>
+      (widget.isGroup || widget.isChannel) &&
+      (service?.isRemovedFromGroup(widget.conversationId) ?? false);
 
   /// §9.5.3 D3 (S119): cached Feature-Request vote tallies per record id.
   final Map<String, Map<String, int>> _frTallies = {};
@@ -205,6 +223,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _recordingTimer;
   Duration _recordingDuration = Duration.zero;
   final AudioRecorder _recorder = AudioRecorder();
+
+  /// The file of the recording in progress — the spoken message in
+  /// plaintext (`TransientFiles`). Set by [_startRecording]; whoever ends
+  /// the recording takes it with [_takeRecordingPath] and is then
+  /// responsible for the file: [_sendMedium] discards it after the
+  /// hand-over, the other exits discard it directly.
+  String? _recordingPath;
 
   // Drag & Drop state
   bool _isDragging = false;
@@ -309,9 +334,43 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.dispose();
     _scrollNavNotifier.dispose();
     _inputFocusNode.dispose();
-    _recorder.dispose();
+    // Leaving the chat in the middle of a recording abandons it: the file
+    // goes once the recorder has let go of it.
+    final abandoned = _takeRecordingPath();
+    _recorder.dispose().whenComplete(
+        () => TransientFiles.discardSurface(abandoned));
     _recordingTimer?.cancel();
     super.dispose();
+  }
+
+  /// §23.10: the application's own screenshot. Always offered; where
+  /// forwarding is not allowed it takes no picture and tells the user why.
+  /// The one-time warning about protection boundaries (key
+  /// `notice_leaves_protection_screenshot`) is not built here — it would hook
+  /// in before the first actual capture and guard the same path.
+  Future<void> _takeScreenshot(ChatConfig? config) async {
+    final locale = AppLocale.read(context);
+    final messenger = ScaffoldMessenger.of(context);
+
+    if (!(config?.allowForwarding ?? true)) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(locale.get('screenshot_refused_forwarding'))),
+      );
+      return;
+    }
+
+    final result = await AppScreenshot.capture();
+    if (!mounted) return;
+
+    if (result.saved && result.uri != null) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(locale.get('screenshot_saved'))),
+      );
+    } else {
+      messenger.showSnackBar(
+        SnackBar(content: Text(locale.get('screenshot_failed'))),
+      );
+    }
   }
 
   /// Returns the subtitle as a plain [String] for use with [AppBarScaffold].
@@ -352,7 +411,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final q = _chatSearchQuery.toLowerCase();
     _searchMatchIndices = [];
     for (var i = 0; i < messages.length; i++) {
-      if (!messages[i].isDeleted && messages[i].text.toLowerCase().contains(q)) {
+      if (messages[i].text.toLowerCase().contains(q)) {
         _searchMatchIndices.add(i);
       }
     }
@@ -464,8 +523,11 @@ class _ChatScreenState extends State<ChatScreen> {
       onDragDone: (details) async {
         // §15.7: a dropped file is a send, same as the (already-hidden)
         // attach button — the drop target itself isn't gated by any widget
-        // visibility, so it needs its own check.
-        if (_isDeletedContactChat(service)) return;
+        // visibility, so it needs its own check. §16.2.2 (S403, V2): a
+        // removed member writes nothing either.
+        if (_isDeletedContactChat(service) || _isRemovedFromGroup(service)) {
+          return;
+        }
         for (final file in details.files) {
           final path = file.path;
           if (service != null) {
@@ -483,6 +545,10 @@ class _ChatScreenState extends State<ChatScreen> {
               // Pending DM config proposal banner (show when PEER proposed, not when WE proposed)
               if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
                 _buildConfigProposalBanner(context, conv!, service),
+              // B-3 (v4_2 §16.2.2): an invited group is joined explicitly.
+              if (widget.isGroup &&
+                  service?.groups[widget.conversationId]?.joined == false)
+                _buildGroupJoinBanner(context, service!),
               Expanded(
                 child: GestureDetector(
                   onTap: () => _inputFocusNode.unfocus(),
@@ -527,7 +593,10 @@ class _ChatScreenState extends State<ChatScreen> {
                               // §15.7: closes reply/react/edit/delete/resend
                               // in the message-actions menu — copy, save,
                               // share and forward-out stay (read/export).
-                              readOnlyArchive: _isDeletedContactChat(service),
+                              // §16.2.2 (S403, V2): the same for a group
+                              // this device was removed from.
+                              readOnlyArchive: _isDeletedContactChat(service) ||
+                                  _isRemovedFromGroup(service),
                               onMessageAction: (action, m) => _handleMessageAction(action, m, service),
                               isSearchHighlight: isHighlighted,
                               isSystemChannel: sys_ch.SystemChannels.isSystemChannel(widget.conversationId),
@@ -705,6 +774,15 @@ class _ChatScreenState extends State<ChatScreen> {
         tooltip: locale.get('chat_settings'),
         onPressed: () => _showChatSettings(context, service),
       ),
+      // §23.10: the application's own screenshot. Offered where the window
+      // is excluded from capture, and there always; where forwarding is not
+      // allowed the button refuses instead of capturing.
+      if (AppScreenshot.isOffered && !widget.isGroup && !widget.isChannel)
+        IconButton(
+          icon: const Icon(Icons.screenshot),
+          tooltip: locale.get('screenshot_action'),
+          onPressed: () => _takeScreenshot(conv?.config),
+        ),
       // §15.7: a deleted contact's inbox key is nobody's anymore — no
       // ringing, no outgoing offer.
       if (!widget.isGroup && !widget.isChannel && !_isDeletedContactChat(service)) ...[
@@ -719,7 +797,9 @@ class _ChatScreenState extends State<ChatScreen> {
           onPressed: () => _startCall(context, appState, video: true),
         ),
       ],
-      if (widget.isGroup)
+      // §16.2.2 (S403, V2): a removed member does not ring the group —
+      // the group is no longer held, the call would not reach anyone.
+      if (widget.isGroup && !_isRemovedFromGroup(service))
         IconButton(
           icon: const Icon(Icons.call),
           tooltip: locale.get('group_call_tooltip'),
@@ -730,17 +810,30 @@ class _ChatScreenState extends State<ChatScreen> {
       // push rightmost actions (poll, info) off the visible edge, so members
       // could not reach the poll-create entry. Group & channel polls/info
       // now live in a single overflow menu that always fits.
+      // §23.10: the screenshot also lives in that menu so it stays reachable.
       if (widget.isGroup || widget.isChannel)
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert),
           tooltip: locale.get('more_options'),
           onSelected: (v) {
+            if (v == 'screenshot') _takeScreenshot(conv?.config);
             if (v == 'poll') _openPollEditor(context);
             if (v == 'info' && widget.isGroup) _showGroupInfo(context, service);
             if (v == 'info' && widget.isChannel) _showChannelInfo(context, service);
           },
           itemBuilder: (_) => [
-            if (widget.isGroup || _canPostInChannel(service))
+            if (AppScreenshot.isOffered)
+              PopupMenuItem(
+                value: 'screenshot',
+                child: Row(children: [
+                  const Icon(Icons.screenshot),
+                  const SizedBox(width: 12),
+                  Text(locale.get('screenshot_action')),
+                ]),
+              ),
+            // §16.2.2 (S403, V2): a removed member starts no polls.
+            if ((widget.isGroup || _canPostInChannel(service)) &&
+                !_isRemovedFromGroup(service))
               PopupMenuItem(
                 value: 'poll',
                 child: Row(children: [
@@ -886,19 +979,24 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _shareMedia(UiMessage msg) async {
     if (msg.filePath == null) return;
     // S362: the system dialog passes a FILE on to a foreign app —
-    // it does not take a URL. The plain text is therefore put into the
-    // system's temporary directory.
+    // it does not take a URL. The plain text is therefore laid down as a
+    // file.
     //
     // **This is an explicit export, not a fallback.** The user
     // chose "Share"; the file goes to another program right away
     // anyway. It is NOT deleted immediately: the system dialog is
     // asynchronous, the receiving app often only reads seconds later, and
-    // an immediate deletion would break sharing. `clipboard_helper.dart`
-    // follows the same pattern for the clipboard.
+    // an immediate deletion would break sharing.
+    //
+    // S401: it lies in the surface's transient directory instead of the
+    // system temp directory (readable there by every account of the
+    // machine), and the next start of the surface clears it
+    // (`TransientFiles.sweepSurfaceAtStart`) — the one edge after which no
+    // receiving app can still be reading.
     final data = MediaStore.instance.readAll(msg.filePath!);
     if (data == null) return;
-    final tmp = File('${Directory.systemTemp.path}/'
-        '${msg.filename ?? msg.filePath!.split('/').last}');
+    final tmp = File(TransientFiles.surfacePath(
+        (msg.filename ?? msg.filePath!).split('/').last));
     await tmp.writeAsBytes(data, flush: true);
     await Share.shareXFiles([XFile(tmp.path, name: msg.filename)]);
   }
@@ -962,59 +1060,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _showForwardPicker(UiMessage msg, ICleonaService service) {
-    final locale = AppLocale.read(context);
-    // Build list of all contacts + groups + channels we can forward to
-    final targets = <MapEntry<String, String>>[]; // id → displayName
-    for (final c in service.acceptedContacts) {
-      targets.add(MapEntry(c.nodeIdHex, c.displayName));
-    }
-    for (final g in service.groups.values) {
-      targets.add(MapEntry(g.groupIdHex, '${g.name} (${locale.get('group')})'));
-    }
-    for (final ch in service.channels.values) {
-      // Only show channels where we can post
-      final myRole = ch.members[service.nodeIdHex]?.role ?? 'subscriber';
-      if (myRole == 'owner' || myRole == 'admin') {
-        targets.add(MapEntry(ch.channelIdHex, '${ch.name} (${locale.get('channel')})'));
-      }
-    }
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(locale.get('forward_to')),
-        content: SizedBox(
-          width: 300,
-          height: 400,
-          child: ListView.builder(
-            itemCount: targets.length,
-            itemBuilder: (_, i) {
-              final target = targets[i];
-              return ListTile(
-                title: Text(target.value),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  final result = await service.forwardMessage(widget.conversationId, msg.id, target.key);
-                  if (result == null && mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(locale.get('forward_media_not_available'))),
-                    );
-                  }
-                },
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(locale.get('cancel')),
-          ),
-        ],
-      ),
-    );
-  }
+  void _showForwardPicker(UiMessage msg, ICleonaService service) =>
+      showForwardPicker(context, service,
+          sourceConversationId: widget.conversationId, msg: msg);
 
   void _confirmDelete(UiMessage msg, ICleonaService service) {
     final locale = AppLocale.read(context);
@@ -1022,7 +1070,17 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(locale.get('delete_message_title')),
-        content: Text(locale.get('delete_message_content')),
+        // §21.5.2 "Normative for the UI": the dialog names the effect — gone
+        // on the devices, the sealed ciphertext expires in the network.
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(locale.get('delete_message_content')),
+            const SizedBox(height: 12),
+            Text(locale.get('delete_message_effect')),
+          ],
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -1164,6 +1222,36 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(
               child: Text(
                 locale.get('conversation_archived_deleted'),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.outline,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // §16.2.2 (S403, owner decision 03.10.2026, V2 = B): this device was
+    // removed from this group. The conversation STAYS — readable, marked
+    // as removed — but no text field, no send, no attach, no paste, no
+    // mic. Same shape as the deleted-contact banner above.
+    if (_isRemovedFromGroup(service)) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.person_remove_outlined,
+                size: 18, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                locale.get('group_removed_banner'),
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.outline,
                   fontStyle: FontStyle.italic,
@@ -1379,6 +1467,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     key: _textFieldKey,
                     controller: _textController,
                     focusNode: _inputFocusNode,
+                    enableIMEPersonalizedLearning: false,
                     decoration: InputDecoration(
                       hintText: isEditing ? locale.get('message_hint_editing') : locale.get('message_hint'),
                       border: const OutlineInputBorder(),
@@ -1597,7 +1686,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             shrinkWrap: true,
                             children: candidates.map((c) => ListTile(
                               leading: const Icon(Icons.person),
-                              title: Text(c.displayName),
+                              title: Text(shownContactName(c.displayName, locale)),
                               onTap: () async {
                                 Navigator.pop(dlg);
                                 await service.inviteToGroup(widget.conversationId, c.nodeIdHex);
@@ -2127,7 +2216,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             shrinkWrap: true,
                             children: candidates.map((c) => ListTile(
                               leading: const Icon(Icons.person),
-                              title: Text(c.displayName),
+                              title: Text(shownContactName(c.displayName, locale)),
                               onTap: () async {
                                 Navigator.pop(dlg);
                                 await service.inviteToChannel(widget.conversationId, c.nodeIdHex);
@@ -2267,12 +2356,19 @@ class _ChatScreenState extends State<ChatScreen> {
             FilledButton(
               onPressed: () async {
                 Navigator.pop(ctx);
-                final ok = await service.reportChannel(channelId, selectedCategory, []);
+                final outcome = await service.reportChannel(channelId, selectedCategory, []);
                 if (!context.mounted) return;
+                // S398-W4 (seam report B-9): the truth per outcome. Before, every
+                // failure read "limit reached" and a report kept only on
+                // this device read "submitted".
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(ok
-                      ? locale.get('report_submitted')
-                      : locale.get('report_limit_reached'))),
+                  SnackBar(content: Text(locale.get(switch (outcome) {
+                    ChannelReportOutcome.notSent => 'report_not_sent',
+                    ChannelReportOutcome.rateLimited => 'report_limit_reached',
+                    ChannelReportOutcome.notQualified => 'report_not_qualified',
+                    ChannelReportOutcome.evidenceInvalid => 'report_evidence_hint',
+                    ChannelReportOutcome.unavailable => 'report_not_sent',
+                  }))),
                 );
               },
               child: Text(locale.get('send')),
@@ -2320,6 +2416,25 @@ class _ChatScreenState extends State<ChatScreen> {
             service?.acceptConfigProposal(widget.conversationId);
           },
           child: Text(locale.get('accept')),
+        ),
+      ],
+    );
+  }
+
+  /// B-3 (v4_2 §16.2.2): "Joining is an explicit act of the invitee; only
+  /// then are its group pairs formed." Until the user joins, members who are
+  /// not contacts cannot reach them and are not reached.
+  Widget _buildGroupJoinBanner(BuildContext context, ICleonaService service) {
+    final locale = AppLocale.read(context);
+    return MaterialBanner(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      content: Text(locale.get('group_join_banner'),
+          style: const TextStyle(fontSize: 13)),
+      leading: const Icon(Icons.group_add),
+      actions: [
+        FilledButton(
+          onPressed: () => service.joinGroup(widget.conversationId),
+          child: Text(locale.get('group_join')),
         ),
       ],
     );
@@ -2426,7 +2541,21 @@ class _ChatScreenState extends State<ChatScreen> {
                       PopupMenuItem(value: 5 * 60 * 1000, child: Text(locale.get('five_minutes'))),
                       PopupMenuItem(value: 60 * 60 * 1000, child: Text(locale.get('one_hour'))),
                       PopupMenuItem(value: 24 * 60 * 60 * 1000, child: Text(locale.get('one_day'))),
-                      PopupMenuItem(value: 7 * 24 * 60 * 60 * 1000, child: Text(locale.get('seven_days'))),
+                      // S403 (owner decision 03.10.2026, V4): "7 Tage" is
+                      // named "1 Woche", and 1 Monat, 1 Jahr and 3 Jahre
+                      // follow — the presets of the auto-delete timer.
+                      PopupMenuItem(
+                          value: 7 * 24 * 60 * 60 * 1000,
+                          child: Text(locale.get('one_week'))),
+                      PopupMenuItem(
+                          value: 30 * 24 * 60 * 60 * 1000,
+                          child: Text(locale.get('one_month'))),
+                      PopupMenuItem(
+                          value: 365 * 24 * 60 * 60 * 1000,
+                          child: Text(locale.get('one_year'))),
+                      PopupMenuItem(
+                          value: 3 * 365 * 24 * 60 * 60 * 1000,
+                          child: Text(locale.get('three_years'))),
                     ],
                   ) : null,
                 ),
@@ -2469,7 +2598,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         final actual = v.isEmpty ? null : v;
                         setDialogState(() => notifySoundName = actual);
                         if (actual != null) {
-                          service.notificationSound.previewRingtone(Ringtone.fromName(actual));
+                          service.previewRingtone(Ringtone.fromName(actual));
                         }
                       },
                       itemBuilder: (_) => [
@@ -2562,6 +2691,12 @@ class _ChatScreenState extends State<ChatScreen> {
   String _formatExpiry(BuildContext context, int? ms) {
     final locale = AppLocale.read(context);
     if (ms == null) return locale.get('off');
+    // The presets of the menu carry their own names (owner decision V4,
+    // 03.10.2026) instead of "30 d" / "365 d" / "1095 d".
+    if (ms == 7 * 24 * 60 * 60 * 1000) return locale.get('one_week');
+    if (ms == 30 * 24 * 60 * 60 * 1000) return locale.get('one_month');
+    if (ms == 365 * 24 * 60 * 60 * 1000) return locale.get('one_year');
+    if (ms == 1095 * 24 * 60 * 60 * 1000) return locale.get('three_years');
     if (ms < 60 * 1000) return locale.tr('unit_seconds_short', {'count': '${ms ~/ 1000}'});
     if (ms < 60 * 60 * 1000) return locale.tr('unit_minutes_short', {'count': '${ms ~/ (60 * 1000)}'});
     if (ms < 24 * 60 * 60 * 1000) return locale.tr('unit_hours_short', {'count': '${ms ~/ (60 * 60 * 1000)}'});
@@ -2608,25 +2743,34 @@ class _ChatScreenState extends State<ChatScreen> {
   // funnel stays: it is the place where a later question per
   // §24.4.5 hangs exactly once, instead of at six call sites.
   //
-  // WHAT STOOD HERE UNTIL S389, and why it is gone: the question from §9.3
-  // was asked IF the chat was set to high-secure — i.e. only if
-  // the user had flipped the switch from §12.1 that must not
-  // exist. With the switch its condition falls. The dialog's answer
-  // also ran as `secureChoice` into `chooseMediaLane`, and
-  // there it is no longer read at all without `secureChat`: a dialog
-  // whose answer changes nothing is the same false promise as the
-  // switch itself.
-  //
-  // §24.4.5 requires consent PER TRANSFER as soon as a file
-  // takes a media lane. This promise is thus unfulfilled today — but in
-  // 4.2 not only since this change: the bulk lane needs
-  // `mediaBulkLane.transport`, and that is set only by `attachV41`, which has
-  // no caller any more in the 4.2 start. Complete finding with two
-  // readings and price: `mycelium/berichte/S389-BAU-MODUS.md`, B-M2.
+  // THE ONE QUESTION (§12.1, §24.4.5, D-29): a file that does not fit lane 1
+  // takes lane 2 or 3, which are visible, linkable events (B-29). It is asked
+  // for this file only, and without a yes nothing is sent. The question is
+  // [mediaLaneConsentFor] — the same gate "Share" and "Forward" ask through.
 
-  /// Reicht [path] ein.
+  /// Hands [path] in; asks first where the file leaves lane 1.
+  ///
+  /// S401: THE ONE PLACE AT WHICH THE SURFACE'S OWN PLAINTEXT GOES. A
+  /// recording, a pasted clipboard item, and on Android/iOS the copy a
+  /// picker or the camera laid into the app's cache are message content in
+  /// a plain file. `sendMediaMessage` returns after the service has read
+  /// the file and laid the attachment down sealed under `media/` — from
+  /// then on the plain file has no purpose; and if the question is
+  /// declined or the send refused, the operation is over as well.
+  /// `discardSurface` deletes only inside the surface's transient
+  /// directories: a file the user picked on a desktop stays untouched.
   Future<void> _sendMedium(ICleonaService service, String path) async {
-    await service.sendMediaMessage(widget.conversationId, path);
+    try {
+      final size = await File(path).length();
+      if (!mounted) return;
+      final consent = await mediaLaneConsentFor(context,
+          length: size, isGroup: widget.isGroup || widget.isChannel);
+      if (consent == null) return;
+      await service.sendMediaMessage(widget.conversationId, path,
+          consent: consent);
+    } finally {
+      TransientFiles.discardSurface(path);
+    }
   }
 
   Future<void> _pickMedia(ICleonaService service) async {
@@ -2672,6 +2816,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final msgId = _editingMessageId;
     if (newText.isEmpty || service == null || msgId == null) return;
     if (_isDeletedContactChat(service)) return; // §15.7: read-only archive
+    if (_isRemovedFromGroup(service)) return; // §16.2.2 (S403, V2): removed
 
     _cancelEdit();
     // Fire-and-forget: don't block UI
@@ -2726,6 +2871,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _textController.text.trim();
     if (text.isEmpty || service == null) return;
     if (_isDeletedContactChat(service)) return; // §15.7: read-only archive
+    if (_isRemovedFromGroup(service)) return; // §16.2.2 (S403, V2): removed
 
     _textController.clear();
 
@@ -2766,8 +2912,14 @@ class _ChatScreenState extends State<ChatScreen> {
   // ── Voice Recording ──────────────────────────────────────────────
   Future<void> _startRecording() async {
     if (await _recorder.hasPermission()) {
-      final dir = Directory.systemTemp;
-      final path = '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      // The recording is the spoken message in plaintext. It lies in the
+      // surface's transient directory — not in the system temp directory,
+      // which on Linux every account of the machine can read — and goes at
+      // the end of the operation (send, cancel, leaving the chat); what a
+      // crash leaves is cleared at the next start of the surface.
+      final path = TransientFiles.surfacePath(
+          'voice_${DateTime.now().millisecondsSinceEpoch}.m4a');
+      _recordingPath = path;
       await _recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
       setState(() {
         _isRecording = true;
@@ -2784,22 +2936,41 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Hands the file of the recording in progress to the caller, who from
+  /// then on answers for it. `null` if no recording was started.
+  String? _takeRecordingPath() {
+    final path = _recordingPath;
+    _recordingPath = null;
+    return path;
+  }
+
   Future<void> _stopAndSendRecording(ICleonaService? service) async {
     _recordingTimer?.cancel();
-    final path = await _recorder.stop();
+    final stopped = await _recorder.stop();
+    final path = _takeRecordingPath() ?? stopped;
     setState(() => _isRecording = false);
     // §15.7: read-only archive — the mic button that starts a recording is
     // already hidden in this state, but stopping still needs to happen
-    // above; only the send is skipped.
-    if (path != null && service != null && !_isDeletedContactChat(service)) {
+    // above; only the send is skipped. §16.2.2 (S403, V2): a removed
+    // member sends nothing either.
+    if (path != null &&
+        service != null &&
+        !_isDeletedContactChat(service) &&
+        !_isRemovedFromGroup(service)) {
+      // [_sendMedium] discards the file after the hand-over.
       await _sendMedium(service, path);
       _scrollToBottomAfterBuild();
+    } else {
+      // Not sent: the recording has no purpose any more.
+      TransientFiles.discardSurface(path);
     }
   }
 
   void _cancelRecording() async {
     _recordingTimer?.cancel();
-    await _recorder.stop();
+    final stopped = await _recorder.stop();
+    // Cancelled: the spoken message must not stay behind as a file.
+    TransientFiles.discardSurface(_takeRecordingPath() ?? stopped);
     setState(() => _isRecording = false);
   }
 
@@ -2810,7 +2981,10 @@ class _ChatScreenState extends State<ChatScreen> {
     // bound on the input field's focus node (`_handleInputKeyEvent`), which
     // this same read-only state also removes from the tree; this check is
     // the actual gate, the missing focus node is only why it can't fire.
-    if (_isDeletedContactChat(service)) return;
+    // §16.2.2 (S403, V2): the same for a group this device was removed from.
+    if (_isDeletedContactChat(service) || _isRemovedFromGroup(service)) {
+      return;
+    }
 
     final content = await ClipboardHelper.getContent();
 
@@ -2842,9 +3016,21 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     // Binary content: show confirmation dialog with preview
-    if (!mounted) return;
+    //
+    // On Android the clipboard item already lies as a copy in the app's
+    // cache at this point (it is what the preview shows). Declining the
+    // paste ends the operation, so the copy goes; on a desktop
+    // `content.filePath` is the user's own file and `discardSurface`
+    // leaves it alone.
+    if (!mounted) {
+      TransientFiles.discardSurface(content.filePath);
+      return;
+    }
     final confirmed = await _showPasteConfirmDialog(content);
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !mounted) {
+      TransientFiles.discardSurface(content.filePath);
+      return;
+    }
 
     final tmpPath = await ClipboardHelper.saveToTempFile(content);
     if (tmpPath != null) {
@@ -3627,25 +3813,32 @@ class _MessageBubbleState extends State<_MessageBubble> {
   // exporting stay available on a deleted contact's archive.
   bool get _canEdit {
     if (readOnlyArchive) return false;
-    if (!message.isOutgoing || message.isDeleted) return false;
+    if (!message.isOutgoing) return false;
     final editWindowMs = chatConfig?.editWindowMs ?? _defaultEditWindowMs;
     if (editWindowMs == 0) return false; // editing disabled
     final ageMs = DateTime.now().millisecondsSinceEpoch - message.timestamp.millisecondsSinceEpoch;
     return ageMs <= editWindowMs;
   }
 
-  bool get _canDelete => !readOnlyArchive && message.isOutgoing && !message.isDeleted;
+  bool get _canDelete => !readOnlyArchive && message.isOutgoing;
 
-  bool get _canForward => !message.isDeleted && (chatConfig?.allowForwarding ?? true);
+  bool get _canForward => chatConfig?.allowForwarding ?? true;
 
-  bool get _canSaveMedia => !message.isDeleted && message.isMedia &&
-      message.filePath != null && (chatConfig?.allowDownloads ?? true);
+  bool get _canSaveMedia => message.isMedia &&
+      message.filePath != null && !_localCopyLost &&
+      (chatConfig?.allowDownloads ?? true);
 
-  bool get _canCopyText => !message.isDeleted && message.text.isNotEmpty;
+  /// S399 O-1: a received file whose local copy is gone (not archived —
+  /// the archive tile covers that, §21.6).
+  bool get _localCopyLost =>
+      _archivedMedium() == null &&
+      mediaLocalCopyLost(message, (p) => _mediaThere(p));
 
-  bool get _canReply => !readOnlyArchive && !message.isDeleted;
+  bool get _canCopyText => message.text.isNotEmpty;
 
-  bool get _canReact => !readOnlyArchive && !message.isDeleted;
+  bool get _canReply => !readOnlyArchive;
+
+  bool get _canReact => !readOnlyArchive;
 
   /// §12.2: "retry" is the ONLY user action of the state table,
   /// and it stands at exactly one state — `failed`.
@@ -3654,7 +3847,13 @@ class _MessageBubbleState extends State<_MessageBubble> {
   /// after 14 days (§9.3 forbids the clock). At `failed` it means
   /// what it says: no rung of the ladder has carried.
   /// §15.7: closed in the read-only archive — resending is sending.
-  bool get _canResend => !readOnlyArchive && message.isOutgoing && message.status == MessageStatus.failed;
+  /// A file is never sent again (§9.3, §12.2 "retry — not for a file",
+  /// D-34, S398-W1): the action exists for text only.
+  bool get _canResend =>
+      !readOnlyArchive &&
+      message.isOutgoing &&
+      !message.isMedia &&
+      message.status == MessageStatus.failed;
 
   bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact || _canResend;
 
@@ -3750,7 +3949,6 @@ class _MessageBubbleState extends State<_MessageBubble> {
     final locale = AppLocale.read(context);
     final isOutgoing = message.isOutgoing;
     final colorScheme = Theme.of(context).colorScheme;
-    final deleted = message.isDeleted;
 
     // System messages (e.g., member left)
     if (message.senderNodeIdHex.isEmpty) {
@@ -3758,7 +3956,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Text(
-            message.text,
+            systemNoticeText(locale, message.text),
             style: TextStyle(
               fontSize: 12,
               color: colorScheme.outline,
@@ -3769,7 +3967,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
       );
     }
 
-    if (isSystemChannel && !deleted && message.text.startsWith('{')) {
+    if (isSystemChannel && message.text.startsWith('{')) {
       final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
       final post = SystemChannelPost(
         text: message.text,
@@ -3802,11 +4000,10 @@ class _MessageBubbleState extends State<_MessageBubble> {
     }
 
     // Simple plain-text messages: delegate to the design-system MessageBubble.
-    // Complex message types (media, polls, deleted, link preview, forwarded,
+    // Complex message types (media, polls, link preview, forwarded,
     // search-highlight, edit mode, group sender label) retain the inline
     // implementation below because MessageBubble only handles plain text.
-    final isSimpleText = !deleted &&
-        !message.isMedia &&
+    final isSimpleText = !message.isMedia &&
         message.pollId == null &&
         !message.hasLinkPreview &&
         message.forwardedFrom == null &&
@@ -3827,7 +4024,11 @@ class _MessageBubbleState extends State<_MessageBubble> {
         // gui-42: surface an active per-chat disappearing-message timer. Uses
         // the accepted/active config (conv.config) — a pending proposal lives
         // separately in conv.pendingConfigProposal and must NOT light this up.
-        expiryActive: chatConfig?.expiryDurationMs != null,
+        // §21.5.3: the message's own deadline decides, not the one the
+        // conversation has now; a row without a recorded one takes that.
+        expiryActive: message.expiryMs != null
+            ? message.expiryMs! > 0
+            : chatConfig?.expiryDurationMs != null,
         membershipMismatch: message.membershipMismatch,
         onActionsPressed: _hasMenu
             ? () => _showMessageActions(context)
@@ -3857,12 +4058,10 @@ class _MessageBubbleState extends State<_MessageBubble> {
         ? colorScheme.tertiaryContainer
         : isEditing
             ? colorScheme.primaryContainer.withValues(alpha: 0.6)
-            : deleted
-                ? colorScheme.surfaceContainerHighest.withValues(alpha: 0.5)
-                : isOutgoing
-                    ? colorScheme.primaryContainer
-                    : colorScheme.surfaceContainerHighest;
-    final bubbleColor = useBlur && !isSearchHighlight && !isEditing && !deleted
+            : isOutgoing
+                ? colorScheme.primaryContainer
+                : colorScheme.surfaceContainerHighest;
+    final bubbleColor = useBlur && !isSearchHighlight && !isEditing
         ? (isOutgoing ? ownPhotoFill : partnerPhotoFill)
         : baseColor;
 
@@ -3879,7 +4078,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
               ? Border.all(color: colorScheme.tertiary, width: 2)
               : isEditing
                   ? Border.all(color: colorScheme.primary, width: 1.5)
-                  : useBlur && !deleted
+                  : useBlur
                       ? Border.all(color: const Color(0x26FFFFFF), width: 1) // 15% white, matches chat_list_tile
                       : _activeSkinBorderWidth(context) > 0
                           ? Border.all(color: colorScheme.outline.withValues(alpha: 0.3), width: _activeSkinBorderWidth(context))
@@ -3894,12 +4093,12 @@ class _MessageBubbleState extends State<_MessageBubble> {
               Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (message.forwardedFrom != null && !deleted)
+              if (message.forwardedFrom != null)
                 Text(
                   locale.tr('forwarded_from', {'name': message.forwardedFrom!}),
                   style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: colorScheme.outline),
                 ),
-              if (message.replyToText != null && !deleted)
+              if (message.replyToText != null)
                 Container(
                   margin: const EdgeInsets.only(bottom: 4),
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -3922,7 +4121,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     ],
                   ),
                 ),
-              if (isGroup && !isOutgoing && senderDisplayName.isNotEmpty && !deleted)
+              if (isGroup && !isOutgoing && senderDisplayName.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 2),
                   child: Text(
@@ -3934,23 +4133,16 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     ),
                   ),
                 ),
-              if (deleted)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.block, size: 14, color: colorScheme.outline),
-                    const SizedBox(width: 4),
-                    Text(
-                      locale.get('message_deleted'),
-                      style: TextStyle(
-                        color: colorScheme.outline,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ],
-                )
-              else if (message.isMedia)
-                _buildMediaContent(context)
+              if (message.isMedia) ...[
+                _buildMediaContent(context),
+                // §22.5.1 (S398-W4): the running lane 2/3 transfer as
+                // progress BESIDE the delivery state, never instead of it.
+                // Draws nothing while no transfer runs for this message.
+                TransferProgressLine(
+                  messageId: message.id,
+                  translate: locale.get,
+                ),
+              ]
               else if (message.pollId != null)
                 PollCard(pollId: message.pollId!)
               else if (message.calendarEventId != null)
@@ -3959,7 +4151,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 _buildTextWithLinks(
                   message.text,
                   TextStyle(
-                    color: useBlur && !isSearchHighlight && !isEditing && !deleted
+                    color: useBlur && !isSearchHighlight && !isEditing
                         // Photo-skin bubble fill is dark (50%-black neutral
                         // ± accent tint); use white text + drop shadow so it
                         // stays readable over any blurred photo region.
@@ -3967,7 +4159,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         : (isOutgoing
                             ? colorScheme.onPrimaryContainer
                             : colorScheme.onSurface),
-                    shadows: useBlur && !isSearchHighlight && !isEditing && !deleted
+                    shadows: useBlur && !isSearchHighlight && !isEditing
                         ? const [
                             Shadow(color: Color(0x99000000), blurRadius: 4, offset: Offset(0, 1)),
                           ]
@@ -4000,7 +4192,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 if (ChannelUri.findInText(message.text) != null)
                   _buildChannelInviteCard(context),
               ],
-              if (message.membershipMismatch && !deleted)
+              if (message.membershipMismatch)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Row(
@@ -4023,7 +4215,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     ],
                   ),
                 ),
-              if (message.reactions.isNotEmpty && !deleted)
+              if (message.reactions.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Wrap(
@@ -4044,13 +4236,35 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     }).toList(),
                   ),
                 ),
+              // §12.2 "warning mark and its reason", §9.4 "Reasons" (S398-W1):
+              // a failed file says why — at the sender and the recipient alike.
+              if (_failureText(context) case final why?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.error_outline, size: 14, color: colorScheme.error),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          why,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: colorScheme.error,
+                                fontSize: 11,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const SizedBox(height: 2),
               Align(
                 alignment: Alignment.centerRight,
                 child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (message.editedAt != null && !deleted) ...[
+                  if (message.editedAt != null) ...[
                     Text(
                       locale.get('edited'),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -4066,13 +4280,13 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   Text(
                     '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: useBlur && !isSearchHighlight && !isEditing && !deleted
+                          color: useBlur && !isSearchHighlight && !isEditing
                               ? Colors.white.withValues(alpha: 0.78)
                               : colorScheme.outline,
                           fontSize: 10,
                         ),
                   ),
-                  if (isOutgoing && !deleted) ...[
+                  if (isOutgoing) ...[
                     const SizedBox(width: 4),
                     // M8: a missing tick is NOT a failed
                     // delivery. In high-secure mode the tick depends on
@@ -4575,6 +4789,31 @@ class _MessageBubbleState extends State<_MessageBubble> {
     final locale = AppLocale.read(context);
     final colorScheme = Theme.of(context).colorScheme;
 
+    // S399 O-1: received and completed, but the local copy is gone — say so,
+    // instead of a fallback that reads "not downloaded yet". The transcript
+    // belongs to the message (§21.7) and stays.
+    if (_localCopyLost) {
+      final transcript = message.transcriptText;
+      final tile = MediaMissingTile(message: message, translate: locale.get);
+      if (transcript == null || transcript.isEmpty) return tile;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          tile,
+          Padding(
+            padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
+            child: Text(
+              transcript,
+              style: TextStyle(
+                  fontSize: 13,
+                  color: colorScheme.onSurface.withValues(alpha: 0.7)),
+            ),
+          ),
+        ],
+      );
+    }
+
     // Image with thumbnail or file preview
     if (message.isImage) {
       Widget? imageWidget;
@@ -4832,6 +5071,30 @@ class _MessageBubbleState extends State<_MessageBubble> {
   /// pending". A recipient who is offline is not an error (§9.1),
   /// and a user waiting for the second tick should not have to guess
   /// whether something is broken.
+  /// The reason of a failed file, translated (§9.4 "Reasons", S398-W1);
+  /// `null` when the message is not a failed file with a reason.
+  String? _failureText(BuildContext context) {
+    final reason = message.failureReason;
+    if (reason == null) return null;
+    final failed = message.isOutgoing
+        ? message.status == MessageStatus.failed
+        : message.mediaState == MediaDownloadState.failed;
+    if (!failed) return null;
+    final locale = AppLocale.read(context);
+    var text = locale.get('failure_reason_${reason.wireName}');
+    final detail = message.failureDetail;
+    if (reason == FailureReason.incomplete && detail != null) {
+      final parts = detail.split('/');
+      if (parts.length == 2) {
+        text = locale
+            .get('failure_reason_incomplete_counted')
+            .replaceAll('{complete}', parts[0])
+            .replaceAll('{stripes}', parts[1]);
+      }
+    }
+    return text;
+  }
+
   String _statusTooltip(BuildContext context, MessageStatus status) {
     final locale = AppLocale.read(context);
     switch (status) {

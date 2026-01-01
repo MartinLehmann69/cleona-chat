@@ -4,10 +4,12 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.media.MediaCodec
 import android.media.MediaExtractor
@@ -23,6 +25,9 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -46,6 +51,7 @@ class MainActivity : FlutterActivity() {
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
     private val UPDATE_CHANNEL = "chat.cleona/update"
+    private val SCREENSHOT_CHANNEL = "chat.cleona/screenshot"
     // S363, point 1 (option D): device credential confirmation via
     // `KeyguardManager`. Deliberately NOT `androidx.biometric`:
     //   * the dependency is missing (`android/app/build.gradle.kts` lists
@@ -239,6 +245,18 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // §23.10: the application's own screenshot. The window carries
+        // FLAG_SECURE, so the system screenshot path is blocked; the Dart side
+        // makes the picture from its own drawing and hands it over to be
+        // saved in the user's picture collection.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SCREENSHOT_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "savePng" -> saveOwnScreenshot(call.argument<ByteArray>("png"), result)
+                    else -> result.notImplemented()
+                }
+            }
+
         // Storage channel: free disk space query for dynamic Storage Budget
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, STORAGE_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -250,6 +268,24 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                         result.success(0L)
                     }
+                }
+                // S398, B-3: the device's name for the device set and the
+                // enrolment request. `Platform.localHostname` is "localhost"
+                // on Android; the Dart side (device_name.dart) chooses from
+                // these three and never falls back to the host name here.
+                "getDeviceName" -> {
+                    val name = try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+                            Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+                        } else null
+                    } catch (e: Exception) {
+                        null
+                    }
+                    result.success(mapOf(
+                        "name" to name,
+                        "manufacturer" to Build.MANUFACTURER,
+                        "model" to Build.MODEL,
+                    ))
                 }
                 else -> result.notImplemented()
             }
@@ -615,6 +651,17 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // §23.10: exclude the activity window from screen capture, screen
+        // recording and casting on every build. The only switch that turns
+        // it off is the Android system property debug.cleona.capture; when
+        // its value is exactly "1" the flag is not set. The property is read
+        // by running /system/bin/getprop through ProcessBuilder — a normal
+        // sandboxed app can execute this world-executable binary, and getprop
+        // reads world-readable debug.* properties without hidden-API reflection.
+        if (!isCaptureDebugEnabled()) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+
         // POST_NOTIFICATIONS Runtime-Permission (API 33+)
         requestNotificationPermission()
 
@@ -627,6 +674,11 @@ class MainActivity : FlutterActivity() {
 
         // Create message notification channel (separate from foreground service)
         createMessageNotificationChannel()
+
+        // §23.10: mark the Flutter view as accessibilityDataSensitive on
+        // Android 14+ so only accessibility services declared as accessibility
+        // tools read its content.
+        markContentAccessibilitySensitive()
 
         ensureForegroundService()
 
@@ -844,6 +896,7 @@ class MainActivity : FlutterActivity() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setGroup("cleona_messages")
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
 
         val manager = getSystemService(NotificationManager::class.java)
@@ -956,6 +1009,7 @@ class MainActivity : FlutterActivity() {
                     .setSilent(true)
                     .setContentIntent(pendingIntent)
                     .setAutoCancel(true)
+                    .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                     .build()
                 manager.notify(0, notification)
             } else {
@@ -988,6 +1042,98 @@ class MainActivity : FlutterActivity() {
             startActivity(intent)
         } catch (e: Exception) {
             Log.w("Cleona", "Battery optimization exemption request failed: ${e.message}")
+        }
+    }
+
+    /// Reads the system property debug.cleona.capture via /system/bin/getprop.
+    /// There is no public SDK API for arbitrary Android system properties;
+    /// running the world-executable getprop binary avoids hidden-API reflection.
+    private fun isCaptureDebugEnabled(): Boolean {
+        return try {
+            val process = ProcessBuilder("/system/bin/getprop", "debug.cleona.capture")
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            process.waitFor()
+            output == "1"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /// §23.10: save the application's own screenshot to the user's picture
+    /// collection as `Pictures/Cleona/cleona_<time>.png`.
+    ///
+    /// The picture itself is made on the Dart side from the application's own
+    /// drawing (`lib/core/platform/app_screenshot.dart`). It is NOT read back
+    /// from the window: Flutter draws into a surface of its own, and a copy of
+    /// the activity window is an empty picture (measured on the emulator,
+    /// API 35, 03.10.2026: 1080x2400, every pixel transparent).
+    ///
+    /// Scoped storage (Android 10, API 29) lets an application add to the
+    /// picture collection without a storage permission. Below that it would
+    /// need WRITE_EXTERNAL_STORAGE; the function is refused there instead.
+    private fun saveOwnScreenshot(png: ByteArray?, result: MethodChannel.Result) {
+        if (png == null || png.isEmpty()) {
+            result.error("NO_PICTURE", "No picture was handed over", null)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            result.error(
+                "API_TOO_OLD",
+                "Own screenshot requires Android 10 (API 29) or newer",
+                null,
+            )
+            return
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "cleona_${System.currentTimeMillis()}.png")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Cleona")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri == null) {
+            result.error("SAVE_FAILED", "MediaStore insert returned no URI", null)
+            return
+        }
+        try {
+            val out = contentResolver.openOutputStream(uri)
+                ?: throw Exception("Could not open MediaStore output stream")
+            out.use { it.write(png) }
+            contentResolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            result.success(mapOf("uri" to uri.toString()))
+        } catch (e: Exception) {
+            // Do not leave a half-written, pending entry in the collection.
+            try { contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            result.error("SAVE_FAILED", e.message, null)
+        }
+    }
+
+    /// §23.10: mark the Flutter content view tree as accessibilityDataSensitive
+    /// on Android 14+. The flag is set recursively on every child because the
+    /// embedding may wrap the FlutterView in intermediate containers.
+    private fun markContentAccessibilitySensitive() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        val content = findViewById<View>(android.R.id.content) ?: return
+        content.post { setAccessibilityDataSensitiveRecursive(content) }
+    }
+
+    private fun setAccessibilityDataSensitiveRecursive(view: View) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Not a Kotlin property: the getter returns Boolean, the setter
+            // takes the int constant.
+            view.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                setAccessibilityDataSensitiveRecursive(view.getChildAt(i))
+            }
         }
     }
 

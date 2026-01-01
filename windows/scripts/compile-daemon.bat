@@ -61,6 +61,12 @@ if not exist %OUTDIR%\bin\..\lib\*.dll (
   goto fail
 )
 
+REM init-profile (S403-9): scripts/moderation-swarm.sh creates the profiles of
+REM the Windows lab VMs with it. It is staged only (build\.init-cli), not put
+REM into Release\ — it is not part of the shipped bundle.
+call %CLEONA_FLUTTER_BIN%\dart build cli --target bin/cleona_init_profile.dart --output build\.init-cli >> %LOG% 2>&1
+if errorlevel 1 goto fail
+
 echo DONE > %MARK%
 goto ende
 

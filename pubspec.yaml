@@ -1,7 +1,7 @@
 name: cleona
 description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
 publish_to: 'none'
-version: 4.2.0+1
+version: 4.2.3+4
 
 environment:
   sdk: ^3.12.0
@@ -51,6 +51,12 @@ dependencies:
 
   # Connectivity detection
   connectivity_plus: ^6.0.0
+
+  # Session bus (Linux): the daemon hands a system notification to
+  # `org.freedesktop.Notifications` itself, so that neither title nor text
+  # is ever an argument of a program (§22.8). Pure Dart; until S403 it came
+  # along only as a dependency of `connectivity_plus`.
+  dbus: ^0.7.12
 
   # QR Code
   qr: ^3.0.2
@@ -141,6 +147,13 @@ flutter:
     - assets/skins/fire/
     - assets/skins/storm/
     - assets/skins/gold/
+    # The license texts of the bundled third-party native libraries (S403,
+    # owner decision 03.10.2026): they ship with every GUI bundle, are
+    # registered with Flutter's LicenseRegistry at app start (lib/main.dart)
+    # and are copied next to the Windows helper programs
+    # (windows/runner/CMakeLists.txt). Verbatim upstream texts — see
+    # assets/licenses/INDEX.txt; do not edit the texts.
+    - assets/licenses/
 
 # ── Store: SQLite3 Multiple Ciphers from VENDORED source (S366) ─────────
 #

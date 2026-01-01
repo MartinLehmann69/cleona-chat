@@ -1,8 +1,41 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:cleona/core/update/binary_update_manager.dart'
     show BinaryUpdateState;
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:mycelium/update_trace.dart';
+
+/// The diagnosis line of [step] for [m] (S406-UPD2).
+void _trace(String step, UpdateManifest? m, String reason) => updateTrace(step,
+    seq: m?.minMonotoneSeq,
+    version: m?.version,
+    object: m?.binaryHashes?[Platform.operatingSystem],
+    platform: Platform.operatingSystem,
+    reason: reason);
+
+/// Whether the update fetch path is suspended right now (v4_2 §26.6.1
+/// "Data-saving mode suspends the fetch path over metered connections";
+/// §24.4.2 "The mode also suspends the update fetch path over metered
+/// connections"; D-32 says the same for bulk pieces).
+///
+/// ONLY the data-saving mode, which the user switches on, suspends it, and
+/// only over a metered connection. Mobile data without data-saving mode
+/// fetches (S406-UPD, finding U-1: until S406 every metered connection
+/// blocked the fetch, so a phone that lives on mobile data never
+/// collected an update).
+///
+/// [metered] `null` = not read yet. With data-saving mode on, a phone
+/// treats that as metered — the same direction as `bulkServeAllowedNow`
+/// (`mycelium_seam.dart`) — a desktop as unmetered.
+bool updateFetchLockedFor({
+  required bool mobile,
+  required bool dataSaving,
+  required bool? metered,
+}) {
+  if (!dataSaving) return false;
+  return metered ?? mobile;
+}
 
 /// The offer of a FINISHED update — separate from collecting.
 ///
@@ -57,13 +90,21 @@ class UpdateOffer<Q extends Object> {
 
   final void Function(String)? report;
 
-  /// `true` as long as fetching is blocked — metered connection
-  /// (mobile, metered WLAN). Owner decision 15.09.2026: the update
-  /// is not fetched over a metered connection (v4_2 §24.4.2,
-  /// §26.6.1 "suspends the fetch path over metered connections"). Synchronous:
-  /// the caller holds the last read value and reports every change
-  /// via [networkKindChanged]. `null` = never blocked (desktop).
+  /// `true` as long as fetching is blocked — data-saving mode on AND a
+  /// metered connection ([updateFetchLockedFor]; v4_2 §24.4.2, §26.6.1
+  /// "Data-saving mode suspends the fetch path over metered connections").
+  /// Synchronous: the caller holds the last read value and reports every
+  /// change via [networkKindChanged]. `null` = never blocked (desktop).
   final bool Function()? fetchLocked;
+
+  /// The target is known, but fetching is locked ([fetchLocked]): its object
+  /// is expected all the same — pieces arriving by cover fill are kept, and
+  /// an object completed that way is checked and offered (v4_2 §26.6.1
+  /// "pieces arriving by cover fill are still kept", §24.4.2 "an update then
+  /// completes through cover fill"; S406-UPDPKG P3). Until S406 a lock
+  /// returned before anything expected the object, and every cover piece of
+  /// it was dropped (S406-UPD2 finding B-4).
+  final void Function(Q source, UpdateManifest target)? expect;
 
   Q? _source;
   UpdateManifest? _target;
@@ -78,6 +119,7 @@ class UpdateOffer<Q extends Object> {
     required this.isNew,
     this.report,
     this.fetchLocked,
+    this.expect,
   });
 
   /// Whether a collection did not begin only because of a metered connection.
@@ -89,8 +131,15 @@ class UpdateOffer<Q extends Object> {
   void networkKindChanged() {
     final q = _source;
     final z = _target;
-    if (!_waitsOnNetwork || q == null || z == null) return;
-    if (fetchLocked?.call() == true) return;
+    if (!_waitsOnNetwork || q == null || z == null) {
+      _trace('retry-moment', z, 'network kind changed — nothing waits on it');
+      return;
+    }
+    if (fetchLocked?.call() == true) {
+      _trace('retry-moment', z, 'network kind changed — fetching still locked');
+      return;
+    }
+    _trace('retry-moment', z, 'network kind changed — the waiting target goes on');
     onManifest(q, z, true);
   }
 
@@ -127,7 +176,11 @@ class UpdateOffer<Q extends Object> {
   void againTry() {
     final q = _source;
     final z = _target;
-    if (q == null || z == null) return;
+    if (q == null || z == null) {
+      _trace('retry-moment', z, 'moment — no target known yet');
+      return;
+    }
+    _trace('retry-moment', z, 'moment — the known target is presented again');
     onManifest(q, z, true);
   }
 
@@ -177,9 +230,15 @@ class UpdateOffer<Q extends Object> {
   ///   such moment" — the manifest comes at exactly these moments.
   /// * **Older**, or the same target is running/lies ready: nothing.
   void onManifest(Q source, UpdateManifest manifest, bool inNetworkDistributed) {
-    if (!inNetworkDistributed) return;
+    if (!inNetworkDistributed) {
+      _trace('load-decision', manifest, 'NO — not distributed in-network');
+      return;
+    }
     final q = _source ??= source;
-    if (!identical(q, source)) return;
+    if (!identical(q, source)) {
+      _trace('load-decision', manifest, 'NO — another service collects');
+      return;
+    }
     final old = _target;
     final newer = old == null ||
         isNew(manifest.version, old.version) ||
@@ -196,16 +255,27 @@ class UpdateOffer<Q extends Object> {
       final equal = !isNew(old.version, manifest.version);
       final withoutResult = _state == BinaryUpdateState.idle ||
           _state == BinaryUpdateState.failed;
-      if (!equal || !withoutResult || _collects) return;
+      if (!equal || !withoutResult || _collects) {
+        _trace('load-decision', manifest,
+            'NO — ${!equal ? 'older than the target' : _collects ? 'a collection runs already' : 'the target lies ${_state.name}'}');
+        return;
+      }
     }
     if (fetchLocked?.call() == true) {
+      _trace('load-decision', _target,
+          'NO fetch — data-saving mode over a metered connection; waits, '
+          'the object is expected (cover fill kept)');
       if (!_waitsOnNetwork) {
         report?.call('Update: metered connection — v${_target!.version} is '
             'fetched only over an unmetered one');
       }
       _waitsOnNetwork = true;
+      expect?.call(q, _target!);
       return;
     }
+    _trace('load-decision', _target,
+        'YES — ${newer ? (old == null ? 'first target' : 'newer than v${old.version} seq ${old.minMonotoneSeq ?? 0}') : 'same target again after ${_state.name}'}, '
+        'fetching not locked');
     _waitsOnNetwork = false;
     _collects = true;
     final target = _target!;
@@ -219,6 +289,9 @@ class UpdateOffer<Q extends Object> {
   /// The state of the collection. NEVER installs — not even on `ready`.
   void onState(Q source, BinaryUpdateState state) {
     if (!identical(_source, source)) return;
+    if (state == BinaryUpdateState.ready && _state != state) {
+      _trace('offer-ready', _target, 'checked and ready — banner visible');
+    }
     _state = state;
   }
 
@@ -226,6 +299,10 @@ class UpdateOffer<Q extends Object> {
   /// or while an installation is already running, nothing happens.
   Future<bool> consent() async {
     final q = _source;
+    _trace('click', _target,
+        q == null || !ready || _installed
+            ? 'NOTHING installed — state ${_state.name}${_installed ? ', installation runs' : ''}'
+            : 'consent given');
     if (q == null || !ready || _installed) {
       report?.call('Update: consent without an update ready '
           '(state ${_state.name}) — nothing installed');
@@ -233,7 +310,10 @@ class UpdateOffer<Q extends Object> {
     }
     _installed = true;
     try {
-      return await install(q);
+      final done = await install(q);
+      _trace('install', _target,
+          done ? 'handed to the system' : 'NOT carried out');
+      return done;
     } finally {
       _installed = false;
     }

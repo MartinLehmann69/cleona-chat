@@ -19,6 +19,7 @@ import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/identity/identity_context.dart'
     show StoredRotationLink;
+import 'package:cleona/core/identity/rotation_chain.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/storage/message_store.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
@@ -84,20 +85,13 @@ class FrTally {
 class SystemChannelRecordStore {
   final CLogger _log;
 
-  /// Upper limit for the length of the rotation chain travelling along (S392).
-  ///
-  /// It is a **DoS gate, not the spec** — v4_2 names no number.
-  /// Without it, a self-signed record with N invented links costs the
-  /// recipient N ML-DSA checks, while the attacker signs only once.
-  /// At 32 that is in the worst case ~32 checks and a record of about
-  /// 235 KB.
-  ///
-  /// The number is deliberately chosen far above any plausible number of
-  /// emergency rotations of an identity, because a reached limit would
-  /// lock the author out — exactly what §14.5 ("a rotation is never
-  /// blocked, only shown") forbids. Whoever lowers it lowers it against
-  /// this sentence.
-  static const int maxRotationChainLinks = 32;
+  /// Upper limit for the length of the rotation chain travelling along
+  /// (S392) — since S398 the ONE limit of `rotation_chain.dart`
+  /// ([kRotationChainMaxLinks], E-A14), which the delivery layer checks as
+  /// well. A DoS gate, not the spec: at 32 a record costs in the worst case
+  /// ~32 ML-DSA checks and about 235 KB. Whoever lowers it lowers it against
+  /// §14.5 ("a rotation is never blocked, only shown").
+  static const int maxRotationChainLinks = kRotationChainMaxLinks;
 
   /// channelIdHex → fingerprintHex → record
   final Map<String, Map<String, StoredSysChanRecord>> _records = {};
@@ -343,65 +337,35 @@ class SystemChannelRecordStore {
   /// Otherwise a never-rotated record could append a junk chain and
   /// still get through — and nobody would check anything any more.
   ///
-  /// The order is intentional: first the four cheap structure and
-  /// binding checks (byte comparisons, one SHA-256), only then the
-  /// expensive signature checks. An attacker must not be able to
-  /// trigger N ML-DSA checks with a forged record.
+  /// Since S398 the check itself is [RotationChain.holds] — the same one
+  /// the delivery layer runs on envelopes, bundles and text lines (§4.5.4).
+  /// This method only maps the record's link form (every link names its old
+  /// AND its new keys) onto it; a link whose old keys are not its
+  /// predecessor's new keys fails in [RotationChain.fromExplicit]. A link
+  /// with an empty signature (LD-8 with outdated user sig SK,
+  /// `identity_context.dart rotateDelegation`) fails in the check.
   bool _verifyRotationChain(proto.SystemChannelRecord record) {
-    final chain = record.rotationChain;
-    if (chain.length > maxRotationChainLinks) return false;
-
-    // (1) Founding anchor: the first link holds the keys from which the
-    //     UserID derives. If it does not match them, the chain belongs to
-    //     another identity.
-    final founding = HdWallet.computeUserId(
-        Uint8List.fromList(chain.first.oldEd25519Pk),
-        Uint8List.fromList(chain.first.oldMlDsaPk));
-    if (_hex(founding) != _hex(record.authorUserId)) return false;
-
-    // (2) The chain must be a chain: the old pair of every link is the
-    //     new pair of its predecessor.
-    for (var i = 1; i < chain.length; i++) {
-      if (_hex(chain[i].oldEd25519Pk) != _hex(chain[i - 1].newEd25519Pk)) {
-        return false;
-      }
-      if (_hex(chain[i].oldMlDsaPk) != _hex(chain[i - 1].newMlDsaPk)) {
-        return false;
-      }
-    }
-
-    // (3) The last link must arrive at the keys with which the record is
-    //     signed — otherwise the chain proves a foreign path.
-    if (_hex(chain.last.newEd25519Pk) != _hex(record.authorEd25519Pk)) {
+    final wire = record.rotationChain;
+    if (wire.length > maxRotationChainLinks) return false;
+    try {
+      final chain = RotationChain.fromExplicit([
+        for (final l in wire)
+          (
+            oldEd25519Pk: Uint8List.fromList(l.oldEd25519Pk),
+            oldMlDsaPk: Uint8List.fromList(l.oldMlDsaPk),
+            newEd25519Pk: Uint8List.fromList(l.newEd25519Pk),
+            newMlDsaPk: Uint8List.fromList(l.newMlDsaPk),
+            sigEd25519: Uint8List.fromList(l.sigEd25519),
+            sigMlDsa: Uint8List.fromList(l.sigMlDsa),
+          )
+      ]);
+      return chain.holds(
+          Uint8List.fromList(record.authorUserId),
+          ChainKeys(Uint8List.fromList(record.authorEd25519Pk),
+              Uint8List.fromList(record.authorMlDsaPk)));
+    } on RotationChainError {
       return false;
     }
-    if (_hex(chain.last.newMlDsaPk) != _hex(record.authorMlDsaPk)) {
-      return false;
-    }
-
-    // (4) Every link is hybrid-signed by the OLD pair (§4.5.4). First
-    //     Ed25519 (cheap), then ML-DSA — and both are mandatory: a link
-    //     with an empty signature (LD-8 with outdated user sig SK,
-    //     `identity_context.dart rotateDelegation`) fails here.
-    for (final link in chain) {
-      if (link.oldEd25519Pk.length != 32) return false;
-      final content = StoredRotationLink.linkContentOf(
-          Uint8List.fromList(link.newEd25519Pk),
-          Uint8List.fromList(link.newMlDsaPk));
-      if (!SodiumFFI().verifyEd25519(
-          content,
-          Uint8List.fromList(link.sigEd25519),
-          Uint8List.fromList(link.oldEd25519Pk))) {
-        return false;
-      }
-      if (!OqsFFI().mlDsaVerify(
-          content,
-          Uint8List.fromList(link.sigMlDsa),
-          Uint8List.fromList(link.oldMlDsaPk))) {
-        return false;
-      }
-    }
-    return true;
   }
 
   /// Maps the persisted chain of an identity onto the wire form.

@@ -19,13 +19,15 @@
 // disappearing — an outdated status line that silently goes away
 // is the mistake this project has made twice.
 //
-// **What is STILL MISSING, named instead of kept quiet:** the 10 s loss rule
-// from §17.4 ("10 s without valid media frames end the session") has a
-// reader for `DSession.lastFrameAt`, but no timer — [onMediaPathLost]
-// still has no trigger in `lib/` to this day. And the media relay from §17.3
-// ("media-relay opt-in via a dual-stack volunteer") is not built: if
-// no pair carries, the answer is the honest refusal of the spec, not a
-// detour.
+// **The 10 s loss rule from §17.4** ("10 s without valid media frames end
+// the session") lives here: [watchMediaLoss] arms one single-shot timer per
+// session once its path carries, the receive branch in [admitSession] stamps
+// every valid MEDIA frame, and [onMediaPathLost] fires after
+// [kMediaLossTimeout] without one.
+//
+// **What is NOT built, named instead of kept quiet:** the media relay from
+// §17.3 ("media-relay opt-in via a dual-stack volunteer"). If no pair
+// carries, the answer is the honest refusal of the spec, not a detour.
 //
 // ══ TWO SEAMS OUTSIDE THIS FILE ══════════════════════════════
 //
@@ -44,6 +46,12 @@
 //    [CallPlaneD] — socket, own data port and the §17.3 address mirror.
 //    The three come from the same node and therefore go as ONE piece;
 //    three setters would be three opportunities to forget one.
+//    **S398-W2: `attachV41` has had no caller since the delivery layer
+//    became `mycelium/`, and with it Plane D fell silent — every call was
+//    rejected at `mediaUnavailableReason`.** The attachment now runs at the
+//    4.2 host start (`plane_d_host.dart`, `planeDAttach`): the cookie table
+//    sends through the host's one data port (§11.1) and is fed by the
+//    branch beside its shell (`ReachabilityProof.beside`).
 // 2. **The signal line loses its information.** See [SignalDispatch].
 
 import 'dart:async';
@@ -108,8 +116,16 @@ final class CallPlaneD {
   /// A punch packet arrives at the binding or nowhere.
   final int ownPort;
 
-  /// The node's §17.3 address mirror.
-  final ObservedAddressBook observed;
+  /// The node's §17.3 address mirror from the link-layer handshake, or
+  /// `null` on the 4.2 path, where the data port has no link layer and the
+  /// mirror comes as [mirrored] (S398-W2).
+  final ObservedAddressBook? observed;
+
+  /// The node's §17.3 mirror under 4.2: the own address as a neighbour
+  /// outside the own segment saw it (`plane_d_host.dart`). A FUNCTION for
+  /// the same reason as [mapped] — it is learned after the start and
+  /// changes with the network.
+  final List<CallCandidate> Function()? mirrored;
 
   /// The CONFIRMED port mapping of the node (`V41Node.advertiseMapped`),
   /// or `null` — S376/A-1.
@@ -146,8 +162,9 @@ final class CallPlaneD {
   const CallPlaneD({
     required this.socket,
     required this.ownPort,
-    required this.observed,
+    this.observed,
     this.mapped,
+    this.mirrored,
   });
 }
 
@@ -176,7 +193,7 @@ class CallTransportV41 implements CallTransport {
   CallPlaneD? _planeD;
   final CLogger _log;
 
-  /// Attaches the node's Plane D. Called by `attachV41` as soon as
+  /// Attaches the node's Plane D. Called by `planeDAttach` (S398-W2) as soon as
   /// node and service both stand.
   ///
   /// Idempotent with respect to the same piece; a DIFFERENT one replaces the
@@ -231,8 +248,7 @@ class CallTransportV41 implements CallTransport {
     final socket = _planeD?.socket;
     if (socket == null) {
       _log.error('Plane D: session for ${_short(peerHex)} not possible — '
-          'no D socket hangs on this service, the demux branch '
-          'LinkDemux.dAdmission is empty for it (§17.4)');
+          'no D socket hangs on this service (§17.4)');
       return null;
     }
     forgetParticipant(peerHex);
@@ -273,6 +289,12 @@ class CallTransportV41 implements CallTransport {
         }
         return;
       }
+      // A VALID MEDIA FRAME — the quantity §17.4's loss rule counts. Stamped
+      // here and not read from `DSession.lastFrameAt`: that one rises on
+      // probes, path validation and control frames too, which are not media.
+      // And not bound to the confirmed path: the norm names no path, so a
+      // running path change cannot trip the rule.
+      _lastMediaUs[peerHex] = _lossClock.elapsedMicroseconds;
       onMediaFrame?.call(peerHex, frame);
     });
     _log.info('Layer D admitted for ${_short(peerHex)}: '
@@ -295,7 +317,10 @@ class CallTransportV41 implements CallTransport {
     final d = _planeD;
     if (d == null) return Uint8List(0);
     final k = await ownCallCandidates(
-        ownPort: d.ownPort, observed: d.observed, mapped: d.mapped?.call());
+        ownPort: d.ownPort,
+        observed: d.observed,
+        mapped: d.mapped?.call(),
+        mirrored: d.mirrored?.call() ?? const []);
     _ownCandidates = k;
     _log.info('Plane D: ${k.length} own address candidates (§17.3): '
         '${k.join(", ")}');
@@ -385,7 +410,8 @@ class CallTransportV41 implements CallTransport {
         await ownCallCandidates(
             ownPort: d.ownPort,
             observed: d.observed,
-            mapped: d.mapped?.call());
+            mapped: d.mapped?.call(),
+            mirrored: d.mirrored?.call() ?? const []);
     final window = PunchWindow(
       session: session,
       peerCandidates: peerCandidates,
@@ -595,6 +621,54 @@ class CallTransportV41 implements CallTransport {
     });
   }
 
+  // ── §17.4 loss detection ────────────────────────────────────────────────
+
+  /// §17.4: "**Loss detection:** 10 s without valid media frames end the
+  /// session (UI: "connection lost"), independent of signaling." The one
+  /// place this number stands.
+  static const Duration kMediaLossTimeout = Duration(seconds: 10);
+
+  /// The time base of the loss rule. Monotonic: a step of the wall clock
+  /// must neither end a live call nor keep a dead one.
+  final Stopwatch _lossClock = Stopwatch()..start();
+
+  /// When the last valid media frame of a session arrived, on [_lossClock].
+  final _lastMediaUs = <String, int>{};
+
+  /// The armed loss timers per counterpart. An entry exists only while a
+  /// watched session stands — no session, no timer (working rule 5).
+  final _lossTimers = <String, Timer>{};
+
+  @override
+  void watchMediaLoss(String peerHex) {
+    if (!_sessions.containsKey(peerHex)) return;
+    // The window opens NOW: the path has just been found to carry, and the
+    // peer's first media frame is allowed the full timeout from here.
+    _lastMediaUs[peerHex] = _lossClock.elapsedMicroseconds;
+    _armLossTimer(peerHex, kMediaLossTimeout);
+  }
+
+  /// One single-shot timer, re-armed for exactly the remainder. A call costs
+  /// one wake-up per [kMediaLossTimeout], not one per frame.
+  void _armLossTimer(String peerHex, Duration after) {
+    _lossTimers.remove(peerHex)?.cancel();
+    _lossTimers[peerHex] = Timer(after, () {
+      _lossTimers.remove(peerHex);
+      final last = _lastMediaUs[peerHex];
+      if (last == null || !_sessions.containsKey(peerHex)) return;
+      final silentUs = _lossClock.elapsedMicroseconds - last;
+      final leftUs = kMediaLossTimeout.inMicroseconds - silentUs;
+      if (leftUs > 0) {
+        _armLossTimer(peerHex, Duration(microseconds: leftUs));
+        return;
+      }
+      _lastMediaUs.remove(peerHex);
+      _log.warn('Plane D: no valid media frame from ${_short(peerHex)} for '
+          '${kMediaLossTimeout.inSeconds} s — the session is lost (§17.4)');
+      onMediaPathLost?.call(peerHex);
+    });
+  }
+
   // ── Signalisierung ────────────────────────────────────────────────────
 
   @override
@@ -626,11 +700,10 @@ class CallTransportV41 implements CallTransport {
       // branch here means: no node hangs on THIS service. That has
       // exactly three causes, and they are all observable — therefore
       // they are in the text and not in a comment.
-      return 'No D socket registered on this service, so the '
-          'demux branch LinkDemux.dAdmission is empty for it (§17.4). '
-          'Causes: V4.1 delivery is switched off (CLEONA_V41=0), '
-          'attachV41 has not run for this identity, or the '
-          'node was shut down.';
+      return 'No D socket registered on this service, so no Plane D '
+          'frame reaches it (§17.4). Causes: the host start has not '
+          'attached Plane D to this identity (planeDAttach / '
+          'planeDRegister), or the host was shut down.';
     }
     // ── WHAT IS ASKED HERE SINCE S361, AND WHAT NO LONGER ──────────
     //
@@ -764,9 +837,9 @@ class CallTransportV41 implements CallTransport {
     final d = _planeD;
     if (d == null) {
       return 'No D socket registered on this service, so tree '
-          'maintenance does not carry either (§17.4). Causes: V4.1 delivery is '
-          'switched off (CLEONA_V41=0), attachV41 has not run for this identity, '
-          'or the node was shut down.';
+          'maintenance does not carry either (§17.4). Causes: the host '
+          'start has not attached Plane D to this identity (planeDAttach / '
+          'planeDRegister), or the host was shut down.';
     }
     if (d.ownPort < 1 || d.ownPort > 65535) {
       return 'The node has no bound data port (${d.ownPort}), '
@@ -907,6 +980,9 @@ class CallTransportV41 implements CallTransport {
     _punches.remove(participantHex)?.cancel();
     _migrations.remove(participantHex)?.cancel();
     _peerCandidates.remove(participantHex);
+    // The loss rule ends with the session: nothing fires after a hang-up.
+    _lossTimers.remove(participantHex)?.cancel();
+    _lastMediaUs.remove(participantHex);
     _subscriptions.remove(participantHex)?.cancel();
     final session = _sessions.remove(participantHex);
     if (session == null) return;
@@ -930,6 +1006,7 @@ class CallTransportV41 implements CallTransport {
       ..._punches.keys,
       ..._migrations.keys,
       ..._peerCandidates.keys,
+      ..._lossTimers.keys,
     }) {
       forgetParticipant(peer);
     }

@@ -188,16 +188,22 @@ double holderLossCover(int failures, {int holders = kNominalBulkHolders}) {
 /// `lib/`, separately for `refill(`, `refillRequestFor`, `refillsRequested`
 /// and `.refill`:
 ///
-///   * receive branch: `BulkReceiver.refill()` (`bulk/bulk_receiver.dart:290`)
-///     is called from `service/media_bulk_lane.dart:571`
-///     (`refillRequestFor`) and `:606` (`maybeRequestRefill`).
-///   * trigger without a clock: `service/media_bulk_transport_v41.dart:267-281`
-///     reports the empty round, wired in `media_bulk_lane.dart:302-307`.
-///   * send branch: `MediaBulkLane.refill` (`media_bulk_lane.dart:494`)
-///     is called from `service/cleona_service_media.dart:427`; below it
-///     `BulkSender.refill` (`bulk/bulk_sender.dart:196`).
+///   * receive branch: `BulkReceiver.refill()`
+///     (`lib/core/bulk/bulk_receiver.dart:290`) is called from
+///     `lib/core/service/media_bulk_lane.dart:571` (`refillRequestFor`) and
+///     `:606` (`maybeRequestRefill`).
+///   * trigger without a clock:
+///     `lib/core/service/media_bulk_transport_v41.dart:267-281` reports the
+///     empty round, wired in `lib/core/service/media_bulk_lane.dart:302-307`.
+///   * send branch: `MediaBulkLane.refill`
+///     (`lib/core/service/media_bulk_lane.dart:494`) is called from
+///     `cleona_service_media.dart` (then line 427); below it
+///     `BulkSender.refill` (`lib/core/bulk/bulk_sender.dart:196`).
 ///   * cap per transfer: `kBulkRefillMaxRequests`
-///     (`media_bulk_lane.dart:605`).
+///     (`lib/core/service/media_bulk_lane.dart:605`).
+///
+///   All of these fell with the V4.1 bulk lane in S399 P2; the paths
+///   resolve through the history (last at `6a720147`).
 ///
 /// What REMAINS: the ~10 % above the p90 thus cost a return path
 /// instead of permanent costs — exactly the design this paragraph justifies.

@@ -1,22 +1,22 @@
 // lib/ui/components/connection_sheet.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 
-/// Connection sheet — §18 / §12.3.1 / §8.1.2
+/// Connection sheet — §25.7
 ///
 /// Opened when the user taps "Active Peers" (NetworkStatsScreen) or
 /// "Connected Peers" (SettingsScreen → Network section).
 ///
 /// Content:
 ///   1. Live list of active peers
-///   2. Debounced Reconnect button (Feature ②)
-///   3. Peer Rescue Bundle import/export section (Feature ③)
-///   4. Manual Peer Entry (co-located with bundle import)
+///   2. Debounced Reconnect button
+///
+/// No manual address entry and no peer bundle: the sources of the first
+/// neighbour are closed (§11.8, §11.8a) — S399 P1 part C.
 ///
 /// Must be wrapped in SafeArea(top: false) to respect Android edge-to-edge.
 void showConnectionSheet(BuildContext context, ICleonaService service) {
@@ -41,15 +41,6 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
   bool _reconnecting = false;
   String? _reconnectResult; // displayed after reconnect finishes
 
-  // Import state
-  final _importController = TextEditingController();
-  bool _importing = false;
-  String? _importResult;
-
-  // Manual peer state
-  final _ipController = TextEditingController();
-  final _portController = TextEditingController();
-
   // Peer list — refreshed on open, after reconnect, and reactively on
   // every service state change (S119 B: no polling timer; the sheet chains
   // into onStateChanged, which node.onPeersChanged already drives).
@@ -72,13 +63,10 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
   @override
   void dispose() {
     widget.service.onStateChanged = _prevOnStateChanged;
-    _importController.dispose();
-    _ipController.dispose();
-    _portController.dispose();
     super.dispose();
   }
 
-  // ── Reconnect (Feature ②) ────────────────────────────────────────────────
+  // ── Reconnect ────────────────────────────────────────────────────────
 
   Future<void> _onReconnect() async {
     if (_reconnecting) return;
@@ -123,113 +111,6 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     } finally {
       if (mounted) setState(() => _reconnecting = false);
     }
-  }
-
-  // ── Bundle Export (Feature ③) ────────────────────────────────────────────
-
-  Future<void> _onShareBundle() async {
-    final locale = AppLocale.read(context);
-    final svc = widget.service;
-
-    // Privacy confirmation dialog
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(locale.get('connection_sheet_share_bundle')),
-        content: Text(locale.get('connection_sheet_bundle_privacy_warning')),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text(locale.get('cancel')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(locale.get('connection_sheet_bundle_share_confirm')),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-
-    try {
-      final bundleData = await svc.exportPeerBundle();
-
-      if (bundleData == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(locale.get('connection_sheet_bundle_import_error'))),
-          );
-        }
-        return;
-      }
-
-      final uri = bundleData['uri'] as String? ?? '';
-      if (uri.isEmpty) return;
-
-      // Copy URI to clipboard and show share sheet
-      await Clipboard.setData(ClipboardData(text: uri));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${locale.get('connection_sheet_share_bundle')}: URI copied')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e')),
-        );
-      }
-    }
-  }
-
-  // ── Bundle Import (Feature ③) ────────────────────────────────────────────
-
-  Future<void> _onImportBundle() async {
-    final locale = AppLocale.read(context);
-    final input = _importController.text.trim();
-    if (input.isEmpty) return;
-
-    final svc = widget.service;
-    setState(() {
-      _importing = true;
-      _importResult = null;
-    });
-    try {
-      final result = await svc.importPeerBundle(
-        uri: input.startsWith('cleona://') ? input : null,
-        bundleBase64: !input.startsWith('cleona://') ? input : null,
-      );
-
-      if (!mounted) return;
-
-      final valid = result['networkTagValid'] as bool? ?? false;
-      if (!valid) {
-        setState(() => _importResult = locale.get('connection_sheet_bundle_import_error'));
-      } else {
-        final contacted = result['peersContacted'] as int? ?? 0;
-        setState(() {
-          _importResult = locale.get('connection_sheet_bundle_import_success')
-              .replaceAll('{n}', '$contacted');
-          _importController.clear();
-        });
-      }
-    } catch (e) {
-      if (mounted) setState(() => _importResult = '$e');
-    } finally {
-      if (mounted) setState(() => _importing = false);
-    }
-  }
-
-  // ── Manual Peer Entry ────────────────────────────────────────────────────
-
-  void _onAddPeer() {
-    final ip = _ipController.text.trim();
-    final port = int.tryParse(_portController.text.trim()) ?? 0;
-    if (ip.isEmpty || port <= 0 || port > 65535) return;
-    widget.service.addManualPeer(ip, port);
-    _ipController.clear();
-    _portController.clear();
-    FocusScope.of(context).unfocus();
   }
 
   /// Compact relative age using international unit symbols (s/min/h/d) —
@@ -337,7 +218,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
 
                   const Divider(),
 
-                  // ── Section 2: Reconnect (Feature ②) ─────────────────
+                  // ── Section 2: Reconnect ─────────────────────────────
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                     child: Column(
@@ -364,115 +245,6 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
                             ),
                           ),
                         ],
-                      ],
-                    ),
-                  ),
-
-                  const Divider(),
-
-                  // ── Section 3: Rescue Bundle (Feature ③) ──────────────
-                  _SectionHeader(locale.get('connection_sheet_rescue_bundle_section')),
-                  ListTile(
-                    leading: const Icon(Icons.ios_share),
-                    title: Text(locale.get('connection_sheet_share_bundle')),
-                    onTap: _onShareBundle,
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _importController,
-                            decoration: InputDecoration(
-                              hintText: locale.get('connection_sheet_bundle_paste_hint'),
-                              border: const OutlineInputBorder(),
-                              isDense: true,
-                              contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 8),
-                            ),
-                            maxLines: 3,
-                            minLines: 1,
-                            keyboardType: TextInputType.multiline,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Column(
-                          children: [
-                            FilledButton(
-                              onPressed: _importing ? null : _onImportBundle,
-                              child: _importing
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(strokeWidth: 2),
-                                    )
-                                  : Text(locale.get('connection_sheet_import_bundle')),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_importResult != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      child: Text(
-                        _importResult!,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-
-                  const Divider(),
-
-                  // ── Section 4: Manual Peer Entry ──────────────────────
-                  _SectionHeader(locale.get('connection_sheet_manual_peer_section')),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          flex: 3,
-                          child: TextField(
-                            controller: _ipController,
-                            decoration: InputDecoration(
-                              hintText: locale.get('connection_sheet_peer_ip_hint'),
-                              border: const OutlineInputBorder(),
-                              isDense: true,
-                              contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 8),
-                            ),
-                            keyboardType: TextInputType.text,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          flex: 1,
-                          child: TextField(
-                            controller: _portController,
-                            decoration: InputDecoration(
-                              hintText: locale.get('connection_sheet_peer_port_hint'),
-                              border: const OutlineInputBorder(),
-                              isDense: true,
-                              contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 8),
-                            ),
-                            keyboardType: TextInputType.number,
-                            inputFormatters: [
-                              FilteringTextInputFormatter.digitsOnly
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton(
-                          onPressed: _onAddPeer,
-                          child: Text(locale.get('connection_sheet_add_peer')),
-                        ),
                       ],
                     ),
                   ),

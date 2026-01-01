@@ -363,7 +363,17 @@ class IosBackgroundFetch {
         baseDir: baseDir,
         key: hostKey(baseDir, masterSeed),
         port: devicesPort,
+        // Lane 3 (D-32): the SAME bulk cache as the app — it lies in the
+        // same device folder. With 0 the wake-up would not load the held
+        // pieces and answer every 0x54 with "nothing here" (0x55), which
+        // ends a recipient's collection although the pieces are on disk.
+        bulkCacheBytes: bulkCacheBytesForPlatform(),
+        bulkClass: bulkClassForPlatform(),
+        bulkServeAllowed: bulkServeAllowedNow,
         report: (m) => debugPrint('[ios-bg-fetch][mycelium] $m'),
+        // No `traceReport`: this wake-up has no log file — every line, the
+        // diagnosis included, goes to `debugPrint`, none into the
+        // crash-report ring (S406).
       );
       debugPrint('[ios-bg-fetch] mycelium host on port ${host.port}');
 
@@ -464,7 +474,7 @@ class IosBackgroundFetch {
         } catch (_) {}
       }
       try {
-        host?.stop();
+        if (host != null) await hostStop(host); // lane 2 clocks, then the host
       } on SocketException catch (_) {}
       for (final service in services) {
         try {

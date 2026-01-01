@@ -1,109 +1,142 @@
-// The rescue bundle (§13.3), application side: WHAT goes into it.
+// The rescue bundle (§13.3) on mycelium, application side: WHAT goes into
+// it, what is done with it when found, and its state (finding B-1, owner
+// approval S398: stage 0, E1-b … E7-a+b).
 //
-// ── THE DIVISION OF LABOUR, AND WHY IT IS CUT THIS WAY ─────────────
+// ── THE DIVISION OF LABOUR ────────────────────────────────────────────
 //
-//   * `recovery_keys.dart`   — the derivations from the seed (§13.3.1/.3).
-//   * `tagline/recovery_line.dart` — splitting, deposit, cadence, harvest
-//     on the bundle line.
-//   * THIS file              — the CONTENT, and only that.
+//   * `recovery/recovery_keys.dart`   — the derivations from the seed:
+//     `recovery_key(i)`, the box key per UTC day (E3-a), `bundle_key`.
+//   * `mycelium/lib/mailbox_recovery_bundle.dart` — WHERE it lies (own
+//     fixed neighbours first, E1-b), WHEN it is renewed (at a collection
+//     edge from 3 d on, E2-a), HOW it is looked for (seven day values in one
+//     question). No timer, nothing idle.
+//   * THIS file — the CONTENT (§13.3.2, format 4), the seal (§13.3.3), the
+//     recovery case (§13.0), taking a found bundle over (E7-a: own keys and
+//     chain; E7-b: contacts held until their first envelope proves them), the
+//     state in the store of the identity (area `recovery_bundle`) and the
+//     one status line (§13.3.4).
 //
-// The content is the only part that needs the contact list, the identity
-// and the master seed. Exactly for that reason it lives here and not in
-// the delivery layer: that knows no contacts and shall know none.
+// The content needs the contact list, the identity and the master seed —
+// exactly for that reason it lives here and not in the delivery layer,
+// which knows no contacts and shall know none.
 //
-// ── WHAT §13.3.2 REQUIRES AND WHAT OF IT WORKS ──────────────────────────
-//
-// The line-by-line acceptance is in the header of
-// `recovery_bundle_content.dart`. Two of the eleven lines are NOT built,
-// both with a reason and both reported: the "Shared Key" including
-// `inbox_key` per contact (there is no mailbox line in V4.1; §21.2
-// explicitly denies it) and the prekey pool identifier from §13.4.4
-// (does not exist in the tree).
+// Until S398 the bundle line hung on `attachV41` (V4.1, no caller since the
+// mycelium rebuild): on mycelium the bundle was neither laid nor looked for,
+// and the status line said "no line (no V4.1 node)" — B-1.
 
 part of 'cleona_service.dart';
 
-/// §13.0 — IS THIS THE RECOVERY CASE?
-///
-/// The decision stands next to it as a pure function, so that it can be
-/// checked and is not only commented — the same pattern as
-/// `harvestRunDue`/`harvestCap` in `tagline/secure_mode.dart`, and for the
-/// same reason: until S382 a STAND-IN stood at this place, and nobody
-/// noticed, because nothing checked it.
-///
-/// The rule, literally from §13.0 (owner decision 12.09.2026):
-///
-///     Fresh installation, NO new user created, but the
-///     passphrase entered:
-///       -> Are there further devices under this phrase?
-///          YES:  the data comes from there (§14.4). Not a case.
-///          NO:   THAT is the recovery case.
-///
-/// [outPhrase]      the identity came about via the 24-word phrase
-///                  (`Identity.restoredFromPhrase`). A freshly created one
-///                  is NOT — not even when it looks like a recovered one
-///                  (seed there, no contacts).
-/// [otherDevice]  another device is still running under the same phrase
-///                  (`Identity.restoreAwaitingPairing`).
-/// [hasContacts]    something is already there, so nothing more to fetch.
-bool isRecoveryCase({
-  required bool outPhrase,
-  required bool otherDevice,
-  required bool hasContacts,
-}) =>
-    outPhrase && !otherDevice && !hasContacts;
+// §13.0 — IS THIS THE RECOVERY CASE? Since B-4b (D-39, D-40) the fresh
+// install decides it from the bundle and the user's choice, not from a
+// question asked up front: `enrolmentStartPhase` and `enrolmentAfterBundle`
+// (`cleona_service_enrolment.dart`) are the pure functions that replace
+// `isRecoveryCase`.
 
-extension V41RecoveryBundleOps on CleonaService {
+/// Area of the bundle state in the store of the identity.
+///
+/// S401 (02.10.2026): until then the state lay in a file of its own next to
+/// the store (`recovery_bundle.json.enc`, under the same key as the store).
+/// It names the contacts restored from a bundle — WHO this identity is in
+/// contact with — together with each pair's `s_AB`: conversation metadata,
+/// which lives in the store and nowhere else (v4_2 §21.4.2; owner
+/// 02.10.2026).
+///
+/// **One row per waiting contact**, keyed by its UserID in hex and written
+/// when it is restored ([RecoveryBundleOps.applyRecoveryBundle]) and
+/// removed when its first envelope anchors it
+/// ([RecoveryBundleOps._recoveryAnchor]). The file was rewritten as a whole
+/// on every deposit and every anchoring; a restore of 200 contacts followed
+/// by their first envelopes rewrote 200 entries 200 times.
+const String kRecoveryBundleArea = 'recovery_bundle';
+
+/// The ONE row of [kRecoveryBundleArea] that is not a waiting contact: when
+/// the bundle was last laid and with how many holders. A UserID in hex has
+/// 64 characters, so this key meets none.
+const String kRecoveryBundleHeadKey = '_';
+
+/// The name the state had as a file. No writer is left; the name is only
+/// asked for by [RecoveryBundleOps._stateFileIntoStore], which empties a
+/// file an earlier build of this line left in the profile.
+const String _kRecoveryStateFile = 'recovery_bundle.json';
+
+/// One waiting contact as a row: `s_AB` and the fixed neighbours the bundle
+/// named for it.
+Map<String, dynamic> _recoveryAnchorRow(
+        ({Uint8List? pairRandom, List<BundleNeighbour> neighbours}) a) =>
+    {
+      's': a.pairRandom == null ? null : base64Encode(a.pairRandom!),
+      'n': [
+        for (final n in a.neighbours) [base64Encode(n.ip), n.port]
+      ],
+    };
+
+/// Reads [_recoveryAnchorRow] back. Throws on a row of another shape.
+({Uint8List? pairRandom, List<BundleNeighbour> neighbours})
+    _recoveryAnchorOf(Map<dynamic, dynamic> row) {
+  final s = row['s'] as String?;
+  return (
+    pairRandom: s == null ? null : base64Decode(s),
+    neighbours: <BundleNeighbour>[
+      for (final n in (row['n'] as List? ?? const []))
+        (ip: base64Decode(n[0] as String), port: n[1] as int)
+    ],
+  );
+}
+
+/// The X25519 base point (RFC 7748 §4.1: u = 9) — the public key of a secret
+/// scalar is X25519(scalar, 9) (RFC 7748 §6.1).
+final Uint8List _kX25519Base = Uint8List(32)..[0] = 9;
+
+/// ML-KEM-768: the decapsulation key is `dk_PKE ‖ ek ‖ H(ek) ‖ z` (FIPS 203
+/// §7.1, ML-KEM.KeyGen_internal), `dk_PKE` being 384·k = 1152 B for k = 3;
+/// `ek` is the 1184-B public key. liboqs stores the secret key in exactly
+/// this layout (2400 B).
+const int _kMlKemEkOffset = 1152;
+
+extension RecoveryBundleOps on CleonaService {
+  // ── The content (§13.3.2, format 4) ────────────────────────────────────
+
   /// Builds the rescue bundle of this identity — unsealed.
   ///
   /// Returns `null` if this identity CANNOT have one: without a master
   /// seed and without an HD index there is neither `recovery_key(i)` nor
   /// `bundle_key`, and a bundle that nobody can find again would be the
   /// dummy that §13 precisely does not need.
-  RecoveryBundleContent? buildRecoveryBundle() {
+  RecoveryBundleContent? buildRecoveryBundle({DateTime? at}) {
     if (identity.masterSeed == null) return null;
     final index = identity.hdIndex;
     if (index == null) return null;
+    final p = myceliumMailbox;
+
+    List<BundleNeighbour> held(List<CardAddress> l) =>
+        [for (final c in l) (ip: c.address, port: c.port)];
 
     // ── WHICH CONTACTS, AND WHY THE DELETED ONES TOO ───────────────
     //
-    // §13.3.2 lists the deletion marker as its own line with the
-    // justification "prevents deleted contacts from resurrecting via
-    // recovery (§15.9)". That only works if the deletion TRAVELS ALONG — a
-    // bundle that simply omits deleted contacts lets them resurrect at the
-    // counterpart's next broadcast, and the user would have to delete them
-    // a second time.
+    // §13.3.2 lists the deletion marker as its own line — "prevents deleted
+    // contacts from resurrecting via recovery (§15.9)". That only works if
+    // the deletion TRAVELS ALONG. From an identifier without a record no
+    // founding key can be formed any more — such identifiers go into the
+    // bundle as a tombstone: 32 B UserID, empty anchor, `deleted = true`.
     //
-    // The tree keeps the own deletion in `_deletedContacts` and in the
-    // process removes the record from `_contacts` (`cleona_service.dart`).
-    // From an identifier without a record no `foundingEd25519Pk` can be
-    // formed any more — such identifiers therefore go into the bundle as a
-    // tombstone: 32 B UserID, empty anchor, `deleted = true`. That suffices
-    // for the purpose (not letting them resurrect) and costs nothing further.
+    // `s_AB` and the contact's fixed neighbours come from the mailbox (the
+    // pair lives there, D-5); for a contact restored from a bundle that has
+    // not yet sent its first envelope (E7-b), from what that bundle brought.
     final contacts = <BundleContact>[];
     for (final c in _contacts.values) {
+      final hex = bytesToHex(c.nodeId);
       final anchor = v41PeerFoundingPk(c);
-      if (anchor == null) {
-        // WITHOUT AN ANCHOR THE CONTACT IS NOT RECOVERABLE, and skipping it
-        // silently would be exactly the kind of gap this session closes. It
-        // comes along as a tombstone, so that the recovery can SHOW it
-        // instead of losing it.
-        contacts.add(BundleContact(
-          userId: c.nodeId,
-          foundingEd25519Pk: Uint8List(0),
-          displayName: c.displayName,
-          verificationLevel: c.verificationLevel,
-          deleted: c.isDeleted,
-          blocked: c.status == 'blocked',
-        ));
-        continue;
-      }
+      final waiting = _recoveryAnchors[hex];
+      final k = p?.contactOrNull(hex);
       contacts.add(BundleContact(
         userId: c.nodeId,
-        foundingEd25519Pk: anchor,
+        foundingEd25519Pk: anchor ?? Uint8List(0),
         displayName: c.displayName,
         verificationLevel: c.verificationLevel,
         deleted: c.isDeleted,
         blocked: c.status == 'blocked',
+        pairRandom: k?.pairRandom ?? waiting?.pairRandom,
+        neighbours: k != null ? held(k.neighbours) : waiting?.neighbours ?? const [],
       ));
     }
     for (final hex in _deletedContacts) {
@@ -134,12 +167,14 @@ extension V41RecoveryBundleOps on CleonaService {
         ),
     ];
 
-    // THE INVITATION LINE (§13.3.3 "closes K-7", §15.3.3). `g_inv` and
-    // highwater together say which invitation indices HAVE BEEN assigned —
-    // without them a recovered identity would assign indices a second
-    // time, and the counterparts of the first assignment would have a line
-    // that belongs to someone else.
+    // THE INVITATION LINE (§13.3.3 "closes K-7", §15.3.3).
     final book = inviteLedger;
+    final own = p == null
+        ? const <BundleNeighbour>[]
+        : held([
+            for (final f in p.node.neighbourhood.fixedNeighbours)
+              f.asCardAddress
+          ]);
 
     return RecoveryBundleContent(
       identityIndex: index,
@@ -162,54 +197,43 @@ extension V41RecoveryBundleOps on CleonaService {
       ],
       inviteGeneration: book.generation,
       inviteHighwater: book.highwater,
-      // NOT the pool identifier from §13.4.4 — that does not exist.
-      // What stands here is the assignment counter of the index space, and
-      // it stands under its own name (see `prekeysIssued`).
-      prekeysIssued: v41Host?.prekeyIndicesIssued ?? 0,
+      depositedAtMs: (at ?? recoveryBundleClock()).millisecondsSinceEpoch,
+      // §13.3.2 (D-39): present only while a window is open.
+      enrolmentOpenUntilMs: _enrol.window?.until?.millisecondsSinceEpoch,
+      ownNeighbours: own,
       contacts: contacts,
       groups: groups,
     );
   }
 
-  /// The material for the bundle line: line key and sealed bundle
-  /// (§13.3.1, §13.3.3).
-  ///
-  /// `null` means "not now" and is not an error — the line asks again in
-  /// an hour.
-  RecoveryBundleMaterial? recoveryBundleMaterial(int recoveryEpoch) {
+  /// The bundle as it is laid: built now and sealed (§13.3.3). `null`: this
+  /// identity has none.
+  Uint8List? recoveryBundleSealed() {
     final seed = identity.masterSeed;
-    final index = identity.hdIndex;
-    if (seed == null || index == null) return null;
+    if (seed == null) return null;
+    // D-40: an undecided install never lays a bundle — it would lay an
+    // emptier, newer one over the living device's (the "newest wins" rule
+    // of §13.3.2 would make the near-empty one the backup).
+    if (enrolmentHolds(_enrol.phase)) return null;
     final content = buildRecoveryBundle();
     if (content == null) return null;
     final clear = content.encode();
-    // ── THE NONCE, AND WHY IT IS RANDOMISED ────────────────────
-    //
-    // `sealBundle` requires it from the caller and says why: "the mark
-    // `recoveryBundleTag` is NOT suitable as a nonce (it repeats when the
-    // same epoch is renewed twice)". Randomness is the right choice here —
-    // with 12 B and one renewal every 14 days a repetition under the same
-    // key is not to be expected, and a counter would need a persistent
-    // state that would be lost after exactly the event the bundle protects
-    // against.
-    final isSealed = sealBundle(
+    // THE NONCE IS RANDOM: `sealBundle` requires it from the caller; a
+    // counter would need a state that is lost after exactly the event the
+    // bundle protects against.
+    final sealed = sealBundle(
         bundleKey(seed), SodiumFFI().randomBytes(kBundleNonceBytes), clear);
-    _log.info('Recovery bundle (§13.3): epoch $recoveryEpoch, '
-        '${content.contacts.length} contact(s), ${content.groups.length} '
-        'group(s), ${clear.length} B content, ${isSealed.length} B '
-        'sealed');
-    return RecoveryBundleMaterial(
-      recoveryKey: recoveryKey(seed, index),
-      sealed: isSealed,
-    );
+    _log.info('Recovery bundle (§13.3): ${content.contacts.length} '
+        'contact(s), ${content.groups.length} group(s), '
+        '${content.ownNeighbours.length} own fixed neighbour(s), '
+        '${clear.length} B content, ${sealed.length} B sealed');
+    return sealed;
   }
 
-  /// Opens a harvested bundle (§13.3.3).
+  /// Opens a found bundle (§13.3.3).
   ///
   /// Returns `null` if the AEAD does not hold or the bytes are not a
-  /// bundle. **`null` does NOT mean "no bundle found"** — §13.2.3 requires
-  /// that an unsuccessful search is not an error; the distinction "nothing
-  /// found" versus "found, but unusable" belongs in the caller.
+  /// bundle. **`null` does NOT mean "no bundle found"** (§13.2.3).
   RecoveryBundleContent? openRecoveryBundle(Uint8List sealed) {
     final seed = identity.masterSeed;
     if (seed == null) return null;
@@ -221,224 +245,402 @@ extension V41RecoveryBundleOps on CleonaService {
     final error = read.error;
     if (error != null) {
       _log.warn('Rescue bundle (§13.3.3): opened, but discarded — '
-          '${error.name} (version expected $kBundleFormatVersion)');
+          '${error.name} (format $kBundleFormatVersion expected)');
     }
     return read.content;
   }
 
-  /// The state of the rescue bundle in one line (§13.3.4).
-  ///
-  /// ── WHY THIS LINE MUST EXIST ──────────────────────────────
-  ///
-  /// §13.3.4 "Visibility" is normative: "The bundle state belongs in the
-  /// UI, following the pattern from §14.4: `Backup valid until <date>` or
-  /// ,Backup expires in N days.` **An expired bundle must not lapse
-  /// silently.**"
-  ///
-  /// The UI for it is NOT built — that is a separate, reported item. What
-  /// stands here is the measurement underneath: the same information in
-  /// the log, so that the question "does it renew at all?" is a
-  /// measurement and not a guess. Without it a missing bundle would be
-  /// noticed after 31 days at the earliest — when it is gone.
+  // ── The state (§13.3.4) ─────────────────────────────────────────────────
+
+  /// The state of the rescue bundle in one line (§13.3.4: "An expired bundle
+  /// must not lapse silently"). The interface shows [CleonaService.
+  /// recoveryBundleValidUntil]; this is the same in the log.
   String get recoveryBundleStatus {
-    final l = v41RecoveryBundle;
-    if (l == null) return 'Rescue bundle: no line (no V4.1 node)';
-    if (l.harvesting) {
-      return 'Rescue bundle: SEARCH running (${l.harvestRuns} runs, '
-          'cap $kRecoveryHarvestMaxRuns)';
+    final box = recoveryBox;
+    if (box == null) {
+      return 'Rescue bundle: none — no mailbox attached, or an identity '
+          'without seed/HD index (§13.3.1)';
     }
-    if (l.exhausted) {
-      return 'Rescue bundle: search ended without a find — not an error '
-          '(§13.2.3), but §13.2.2';
+    if (box.seeking) {
+      return 'Rescue bundle: SEARCH — recovery case (§13.0), asked at every '
+          'collection edge and at every card read (${box.seeks} so far)';
     }
-    final found = l.foundEpoch;
-    if (found != null) {
-      return 'Rescue bundle: adopted from epoch $found';
+    final last = box.lastDeposit;
+    final taken = _recoveryTaken;
+    final head = taken == null
+        ? ''
+        : 'taken over at ${taken.toUtc().toIso8601String()}; ';
+    if (last == null) {
+      return 'Rescue bundle: ${head}not placed yet — laid at the next '
+          'collection edge (§13.3.4)';
     }
-    return 'Rescue bundle: ${l.attached ? "on the tick" : "DETACHED"}, '
-        '${l.renewals} renewal(s), ${l.placements} placements made, '
-        '${l.pendingTags} tag(s) open '
-        '(${l.plannedPlacements} placements in the plan), TTL '
-        '${kRecoveryBundleTtl.inDays} d, cadence '
-        '${kRecoveryRenewalInterval.inDays} d';
+    return 'Rescue bundle: ${head}placed ${last.toUtc().toIso8601String()} '
+        'with ${box.lastHolders} holder(s), valid until '
+        '${box.validUntil!.toUtc().toIso8601String()}, renewed at an edge '
+        'from ${mycelium.kBundleRenewAfter.inDays} d on';
   }
 
-  // ═══════════════════════════════════════════════════════════════════
-  // THE SEARCH FOR THE OWN BUNDLE (§13.2.1, §13.3.1)
-  // ═══════════════════════════════════════════════════════════════════
-
-  /// Starts the search IF this node is in the recovery case.
+  /// Reads the state from the store: last deposit, holders, and the
+  /// contacts still waiting for their first envelope (E7-b). Nothing there:
+  /// all empty.
   ///
-  /// ── BY WHAT THE CASE IS RECOGNISED, AND WHY BY EXACTLY THAT ───────────
-  ///
-  /// §13.0 cuts the occasion narrowly: "replacing a device is not a
-  /// recovery case … The real recovery case is exclusively: **all devices
-  /// gone.**" And §13.1.3 describes what of that is visible in the process:
-  /// "The recovering user possesses exclusively **self-referential** key
-  /// material" — seed yes, counterpart no.
-  ///
-  /// Exactly that is the probe: a master seed is present, an HD index is
-  /// present, and there is **not a single** contact — neither a living nor
-  /// a deleted one. A device replacement does not fall in here: the new
-  /// device gets its contacts via the admission (§14.6), not via the
-  /// bundle.
-  ///
-  /// **NO EFFORT IF THE CASE DOES NOT APPLY.** The probe is a look at two
-  /// counters; the search itself only runs if it applies. A normally used
-  /// account never makes one of these requests.
-  ///
-  /// Returns `true` if a search was started.
-  bool beginRecoveryBundleHarvestIfLost() {
-    final line = v41RecoveryBundle;
-    if (line == null) return false;
-    if (line.harvesting || line.sealedFound != null) return false;
-    final seed = identity.masterSeed;
-    final index = identity.hdIndex;
-    if (seed == null || index == null) return false;
-    // ── THREE QUESTIONS, IN THIS ORDER (§13, S382) ────────────────
-    //
-    // Until S382 ONLY the third stood here — "does this identity have no
-    // contacts". That is a STAND-IN, and it is just as true for a freshly
-    // created second identity as for a recovered one. Measured on
-    // 12.09.2026: every second identity in the lab (AllyCat, Charly,
-    // WindowsTwo) fired a search over up to 120 runs at EVERY attach — for
-    // something that never existed.
-    //
-    // The case distinction that belongs here (owner, 12.09.2026):
-    //
-    //   Fresh installation, NO new user created, but the
-    //   passphrase entered:
-    //     -> Are there further devices under this phrase?
-    //        YES:  the data comes from there, via the same identity on the
-    //              other device (§14.4). NOT a recovery case.
-    //        NO:   THAT is the recovery case — the data from the chats with
-    //              contacts, groups and channels is fetched back.
-    //
-    // The three questions stand in `isWiederherstellungsfall` above.
-    if (!isRecoveryCase(
-        outPhrase: identity.restoredFromPhrase,
-        otherDevice: identity.restoreAwaitingPairing,
-        hasContacts: _contacts.isNotEmpty || _deletedContacts.isNotEmpty)) {
-      return false;
+  /// THE ONE READER. Everything that shows or uses the state gets it from
+  /// here: the box's `lastDeposit` (status line, `recoveryBundleValidUntil`,
+  /// the `recoveryBundleUntil` of the state snapshot the interface reads)
+  /// and [CleonaService._recoveryAnchors]. No place asks for a file.
+  ({DateTime? last, int holders}) _recoveryStateLoad() {
+    _stateFileIntoStore('$profileDir/$_kRecoveryStateFile',
+        kRecoveryBundleArea, _recoveryRowsOfFile);
+    final Map<String, Map<String, dynamic>> rows;
+    try {
+      rows = store.loadArea(kRecoveryBundleArea);
+    } catch (e) {
+      _log.warn('Rescue bundle: state not readable ($e) — starts empty');
+      return (last: null, holders: 0);
     }
-    line.onFound = (isSealed, epoch) {
-      final content = openRecoveryBundle(isSealed);
-      if (content == null) {
-        // FOUND, BUT UNUSABLE — and that is something other than "nothing
-        // found" (§13.2.3). It is reported and the search ended: a bundle
-        // that cannot be opened with the own seed will not open on the next
-        // run either.
-        _log.warn('Rescue bundle (§13.3): bundle from epoch $epoch '
-            'found, but cannot be opened — the AEAD does not hold or '
-            'the content is none. Search ended.');
-        line.endHarvest();
+    final head = rows.remove(kRecoveryBundleHeadKey);
+    _recoveryAnchors.clear();
+    for (final MapEntry(:key, :value) in rows.entries) {
+      try {
+        _recoveryAnchors[key] = _recoveryAnchorOf(value);
+      } catch (e) {
+        _log.warn('Rescue bundle: waiting contact ${_short8(key)} not '
+            'readable ($e) — skipped');
+      }
+    }
+    final ms = head?['last'] as int?;
+    return (
+      last: ms == null ? null : DateTime.fromMillisecondsSinceEpoch(ms),
+      holders: head?['holders'] as int? ?? 0,
+    );
+  }
+
+  /// Writes the head: when the bundle was last laid, with how many holders.
+  /// It changes at a deposit and at nothing else.
+  void _recoveryHeadSave() {
+    final box = recoveryBox;
+    try {
+      store.putEntry(kRecoveryBundleArea, kRecoveryBundleHeadKey, {
+        'last': box?.lastDeposit?.millisecondsSinceEpoch,
+        'holders': box?.lastHolders ?? 0,
+      });
+    } catch (e) {
+      _log.warn('Rescue bundle: state not written ($e)');
+    }
+  }
+
+  /// Writes EXACTLY ONE waiting contact — or removes its row if it no
+  /// longer waits. Nothing here writes the whole set from memory, so a
+  /// failed load can never empty the area.
+  void _recoveryAnchorSave(String hex) {
+    try {
+      final waiting = _recoveryAnchors[hex];
+      if (waiting == null) {
+        store.removeEntry(kRecoveryBundleArea, hex);
+      } else {
+        store.putEntry(kRecoveryBundleArea, hex, _recoveryAnchorRow(waiting));
+      }
+    } catch (e) {
+      _log.warn('Rescue bundle: waiting contact ${_short8(hex)} not '
+          'written ($e)');
+    }
+  }
+
+  String _short8(String s) => s.length > 8 ? s.substring(0, 8) : s;
+
+  /// The rows of the area from the content of the former state file
+  /// (`{last, holders, anchors: {<UserID hex>: {s, n}}}`).
+  Map<String, Map<String, dynamic>> _recoveryRowsOfFile(
+      Map<String, dynamic> j) {
+    final rows = <String, Map<String, dynamic>>{};
+    final last = j['last'] as int?;
+    // Without a deposit the head says nothing; the reader treats a missing
+    // head the same.
+    if (last != null) {
+      rows[kRecoveryBundleHeadKey] = {
+        'last': last,
+        'holders': j['holders'] as int? ?? 0,
+      };
+    }
+    final anchors = j['anchors'];
+    if (anchors is Map) {
+      for (final MapEntry(:key, :value) in anchors.entries) {
+        if (key is! String || value is! Map) continue;
+        try {
+          rows[key] = _recoveryAnchorRow(_recoveryAnchorOf(value));
+        } catch (e) {
+          _log.warn('Rescue bundle: waiting contact ${_short8(key)} of the '
+              'left-over file not readable ($e) — skipped');
+        }
+      }
+    }
+    return rows;
+  }
+
+  /// Enforcer for a state file an earlier build of THIS line left in the
+  /// profile: its content goes into [area] of the store, then every form
+  /// of the file is removed.
+  ///
+  /// ── WHY IT TAKES OVER INSTEAD OF ONLY REMOVING ──────────────────────
+  ///
+  /// The two files it is called for (`recovery_bundle.json`,
+  /// `enrolment.json`) were written by builds of this line between
+  /// 29.09.2026 and S401, under this identity's own key — not foreign
+  /// stock. No released build wrote them (v4.2.0-beta, `2a3d1947`, has
+  /// neither writer), so only lab profiles carry them. What a loss would
+  /// mean decided it:
+  ///   * the head of the bundle state heals by itself (the bundle is laid
+  ///     once more at the next edge);
+  ///   * a contact restored from a bundle and still waiting for its first
+  ///     envelope does NOT: without its row [_recoveryAnchor] refuses the
+  ///     envelope that would anchor it, and `s_AB` is gone for good;
+  ///   * a settled enrolment without contacts does NOT either: without
+  ///     `settled` an install made from the words searches again and holds
+  ///     its own post (D-40) until the user chooses recovery a second time.
+  /// The takeover is one read and one transaction.
+  ///
+  /// ── THE RULES ───────────────────────────────────────────────────────
+  ///
+  ///   * Nothing of the name in the profile: nothing happens (four
+  ///     `existsSync`).
+  ///   * The area already carries rows: THE STORE LEADS. The file is the
+  ///     older state (or one whose takeover completed and whose removal
+  ///     did not) and is removed without being read into the area.
+  ///   * The file does not open under this identity's key: nothing is
+  ///     taken, it is removed and named in the log — a file nobody can
+  ///     read has no reader to wait for.
+  ///   * Otherwise: written in ONE transaction, READ BACK and compared;
+  ///     only an identical read-back removes the file. If it differs, the
+  ///     area is emptied again and the file stays for the next start.
+  ///   * The store itself fails: the file stays, the next start repeats.
+  void _stateFileIntoStore(String path, String area,
+      Map<String, Map<String, dynamic>> Function(Map<String, dynamic>) rowsOf) {
+    try {
+      if (!PlaintextSweep.forms.any((s) => File('$path$s').existsSync())) {
         return;
       }
-      final n = applyRecoveryBundle(content);
-      _log.info('Recovery bundle (§13.3): bundle from epoch $epoch '
-          'opened — $n contact(s) adopted of '
-          '${content.contacts.length}.');
-      // ── THE CASE IS SETTLED, SO THE MARKER EXPIRES (S382) ────
-      //
-      // Without this line `restoredFromPhrase` would stay set and the case
-      // would be open again at every restart — exactly the permanent
-      // trigger this change switches off, just one level higher. The third
-      // probe in the gate (contacts present) would catch it as soon as the
-      // bundle brought something; if it brought NOTHING, it would not catch
-      // it, and then exactly this deletion is the difference.
-      //
-      // ONLY THE RUNTIME MIRROR. The identity record on disk belongs to the
-      // `IdentityManager`, which the service layer does not hold; across
-      // the restart the third probe carries. That is a deliberately small
-      // solution and named as a limit, not overlooked.
-      identity.restoredFromPhrase = false;
-      line.endHarvest();
-    };
-    line.beginHarvest(recoveryKey(seed, index));
-    _log.info('Rescue bundle (§13.3): no contact known, seed is '
-        'present — search on the own bundle line started (epochs '
-        '${recoveryHarvestEpochs(DateTime.now().toUtc()).join(", ")}).');
-    return true;
+    } on FileSystemException {
+      return;
+    }
+    final name = path.split(Platform.pathSeparator).last;
+    try {
+      if (store.countArea(area) > 0) {
+        _log.info('State file $name found although the store already '
+            'carries the area `$area` — the store leads, the file is removed');
+      } else {
+        Map<String, dynamic>? j;
+        try {
+          j = _fileEnc.readJsonFile(path);
+        } catch (e) {
+          _log.warn('State file $name: reading failed ($e)');
+        }
+        if (j == null) {
+          _log.warn('State file $name does not open under the key of this '
+              'identity — nothing taken over, the file is removed');
+        } else {
+          final rows = rowsOf(j);
+          String canon(Map<String, Map<String, dynamic>> m) => jsonEncode(
+              [for (final k in m.keys.toList()..sort()) [k, m[k]]]);
+          store.replaceArea(area, rows);
+          if (canon(store.loadArea(area)) != canon(rows)) {
+            store.replaceArea(area, const {});
+            _log.error('State file $name: the area `$area` does not read '
+                'back what was written — the file STAYS, the next start '
+                'tries again');
+            return;
+          }
+          _log.info('State file $name taken over into the area `$area` '
+              '(${rows.length} row(s)) — the file is removed');
+        }
+      }
+    } catch (e) {
+      _log.warn('State file $name: the store is not usable ($e) — the file '
+          'stays, the next start tries again');
+      return;
+    }
+    PlaintextSweep.removeAllForms(path, log: _log);
   }
 
-  /// Takes an opened bundle content into the contact stock.
+  // ── At the mailbox (§13.3.1, E1-b/E2-a) ────────────────────────────────
+
+  /// Hangs the bundle of this identity on the collection edges of [p]'s
+  /// node. Called by `myceliumAttach` AFTER the format reset (W-a): a
+  /// contact ended there stands as `deleted` in the next bundle.
   ///
-  /// ── WHAT IS TAKEN OVER AND WHAT EXPLICITLY NOT ──────────────
+  /// In the recovery case (§13.0) the box LOOKS instead of laying: at every
+  /// collection edge, and at every card the user reads
+  /// ([_recoverySeekAtCard]). Otherwise it lays at the first edge and renews
+  /// at an edge from 3 d on. No timer, nothing idle (§5.4).
+  void _recoveryBundleAttach(mycelium.Mailbox p) {
+    recoveryBox?.detach();
+    recoveryBox = null;
+    final seed = identity.masterSeed;
+    final index = identity.hdIndex;
+    if (seed == null || index == null) {
+      _log.warn('Rescue bundle: none — identity without seed or HD index, '
+          'there is no recovery_key(i) (§13.3.1)');
+      return;
+    }
+    final rk = recoveryKey(seed, index);
+    final state = _recoveryStateLoad();
+    final box = mycelium.BundleBox(p.node,
+        keyFor: (d) => recoveryBoxKey(rk, d),
+        sealed: recoveryBundleSealed,
+        now: () => recoveryBundleClock(),
+        report: _log.info,
+        lastDeposit: state.last,
+        lastHolders: state.holders,
+        onDeposited: (_, _) {
+          _recoveryHeadSave();
+          onStateChanged?.call();
+        },
+        onFound: _recoveryBundleFound);
+    // §13.0, D-40: the phase decides whether the box seeks, reads only, or
+    // lays (`cleona_service_enrolment.dart`).
+    recoveryBox = box;
+    _enrolmentAttach(p, box, rk);
+    box.attach();
+    _log.info(recoveryBundleStatus);
+  }
+
+  /// A card was read (QR, NFC, text — §15.2) while this identity looks for
+  /// its bundle: its addresses are asked at once (E1-b) — a contact's device
+  /// that was a fixed neighbour holds the bundle. Outside the recovery case:
+  /// nothing. Does not throw.
   ///
-  /// **Taken over:** the contacts including founding anchor, display name
-  /// and verification level, the deletion markers, and the state of the
-  /// invitation line. Exactly that solves the chicken-and-egg problem from
-  /// §13.1.3 ("The problem is not where the mail is, but **knowledge of the
-  /// other parties**") — with the founding anchor `K_AB` follows, and with
-  /// `K_AB` every tagline.
+  /// Undecided (D-40) the search is not waited for: the redeem answers
+  /// "searched only" whatever it brings, and a bundle is taken when it
+  /// arrives. In the recovery case the future ends once every asked address
+  /// is done (§8.2) — the redeem then knows whether the bundle brought this
+  /// contact back.
+  Future<void> _recoverySeekAtCard(mycelium.Card card) async {
+    final box = recoveryBox;
+    if (box == null || !box.seeking) return;
+    final holders =
+        mycelium.cardHolders(card.ownAddresses, card.neighbourAddress);
+    if (holders.isEmpty) return;
+    _log.info('Rescue bundle: card read in the recovery case — asking its '
+        '${holders.length} address(es)');
+    final search = box.seek(withWhom: holders);
+    if (enrolmentHolds(_enrol.phase)) return unawaited(search);
+    await search;
+  }
+
+  // ── Taking a found bundle over (E7) ────────────────────────────────────
+
+  /// What a search brought: the newest bundle that opens is taken over; the
+  /// search ends. Found, but none opens: named and ended too — a bundle that
+  /// the own seed does not open now does not open later (§13.2.3: that is
+  /// not an error, and §13.2.2 applies).
+  void _recoveryBundleFound(List<Uint8List> pieces) {
+    final box = recoveryBox;
+    if (box == null || !box.seeking) return;
+    RecoveryBundleContent? best;
+    for (final s in pieces) {
+      final c = openRecoveryBundle(s);
+      if (c == null) continue;
+      if (best == null || c.depositedAtMs > best.depositedAtMs) best = c;
+    }
+    if (best == null) {
+      // While undecided (D-40) the search goes on: a bundle that does not
+      // open is not the living device's (§13.2.3 — not an error).
+      if (enrolmentHolds(_enrol.phase)) return;
+      box.seeking = false;
+      _log.warn('Rescue bundle (§13.3): ${pieces.length} piece(s) found, none '
+          'opens with this seed — search ended (§13.2.2)');
+      return;
+    }
+    // §13.0: undecided, the bundle decides between adding and the question;
+    // it is taken over only in the recovery case the user chose.
+    if (enrolmentHolds(_enrol.phase)) {
+      if (_enrol.phase == EnrolmentPhase.waiting) return;
+      final sealedBest = pieces.firstWhere(
+          (s) => openRecoveryBundle(s)?.depositedAtMs == best!.depositedAtMs);
+      _enrolBundleFound(best, sealedBest);
+      return;
+    }
+    box.seeking = false;
+    final n = applyRecoveryBundle(best);
+    _enrolRecoverySettled();
+    // THE CASE IS SETTLED, SO THE MARKER EXPIRES (S382) — only the runtime
+    // mirror; across a restart the third probe (contacts present) carries.
+    identity.restoredFromPhrase = false;
+    _recoveryTaken = recoveryBundleClock();
+    _log.info('Recovery bundle (§13.3): bundle of '
+        '${DateTime.fromMillisecondsSinceEpoch(best.depositedAtMs).toUtc().toIso8601String()} '
+        'taken over — $n contact(s) of ${best.contacts.length}');
+    final p = myceliumMailbox;
+    if (p != null) {
+      // The post still waiting lies with the former fixed neighbours (§8.2)
+      // — ask them at once, then the usual ones.
+      final former = [
+        for (final a in best.ownNeighbours)
+          (InternetAddress.fromRawAddress(a.ip), a.port)
+      ];
+      unawaited(p.node.collect(
+          withWhom: holdersJoin(former, p.node.collectNeighbours)));
+    }
+    // E5-a: the holder deleted it on our receipt — the device lays a fresh
+    // one now, with everything it just took over.
+    unawaited(box.deposit());
+    onStateChanged?.call();
+  }
+
+  /// Takes an opened bundle content over (§13.3.2, E7).
   ///
-  /// **NOT taken over, and both with a reason:**
+  /// **Taken over:** the own keys and the rotation chain (E7-a, §4.5.4,
+  /// D-33 — after an Emergency Key Rotation the words alone give the
+  /// replaced keys); the contacts with founding anchor, name, level, the
+  /// deletion and block marks; `s_AB` and each contact's fixed neighbours
+  /// are HELD until the contact's first envelope proves its UserID (E7-b,
+  /// [_recoveryAnchor]) — the bundle carries no full address (E4); and the
+  /// invitation line (only upwards).
   ///
-  ///   * **The own keys** (sig SKs, user KEM SK, rotation chain). They
-  ///     TRAVEL along in the bundle — §13.3.2 requires them, and without
-  ///     them a ROTATED identity is the one from day 1 after the recovery.
-  ///     Importing them here, however, would mean overwriting the running
-  ///     key state from something that came from the network; that belongs
-  ///     to the takeover path from §13.6/§14.4 with its continuity check and
-  ///     not here. Open and reported, not forgotten.
-  ///   * **The groups.** They travel along too (§13.3.2, last line), but
-  ///     `GroupInfo` needs `ownerNodeIdHex`, `createdAt` and
-  ///     `membershipEpoch`, and two of them do NOT stand in the bundle.
-  ///     A group with an invented membership epoch would be worse than none.
+  /// **NOT taken over:** the groups — `GroupInfo` needs owner, creation time
+  /// and membership epoch, two of which are not in the bundle (B-3).
   ///
   /// **ONLY SUPPLEMENTING, NEVER OVERWRITING.** An existing contact stays
-  /// as it is: the bundle is up to 31 days old, an existing record is
-  /// never older.
-  ///
-  /// Returns how many contacts were newly created.
+  /// as it is. Returns how many contacts were newly created.
   int applyRecoveryBundle(RecoveryBundleContent content) {
+    final keys = _recoveryKeysAdopt(content);
     var fresh = 0;
     var deleted = 0;
     for (final c in content.contacts) {
       final hex = bytesToHex(c.userId);
       if (c.deleted) {
-        // §15.9: a deleted contact must NOT resurrect via the recovery. The
-        // marker comes back, the record does not.
+        // §15.9: a deleted contact must NOT resurrect via the recovery.
         _deletedContacts.add(hex);
         deleted++;
         continue;
       }
       if (_contacts.containsKey(hex)) continue;
       if (c.foundingEd25519Pk.length != 32) {
-        // WITHOUT AN ANCHOR NO `K_AB` AND NO LINE. Such an entry would be a
-        // name without a delivery path; it is reported, not created.
-        _log.warn('Rescue bundle: contact $hex without founding anchor in the '
-            'bundle — not created.');
+        _log.warn('Rescue bundle: contact ${hex.substring(0, 8)} without '
+            'founding anchor in the bundle — not created.');
         continue;
       }
-      _contacts[hex] = ContactInfo(
+      final info = ContactInfo(
         nodeId: c.userId,
         displayName: c.displayName,
-        // ── THE VERIFICATION LEVEL COMES ALONG, THE STATUS DOES NOT ───────────────
-        //
-        // §13.3.2 lists "display name + verification level" as a bundle
-        // line with the justification "UI continuity, key-change detection
-        // (§15.7)". The STATUS does not stand there — and it could not be
-        // proven either: `blocked` travels as its own bit, everything else
-        // is an accepted contact, otherwise it would not lie in the bundle.
         status: c.blocked ? 'blocked' : 'accepted',
         verificationLevel: c.verificationLevel,
-        // THE ANCHOR BELONGS IN `seedEpB64`, because `v41PeerFoundingPk`
-        // looks for it exactly there (and only afterwards falls back to
-        // `ed25519Pk`). URL-safe and without padding — the same notation as
-        // with all three other writers of the field, against exactly the
-        // error that silently killed first contact in S360.
+        // THE ANCHOR BELONGS IN `seedEpB64` (`v41PeerFoundingPk` looks for
+        // it there), URL-safe and without padding like every writer.
         seedEpB64: base64Url.encode(c.foundingEd25519Pk).replaceAll('=', ''),
       );
+      info.rememberFoundingAnchor(c.foundingEd25519Pk);
+      _contacts[hex] = info;
+      _recoveryAnchors[hex] =
+          (pairRandom: c.pairRandom, neighbours: c.neighbours);
+      // The row BEFORE the contact list: a contact that is stored without
+      // its waiting row could never be anchored ([_recoveryAnchor] refuses
+      // it); a row without its contact is used by nobody.
+      _recoveryAnchorSave(hex);
       fresh++;
     }
     if (fresh > 0 || deleted > 0) _saveContacts();
 
-    // THE INVITATION LINE (§15.3.3, K-7). Only UPWARDS: if the local ledger
-    // is further ahead than the bundle, it is right — the bundle is up to
-    // 31 days old. Set backwards, indices would be assigned a second time,
-    // and the counterparts of the first assignment would have a line that
-    // belongs to someone else.
+    // THE INVITATION LINE (§15.3.3, K-7). Only UPWARDS.
     final book = inviteLedger;
     var bookChanged = false;
     if (content.inviteGeneration > book.generation) {
@@ -449,16 +651,130 @@ extension V41RecoveryBundleOps on CleonaService {
       book.highwater = content.inviteHighwater;
       bookChanged = true;
     }
-    // S366: here EXCLUSIVELY the header changes — generation and highwater
-    // move upwards, no record is created. So only the header is written.
     if (bookChanged) inviteStore.persistHead(book);
 
     if (content.groups.isNotEmpty) {
       _log.info('Rescue bundle: ${content.groups.length} group(s) lie '
           'in the bundle and are NOT taken over — `GroupInfo` needs '
-          'owner, creation time and membership epoch, and two of them '
-          'are not in the bundle (§13.3.2). Open, not forgotten.');
+          'owner, creation time and membership epoch (B-3). Open.');
     }
+    _log.info('Rescue bundle: taken over — own keys '
+        '${keys ? "and chain (${content.rotationChain.length} link(s))" : "unchanged (the keys of the words)"}, '
+        '$fresh contact(s) waiting for their first envelope, $deleted '
+        'deletion mark(s)');
     return fresh;
+  }
+
+  /// E7-a: the own current keys and chain from the bundle, when they differ
+  /// from the words' keys — an Emergency Key Rotation happened (§4.5.4,
+  /// D-33). The chain must lead from this UserID to the bundle's signing
+  /// keys (checked hybrid, `RotationChain.holds`); the running mailbox takes
+  /// the keys over in the same step (`MailboxRotation.identityRotate`).
+  /// `false`: nothing to adopt, or refused (named).
+  bool _recoveryKeysAdopt(RecoveryBundleContent c) {
+    if (c.rotationChain.isEmpty) return false;
+    if (c.ed25519SecretKey.length != 64) return false;
+    final ed = Uint8List.fromList(Uint8List.sublistView(c.ed25519SecretKey, 32));
+    if (constantTimeEquals(ed, identity.ed25519PublicKey)) return false;
+    if (identity.hasRotated) {
+      _log.warn('Rescue bundle: this device already carries a rotation chain '
+          '— the bundle\'s keys are NOT written over it');
+      return false;
+    }
+    final chain = [
+      for (final l in c.rotationChain)
+        StoredRotationLink(
+          oldEd25519Pk: l.oldEd25519Pk,
+          oldMlDsaPk: l.oldMlDsaPk,
+          newEd25519Pk: l.newEd25519Pk,
+          newMlDsaPk: l.newMlDsaPk,
+          oldSignatureEd25519: l.oldSignatureEd25519,
+          oldSignatureMlDsa: l.oldSignatureMlDsa,
+        )
+    ];
+    final dsa = c.rotationChain.last.newMlDsaPk;
+    try {
+      if (!RotationChain.fromStored(chain)
+          .holds(identity.userId, ChainKeys(ed, dsa))) {
+        _log.warn('Rescue bundle: the chain does not lead from this UserID to '
+            'the bundle\'s keys (§4.5.4) — keys NOT adopted');
+        return false;
+      }
+      if (c.mlKemSecretKey.length != OqsFFI.mlKemSecretKeyLength) {
+        throw ArgumentError('ML-KEM secret key of ${c.mlKemSecretKey.length} B');
+      }
+      identity.adoptRecoveredKeys(
+        chain: chain,
+        ed25519Pk: ed,
+        ed25519Sk: c.ed25519SecretKey,
+        mlDsaPk: dsa,
+        mlDsaSk: c.mlDsaSecretKey,
+        x25519Pk: SodiumFFI().x25519ScalarMult(c.x25519SecretKey, _kX25519Base),
+        x25519Sk: c.x25519SecretKey,
+        mlKemPk: Uint8List.fromList(c.mlKemSecretKey.sublist(_kMlKemEkOffset,
+            _kMlKemEkOffset + OqsFFI.mlKemPublicKeyLength)),
+        mlKemSk: c.mlKemSecretKey,
+      );
+    } on Object catch (e) {
+      _log.warn('Rescue bundle: keys NOT adopted — $e');
+      return false;
+    }
+    final p = myceliumMailbox;
+    if (p != null) {
+      try {
+        mycelium.MailboxRotation(p).identityRotate(postBoxFrom(identity));
+      } catch (e) {
+        _log.error('Rescue bundle: the running mailbox did not take the '
+            'recovered keys over ($e) — it takes them at the next start');
+      }
+    }
+    return true;
+  }
+
+  /// E7-b: the first envelope of a restored contact that proves its UserID
+  /// (mycelium checked the signature and, for a rotated one, the chain). Its
+  /// founding key must be the one the bundle named; then its address becomes
+  /// the contact's, and the mailbox learns it with the `s_AB` and fixed
+  /// neighbours from the bundle — `K_AB`, the codes and step 3 are back
+  /// (§4.3, §8.1). `false`: not a waiting contact, or refused (named).
+  bool _recoveryAnchor(ContactInfo c, mycelium.Address from) {
+    final hex = bytesToHex(c.nodeId);
+    final waiting = _recoveryAnchors[hex];
+    if (waiting == null) return false;
+    final founding = from.chain.founding?.ed25519Pk ?? from.ed25519Pk;
+    final held = v41PeerFoundingPk(c);
+    if (held == null || !constantTimeEquals(held, founding)) {
+      _log.warn('Rescue bundle: envelope of ${hex.substring(0, 8)} does not '
+          'carry the founding key the bundle named — not anchored');
+      return false;
+    }
+    if (!_setContactTrustAnchor(c, hex, from.ed25519Pk, from.mlDsaPk,
+        source: 'recovery bundle, first envelope')) {
+      return false;
+    }
+    c.x25519Pk = from.x25519Pk;
+    c.mlKemPk = from.mlKemPk;
+    c.kemRotationAt = DateTime.fromMillisecondsSinceEpoch(from.state);
+    c.acceptedAt ??= DateTime.now();
+    _recoveryAnchors.remove(hex);
+    final p = myceliumMailbox;
+    if (p != null) {
+      p.contactRemember(from,
+          pairRandom: waiting.pairRandom,
+          neighbours: [
+            for (final n in waiting.neighbours) CardAddress(n.ip, n.port)
+          ],
+          displayName: c.displayName);
+      p.node.codeRoute.codesChanged(); // EDGE (§8.1): the pair's codes
+      p.host.contactSeatsEdge(); // §5.2: it may take a fixed seat again
+    }
+    // The contact first, then its row goes: a row left over after a crash
+    // in between names a contact that is anchored already and is harmless.
+    _saveContacts();
+    _recoveryAnchorSave(hex);
+    _log.event('Rescue bundle: contact ${hex.substring(0, 8)} anchored by its '
+        'first envelope (E7-b) — s_AB ${waiting.pairRandom == null ? "none" : "from the bundle"}, '
+        '${waiting.neighbours.length} fixed neighbour(s)');
+    return true;
   }
 }

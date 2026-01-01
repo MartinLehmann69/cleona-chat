@@ -37,6 +37,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/update/update_carrier.dart' show UpdateCarrier;
 import 'package:mycelium/card_address.dart' show kChannelBeta, kChannelLive;
+import 'package:mycelium/update_trace.dart';
 
 /// The compartment accepts nothing larger — a manifest is a few KB.
 const int kManifestAtMost = 64 * 1024;
@@ -97,14 +98,22 @@ class ManifestCompartment {
   /// or `null` if it is not validly signed.
   final int? Function(Uint8List json) check;
 
-  /// Fetches what lies in the compartment. `null`: it was NOT asked (no neighbour,
-  /// or the post box is currently occupied) — then nothing was
-  /// deleted either, and nothing is put back.
-  final Future<List<Uint8List>?> Function(Uint8List compartment) collect;
+  /// Fetches what lies in the compartment: every piece goes to [onPiece]
+  /// when it arrives, the future completes with all of them once every
+  /// asked holder is done (§8.2). `null`: it was NOT asked (no neighbour) —
+  /// then nothing is put back.
+  final Future<List<Uint8List>?> Function(
+      Uint8List compartment, void Function(Uint8List piece) onPiece) collect;
 
   /// Deposits [content] under the value [compartment] (`NodePostBox.deposit`).
   final Future<(bool done, int acknowledged)> Function(
       Uint8List content, Uint8List compartment) deposit;
+
+  /// Keeps the checked manifest in the node's OWN post box under the public
+  /// value (§26.5.4, owner 07.10.2026; `PostBoxHolder.holdOwn`): called with
+  /// the best manifest whenever one at least as new is known or arrives —
+  /// from the file at start, from the cache, or collected. `null`: not kept.
+  final bool Function(Uint8List json)? holdOwn;
 
   /// A newer valid manifest has arrived.
   void Function(Uint8List json)? onManifest;
@@ -112,13 +121,16 @@ class ManifestCompartment {
 
   Uint8List? _best;
   int _bestSequence = -1;
-  bool _asksCurrently = false;
+
+  /// Counts the moments: only the newest [ask] decides about depositing.
+  int _asked = 0;
 
   ManifestCompartment({
     required this.compartment,
     required this.check,
     required this.collect,
     required this.deposit,
+    this.holdOwn,
     this.onManifest,
     this.report,
   });
@@ -128,60 +140,84 @@ class ManifestCompartment {
 
   /// A manifest that the caller already knows (cache, own
   /// check). Kept if it is valid and newer; no callback.
-  bool known(Uint8List json) => _take(json) != null;
+  bool known(Uint8List json) {
+    final before = _bestSequence;
+    final sequence = _take(json);
+    updateTrace('manifest-known',
+        seq: sequence,
+        reason: sequence == null
+            ? 'not valid (${json.length} B) — ignored'
+            : sequence > before
+                ? 'taken (newest so far, before $before)'
+                : 'not newer than held $before — kept the held one');
+    return sequence != null;
+  }
 
-  /// ONE moment: ask the compartment, report something newer — and ONLY then deposit
-  /// if the own checked manifest is newer than every one handed over or
-  /// nothing valid came (§26.5.4). An invalid piece is not a
-  /// manifest: whoever hears only such hears „nothing here".
+  /// ONE moment: ask the compartment, report something newer when it
+  /// arrives — and, once every asked holder is done, deposit ONLY if the own
+  /// checked manifest is newer than every one handed over or nothing valid
+  /// came (§26.5.4). An invalid piece is not a manifest: whoever hears only
+  /// such hears „nothing here". A moment that a newer one has followed
+  /// before its holders were done deposits nothing: the newer one decides.
   Future<void> ask() async {
-    if (_asksCurrently) return;
-    _asksCurrently = true;
-    try {
-      final pieces = await collect(compartment);
-      if (pieces == null) return;
-      var fresh = false;
-      var passed = -1;
-      for (final s in pieces) {
-        final before = _bestSequence;
-        final sequence = _take(s);
-        if (sequence == null) {
-          report?.call('Manifest compartment: invalid piece (${s.length} B) '
-              'discarded');
-          continue;
-        }
-        if (sequence > passed) passed = sequence;
-        if (sequence > before) fresh = true;
+    final mine = ++_asked;
+    var passed = -1;
+    void arrived(Uint8List s) {
+      final before = _bestSequence;
+      final sequence = _take(s);
+      updateTrace('manifest-in',
+          seq: sequence,
+          reason: sequence == null
+              ? 'not valid (${s.length} B) — discarded'
+              : sequence > before
+                  ? 'newer than held $before — reported'
+                  : 'not newer than held $before — not reported');
+      if (sequence == null) {
+        report?.call('Manifest compartment: invalid piece (${s.length} B) '
+            'discarded');
+        return;
       }
+      if (sequence > passed) passed = sequence;
       final best = _best;
-      if (pieces.isNotEmpty && passed < 0) {
-        // B-3 (S388): towards the outside this is the same as „nothing here" — the
-        // own manifest is deposited, otherwise a single
-        // forgery would hold up every new deposit. In the log the two cases stay
-        // distinguishable; since S389 the holder rejects forgeries itself
-        // (`post_box_holder.dart`), so a hit here means: the
-        // counterpart does not comply.
-        report?.call('Manifest compartment: only invalid items handed over '
-            '(${pieces.length} piece(s)) — like „nothing here"');
-      }
-      if (fresh && best != null) onManifest?.call(best);
-      if (best == null || _bestSequence <= passed) return;
-      final (done, acknowledged) = await deposit(best, compartment);
-      report?.call('Manifest compartment: sequence $_bestSequence deposited (handed: '
-          '${passed < 0 ? 'nothing valid' : 'sequence $passed'}, '
-          '$acknowledged receipt(s)${done ? '' : ', incomplete'})');
-    } finally {
-      _asksCurrently = false;
+      if (sequence > before && best != null) onManifest?.call(best);
     }
+
+    final pieces = await collect(compartment, arrived);
+    if (pieces == null || mine != _asked) return;
+    final best = _best;
+    if (pieces.isNotEmpty && passed < 0) {
+      // B-3 (S388): towards the outside this is the same as „nothing here" — the
+      // own manifest is deposited, otherwise a single
+      // forgery would hold up every new deposit. In the log the two cases stay
+      // distinguishable; since S389 the holder rejects forgeries itself
+      // (`post_box_holder.dart`), so a hit here means: the
+      // counterpart does not comply.
+      report?.call('Manifest compartment: only invalid items handed over '
+          '(${pieces.length} piece(s)) — like „nothing here"');
+    }
+    if (best == null || _bestSequence <= passed) return;
+    final (done, acknowledged) = await deposit(best, compartment);
+    report?.call('Manifest compartment: sequence $_bestSequence deposited (handed: '
+        '${passed < 0 ? 'nothing valid' : 'sequence $passed'}, '
+        '$acknowledged receipt(s)${done ? '' : ', incomplete'})');
   }
 
   int? _take(Uint8List json) {
     if (json.isEmpty || json.length > kManifestAtMost) return null;
     final sequence = check(json);
     if (sequence == null) return null;
-    if (sequence > _bestSequence) {
+    final newer = sequence > _bestSequence;
+    if (newer) {
       _best = Uint8List.fromList(json);
       _bestSequence = sequence;
+    }
+    final held = sequence == _bestSequence && holdOwn?.call(_best!) == true;
+    if (held) {
+      updateTrace('manifest-held',
+          seq: sequence, reason: newer ? 'new in the own post box' : 'renewed');
+    }
+    if (held && newer) {
+      report?.call('Manifest compartment: sequence $sequence held in the own post box');
     }
     return sequence;
   }

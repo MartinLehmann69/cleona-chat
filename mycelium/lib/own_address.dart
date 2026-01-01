@@ -16,6 +16,8 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/util/host_interfaces.dart'
+    show interfaceLeadsAfterOutside;
 import 'package:mycelium/card_address.dart'
     show CardAddress, kOwnAddressesAtMost;
 import 'package:mycelium/node_helpers.dart' show isPrivate;
@@ -58,6 +60,14 @@ int rankTheAddress(InternetAddress a) {
   return isPrivate(a) ? 0 : 2;
 }
 
+/// Whether the addresses of [s] may be named to others at all. A
+/// host-internal bridge (`virbr0`, `docker0`, …) carries an address that
+/// does not leave the host: every reader would dial it into the void, or
+/// into its own bridge of the same range. The node still KNOWS these
+/// addresses as its own (`node_helpers.interfaces` stays unfiltered) and
+/// answers from them to a peer in that very segment (`own_entries._family`).
+bool announced(NetworkInterface s) => interfaceLeadsAfterOutside(s.name);
+
 /// The best own address for the LAN field of the card — or `null`
 /// if this machine has no usable one.
 ///
@@ -75,7 +85,7 @@ Uint8List? ownLanAddress(List<NetworkInterface> interfaces) {
   Uint8List? best;
   var bestRank = -1;
   var bestLink = 0;
-  for (final s in interfaces) {
+  for (final s in interfaces.where(announced)) {
     final link = linkKindFrom(s.name).priority;
     for (final a in s.addresses) {
       final r = rankTheAddress(a);
@@ -234,7 +244,7 @@ LinkKind linkKindFrom(String name) {
 List<CardAddress> ownAddressesOrdered(
     List<NetworkInterface> interfaces, int port) {
   final candidates = <({int link, int rank, Uint8List raw})>[];
-  for (final s in interfaces) {
+  for (final s in interfaces.where(announced)) {
     final link = linkKindFrom(s.name).priority;
     for (final a in s.addresses) {
       final rank = rankTheAddress(a);

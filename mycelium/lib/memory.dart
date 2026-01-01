@@ -2,11 +2,11 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/file_encryption.dart';
-import 'package:cleona/core/crypto/oqs_ffi.dart';
-import 'package:cleona/core/crypto/sodium_ffi.dart' show cryptoSignSecretKeyBytes;
 import 'package:mycelium/memory_invitation.dart';
 import 'package:mycelium/memory_contact.dart';
+import 'package:mycelium/memory_own.dart';
 import 'package:mycelium/envelope.dart';
+import 'package:mycelium/trace.dart' show traceNote;
 
 /// [MemoryError], [Reader] and [RememberedInvitation] stand in
 /// `memory_invitation.dart` (reasoning for the cut in its header) and
@@ -18,6 +18,9 @@ export 'package:mycelium/memory_invitation.dart';
 /// `memory_contact.dart` — likewise re-exported.
 export 'package:mycelium/memory_contact.dart';
 
+/// The own post box and its file section (S401) — likewise re-exported.
+export 'package:mycelium/memory_own.dart';
+
 /// What a MAILBOX remembers restart-proof: the own post box, the
 /// contacts and the issued invitations — everything that belongs to exactly one
 /// identity. Port and neighbours belong to the device and have stood
@@ -25,20 +28,8 @@ export 'package:mycelium/memory_contact.dart';
 ///
 /// Encryption is done by [FileEncryption] (atomic write path via
 /// `.enc.tmp` + rename) — this file only supplies format+mapping.
-///
-/// OPEN SEAM: a real `PostBox` (envelope.dart) cannot be serialised from
-/// here — its three secret fields are
-/// file-private. What is stored is therefore [OwnPostBox]: the same
-/// four values as a standalone byte bundle (`berichte/P7-gedaechtnis.md`).
-typedef OwnPostBox = ({
-  Address address,
-  Uint8List ed25519Sk,
-  Uint8List x25519Sk,
-  Uint8List mlKemSk,
-  Uint8List mlDsaSk,
-  // The previous KEM generation, as long as it is within the grace period (E1).
-  PreviousParts? previous,
-});
+/// The own post box — [OwnPostBox], [OwnKept], their mapping and their
+/// file section — has stood since S401 in `memory_own.dart`.
 
 /// [FileEncryption] itself appends `.enc`; on disk therefore lies
 /// `gedaechtnis.enc` (briefly during writing: `.enc.tmp`).
@@ -84,6 +75,19 @@ const String kFileMailbox = 'memory';
 /// Version 16 (2026-09, contacts as fixed neighbours, §5.2/§8.1): every
 /// contact carries a LIST of up to three fixed neighbours instead of one,
 /// and the mark "never a fixed neighbour" (`memory_contact.dart`).
+/// Version 17 (S398, proposal A, D-33): every address carries the identifier
+/// (3240 B) and is followed by its rotation chain; every contact carries
+/// whether it acknowledged the own chain; the post box carries — with flags —
+/// the founding secret key and the previous day-key seed. PRICE, named: a
+/// device updating from version 16 loses this file (`memory_enforcer.dart`)
+/// — contacts' `s_AB`, day keys, routes, invitations; 4.2.1 is not
+/// compatible with 4.2.0 (owner decision).
+/// STILL version 17 (S401): the post box flag takes a second value, 2 — the
+/// address and the day-seed section WITHOUT the four secret keys, the
+/// previous KEM generation and the founding key ([OwnKept]). That is what a
+/// memory writes whose caller holds the identity; flag 1 stays the layout of
+/// a node without an app. Both are read; no file is lost, and a flag-1 file
+/// of the app is rewritten as flag 2 at its next start.
 ///
 /// **Why 11 and not 10**, although both changes arose in the same session:
 /// version 10 really existed — it lay between two
@@ -95,7 +99,7 @@ const String kFileMailbox = 'memory';
 /// Older versions are NOT read. There are no legacy profiles —
 /// mycelium has not shipped, and a migration for a state that
 /// nobody has would be code that nobody ever checks.
-const int kVersionMailbox = 16;
+const int kVersionMailbox = 17;
 
 /// What a mailbox remembers restart-proof: the own [OwnPostBox],
 /// the [Contact]s and the invitations. Encrypted via
@@ -104,10 +108,23 @@ const int kVersionMailbox = 16;
 class Memory {
   final FileEncryption _enc;
   final String _path;
+
+  /// The bytes as they last lay on disk — `null` until this instance has
+  /// written or read the file. [save] compares against it, so the file is
+  /// not rewritten when no content changed (S403, finding 5).
+  Uint8List? _written;
+
+  /// Whether this memory WRITES the secret keys of the own post box. Only
+  /// for a node without an app (`myceliumd`, probes), for which this file is
+  /// the one place its identity lives. With an app the keys stand in the
+  /// app's store and come in at every start (`MailboxDetails.me`); a second
+  /// copy here had no reader (S401, U-4).
+  final bool secretKeys;
   OwnPostBox? _postBox;
+  OwnKept? _kept;
   final Map<String, Contact> _contacts = {};
 
-  Memory._(this._enc, this._path);
+  Memory._(this._enc, this._path, this.secretKeys);
 
   /// Loads what lies in the directory, or creates an empty [Memory].
   /// If something lies there that cannot be read with [key]
@@ -117,13 +134,13 @@ class Memory {
   /// [now] is the clock in Unix seconds against which expired
   /// invitations are sorted out on loading (default: the system clock).
   /// It stands here and not in a field, so that a probe can check the expiry
-  /// without adjusting the system time.
+  /// without adjusting the system time. [secretKeys]: see the field.
   static Memory open(Directory directory, Uint8List key,
-      {int? now}) {
+      {int? now, bool secretKeys = false}) {
     directory.createSync(recursive: true);
     final path = '${directory.path}/$kFileMailbox';
     final enc = FileEncryption(baseDir: directory.path, key: key);
-    final g = Memory._(enc, path);
+    final g = Memory._(enc, path, secretKeys);
 
     if (File('$path.enc').existsSync()) {
       final bytes = enc.readBinaryFile(path);
@@ -134,33 +151,29 @@ class Memory {
       }
       g._decode(
           bytes, now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000);
+      // What lies on disk — the comparison basis for [save]. A file that
+      // does not re-encode identically (flag 1 instead of 2, expired
+      // invitations, dropped introduction fields) is rewritten at its
+      // next save, as before.
+      g._written = bytes;
     }
     return g;
   }
 
-  /// The own post box, or `null` as long as none is set.
+  /// The own post box WITH its secret keys — what a file of a node without
+  /// an app holds; `null` when none is set or the file holds no keys.
   OwnPostBox? get ownPostBox => _postBox;
+
+  /// Address and previous day-key seed of the own post box — in every file.
+  OwnKept? get ownKept => _kept;
+
   /// Sets the own post box. Checks the three key lengths
   /// against the crypto library, instead of only at the next round trip.
+  /// Without [secretKeys] only [ownKept] is taken from it.
   set ownPostBox(OwnPostBox? b) {
-    if (b != null) {
-      if (b.ed25519Sk.length != cryptoSignSecretKeyBytes) {
-        throw ArgumentError('ed25519Sk must be $cryptoSignSecretKeyBytes B, '
-            'was ${b.ed25519Sk.length}');
-      }
-      if (b.x25519Sk.length != 32) {
-        throw ArgumentError('x25519Sk must be 32 B, was ${b.x25519Sk.length}');
-      }
-      if (b.mlKemSk.length != OqsFFI.mlKemSecretKeyLength) {
-        throw ArgumentError('mlKemSk must be ${OqsFFI.mlKemSecretKeyLength} B, '
-            'was ${b.mlKemSk.length}');
-      }
-      if (b.mlDsaSk.length != OqsFFI.mlDsaSecretKeyLength) {
-        throw ArgumentError('mlDsaSk must be ${OqsFFI.mlDsaSecretKeyLength} B, '
-            'was ${b.mlDsaSk.length}');
-      }
-    }
-    _postBox = b;
+    if (b != null) ownPostBoxCheck(b);
+    _postBox = secretKeys ? b : null;
+    _kept = b == null ? null : ownKeptOf(b);
   }
 
   /// The invitations that this identity has issued (`ch15.md:315`).
@@ -189,37 +202,54 @@ class Memory {
     _contacts[key] = fresh
         ? k
         : k.withAddress(soFar.address);
+    // S405 (proposal D): every change of the last observed address.
+    final was = soFar?.lastSeen, seen = k.lastSeen;
+    if (seen == null ? was != null : !(was?.equal(seen) ?? false)) {
+      traceNote('contact $key: last observed address ${was ?? "none"} -> ${seen ?? "none"}');
+    }
     return soFar != null && fresh;
   }
 
   /// Removes the contact with this address; no error if there was none.
-  void contactForget(Address a) => _contacts.remove(_keyFor(a));
+  void contactForget(Address a) {
+    if (_contacts.remove(_keyFor(a)) != null) traceNote('contact ${_keyFor(a)}: forgotten');
+  }
 
   /// Writes the state encrypted and atomically (`FileEncryption.
   /// writeBinaryFile` / `atomicReplace`: first `.enc.tmp`, then renamed).
   /// A crash between the two steps leaves the previous
   /// `gedaechtnis.enc` intact — there is never an intermediate version under
   /// the canonical name.
-  void save() => _enc.writeBinaryFile(_path, _encode());
+  ///
+  /// NOTHING NEW ON DISK WITHOUT A CONTENT CHANGE (S403, finding 5): every
+  /// inbound delivery of a contact reached `contactRemember` and with it
+  /// this save — although the adoption rule adopts most addresses not at
+  /// all, and a pure re-delivery changes no byte. Identical bytes ARE
+  /// identical content (the encoding is deterministic), so the write is
+  /// skipped when it would reproduce what lies on disk.
+  void save() {
+    final bytes = _encode();
+    final before = _written;
+    if (before != null && before.length == bytes.length) {
+      var same = true;
+      for (var i = 0; i < bytes.length; i++) {
+        if (before[i] != bytes[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    _enc.writeBinaryFile(_path, bytes);
+    _written = bytes;
+  }
 
   Uint8List _encode() {
     final b = BytesBuilder();
     b.addByte(kVersionMailbox);
-    final bk = _postBox;
-    b.addByte(bk == null ? 0 : 1);
-    if (bk != null) {
-      b.add(bk.address.toBytes());
-      b.add(bk.ed25519Sk);
-      b.add(bk.x25519Sk);
-      b.add(bk.mlKemSk);
-      b.add(bk.mlDsaSk);
-      final v = bk.previous;
-      b.addByte(v == null ? 0 : 1);
-      if (v != null) {
-        b.add(v.x25519Sk);
-        b.add(v.mlKemSk);
-      }
-    }
+    // The secret keys only where this file is their one place ([secretKeys]);
+    // a file read WITH keys is written without them otherwise (S401).
+    ownWrite(b, secretKeys ? _postBox : null, _kept);
     final list = _contacts.values.toList();
     b.add(_u32(list.length));
     for (final k in list) {
@@ -241,27 +271,7 @@ class Memory {
       if (version != kVersionMailbox) {
         throw MemoryError('unknown version $version');
       }
-      final hasBk = l.byte();
-      OwnPostBox? bk;
-      if (hasBk == 1) {
-        bk = (
-          address: Address.outBytes(l.bytes(Address.length)),
-          ed25519Sk: l.bytes(cryptoSignSecretKeyBytes),
-          x25519Sk: l.bytes(32),
-          mlKemSk: l.bytes(OqsFFI.mlKemSecretKeyLength),
-          mlDsaSk: l.bytes(OqsFFI.mlDsaSecretKeyLength),
-          previous: switch (l.byte()) {
-            0 => null,
-            1 => (
-                x25519Sk: l.bytes(32),
-                mlKemSk: l.bytes(OqsFFI.mlKemSecretKeyLength),
-              ),
-            final f => throw MemoryError('invalid previous flag $f'),
-          },
-        );
-      } else if (hasBk != 0) {
-        throw MemoryError('invalid post box flag $hasBk');
-      }
+      final (bk, kept) = ownRead(l); // section: `memory_own.dart`
       final count = l.u32();
       final contacts = <String, Contact>{};
       for (var i = 0; i < count; i++) {
@@ -272,6 +282,7 @@ class Memory {
           invitationsDecode(l.bytes(l.u32()), now: now);
       l.done();
       _postBox = bk;
+      _kept = kept;
       _contacts
         ..clear()
         ..addAll(contacts);

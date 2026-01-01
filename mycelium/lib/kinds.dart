@@ -23,7 +23,8 @@
 /// | 0x50-0x5F | media |
 /// | 0x60-0x6F | groups |
 /// | 0x70-0x7F | update (software update) |
-/// | 0x80-0xFF | free |
+/// | 0x80-0x8F | enrolment of an own device (§14.6.1) |
+/// | 0x90-0xFF | free |
 ///
 /// The neighbour search (`neighbours.dart`) does NOT belong here: it has its
 /// own socket on port 41341 and thus its own number space.
@@ -40,15 +41,12 @@ const int kReceiptFirstContact = 0x05;
 const int kMessage = 0x10;
 const int kDeliveryReceipt = 0x11;
 
-/// Publication of a new KEM generation (V4.2 §4.5.4, E1): an
-/// ordinary envelope to ONE contact whose sender address carries the new
-/// generation; plaintext = identifier 8 B ‖ mode 1 B. No broadcast.
-const int kKeyRotation = 0x15;
-
-/// Mode byte in the plaintext of a publication (§4.5.4 "must carry the mode"):
-/// identifier and routes continue to apply for the new keys. Not a kind,
-/// but a number on the wire — therefore likewise assigned only here.
-const int kModeRoutesApplyFurther = 0x01;
+// 0x15 (the publication of a new KEM generation, with its mode byte) is
+// gone (S398): the ONE rotation notice is the application's
+// KEY_ROTATION_BROADCAST, an ordinary message whose envelope carries the
+// new address and whose signed body carries the mode (§4.5.4). Nothing has
+// sent 0x15 since `f025ab9f`; a packet of this kind is now an unexpected
+// kind like any unassigned number. Not reused.
 
 /// Pair notices (proposal M, S391): ordinary sealed
 /// messages to ONE contact, receipted like any, without a history entry.
@@ -87,6 +85,10 @@ const int kNothingThere = 0x34;
 const int kCollectTask = 0x35;
 /// The collector's answer: identifier, random value, bundle, Ed25519 signature.
 const int kCollectProof = 0x36;
+/// The holder's refusal of a proof — `0x37 | value (16 B) | request (8 B)`: this value is not
+/// handed out now (invalid, expired or unknown task, or the hand-out stopped).
+/// A holder never stays silent to a request (S399 step 4, owner 30.09.2026).
+const int kRefused = 0x37;
 
 // ── Outside route (outside_route.dart) ────────────────────────────────────
 const int kWhatIsMyAddress = 0x40;
@@ -123,9 +125,30 @@ const int kTryFromHere = 0x49;
 /// same 16 B. 17 B.
 const int kOpen = 0x4A;
 
-// ── Media (media.dart) ───────────────────────────────────────────────
+// ── Media (media.dart, bulk_piece.dart, §9.4) ────────────────────────
 const int kMediaAnnouncement = 0x50;
+/// Lane 3: one piece sealed under `HKDF(K_T, "bulk/seal")`, the answer to
+/// [kBulkCollect] (`bulk_piece.dart`).
 const int kMediaPiece = 0x51;
+/// Lane 3: leave pieces with a holder — form "open" (proof of work, count)
+/// or form "piece".
+const int kBulkHold = 0x52;
+/// Lane 3: held — the accepted count, later the count really held.
+const int kBulkHeld = 0x53;
+/// Lane 3: collect everything held under this identifier.
+const int kBulkCollect = 0x54;
+/// Lane 3: nothing held under this identifier.
+const int kBulkNothingHere = 0x55;
+/// Lane 2 (§17.6, `stream_frame.dart`): ask a volunteer — size, random.
+const int kStreamAsk = 0x56;
+/// Lane 2: the volunteer's two cookies, or its refusal.
+const int kStreamAnswer = 0x57;
+/// Lane 2: join a session with a cookie; echoed once both sides stand.
+const int kStreamJoin = 0x58;
+/// Lane 2: one sealed piece, forwarded 1:1 by the volunteer.
+const int kStreamFrame = 0x59;
+/// Lane 2: the recipient's missing list, done, give-up or mark.
+const int kStreamMissing = 0x5A;
 
 // ── Groups (group.dart) ──────────────────────────────────────────────
 const int kGroupsMessage = 0x60;
@@ -151,22 +174,45 @@ const int kUpdatePiece = 0x72;
 /// The holder does not have this object: kind | object 32 B.
 const int kNoPieces = 0x73;
 
+// ── Enrolment of an own device (enrol_window.dart, enrol_wait.dart) ─────
+//
+// V4.2 §14.6.1 (D-39): the enrolment call on the LAN and the direct
+// handover while both devices are present. Every answer is shorter than
+// what it answers — no amplification toward a forged sender address.
+
+/// The new device's request, sent directly to the nodes of its segment:
+/// kind | value_E 16 B | sealed request.
+const int kEnrolCall = 0x80;
+
+/// Heard, by a device whose window is open under that value: kind |
+/// value_E 16 B. 17 B. Nobody else answers.
+const int kEnrolHeard = 0x81;
+
+/// One handover piece, sent directly: kind | value 16 B | sealed piece.
+const int kEnrolPiece = 0x82;
+
+/// The piece arrived: kind | value 16 B | first 16 B of SHA-256(piece).
+/// 33 B.
+const int kEnrolPieceHeard = 0x83;
 /// All assigned numbers — the self-test records that none
 /// occurs twice.
 const List<int> allKinds = [
   kBundlePlea, kBundle, kRequest, kAnswer, kReceiptFirstContact,
   kMessage, kDeliveryReceipt, kReaction, kEdit, kReadMark,
-  kKeyRotation, kDayKey,
-  kForward, kUnknownCode, kDetour, kWhereAreYou,
+  kDayKey,
+  kForward, kUnknownCode, kDetour, kWhereAreYou, kRegistration, kRegistered,
   kDeposit, kDeposited, kCollect, kHereItIs, kNothingThere,
-  kCollectTask, kCollectProof,
+  kCollectTask, kCollectProof, kRefused,
   kWhatIsMyAddress, kYourAddressIs, kKnock,
   kAnswerQuestion, kAnswerAnswer,
   kEchoRequest, kEcho, kMoved,
   kIsMyFamilyOpen, kTryFromHere, kOpen,
   kMediaAnnouncement, kMediaPiece,
+  kBulkHold, kBulkHeld, kBulkCollect, kBulkNothingHere,
+  kStreamAsk, kStreamAnswer, kStreamJoin, kStreamFrame, kStreamMissing,
   kGroupsMessage, kKeyDelivery,
   kPiecePlea, kPieceTask, kUpdatePiece, kNoPieces,
+  kEnrolCall, kEnrolHeard, kEnrolPiece, kEnrolPieceHeard,
 ];
 
 // ── Groups of kinds ────────────────────────────────────────────────
@@ -180,12 +226,14 @@ bool isFirstContact(int s) => s >= 0x01 && s <= 0x0F;
 bool isMessage(int s) =>
     s == kMessage ||
     s == kDeliveryReceipt ||
-    s == kKeyRotation ||
     isPairNotice(s);
 bool isPairNotice(int s) => s == kDayKey;
 bool isAmendment(int s) =>
     s == kReaction || s == kEdit || s == kReadMark;
 bool isForward(int s) => s >= 0x20 && s <= 0x2F;
+/// Subset of [isForward] — the code registration with the fixed neighbour
+/// (§8.1); whoever dispatches asks THIS first.
+bool isRegistration(int s) => s == kRegistration || s == kRegistered;
 bool isPostBox(int s) => s >= 0x30 && s <= 0x3F;
 bool isOutsideRoute(int s) => s >= 0x40 && s <= 0x4F;
 /// Subset of [isOutsideRoute] — whoever dispatches asks THIS first.
@@ -196,8 +244,11 @@ bool isMappingProbe(int s) => s >= kEchoRequest && s <= kMoved;
 /// Subset of [isOutsideRoute] — the open check (§8.1).
 bool isOpenCheck(int s) => s >= kIsMyFamilyOpen && s <= kOpen;
 bool isMedia(int s) => s >= 0x50 && s <= 0x5F;
+/// Subset of [isMedia] — lane 2, the relayed stream (§17.6).
+bool isStream(int s) => s >= kStreamAsk && s <= kStreamMissing;
 bool isGroup(int s) => s >= 0x60 && s <= 0x6F;
 bool isUpdate(int s) => s >= 0x70 && s <= 0x7F;
+bool isEnrolment(int s) => s >= 0x80 && s <= 0x8F;
 
 // ── Content bytes of the cover packet (cover_stream_content.dart, S391) ─────────
 //
@@ -209,9 +260,10 @@ const int kCoverFill = 0x00;
 const int kCoverPiece = 0x01;
 const int kCoverEntries = 0x02;
 
-/// The codes for which this node answers (§5.5, §8.1) — only in
-/// packets to the fixed neighbour (`code_registration.dart`).
-const int kCoverRegistration = 0x03;
+// 0x03 (the code registration inside a cover packet, S391) is gone (F-B,
+// owner 06.10.2026): cover carries update pieces and address entries only
+// (§5.5); the registration travels as `0x24`/`0x25` below. A cover packet
+// with this content byte is discarded like any unknown one. Not reused.
 
 /// Keep-alive (§8.1): device code 16 B | token 8 B — so that the fixed
 /// neighbour can follow a move and report it (`mapping_echo.dart`).
@@ -228,3 +280,12 @@ const int kDetour = 0x22;
 
 /// Where are you: kind | hop count (start 2) | code 16 B | ONE part of content.
 const int kWhereAreYou = 0x23;
+
+/// Registration with a fixed neighbour (§8.1, F-B): kind | day u32 BE |
+/// piece 1 | pieces 1 | count 1 | device code 16 B | count × 16 B codes —
+/// the piece of `code_registration.dart` behind the kind. 1048 B for 64 codes.
+const int kRegistration = 0x24;
+
+/// Registered, the fixed neighbour's answer to each `0x24`: kind | day u32 BE
+/// | piece 1. 6 B — far smaller than what it answers.
+const int kRegistered = 0x25;
