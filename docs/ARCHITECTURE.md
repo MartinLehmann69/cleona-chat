@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:59c2c395d1c5, 2026-06-11). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:50ed8f8376f7, 2026-06-11). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1914,7 +1914,7 @@ The two flows (soft-reset on network change, boot-load from disk) thus converge 
 Cleona is a **Closed Network** — only official Cleona builds participate in the network. Forks or third-party implementations without the `network_secret` see no one on the network and are seen by no one.
 
 **Rationale**: not anti-competitive, but security-driven:
-- **Anti-Sybil**: an attacker with a self-built client cannot operate fake nodes en masse.
+- **Anti-Sybil**: an attacker **without the network secret** cannot operate fake nodes en masse — for the insider case (extracted secret) see the threat-model addendum §13.1.8.
 - **Anti-pollution**: no spam, no incompatible wire-format variant in the mesh.
 - **Updates remain controllable**: the maintainer can cut off old versions through secret rotation (§13.2).
 
@@ -5017,9 +5017,25 @@ Only **chat content messages** (TEXT, IMAGE, FILE, VOICE, CALL_*) sent **directl
 
 **Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
 
+**Admission PoW (identity-bound, D3 — Phase 1 observe-only):** distinct from the per-message PoW above, the admission proof prices **ID minting** (insider-Sybil cost anchor, §13.1.8):
+
+```
+Admission PoW:
+  Algorithm:    SHA-256("cleona-id-pow-v1" || device_ed25519_pk || nonce_8byte_LE)
+  Difficulty:   22 leading zero bits (production), 8 (test preset)
+  Computed:     once at device-keypair creation (isolate); existing devices
+                compute lazily on first start after upgrade
+  Persisted:    device_keys.json, alongside the device keypair
+```
+
+- **Bound to the pubkey, not the Device-ID** — it survives secret rotation (Device-IDs change with the secret, the proof does not). The receiver additionally checks `SHA-256(network_secret || pk) == senderDeviceId`, binding the proof to the wire identity.
+- **Transport — no additional packets:** the proof travels alongside the device pubkey it certifies, as `PeerInfoProto.device_id_pow_nonce` (field 21) in self-broadcast `PEER_LIST_PUSH` and `PEER_KEY_RESPONSE`. The 8-byte nonce is part of the **slim** PEER_LIST_PUSH field set (§4.5.x slim mode). Legacy builds ignore the field; legacy gossipers drop it on re-serialization — the peer then simply stays non-admitted until direct contact (harmless in Phase 1).
+- **Verification:** on the key-learning path (`setSigningKeys`): two SHA-256 invocations per newly learned peer; result cached as `idPowVerified` in the PeerInfo and persisted with the routing table.
+- **Phase 1 semantics:** observe-only — nothing is dropped or gated; network stats count admitted vs. non-admitted peers as adoption telemetry. Phase-2 role gating (DHT-store acceptance, relay candidacy, DV route acceptance, fragment storage) activates only behind a `minRequiredVersion` hard-block (§19.5.7/§13.1.8); basic packet receive is never gated.
+
 #### 13.1.3 Layer 2: Rate Limiting per Device
 
-<!-- TODO-V3-CLARIFY: per-device or per-user? Wire-level rate-limiting must key on the device identity (DeviceID = SHA-256(network_secret + device_pubkey)) because that is what appears in the outer NetworkPacket source field. A multi-device user can legitimately occupy multiple per-source budgets — this is a design choice (one user with 5 devices gets 5x the budget) that should be confirmed during §13.1 sign-off. -->
+**Keying sign-off (D2):** rate limiting keys **per-Device**. The wire layer sees only the outer `NetworkPacket` source Device-ID — the UserID is intentionally not disclosed at this layer. A multi-device user legitimately occupies one per-source budget per device (one user with 5 devices gets 5× the budget); this is a deliberate design choice. Against insider ID minting, per-source budgets are a fairness mechanism, not a hard bound — see §13.1.8.
 
 Each node tracks traffic volume per source Device-ID using a sliding time window. The source identifier is taken from the outer `NetworkPacket` (DeviceID), not from any inner `ApplicationFrame` (UserID) — rate-limiting is a wire-layer defense and must operate before inner-frame decryption.
 
@@ -5050,7 +5066,7 @@ Excessive traffic from a single source is silently dropped. **Exemptions:** Rela
 
 Nodes build reputation over time based on observed behavior. Reputation is strictly local — each node independently evaluates its peers. There is no global reputation score.
 
-<!-- TODO-V3-CLARIFY: per-device or per-user? Reputation may legitimately key on UserID rather than DeviceID — a misbehaving user should not get a clean slate by switching devices, and an honest user should carry trust across their device fleet. Wire-layer rate-limiting (§13.1.3) is per-Device, but reputation-based banning (§13.1.6) is more naturally per-User. To be confirmed during §13.1 sign-off; the per-User choice depends on whether the outer NetworkPacket is required to disclose UserID, which it is not in v3.0 base wire format. -->
+**Keying sign-off (D2):** reputation keys **per-Device** and stays that way. Per-User keying is not available at the wire layer (the outer NetworkPacket does not disclose the UserID in the v3.0 base wire format, by design — §16.6) and would buy nothing against the relevant adversary: an insider can mint User-IDs exactly as cheaply as Device-IDs (§13.1.8), so a per-User clean slate is equally free. Honest multi-device users build per-device reputation organically through normal traffic (`recordGood` on accepted packets, §13.1.3).
 
 ```
 Reputation Score Formula:
@@ -5086,19 +5102,39 @@ Each node allocates a limited relay storage budget per source Device-ID. If a si
 
 Nodes can temporarily or permanently ban other nodes based on accumulated misbehavior. Bans are strictly local decisions — no central ban list exists. When many independent nodes ban the same attacker, the attacker becomes effectively isolated from the network through emergent consensus.
 
-**Banned node behavior:** All packets from a banned Device-ID are dropped at the transport layer before any processing. The ban is keyed by Device-ID (not IP), so IP rotation does not bypass bans. Since Device-ID = SHA-256(network_secret + device_pubkey) (see §3.5 Device Identity Sigs and §4.10 Closed Network Model), generating a new Device-ID requires a new device-keypair — and a new device must be re-authorized by the user's existing device fleet (see §7 Multi-Device), losing all contacts and reputation.
+**Banned node behavior:** All packets from a banned Device-ID are dropped at the transport layer before any processing. The ban is keyed by Device-ID (not IP), so IP rotation does not bypass bans. Generating a new Device-ID, however, costs only a fresh keypair plus the (extractable, §4.10) network secret. Fleet re-authorization (§7 Multi-Device) gates only the **user layer** — acting as a device of a user (contacts, Auth-Manifest membership). **Network participation** (relay, DHT replication, DV routing) requires no fleet authorization; a banned insider can re-enter under a fresh ID with neutral reputation. See the insider addendum (§13.1.8).
 
 #### 13.1.7 Attack Scenarios & Mitigations
 
 | Attack | Layer(s) | Mitigation |
 |--------|----------|------------|
 | Spam flood (bulk messages) | 1+2 | PoW makes each packet expensive; rate limiter drops excess |
-| Sybil (fake identities) | 5 + Anti-Sybil | New IDs start at 0.5 reputation; Social Graph Reachability (§9.4) blocks coordinated reports |
+| Sybil (outsider, no secret) | HMAC | without the network secret no valid IDs exist — the closed-network filter holds |
+| Sybil (insider, extracted secret) | §13.1.8 | per-device layers (2/3/5) are bypassable by ID minting; global caps, KEX gate (§8.2), moderation costs (§9.4) and the D1 record anchor (§4.3) remain effective — hardening roadmap in §13.1.8 |
 | Fragment storage exhaustion | 4 | Per-source budget prevents monopolization |
 | Relay abuse (relay others' traffic) | 2+3 | Rate limiter per source; relay traffic counts against relay node's budget |
 | DHT poisoning (fake entries) | 3+4 | DHT/infrastructure ops are PoW-exempt (§13.1.2) — addressed instead by per-source storage quota + record-ownership proof on DHT-STORE; low-reputation entries deprioritized. (Storage-poisoning hardening tracked in the security review.) |
 | Startup burst (legitimate new peer) | 2+3 | Rate limiter generates `recordGood` for accepted packets; score-gate prevents banning peers with score >= 0.5 |
 | Ban-DoS by framing (forge victim's Device-ID) | 5 | `recordBad` requires a verified outer device-sig in the same packet; sig-invalid and unproven-sender frames drop silently without attribution (§13.1.4 attribution precondition) |
+
+#### 13.1.8 Threat-Model Addendum — Insider Sybil
+
+The DoS layers keyed on Device-IDs (Layer 2 rate limiting, Layer 3 reputation, Layer 5 banning) are **outsider-grade** defenses. They are effective against actors without the network secret and against careless insiders. A determined insider who has extracted the secret from an official build (the obfuscation is explicitly not crypto-secure, §4.10) defeats per-device keying by **ID minting**: `deviceId = SHA-256(network_secret || ed25519_device_pubkey)` means every fresh keypair yields a valid Device-ID, offline and at negligible cost.
+
+**What the insider gains:**
+
+- **Per-source budget multiplication.** N minted IDs hold N× the per-source rate/relay/fragment budgets. The **global** caps per node (Layer 2 global limits, relay total budget) still bound the absolute intake — the attack degrades to fairness starvation within the global budget, not unbounded exhaustion.
+- **Reputation/ban evasion.** Each fresh ID starts at neutral 0.5; bans are local and per-ID. Banning a disposable identity has no lasting effect.
+- **DHT position grinding.** Because Device-IDs are hashes, the insider can grind pubkeys until his IDs are XOR-close to any target DHT key and occupy a victim's K-closest replicator set. Since the trust anchor (§4.3 D1) made identity records self-certifying, this is reduced from **identity forgery** to **censorship** (withholding records).
+
+**What holds against the insider:** the global per-node caps; the KEX gate (§8.2 — Sybils cannot reach users at the application layer); the moderation costs that do not scale with IDs (identity age, bidirectional partners, social-graph reachability, §9.4); and the §4.3 record anchor (no forgery). Replay (§2.4 dedup cache) and Ban-DoS-by-framing (§13.1.4) are closed independently of ID count.
+
+**Hardening roadmap (decided, security review cycle D):**
+
+- **D3 — Admission PoW per device keypair.** A static, reusable proof — nonce such that `SHA-256("cleona-id-pow-v1" || ed25519_device_pk || nonce)` has ≥ N leading zero bits — computed once at device creation and carried **alongside the device pubkey it certifies** (`PeerInfoProto.device_id_pow_nonce`, PEER_LIST_PUSH / PEER_KEY_RESPONSE — no additional packets), verified and cached by receivers (two hashes). Bound to the **pubkey**, not the Device-ID, so it survives secret rotation. Legacy builds ignore the unknown field. This raises ID minting from free to CPU-bound; it is a cost factor, not a prevention. Spec: §13.1.2.
+- **D4 — Replicator/lookup diversity + publisher self-verify.** K-closest selection prefers IP-subnet diversity (binds eclipse to the genuinely scarce resource — addresses); the publisher verifies its own records with one self-lookup per publish cycle.
+- **D5 — Collective quotas.** Non-admitted/unknown sources additionally share a collective fraction of the global budgets, so N minted IDs compete with each other instead of multiplying.
+- **Phase-2 enforcement** is gated behind a `minRequiredVersion` hard-block (§19.5.7) and implemented as **role gating** (admission required for DHT-store acceptance, relay candidacy, DV route acceptance, fragment storage) — basic packet receive is **never** dropped for missing admission, so no build generation ever loses message delivery.
 
 ### 13.2 Secret Rotation
 
