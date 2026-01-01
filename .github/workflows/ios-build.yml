@@ -109,34 +109,6 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Inject native FFI libs into Xcode build settings
-        run: |
-          # CocoaPods vendored_frameworks with static .a XCFrameworks does not
-          # link the archives into the Runner. We inject -force_load flags for
-          # each FFI library directly into the Pods xcconfig so the linker
-          # includes all symbols that dart:ffi needs at runtime.
-          XCCONFIG="ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
-          FWDIR="ios/CleonaNative/Frameworks"
-          FLAGS=""
-          for lib in libsodium liboqs libzstd libopus libcleona_audio libwhisper libggml; do
-            A="$FWDIR/$lib.xcframework/ios-arm64/$lib.a"
-            if [ -f "$A" ]; then
-              FLAGS="$FLAGS -force_load \$(PODS_ROOT)/../CleonaNative/Frameworks/$lib.xcframework/ios-arm64/$lib.a"
-            fi
-          done
-          if [ -n "$FLAGS" ]; then
-            echo "" >> "$XCCONFIG"
-            echo "OTHER_LDFLAGS = \$(inherited)$FLAGS" >> "$XCCONFIG"
-            echo "Injected force_load flags into $XCCONFIG"
-            tail -3 "$XCCONFIG"
-          fi
-          # Same for profile config (used by flutter build ipa --release)
-          XCCONFIG_PROFILE="ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"
-          if [ -f "$XCCONFIG_PROFILE" ]; then
-            echo "" >> "$XCCONFIG_PROFILE"
-            echo "OTHER_LDFLAGS = \$(inherited)$FLAGS" >> "$XCCONFIG_PROFILE"
-          fi
-
       - name: Install distribution certificate
         env:
           CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
