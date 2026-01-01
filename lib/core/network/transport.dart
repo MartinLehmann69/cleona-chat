@@ -145,14 +145,19 @@ class Transport {
   /// socket, no §4.5.2 dual-socket risk.
   IosUdpSender? _iosUdpSender;
 
-  // ── iOS Receive Diagnostics ────────────────────────────────────────
-  // Dart's RawDatagramSocket on iOS has a proven send-path defect (returns 0
-  // for all destinations). The receive path (kqueue/CFSocket → RawSocketEvent.read)
-  // may have a similar integration bug. These counters + native peek probe
-  // distinguish "no packets arriving" from "data in kernel buffer but Dart
-  // not reading it".
+  // ── iOS Native Receive ─────────────────────────────────────────────
+  // Dart's RawDatagramSocket on iOS has proven defects in BOTH directions:
+  //   Send: returns 0 for all destinations (fixed via native sendto).
+  //   Receive: kqueue/CFSocket stops delivering read events after a burst
+  //     of native sendto() calls on the same fd. The kernel socket has no
+  //     data (peek=-35), but packets from the network stop arriving at the
+  //     socket entirely after the initial 1-2.
+  // Fix: poll the socket with native recvfrom() on a 50ms timer, completely
+  // bypassing Dart's broken kqueue event delivery.
   Timer? _iosDiagTimer;
+  Timer? _iosRecvTimer;
   int _iosRxEventCount = 0;
+  int _iosNativeRxCount = 0;
 
   NetworkPacketCallback? onPacketV3;
   DiscoveryCallback? onDiscovery;
@@ -1446,12 +1451,21 @@ class Transport {
       _startedAtMs = DateTime.now().millisecondsSinceEpoch;
       if (Platform.isWindows) _sendSelfProbe();
       // iOS: old fd is stale after socket close+reopen — must rescan.
+      // Restart native receive polling with the new fd.
       if (Platform.isIOS) {
+        _iosRecvTimer?.cancel();
+        _iosRecvTimer = null;
         _iosUdpSender = null;
         try {
           _iosUdpSender = IosUdpSender.open(port);
           if (_iosUdpSender != null) {
             _log.info('iOS native sendto() reattached on fd=${_iosUdpSender!.fd} fd6=${_iosUdpSender!.fd6}');
+            if (_iosUdpSender!.hasRecvFrom) {
+              _iosRecvTimer = Timer.periodic(
+                  const Duration(milliseconds: 50), (_) {
+                _iosNativeRecvPoll();
+              });
+            }
           }
         } catch (e) {
           _log.warn('iOS native sendto() reattach failed: $e');
@@ -1480,25 +1494,33 @@ class Transport {
     _log.info('Transport rebound to port $newPort');
   }
 
-  // ── iOS Receive Diagnostics (§4.5.2 iOS) ───────────────────────────
+  // ── iOS Native Receive + Diagnostics (§4.5.2 iOS) ──────────────────
   void _startIosDiagnostics() {
     _iosRxEventCount = 0;
+    _iosNativeRxCount = 0;
     _iosDiagTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       final peek = _iosUdpSender?.recvPeek() ?? -999;
-      _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount peek=$peek '
-          '(rxEvents>0=OK, peek>0=data stuck in kernel/Dart broken, '
-          'peek=-35=EAGAIN/empty)');
-      // peek=-9 (EBADF) = socket fd is dead → trigger reconnect
+      _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount nativeRx=$_iosNativeRxCount peek=$peek');
       if (peek == -9 && !_reconnecting) {
         _log.warn('iOS UDP socket dead (EBADF) — triggering reconnect');
         _iosRxEventCount = 0;
+        _iosNativeRxCount = 0;
         onUdpSocketDead?.call();
         return;
       }
       _iosRxEventCount = 0;
+      _iosNativeRxCount = 0;
     });
-    // Localhost echo: send 4 bytes to 127.0.0.1:ownPort. If _onUdpEvent
-    // fires within 2s → Dart's kqueue integration works. If not → broken.
+    // Native receive polling: 50ms timer that calls recvfrom() in a loop.
+    // This is the PRIMARY receive path on iOS — Dart's kqueue delivery is
+    // unreliable and stops after burst sends on the same fd.
+    if (_iosUdpSender != null && _iosUdpSender!.hasRecvFrom) {
+      _iosRecvTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+        _iosNativeRecvPoll();
+      });
+      _log.info('iOS native recvfrom() polling active (50ms interval)');
+    }
+    // Localhost echo: verify Dart's kqueue still works (diagnostic only).
     if (_iosUdpSender != null) {
       final echo = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
       final sent = _iosUdpSender!.send('127.0.0.1', port, echo);
@@ -1510,7 +1532,29 @@ class Transport {
     }
   }
 
+  void _iosNativeRecvPoll() {
+    if (_iosUdpSender == null) return;
+    for (var i = 0; i < 100; i++) {
+      final result = _iosUdpSender!.recvFrom();
+      if (result == null) break;
+      _iosNativeRxCount++;
+      _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
+      if (_udpSocketMobile != null) {
+        _log.info('WiFi recovered (native rx) — deactivating mobile fallback');
+        stopMobileFallback();
+      }
+      final datagram = Datagram(
+        result.data,
+        InternetAddress(result.sourceIp),
+        result.sourcePort,
+      );
+      _processUdpDatagram(datagram);
+    }
+  }
+
   Future<void> stop() async {
+    _iosRecvTimer?.cancel();
+    _iosRecvTimer = null;
     _iosDiagTimer?.cancel();
     _iosDiagTimer = null;
     _tlsRebindTimer?.cancel();

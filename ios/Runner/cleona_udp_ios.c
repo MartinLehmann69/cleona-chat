@@ -128,3 +128,34 @@ int cleona_ios_recv_peek(int fd) {
     extern int errno;
     return -errno;
 }
+
+/* Non-blocking receive: read one UDP datagram from the fd.
+ * Bypasses Dart's kqueue/CFSocket event delivery which silently stops
+ * receiving after a burst of native sendto() calls on the same fd.
+ *
+ * Returns bytes read (>0) on success, 0 on EOF, or -errno on failure.
+ * Fills src_ip (caller provides ≥46 bytes) and *src_port. */
+__attribute__((visibility("default"), used))
+int cleona_ios_recvfrom(int fd, void* buf, int buflen,
+                        char* src_ip, int src_ip_len,
+                        int* src_port) {
+    struct sockaddr_storage addr;
+    socklen_t alen = sizeof(addr);
+    ssize_t n = recvfrom(fd, buf, (size_t)buflen, MSG_DONTWAIT,
+                         (struct sockaddr*)&addr, &alen);
+    if (n <= 0) {
+        if (n == 0) return 0;
+        extern int errno;
+        return -errno;
+    }
+    if (addr.ss_family == AF_INET) {
+        struct sockaddr_in* a4 = (struct sockaddr_in*)&addr;
+        inet_ntop(AF_INET, &a4->sin_addr, src_ip, (socklen_t)src_ip_len);
+        *src_port = ntohs(a4->sin_port);
+    } else if (addr.ss_family == AF_INET6) {
+        struct sockaddr_in6* a6 = (struct sockaddr_in6*)&addr;
+        inet_ntop(AF_INET6, &a6->sin6_addr, src_ip, (socklen_t)src_ip_len);
+        *src_port = ntohs(a6->sin6_port);
+    }
+    return (int)n;
+}

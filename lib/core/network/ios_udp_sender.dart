@@ -25,13 +25,37 @@ typedef _RecvPeekDart = int Function(int fd);
 typedef _CreateSendSocketC = ffi.Int32 Function();
 typedef _CreateSendSocketDart = int Function();
 
+typedef _RecvFromC = ffi.Int32 Function(
+    ffi.Int32 fd,
+    ffi.Pointer<ffi.Uint8> buf,
+    ffi.Int32 buflen,
+    ffi.Pointer<ffi.Uint8> srcIp,
+    ffi.Int32 srcIpLen,
+    ffi.Pointer<ffi.Int32> srcPort);
+typedef _RecvFromDart = int Function(
+    int fd,
+    ffi.Pointer<ffi.Uint8> buf,
+    int buflen,
+    ffi.Pointer<ffi.Uint8> srcIp,
+    int srcIpLen,
+    ffi.Pointer<ffi.Int32> srcPort);
+
+class IosRecvResult {
+  final Uint8List data;
+  final String sourceIp;
+  final int sourcePort;
+  IosRecvResult(this.data, this.sourceIp, this.sourcePort);
+}
+
 class IosUdpSender {
   final int _fd;
   final int _fd6;
   final _SendtoDart _sendto;
   final _SendtoDart _sendto6;
   final _RecvPeekDart? _recvPeek;
-  IosUdpSender._(this._fd, this._fd6, this._sendto, this._sendto6, this._recvPeek);
+  final _RecvFromDart? _recvFrom;
+  IosUdpSender._(this._fd, this._fd6, this._sendto, this._sendto6,
+      this._recvPeek, this._recvFrom);
 
   /// Attach to Dart's existing sockets by scanning for UDP fds on [localPort].
   /// Finds both IPv4 (AF_INET) and IPv6 (AF_INET6) sockets.
@@ -60,12 +84,19 @@ class IosUdpSender {
           .lookupFunction<_RecvPeekC, _RecvPeekDart>('cleona_ios_recv_peek');
     } catch (_) {}
 
+    _RecvFromDart? recvFrom;
+    try {
+      recvFrom = lib
+          .lookupFunction<_RecvFromC, _RecvFromDart>('cleona_ios_recvfrom');
+    } catch (_) {}
+
     final fd = findFd(localPort);
     if (fd < 0) return null;
 
     final fd6 = findFd6?.call(localPort) ?? -1;
 
-    return IosUdpSender._(fd, fd6, sendto, sendto6 ?? sendto, recvPeek);
+    return IosUdpSender._(fd, fd6, sendto, sendto6 ?? sendto, recvPeek,
+        recvFrom);
   }
 
   /// Create a fresh native UDP socket for send-only use (broadcast+unicast).
@@ -84,12 +115,13 @@ class IosUdpSender {
     final fd = createSocket();
     if (fd < 0) return null;
 
-    return IosUdpSender._(fd, -1, sendto, sendto, null);
+    return IosUdpSender._(fd, -1, sendto, sendto, null, null);
   }
 
   int get fd => _fd;
   int get fd6 => _fd6;
   bool get hasIpv6 => _fd6 >= 0;
+  bool get hasRecvFrom => _recvFrom != null;
 
   int send(String destIp, int destPort, Uint8List data) {
     final ipPtr = destIp.toNativeUtf8();
@@ -117,4 +149,25 @@ class IosUdpSender {
   }
 
   int recvPeek() => _recvPeek?.call(_fd) ?? -999;
+
+  /// Non-blocking native recvfrom(). Returns null on EAGAIN/error.
+  /// Bypasses Dart's kqueue event delivery which dies after burst sends.
+  IosRecvResult? recvFrom() {
+    if (_recvFrom == null) return null;
+    final buf = calloc<ffi.Uint8>(65536);
+    final srcIp = calloc<ffi.Uint8>(46); // INET6_ADDRSTRLEN
+    final srcPort = calloc<ffi.Int32>(1);
+    try {
+      final n = _recvFrom(_fd, buf, 65536, srcIp, 46, srcPort);
+      if (n <= 0) return null;
+      final data = Uint8List(n);
+      data.setAll(0, buf.asTypedList(n));
+      final ip = srcIp.cast<Utf8>().toDartString();
+      return IosRecvResult(data, ip, srcPort.value);
+    } finally {
+      calloc.free(buf);
+      calloc.free(srcIp);
+      calloc.free(srcPort);
+    }
+  }
 }
