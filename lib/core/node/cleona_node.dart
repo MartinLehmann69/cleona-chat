@@ -363,8 +363,12 @@ class CleonaNode {
       }).toSet();
 
   // DV-Routing: track when we last sent a route update to each neighbor.
-  // Used for catch-up: if >60s since last update, send full routes on next packet.
+  // Used for catch-up and welcome gate.
   final Map<String, DateTime> _lastRouteUpdateSentTo = {};
+
+  // Epoch of dvRouting.routeEpoch at the time of the last update sent to
+  // each neighbor. Catch-up is skipped when routeEpoch hasn't changed.
+  final Map<String, int> _lastRouteEpochSentTo = {};
 
   // DV→K-bucket seeding: cooldown per destination to avoid repeated WANTs.
   final Map<String, DateTime> _dvSeedWantCooldown = {};
@@ -2615,6 +2619,7 @@ class CleonaNode {
           if (peer != null) {
             _sendRouteUpdate(peer, ourRoutes);
             _lastRouteUpdateSentTo[fromHex] = DateTime.now();
+            _lastRouteEpochSentTo[fromHex] = dvRouting.routeEpoch;
             _log.info('DV: Reciprocal welcome sent ${ourRoutes.length} '
                 'routes to ${fromHex.substring(0, 8)} (peer restart)');
           }
@@ -3094,14 +3099,17 @@ class CleonaNode {
     _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: wireSize=$wireSize '
         'large=$isLargePayload confirmed=$isConfirmed '
         'targets=${targets.map((a) => "${a.ip}:${a.port}").join(",")}');
-    var anySent = false;
     for (final addr in targets) {
       try {
         final ok = await transport.sendUdp(
             packet, InternetAddress(addr.ip), addr.port);
         if (ok) {
-          if (isConfirmed && !isLargePayload) return true;
-          anySent = true;
+          // Confirmed peers: one successful UDP send is enough. RUDP-Light
+          // (DELIVERY_RECEIPT) proves end-to-end delivery; sending to ALL
+          // addresses amplifies traffic 3-4x for no benefit.
+          if (isConfirmed) return true;
+          // Unconfirmed: UDP "ok" is just a local buffer write — continue
+          // to TLS below for real delivery feedback.
         }
       } catch (e) {
         _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
@@ -3130,32 +3138,22 @@ class CleonaNode {
       return false;
     }
 
-    // §4.1 step 3: TLS backup for large payloads (>1200B → fragmented).
-    // UDP fragment bursts are unreliable across routed subnets — the kernel
-    // accepts the datagrams but intermediate routers may drop the burst.
-    // TLS gives real delivery feedback. Try it even when UDP "succeeded"
-    // for payloads that required fragmentation.
-    if (isConfirmed && isLargePayload) {
-      if (!anySent) {
-        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP failed on all '
-            '${targets.length} targets, trying TLS for ${wireSize}B payload');
-      }
-      for (final addr in targets) {
-        final ia = InternetAddress(addr.ip);
-        if (!transport.tlsBulkCapable(ia, addr.port)) continue;
-        try {
-          final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
-          if (ok) {
-            addr.recordSuccess();
-            return true;
-          }
-        } catch (e) {
-          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
+    // Confirmed peer, UDP failed on all targets: try TLS as last resort.
+    _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP failed on all '
+        '${targets.length} targets, trying TLS for ${wireSize}B payload');
+    for (final addr in targets) {
+      final ia = InternetAddress(addr.ip);
+      if (!transport.tlsBulkCapable(ia, addr.port)) continue;
+      try {
+        final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
+        if (ok) {
+          addr.recordSuccess();
+          return true;
         }
+      } catch (e) {
+        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
       }
     }
-
-    if (anySent) return true;
 
     for (final addr in targets) {
       addr.recordFailure();
@@ -4089,6 +4087,7 @@ class CleonaNode {
     final staleCount = dvRouting.markAllRoutesStale();
     _log.debug('Soft-reset: marked $staleCount DV-routes as stale (30s deadline)');
     _lastRouteUpdateSentTo.clear();
+    _lastRouteEpochSentTo.clear();
 
     // Schedule the prune sweep for the soft-reset deadline. Routes /
     // relay-routes that did not revalidate via PONG / DV-update / Relay-
@@ -4344,11 +4343,22 @@ class CleonaNode {
     }
   }
 
+  DateTime? _lastPushSelfBroadcast;
+
   /// §5.11 — broadcast self-PEER_LIST_PUSH to every neighbor *except* the
   /// given peer. Used on new-neighbor events: we tell the existing mesh
   /// about ourselves (which transitively informs them about the new edge,
   /// since our reachability has changed).
   void _pushSelfToNeighborsExcept(Uint8List excludeDeviceId) {
+    // Throttle: at most once per 30s to prevent packet storms if the
+    // caller fires repeatedly (e.g. stale-route revalidation race).
+    final now = DateTime.now();
+    if (_lastPushSelfBroadcast != null &&
+        now.difference(_lastPushSelfBroadcast!).inSeconds < 30) {
+      return;
+    }
+    _lastPushSelfBroadcast = now;
+
     final excludeHex = bytesToHex(excludeDeviceId);
     // §4.4: only push to confirmed peers.
     final targets = routingTable.allPeers
@@ -4659,6 +4669,7 @@ class CleonaNode {
 
       _sendRouteUpdate(peer, entries);
       _lastRouteUpdateSentTo[neighborHex] = now;
+      _lastRouteEpochSentTo[neighborHex] = dvRouting.routeEpoch;
       sent++;
     }
     if (sent > 0) {
@@ -4709,8 +4720,10 @@ class CleonaNode {
           'to ${dvRouting.neighbors.length} neighbors');
       // Update catch-up timestamps for all neighbors
       final now = DateTime.now();
+      final epoch = dvRouting.routeEpoch;
       for (final neighborHex in dvRouting.neighbors.keys) {
         _lastRouteUpdateSentTo[neighborHex] = now;
+        _lastRouteEpochSentTo[neighborHex] = epoch;
       }
     }
 
@@ -4770,24 +4783,25 @@ class CleonaNode {
     final fullUpdate = dvRouting.buildFullUpdate();
     _sendRouteUpdate(peer, fullUpdate);
     _lastRouteUpdateSentTo[neighborHex] = DateTime.now();
+    _lastRouteEpochSentTo[neighborHex] = dvRouting.routeEpoch;
     _log.info('DV: Welcome update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)}');
   }
 
-  /// Catch-up: if we haven't sent a route update to this neighbor in >60s,
-  /// send a full update now. Covers returning peers whose route never went DOWN.
+  /// Catch-up: send a full route update only if the routing table has
+  /// actually changed since the last update to this neighbor.
   void _maybeSendCatchUpRouteUpdate(String neighborHex) {
     if (!isPeerConfirmed(neighborHex)) return;
-    final lastSent = _lastRouteUpdateSentTo[neighborHex];
-    if (lastSent != null && DateTime.now().difference(lastSent).inSeconds < 60) {
-      return; // Recent update — no catch-up needed
-    }
+    final currentEpoch = dvRouting.routeEpoch;
+    final lastEpoch = _lastRouteEpochSentTo[neighborHex];
+    if (lastEpoch != null && lastEpoch >= currentEpoch) return;
     final peer = routingTable.getPeer(hexToBytes(neighborHex));
     if (peer == null) return;
     final fullUpdate = dvRouting.buildFullUpdate();
     if (fullUpdate.isEmpty) return;
     _sendRouteUpdate(peer, fullUpdate);
     _lastRouteUpdateSentTo[neighborHex] = DateTime.now();
-    _log.info('DV: Catch-up update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)}');
+    _lastRouteEpochSentTo[neighborHex] = currentEpoch;
+    _log.info('DV: Catch-up update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)} (epoch $currentEpoch)');
   }
 
   // ── NAT Keepalive Gate ──────────────────────────────────────────────

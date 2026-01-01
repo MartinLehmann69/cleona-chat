@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:561a2e288767, 2026-06-13). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:125ade3a2010, 2026-06-13). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1559,6 +1559,7 @@ Cleona's routing layer operates exclusively on **DeviceIDs**. The routing table 
   Total route cost = sum of all link costs along the path.
 
 - **Updates are event-driven**: on every `PEER_LIST_PUSH`, `ROUTE_UPDATE`, `RELAY_ACK`, routes are updated. There is no periodic refresh apart from a safety net (1×/hour full exchange).
+- **Stale-route revalidation**: when an incoming direct packet calls `addDirectNeighbor()` and a stale route from the same `connType` already exists, the route is revalidated in-place (`revalidate()`) without triggering a new-neighbor event or incrementing `routeEpoch`. Previously, the stale route's inflated cost (+5 penalty from `onNetworkChanged`) was compared against the fresh cost — the fresh route always "won", causing every inbound packet from a known peer to fire new-neighbor logic (welcome route update + mesh broadcast), even though the peer was already established. The fix is surgical: only stale direct routes with the same connection type are revalidated; genuinely new connection types (e.g. a peer appearing on a new network interface) still trigger a full new-neighbor event.
 - **Receive-side `_touchPeer`**: every successfully verified incoming V3 packet calls `_touchPeer(senderDeviceId, from.address, fromPort)` immediately after `dvRouting.addDirectNeighbor`. This keeps `routingTable` (peer info + addresses) and `dvRouting._neighbors` in sync regardless of the discovery channel (LAN multicast, cross-subnet unicast scan, third-party `PEER_LIST_PUSH`) — without it, cross-subnet peers would land in `dvRouting` but never in `routingTable`, leaving the send cascade with `routes=0` despite a "DV: New neighbor" log line.
 - **Split Horizon**: routes are NOT advertised back to the neighbor they were learned from.
 - **Poison Reverse**: when a route fails, it is advertised with `cost=65535` (infinity) to all neighbors — accelerating loop detection.
@@ -1657,7 +1658,7 @@ Result: a slim PeerInfoProto is ~450 B — fits in a single UDP datagram (MTU 12
 
 **On-demand PQ-key fetch**: when the receiver processes a slim `PEER_LIST_PUSH` and detects that the sender's PQ keys are missing from its cache **or** the received `key_fingerprint` differs from the locally computed fingerprint, it sends a `PEER_KEY_REQUEST` (empty payload, BOOT path) to the sender. The sender responds with a `PEER_KEY_RESPONSE` carrying the full `PeerInfoProto` (including all PQ keys) for each hosted identity. Cooldown: max 1 request per peer per 60 s.
 
-**Push jitter**: both `_pushSelfToNeighborsExcept` and `_broadcastAddressUpdate` filter to confirmed peers (§4.4), shuffle the list, and space sends at 200 ms per peer. Combined with the 0–3 s cold-start jitter (§4.5), this limits the peak burst rate even when many nodes join simultaneously.
+**Push jitter**: both `_pushSelfToNeighborsExcept` and `_broadcastAddressUpdate` filter to confirmed peers (§4.4), shuffle the list, and space sends at 200 ms per peer. Combined with the 0–3 s cold-start jitter (§4.5), this limits the peak burst rate even when many nodes join simultaneously. Additionally, `_pushSelfToNeighborsExcept` is **globally throttled to at most once per 30 seconds** — the new-neighbor event that triggers it can fire repeatedly during revalidation bursts (e.g. after `onNetworkChanged`), and without throttling each revalidation would fire a full mesh broadcast.
 
 The PEER_LIST_WANT → PEER_LIST_PUSH response path (`_handlePeerListWantInfra`) continues to deliver **full** PeerInfoProto — the WANT is an explicit key-material request and the response must carry the complete PQ keys.
 
@@ -1789,6 +1790,8 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 **The send and relay-forward paths gate on _reachable_, not _direct-confirmed_.** A peer reachable only via relay (CGNAT, or a never-before-heard first-contact target) must still receive user- and routing-initiated traffic. First-contact (no route yet) is **not** a drop: the cascade attempts the ContactSeed addresses directly **and** relays via the seed peers, and RUDP-Light decides delivery. The idle-traffic savings come from gating *proactive periodic* traffic (the gossip rows above) and from RUDP-Light deciding delivery — **not** from refusing to send real messages. When an offline peer reboots, it still pulls updates via the Mesh-Refresh path (PEER_LIST_SUMMARY → PEER_LIST_WANT → PEER_LIST_PUSH).
 
 > **V3.1.71 regression (fixed in V3.1.72):** the four V3.1.71 gates used *direct-confirmed* to suppress **all** outbound, including `_sendV3ViaHop` and relay-forward. This silently dropped (a) every first-contact CR to an as-yet-unconfirmed target, and (b) the first message to any established LAN/IPv6 peer that had been idle > TTL — because the idle-traffic elimination simultaneously removed the keepalive that kept those peer types confirmed. The send/relay decision now uses *reachable*; *direct-confirmed* gates only proactive periodic direct traffic.
+
+**Single-success-return for confirmed peers** (V3.1.86): `_sendV3ViaHop` sends to the peer's known addresses in priority order. For **confirmed** peers (at least one prior successful exchange), the function returns immediately after the first successful UDP send — it does not continue to remaining addresses. For **unconfirmed** peers, all addresses are attempted (scatter-shot) to maximize first-contact probability, followed by a TLS fallback. Previously, large payloads (≥ 2 UDP fragments) were sent to ALL known addresses of a confirmed peer, causing 3–4× amplification per send (e.g. a 6-fragment route update sent to 4 addresses = 24 UDP packets instead of 6).
 
 ### 4.7 IPv6 Dual-Stack & CGNAT Bypass
 
@@ -5156,7 +5159,7 @@ Four periodic timers run during normal operation:
 
 **UDP receive-health self-probe.** `checkReceiveHealth()` (called by the 5s daemon heartbeat) sends a 4-byte raw probe (`0x43 0x50 0x52 0x42` = "CPRB") to 127.0.0.1 on the node's own port. The probe is intentionally too short for V3 outer-frame parsing — it serves solely to set `_lastUdpReceiveMs` in the `onUdpEvent` handler *before* any HMAC/parse step, confirming that the Dart `RawDatagramSocket` listen callback is alive. If no UDP event (including the self-probe) fires within 30 seconds, the socket is considered dead and `reconnectSockets()` triggers. The probe's parse failure is suppressed in the V3 parser (loopback + ≤4 bytes → no "HMAC fail" log line) to avoid misleading log noise. On iOS, an additional `recvPeek()` path detects EBADF socket death (see §25.2).
 
-Additionally, a **welcome route update** fires 500 ms after a new neighbor is detected, sending full DV routes to the newcomer. A **DV catch-up** is triggered when the last full route exchange was more than 60 seconds ago.
+Additionally, a **welcome route update** fires 500 ms after a new neighbor is detected, sending full DV routes to the newcomer. A **DV catch-up** is **epoch-gated**: each `_maybeSendCatchUpRouteUpdate` compares a monotonic `routeEpoch` counter (incremented only on genuine topology changes — new neighbor, neighbor removal, route-down, stale-route pruning, or `processRouteUpdateDetailed` with at least one changed destination) against the last epoch sent to that specific neighbor. If the epoch has not advanced, the catch-up is suppressed. This replaces the previous 60 s time-based throttle, which still caused O(N) full route-table sends per minute in a stable mesh (N = neighbor count).
 
 Beyond these three core timers, several long-period housekeeping checks fire less frequently and are listed here for completeness:
 

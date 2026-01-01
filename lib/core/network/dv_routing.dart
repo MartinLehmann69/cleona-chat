@@ -41,6 +41,10 @@ class DvRoutingTable {
   // could be behind AP isolation (unicast doesn't pass through).
   final Set<String> _relayConfirmedNeighbors = {};
 
+  // Monotonic counter bumped on every route change. Used by catch-up logic
+  // to skip full-table sends when nothing changed since the last send.
+  int routeEpoch = 0;
+
   // Three-tier capacity classification (Architecture 2.2.3)
   final Set<String> _contactIds = {};
   final Set<String> _channelMemberIds = {};
@@ -163,9 +167,19 @@ class DvRoutingTable {
       }
     }
 
-    // If an equally good or better direct route already exists
-    if (existingDirect != null && existingDirect.cost <= cost) {
-      return false;
+    if (existingDirect != null) {
+      // Stale direct route from the same connType: revalidate in-place
+      // (remove penalty, clear stale flag) instead of replacing it.
+      // Without this, the stale penalty (+5) inflates cost above the fresh
+      // connectionTypeCost, so every inbound packet looks like a "better
+      // route" → returns true → triggers PEER_LIST_PUSH storm to all peers.
+      if (existingDirect.isStale && existingDirect.connType == connType) {
+        existingDirect.revalidate();
+        return false;
+      }
+      if (existingDirect.cost <= cost) {
+        return false;
+      }
     }
 
     // Create/update direct route
@@ -179,6 +193,7 @@ class DvRoutingTable {
     );
 
     _addOrUpdateRoute(hex, route);
+    routeEpoch++;
     onRouteChanged?.call(hex, cost);
     // H-5: Immediately consider the new neighbor as default gateway
     // candidate instead of waiting for the next maintenance tick.
@@ -207,6 +222,8 @@ class DvRoutingTable {
 
     // Remove empty entries
     _routes.removeWhere((_, routes) => routes.isEmpty);
+
+    if (toNotify.isNotEmpty) routeEpoch++;
 
     // Poison Reverse for removed destinations
     for (final entry in toNotify.entries) {
@@ -419,6 +436,7 @@ class DvRoutingTable {
     }
 
     final destList = updatedDests.toList();
+    if (destList.isNotEmpty) routeEpoch++;
     return RouteUpdateResult(
       changed: destList.isNotEmpty,
       updatedDestinations: destList,
@@ -572,6 +590,7 @@ class DvRoutingTable {
         !r.isAlive && now.difference(r.lastConfirmed).inMinutes > 5);
     if (routes.isEmpty) _routes.remove(destHex);
 
+    routeEpoch++;
     final best = bestRouteTo(destHex);
     onRouteChanged?.call(destHex, best?.cost ?? Route.infinity);
   }
@@ -939,7 +958,10 @@ class DvRoutingTable {
       _routes.remove(destHex);
       onRouteChanged?.call(destHex, Route.infinity);
     }
-    if (removed > 0) updateDefaultGateway();
+    if (removed > 0) {
+      routeEpoch++;
+      updateDefaultGateway();
+    }
     return removed;
   }
 
