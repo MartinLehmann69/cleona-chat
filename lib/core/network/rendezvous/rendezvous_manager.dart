@@ -104,6 +104,10 @@ class RendezvousManager {
   /// Update the contact list (called on contact add/remove).
   void updateContacts(List<RendezvousContact> contacts) {
     _contacts = contacts;
+    // §4.11.7: contact add/remove (e.g. contact accept) must republish so the
+    // new mutual contact can resolve our current endpoint. Reuse the existing
+    // network-change debounce to batch rapid contact updates.
+    onNetworkChanged();
   }
 
   /// Current contact list snapshot (for Tier 3b resolve in discovery cascade).

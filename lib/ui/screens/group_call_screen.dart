@@ -411,14 +411,18 @@ class _GroupCallButton extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: size,
-          height: size,
-          child: FloatingActionButton(
-            heroTag: 'gc_$label',
-            backgroundColor: bgColor,
-            onPressed: onPressed,
-            child: Icon(icon, color: fgColor, size: size * 0.45),
+        Semantics(
+          button: true,
+          label: label,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: FloatingActionButton(
+              heroTag: 'gc_$label',
+              backgroundColor: bgColor,
+              onPressed: onPressed,
+              child: Icon(icon, color: fgColor, size: size * 0.45),
+            ),
           ),
         ),
         const SizedBox(height: 4),

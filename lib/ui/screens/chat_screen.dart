@@ -474,12 +474,18 @@ class _ChatScreenState extends State<ChatScreen> {
         tooltip: locale.get('chat_settings'),
         onPressed: () => _showChatSettings(context, service),
       ),
-      if (!widget.isGroup && !widget.isChannel)
+      if (!widget.isGroup && !widget.isChannel) ...[
         IconButton(
           icon: const Icon(Icons.call),
           tooltip: locale.get('call_tooltip'),
-          onPressed: () => _startCall(context, appState),
+          onPressed: () => _startCall(context, appState, video: false),
         ),
+        IconButton(
+          icon: const Icon(Icons.videocam),
+          tooltip: 'Videoanruf',
+          onPressed: () => _startCall(context, appState, video: true),
+        ),
+      ],
       if (widget.isGroup)
         IconButton(
           icon: const Icon(Icons.call),
@@ -2017,11 +2023,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _startCall(BuildContext context, CleonaAppState appState) async {
+  Future<void> _startCall(BuildContext context, CleonaAppState appState, {bool video = false}) async {
     final service = appState.service;
     if (service == null) return;
 
-    final callInfo = await service.startCall(widget.conversationId);
+    final callInfo = await service.startCall(widget.conversationId, video: video);
     if (callInfo != null && context.mounted) {
       Navigator.of(context).push(
         MaterialPageRoute(

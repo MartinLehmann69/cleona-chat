@@ -28,6 +28,7 @@ import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
+import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
@@ -483,6 +484,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult> _connectivityResults = [];
   String _lastNotificationText = '';
+
+  /// Buffered incoming 1:1/group call when the Navigator is not yet attached.
+  /// Drained via [WidgetsBinding.instance.addPostFrameCallback] once the
+  /// [MaterialApp] has rendered its first frame and [navigatorKey.currentState]
+  /// is non-null. Fixes the Linux-Desktop race where an early `incoming_call`
+  /// event arrived before `runApp` finished building.
+  CallInfo? _pendingIncomingCall;
+  GroupCallInfo? _pendingIncomingGroupCall;
 
   /// Current connectivity results from connectivity_plus.
   /// Used by HomeScreen to display connection status icon.
@@ -1118,6 +1127,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onCallEnded = (_) => notifyListeners();
         ipcClient.onCallAccepted = (_) => notifyListeners();
         ipcClient.onCallRejected = (call, reason) => notifyListeners();
+        ipcClient.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
+        ipcClient.onGroupCallStarted = (_) => notifyListeners();
+        ipcClient.onGroupCallEnded = (_) => notifyListeners();
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
         ipcClient.onDaemonDied = () {
           // GUI and daemon act as one unit — if daemon truly dies (lock file
@@ -1504,7 +1516,21 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _showIncomingCallScreen(CallInfo call) {
     final nav = navigatorKey.currentState;
-    if (nav == null) return;
+    if (nav == null) {
+      // Navigator not attached yet (early event before first frame). Buffer
+      // the call and retry after the post-frame callback, matching the
+      // [_scheduleSkinPrecache] pattern.
+      _pendingIncomingCall = call;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final pending = _pendingIncomingCall;
+        if (pending != null) {
+          _pendingIncomingCall = null;
+          _showIncomingCallScreen(pending);
+        }
+      });
+      return;
+    }
+    _pendingIncomingCall = null;
 
     // Determine display name from contacts
     final contact = _service?.getContact(call.peerNodeIdHex);
@@ -1517,6 +1543,41 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           child: CallScreen(
             callInfo: call,
             peerDisplayName: displayName,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Shows the incoming/outgoing group call screen. Buffers like the 1:1 path
+  /// so a `group_call_started` event that races with the first frame is not lost.
+  void _showIncomingGroupCallScreen(GroupCallInfo call) {
+    final nav = navigatorKey.currentState;
+    if (nav == null) {
+      _pendingIncomingGroupCall = call;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final pending = _pendingIncomingGroupCall;
+        if (pending != null) {
+          _pendingIncomingGroupCall = null;
+          _showIncomingGroupCallScreen(pending);
+        }
+      });
+      return;
+    }
+    _pendingIncomingGroupCall = null;
+
+    final groupName = _service?.groups[call.groupIdHex]?.name ??
+        (call.groupIdHex.length >= 8
+            ? call.groupIdHex.substring(0, 8)
+            : call.groupIdHex);
+
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => ChangeNotifierProvider.value(
+          value: this,
+          child: GroupCallScreen(
+            callInfo: call,
+            groupName: groupName,
           ),
         ),
       ),
@@ -1616,6 +1677,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onCallEnded = (_) => notifyListeners();
     service.onCallAccepted = (_) => notifyListeners();
     service.onCallRejected = (call, reason) => notifyListeners();
+    service.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
+    service.onGroupCallStarted = (_) => notifyListeners();
+    service.onGroupCallEnded = (_) => notifyListeners();
 
     // Android: inject platform-specific callbacks
     if (Platform.isAndroid) {

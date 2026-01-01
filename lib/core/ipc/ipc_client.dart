@@ -309,6 +309,11 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         _currentCall = call;
         onIncomingCall?.call(call);
         onStateChanged?.call();
+      } else if (event.event == 'incoming_group_call') {
+        final call = GroupCallInfo.fromJson(event.data);
+        _currentGroupCall = call;
+        onIncomingGroupCall?.call(call);
+        onStateChanged?.call();
       } else if (event.event == 'new_message') {
         // Track unread for non-active identity
         final msgData = event.data['message'] as Map<String, dynamic>?;
@@ -431,6 +436,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final call = CallInfo.fromJson(event.data);
         _currentCall = null;
         onCallEnded?.call(call);
+        onStateChanged?.call();
+        break;
+      case 'incoming_group_call':
+        _currentGroupCall = GroupCallInfo.fromJson(event.data);
+        onIncomingGroupCall?.call(_currentGroupCall!);
+        onStateChanged?.call();
+        break;
+      case 'group_call_started':
+        _currentGroupCall = GroupCallInfo.fromJson(event.data);
+        onGroupCallStarted?.call(_currentGroupCall!);
+        onStateChanged?.call();
+        break;
+      case 'group_call_ended':
+        final call = GroupCallInfo.fromJson(event.data);
+        _currentGroupCall = null;
+        onGroupCallEnded?.call(call);
         onStateChanged?.call();
         break;
       case 'gui_action':
@@ -696,6 +717,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
     final callData = state['currentCall'] as Map<String, dynamic>?;
     _currentCall = callData != null ? CallInfo.fromJson(callData) : null;
+
+    final groupCallData = state['currentGroupCall'] as Map<String, dynamic>?;
+    _currentGroupCall = groupCallData != null ? GroupCallInfo.fromJson(groupCallData) : null;
 
     final peers = state['peerSummaries'] as List<dynamic>?;
     if (peers != null) {

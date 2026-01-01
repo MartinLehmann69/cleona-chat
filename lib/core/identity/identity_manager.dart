@@ -9,6 +9,7 @@ import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/storage/atomic_json_writer.dart';
 
 /// Represents a single identity profile.
@@ -280,16 +281,16 @@ class IdentityManager {
   /// Call this right after the user hits "Start" in the setup screen so the
   /// 15-30s keygen on slow hardware overlaps with the seed-phrase dialog
   /// instead of appearing as post-confirm latency.
-  void preWarmPqKeys() {
-    _pqKeygenPrewarm ??= generatePqKeysIsolated();
+  Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})> preWarmPqKeys() {
+    return _pqKeygenPrewarm ??= generatePqKeysIsolated();
   }
 
   /// Like [preWarmPqKeys] but starts **deterministic** PQ keygen from the
   /// master seed + HD index. This way the prewarmed keys are the exact keys
   /// that [createIdentity] will need — no discard/re-generate.
-  void preWarmPqKeysDeterministic(Uint8List masterSeed, int hdIndex) {
-    _pqKeygenPrewarm ??= generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
+  Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})> preWarmPqKeysDeterministic(Uint8List masterSeed, int hdIndex) {
     _pqPrewarmHdIndex = hdIndex;
+    return _pqKeygenPrewarm ??= generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
   }
 
   /// Create a new identity. Uses HD-Wallet index if master seed exists.
@@ -378,12 +379,13 @@ class IdentityManager {
     _pqKeygenPrewarm = null;
     _pqPrewarmHdIndex = null;
     final pqKeys = await pqFuture;
-    // print() (stdout) is captured in /tmp/cleona-gui.log by the GUI launcher;
-    // stderr is not. No flutter/foundation import here because this file also
-    // runs in the pure-Dart AOT daemon build.
+    // Log PQ keygen timing both to stdout (print) and to the per-profile CLogger
+    // so it appears in $profileDir/logs/cleona_YYYY-MM-DD.log for E2E diagnosis.
     // ignore: avoid_print
     print('[setup-timing] PQ keygen await: ${pqStart.elapsedMilliseconds}ms '
         '(prewarmed=$pqPrewarmed)');
+    CLogger.get('setup-timing', profileDir: profileDir).info(
+        'PQ keygen await: ${pqStart.elapsedMilliseconds}ms prewarmed=$pqPrewarmed');
 
     // Save encrypted keys.json — same format as IdentityContext._saveKeys()
     fileEnc.writeJsonFile('$profileDir/keys.json', {

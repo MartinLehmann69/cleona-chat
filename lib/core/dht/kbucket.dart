@@ -187,6 +187,14 @@ class KBucket {
               fresh.lastAttempt = old.lastAttempt;
               fresh.lastReceivedAt = old.lastReceivedAt;
               fresh.stableSince = old.stableSince;
+            } else {
+              // §4.6: first-party self-advertised address we have not seen
+              // before. Boost its initial score so it can outrank stale
+              // NAT-orphans that are no longer advertised but still carry a
+              // high historical score. Real success/failure will adjust the
+              // score within the next send attempts.
+              fresh.score = 1.0;
+              fresh.lastAttempt = DateTime.now();
             }
           }
           // Track public address churn for StabilityTier classification.

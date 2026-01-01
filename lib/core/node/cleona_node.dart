@@ -385,22 +385,11 @@ class CleonaNode {
     return true;
   }
 
-  /// Live view: drops peers whose direct AND relay routes have died (3x ACK
-  /// timeout) so the connection-status UI doesn't show "all good" after the
-  /// network broke. Stays cheap because the set is small (handful of peers).
-  Set<String> get confirmedPeerIds => _confirmedPeers.keys.where((hex) {
-        if (!isPeerConfirmed(hex)) return false;
-        try {
-          final peer = routingTable.getPeer(hexToBytes(hex));
-          if (peer == null) return false;
-          final directDead = peer.consecutiveRouteFailures >= 3;
-          final relayDead = peer.consecutiveRelayFailures >= 3 ||
-                            peer.relayViaNodeId == null;
-          return !(directDead && relayDead);
-        } catch (_) {
-          return false;
-        }
-      }).toSet();
+  /// Authoritative set of currently confirmed peers (within TTL).
+  /// Mirrors [isPeerConfirmed] so callers get a consistent view; any route-dead
+  /// filtering must be performed explicitly by the consumer.
+  Set<String> get confirmedPeerIds =>
+      _confirmedPeers.keys.where(isPeerConfirmed).toSet();
 
   // DV-Routing: track when we last sent a route update to each neighbor.
   // Used for catch-up and welcome gate.
@@ -905,7 +894,22 @@ class CleonaNode {
 
     // Get all local IPs BEFORE transport starts — isReachableFromCurrentNetwork
     // depends on this being set when incoming packets trigger outgoing sends.
-    final allIps = await Transport.getAllLocalIps();
+    var allIps = await Transport.getAllLocalIps();
+
+    // §4.7 Mobile/SLAAC IPv6 startup race: the first snapshot may run before
+    // the carrier has finished IPv6 address assignment. Retry briefly (local
+    // only, no network traffic) until a global IPv6 appears or we give up.
+    for (var retry = 0; retry < 3; retry++) {
+      final hasGlobalV6 = allIps.any((ip) {
+        final t = PeerAddress.classifyIp(ip);
+        return t == PeerAddressType.ipv6Global;
+      });
+      if (hasGlobalV6) break;
+      _log.info('Local IPs: no global IPv6 yet, retry ${retry + 1}/3 ...');
+      await Future.delayed(const Duration(seconds: 2));
+      allIps = await Transport.getAllLocalIps();
+    }
+
     _localIp = allIps.isNotEmpty ? allIps.first : '127.0.0.1';
     _localIps = allIps;
     PeerAddress.currentLocalIps = _localIps;
@@ -1157,8 +1161,10 @@ class CleonaNode {
     // Tier 3b — External Rendezvous (§4.11 + §4.11.9): two parallel paths.
     // (A) Contact-Rendezvous: resolve contact devices via device-scoped tags.
     // (B) Infra-Rendezvous: resolve network entry-points via network-wide tag.
-    if (!_discoveryComplete &&
-        (rendezvousManager != null || infraRendezvousManager != null)) {
+    // Run regardless of _discoveryComplete: rendezvous is not just a cold-start
+    // fallback; it also refreshes entry-points and contact endpoints even after
+    // bootstrap peers have been found.
+    if (rendezvousManager != null || infraRendezvousManager != null) {
       _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve');
       try {
         final futures = <Future>[];
@@ -1170,12 +1176,20 @@ class CleonaNode {
             final deviceIds = <String, List<String>>{};
             for (final c in contacts) {
               final userIdBytes = hexToBytes(c.userIdHex);
-              final manifest =
-                  identityDhtHandler.getAuthManifest(userIdBytes);
+              // Prefer cached manifest; fall back to live 2D-DHT lookup
+              // (§4.3) so fresh contacts can still be resolved.
+              final manifest = identityDhtHandler.getAuthManifest(userIdBytes);
               if (manifest != null) {
                 deviceIds[c.userIdHex] = manifest.authorizedDeviceNodeIds
                     .map(bytesToHex)
                     .toList();
+              } else {
+                final resolved = await identityResolver.resolve(userIdBytes);
+                if (resolved.isNotEmpty) {
+                  deviceIds[c.userIdHex] = resolved
+                      .map((d) => bytesToHex(d.deviceNodeId))
+                      .toList();
+                }
               }
             }
             final resolved = await rendezvousManager!

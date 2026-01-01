@@ -397,7 +397,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.114';
+  static const String kCurrentAppVersion = '3.1.115';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -626,7 +626,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _rendezvousManager!.init(
       ownFoundingSk: identity.ed25519SecretKey,
       ownUserIdHex: identity.userIdHex,
-      deviceId: identity.nodeId,
+      // §4.11.7: device-scoped rendezvous MUST use the daemon-global
+      // deviceNodeId, not the userId. identity.nodeId is a legacy alias
+      // for userId and must not be used for routing/device tags.
+      deviceId: identity.deviceNodeId,
       contacts: _buildRendezvousContacts(),
       addressProvider: () => node.currentSelfAddresses()
           .map((a) => RendezvousAddress(a.ip, a.port))

@@ -39,12 +39,12 @@ abstract class KeyringService {
       log.warn('secret-tool not available — file-based key storage');
     } else if (Platform.isWindows) {
       final dpapi = _WindowsDpapiKeyring(baseDir, log);
-      if (dpapi._roundTripProbe()) {
+      if (await dpapi._roundTripProbe()) {
         log.info('Using Windows DPAPI for key protection');
         _instance = dpapi;
         return _instance!;
       }
-      log.warn('DPAPI round-trip probe failed — file-based key storage');
+      log.warn('DPAPI round-trip probe failed or timed out — file-based key storage');
       dpapi.delete('_probe');
     } else if (Platform.isMacOS) {
       log.info('Using macOS Keychain via security CLI');
@@ -197,19 +197,52 @@ class _WindowsDpapiKeyring extends KeyringService {
 
   String _pathFor(String name) => '$_baseDir/$name.dpapi';
 
-  bool _roundTripProbe() {
+  Future<bool> _roundTripProbe() async {
     try {
       final testData = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
-      if (!store('_probe', testData)) return false;
-      final loaded = load('_probe');
-      delete('_probe');
-      if (loaded == null || loaded.length != 4) return false;
+      final b64Input = base64Encode(testData);
+
+      // Protect step with 5s timeout — if DPAPI hangs, fall back to file storage.
+      final protect = await Process.run('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        'Add-Type -AssemblyName System.Security; '
+            '[Convert]::ToBase64String('
+            '[System.Security.Cryptography.ProtectedData]::Protect('
+            '[Convert]::FromBase64String("$b64Input"), '
+            '\$null, '
+            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
+            '))',
+      ]).timeout(const Duration(seconds: 5));
+      if (protect.exitCode != 0) {
+        _log.warn('DPAPI Protect probe failed: ${protect.stderr}');
+        return false;
+      }
+      final encrypted = (protect.stdout as String).trim();
+
+      // Unprotect step with 5s timeout.
+      final unprotect = await Process.run('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        'Add-Type -AssemblyName System.Security; '
+            '[Convert]::ToBase64String('
+            '[System.Security.Cryptography.ProtectedData]::Unprotect('
+            '[Convert]::FromBase64String("$encrypted"), '
+            '\$null, '
+            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
+            '))',
+      ]).timeout(const Duration(seconds: 5));
+      if (unprotect.exitCode != 0) {
+        _log.warn('DPAPI Unprotect probe failed: ${unprotect.stderr}');
+        return false;
+      }
+
+      final loaded = base64Decode((unprotect.stdout as String).trim());
+      if (loaded.length != 4) return false;
       for (var i = 0; i < 4; i++) {
         if (loaded[i] != testData[i]) return false;
       }
       return true;
     } catch (e) {
-      _log.warn('DPAPI round-trip probe exception: $e');
+      _log.warn('DPAPI round-trip probe exception/timeout: $e');
       return false;
     }
   }

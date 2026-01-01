@@ -443,15 +443,19 @@ class _VideoCallButton extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: 48,
-          height: 48,
-          child: FloatingActionButton(
-            heroTag: 'video_$label',
-            backgroundColor: bgColor,
-            elevation: 0,
-            onPressed: onPressed,
-            child: Icon(icon, color: fgColor, size: 22),
+        Semantics(
+          button: true,
+          label: label,
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: FloatingActionButton(
+              heroTag: 'video_$label',
+              backgroundColor: bgColor,
+              elevation: 0,
+              onPressed: onPressed,
+              child: Icon(icon, color: fgColor, size: 22),
+            ),
           ),
         ),
         const SizedBox(height: 4),
@@ -496,14 +500,18 @@ class _CallButton extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: size,
-          height: size,
-          child: FloatingActionButton(
-            heroTag: label,
-            backgroundColor: bgColor,
-            onPressed: onPressed,
-            child: Icon(icon, color: fgColor, size: size * 0.45),
+        Semantics(
+          button: true,
+          label: label,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: FloatingActionButton(
+              heroTag: label,
+              backgroundColor: bgColor,
+              onPressed: onPressed,
+              child: Icon(icon, color: fgColor, size: size * 0.45),
+            ),
           ),
         ),
         const SizedBox(height: 8),

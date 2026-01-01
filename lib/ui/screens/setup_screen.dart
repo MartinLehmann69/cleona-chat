@@ -22,6 +22,7 @@ class _SetupScreenState extends State<SetupScreen> {
   final _nameController = TextEditingController();
   bool _loading = false;
   String? _error;
+  Future<dynamic>? _pqPrewarmFuture;
 
   @override
   Widget build(BuildContext context) {
@@ -144,7 +145,8 @@ class _SetupScreenState extends State<SetupScreen> {
         // takes 15-30s; the dialog reading time covers most of it.
         final masterSeed = identityMgr.loadMasterSeed()!;
         final hdIndex = identityMgr.nextHdIndex();
-        identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        final pqFuture = identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        setState(() => _pqPrewarmFuture = pqFuture);
         log('deterministic prewarm kicked (hdIndex=$hdIndex)');
         if (mounted) {
           await _showSeedPhraseBackup(words);
@@ -156,7 +158,8 @@ class _SetupScreenState extends State<SetupScreen> {
         // _preGenerateKeys because masterSeed != null.
         final masterSeed = identityMgr.loadMasterSeed()!;
         final hdIndex = identityMgr.nextHdIndex();
-        identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        final pqFuture = identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        setState(() => _pqPrewarmFuture = pqFuture);
         log('deterministic prewarm kicked (existing seed, hdIndex=$hdIndex)');
       }
 
@@ -243,9 +246,28 @@ class _SetupScreenState extends State<SetupScreen> {
               label: Text(locale.get('print')),
               onPressed: () => _printSeedPhrase(words),
             ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: Text(locale.get('i_have_noted_them')),
+            FutureBuilder<dynamic>(
+              future: _pqPrewarmFuture,
+              builder: (ctx, snap) {
+                final ready = snap.connectionState == ConnectionState.done;
+                return FilledButton(
+                  onPressed: ready ? () => Navigator.of(ctx).pop() : null,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!ready) ...[
+                        SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(ctx).colorScheme.onPrimary),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      Text(locale.get('i_have_noted_them')),
+                    ],
+                  ),
+                );
+              },
             ),
           ],
         );
