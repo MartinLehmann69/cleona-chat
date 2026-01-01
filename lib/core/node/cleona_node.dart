@@ -582,6 +582,7 @@ class CleonaNode {
     // first, the topology second.
     _loadDvRouting();
     _loadConfirmedPeers();
+    _loadFirstCrMailbox();
 
     // Init DHT RPC. V3-direct contract: sendFunction takes
     // `(MTV3, body, peer)` and we plumb that into the §2.3.5 InfraFrame
@@ -3034,6 +3035,7 @@ class CleonaNode {
 
       _log.info('§5.5b FIRST_CR_STORE: stored CR from ${senderHex.substring(0, 8)} '
           'for ${recipHex.substring(0, 8)} (ttl=${ttl.inHours}h, total=$totalEntries)');
+      _saveFirstCrMailbox();
       _sendFirstCrStoreAck(senderDeviceId, from, fromPort, true);
     } catch (e) {
       _log.debug('FIRST_CR_STORE parse error: $e');
@@ -3094,15 +3096,18 @@ class CleonaNode {
     if (delivered > 0) {
       _log.info('§5.5b FIRST_CR_DELIVER: pushed $delivered stored CRs '
           'to ${hex.substring(0, 8)} at ${addr.address}:$port');
+      _saveFirstCrMailbox();
     }
   }
 
   /// Evict expired entries from the First-CR-Mailbox (called from periodic tick).
   void _evictExpiredFirstCrMailbox() {
+    final before = _firstCrMailbox.length;
     _firstCrMailbox.removeWhere((_, bucket) {
       bucket.removeWhere((e) => e.isExpired);
       return bucket.isEmpty;
     });
+    if (_firstCrMailbox.length != before) _saveFirstCrMailbox();
   }
 
   /// §5.5b: Handle FIRST_CR_DELIVER — a seed peer is forwarding a
@@ -5306,6 +5311,39 @@ class CleonaNode {
     _saveConfirmedPeers();
   }
 
+  void _loadFirstCrMailbox() {
+    final file = File('$profileDir/first_cr_mailbox.json');
+    if (!file.existsSync()) return;
+    try {
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      for (final entry in json.entries) {
+        final list = (entry.value as List<dynamic>)
+            .map((e) => _FirstCrMailboxEntry.fromJson(e as Map<String, dynamic>))
+            .where((e) => !e.isExpired)
+            .toList();
+        if (list.isNotEmpty) _firstCrMailbox[entry.key] = list;
+      }
+      var total = 0;
+      for (final list in _firstCrMailbox.values) total += list.length;
+      _log.info('Loaded $total First-CR-Mailbox entries from disk');
+    } catch (e) {
+      _log.warn('Failed to load First-CR-Mailbox: $e');
+    }
+  }
+
+  void _saveFirstCrMailbox() {
+    try {
+      final json = <String, dynamic>{};
+      for (final entry in _firstCrMailbox.entries) {
+        final live = entry.value.where((e) => !e.isExpired).toList();
+        if (live.isNotEmpty) json[entry.key] = live.map((e) => e.toJson()).toList();
+      }
+      _atomicWriteJson('$profileDir/first_cr_mailbox.json', json);
+    } catch (e) {
+      _log.warn('Failed to save First-CR-Mailbox: $e');
+    }
+  }
+
   void _debouncedNetworkStateSave() {
     _networkStateSaveDebounce?.cancel();
     _networkStateSaveDebounce = Timer(const Duration(seconds: 10), () {
@@ -6152,4 +6190,21 @@ class _FirstCrMailboxEntry {
 
   String get dedupKey =>
       '${bytesToHex(senderDeviceId)}:${bytesToHex(recipientDeviceId)}';
+
+  Map<String, dynamic> toJson() => {
+    'recipientDeviceId': base64Encode(recipientDeviceId),
+    'senderDeviceId': base64Encode(senderDeviceId),
+    'encryptedCrBlob': base64Encode(encryptedCrBlob),
+    'storedAtMs': storedAt.millisecondsSinceEpoch,
+    'ttlMs': ttl.inMilliseconds,
+  };
+
+  factory _FirstCrMailboxEntry.fromJson(Map<String, dynamic> j) =>
+      _FirstCrMailboxEntry(
+        recipientDeviceId: base64Decode(j['recipientDeviceId'] as String),
+        senderDeviceId: base64Decode(j['senderDeviceId'] as String),
+        encryptedCrBlob: base64Decode(j['encryptedCrBlob'] as String),
+        storedAt: DateTime.fromMillisecondsSinceEpoch(j['storedAtMs'] as int),
+        ttl: Duration(milliseconds: j['ttlMs'] as int),
+      );
 }

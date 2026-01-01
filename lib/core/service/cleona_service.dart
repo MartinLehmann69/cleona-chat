@@ -826,6 +826,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // trigger. Recovery for owners that come online later happens via the
       // owner's FRAGMENT_RETRIEVE startup poll (§3.3.6), not via sender-side
       // re-pushes.
+
+      // §8.1.1: retry pending CRs when a new peer appears — the CR target
+      // may now be reachable. Backoff gates inside the method prevent flooding.
+      if (_contacts.values.any((c) => c.status == 'pending_outgoing')) {
+        _retryPendingContactRequests();
+      }
     }
     node.routingTable.addOnPeerAddedListener(onPeerAdded);
     _publisherPeerAddedListener = onPeerAdded;

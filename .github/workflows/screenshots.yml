@@ -296,6 +296,35 @@ jobs:
           # Check if IPC socket exists (daemon started successfully)
           ls -la "$HOME/.cleona/cleona.sock" 2>/dev/null || echo "WARNING: No IPC socket found"
 
+          # Trigger screen recording permission dialog with a dummy capture,
+          # then dismiss ALL system dialogs (local network + screen recording)
+          screencapture -x /tmp/dummy-trigger.png 2>/dev/null || true
+          sleep 3
+          echo "Dismissing system dialogs..."
+          osascript <<'DISMISS' 2>/dev/null || true
+          tell application "System Events"
+            -- Click "Allow" on all visible dialogs (local network + screen recording)
+            set procNames to name of every process whose visible is true
+            repeat with procName in procNames
+              try
+                set proc to first process whose name is procName
+                repeat with w in windows of proc
+                  try
+                    if exists button "Allow" of w then
+                      click button "Allow" of w
+                      delay 1
+                    end if
+                  end try
+                end repeat
+              end try
+            end repeat
+          end tell
+          DISMISS
+          sleep 3
+          # Re-activate Cleona after dialog dismissal
+          osascript -e 'tell application "Cleona" to activate' 2>/dev/null || true
+          sleep 2
+
           # Helper function for IPC
           ipc_cmd() {
             python3 -c "
