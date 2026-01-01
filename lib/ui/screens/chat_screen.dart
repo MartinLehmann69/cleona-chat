@@ -142,10 +142,12 @@ class _ChatScreenState extends State<ChatScreen> {
   // length == 0 and we don't want to trigger scroll.
   int _lastRenderedMessageCount = -1;
 
-  // Scroll navigation overlay state
-  bool _showScrollNav = false;
+  // Scroll navigation overlay state — ValueNotifier so toggling rebuilds only
+  // the overlay, not the entire chat screen (message list, input area, etc.).
+  final _scrollNavNotifier = ValueNotifier<bool>(false);
   int _navMessageIndex = -1;
   int _messageCountWhenScrolledUp = -1;
+  bool _suppressScrollNav = false;
 
   @override
   void initState() {
@@ -216,6 +218,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _searchTextController.dispose();
     _scrollController.removeListener(_onScrollChanged);
     _scrollController.dispose();
+    _scrollNavNotifier.dispose();
     _inputFocusNode.dispose();
     _recorder.dispose();
     _recordingTimer?.cancel();
@@ -444,13 +447,19 @@ class _ChatScreenState extends State<ChatScreen> {
                     Positioned(
                       bottom: 8,
                       right: 12,
-                      child: IgnorePointer(
-                        ignoring: !_showScrollNav || messages.isEmpty,
-                        child: AnimatedOpacity(
-                          opacity: _showScrollNav && messages.isNotEmpty ? 1.0 : 0.0,
-                          duration: const Duration(milliseconds: 200),
-                          child: _buildScrollNavOverlay(context, messages.length),
-                        ),
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: _scrollNavNotifier,
+                        builder: (context, showNav, _) {
+                          final mc = _lastRenderedMessageCount;
+                          return IgnorePointer(
+                            ignoring: !showNav || mc <= 0,
+                            child: AnimatedOpacity(
+                              opacity: showNav && mc > 0 ? 1.0 : 0.0,
+                              duration: const Duration(milliseconds: 200),
+                              child: _buildScrollNavOverlay(context, mc),
+                            ),
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -2410,41 +2419,50 @@ class _ChatScreenState extends State<ChatScreen> {
   void _scrollToBottomAfterBuild() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
-      _jumpToBottomRepeatedly(remainingAttempts: 4);
+      _jumpToBottomRepeatedly(remainingAttempts: 8);
     });
   }
 
   void _jumpToBottomRepeatedly({required int remainingAttempts}) {
     if (!mounted || !_scrollController.hasClients) return;
+    _suppressScrollNav = true;
     final before = _scrollController.position.maxScrollExtent;
     _scrollController.jumpTo(before);
-    if (remainingAttempts <= 0) return;
+    if (remainingAttempts <= 0) {
+      _suppressScrollNav = false;
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
+      if (!mounted || !_scrollController.hasClients) {
+        _suppressScrollNav = false;
+        return;
+      }
       final after = _scrollController.position.maxScrollExtent;
       if (after > before + 0.5) {
-        // More items have materialised — jump again until the extent settles.
         _jumpToBottomRepeatedly(remainingAttempts: remainingAttempts - 1);
       } else {
-        // Stable. Final jump guarantees we sit on the true bottom even if the
-        // last animate would otherwise leave us a fraction of a pixel short.
         _scrollController.jumpTo(after);
+        _suppressScrollNav = false;
       }
     });
   }
 
   void _onScrollChanged() {
-    final shouldShow = !_isNearBottom();
-    if (shouldShow == _showScrollNav) return;
-    setState(() {
-      _showScrollNav = shouldShow;
-      if (!shouldShow) {
-        _navMessageIndex = -1;
-        _messageCountWhenScrolledUp = -1;
-      } else {
-        _messageCountWhenScrolledUp = _lastRenderedMessageCount;
-      }
-    });
+    if (_suppressScrollNav) return;
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final distFromBottom = pos.maxScrollExtent - pos.pixels;
+    final isShowing = _scrollNavNotifier.value;
+    // Hysteresis: show at 200px, hide at 80px — prevents rapid toggling
+    // when the user scrolls near the threshold.
+    if (!isShowing && distFromBottom >= 200) {
+      _messageCountWhenScrolledUp = _lastRenderedMessageCount;
+      _scrollNavNotifier.value = true;
+    } else if (isShowing && distFromBottom < 80) {
+      _navMessageIndex = -1;
+      _messageCountWhenScrolledUp = -1;
+      _scrollNavNotifier.value = false;
+    }
   }
 
   int _estimateCurrentTopIndex() {
@@ -2533,11 +2551,9 @@ class _ChatScreenState extends State<ChatScreen> {
               child: InkWell(
                 customBorder: const CircleBorder(),
                 onTap: () {
-                  setState(() {
-                    _showScrollNav = false;
-                    _navMessageIndex = -1;
-                    _messageCountWhenScrolledUp = -1;
-                  });
+                  _navMessageIndex = -1;
+                  _messageCountWhenScrolledUp = -1;
+                  _scrollNavNotifier.value = false;
                   _jumpToBottomRepeatedly(remainingAttempts: 4);
                 },
                 child: SizedBox(

@@ -1785,6 +1785,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         const channel = MethodChannel('chat.cleona/vibration');
         await channel.invokeMethod('vibrate', {'duration': durationMs});
       };
+
+      service.onPostCallNotificationAndroid = (callerName, callId) {
+        const channel = MethodChannel('chat.cleona/notification');
+        channel.invokeMethod('showIncomingCall', {
+          'callerName': callerName,
+          'callId': callId,
+        });
+      };
+      service.onCancelCallNotificationAndroid = () {
+        const channel = MethodChannel('chat.cleona/notification');
+        channel.invokeMethod('cancelIncomingCall');
+      };
     }
   }
 
@@ -1835,9 +1847,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // Same Dart wrapper for both: the `chat.cleona/camera` MethodChannel
       // contract is identical (CameraXHandler.kt / CameraHandler.swift).
       final cam = VideoCaptureAndroid();
-      cam.onFrame = (i420, w, h) {
-        engine.feedExternalFrame(i420, w, h);
-        _updateLocalVideoPreview(i420, w, h);
+      cam.onFrame = (i420, w, h, rotation) {
+        final (rotated, rw, rh) = VideoEngine.rotateI420(i420, w, h, rotation);
+        engine.feedExternalFrame(rotated, rw, rh);
+        final mirrored = VideoEngine.mirrorI420Horizontal(rotated, rw, rh);
+        _updateLocalVideoPreview(mirrored, rw, rh);
       };
       engine.onSwitchCameraRequested = () => cam.switchCamera();
       engine.onCaptureStop = () {

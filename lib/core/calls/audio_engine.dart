@@ -47,7 +47,7 @@ void _captureIsolateEntry(_CaptureInit init) {
     return;
   }
 
-  final startRc = shim.start(engine);
+  final startRc = shim.startDirected(engine, 1);
   if (startRc != 0) {
     shim.destroy(engine);
     frameSendPort.send(null);
@@ -176,7 +176,7 @@ class AudioEngine {
       _log.error('cleona_audio_create failed');
       return false;
     }
-    final startRc = _shim.start(_engine!);
+    final startRc = _shim.startDirected(_engine!, 2);
     if (startRc != 0) {
       _log.error('cleona_audio_start failed: rc=$startRc');
       _shim.destroy(_engine!);

@@ -33,6 +33,10 @@ typedef _CreateDart = Pointer<CleonaAudioEngine> Function(
 typedef _StartNative = Int32 Function(Pointer<CleonaAudioEngine>);
 typedef _StartDart = int Function(Pointer<CleonaAudioEngine>);
 
+typedef _StartDirectedNative = Int32 Function(
+    Pointer<CleonaAudioEngine>, Int32);
+typedef _StartDirectedDart = int Function(Pointer<CleonaAudioEngine>, int);
+
 typedef _StopNative = Void Function(Pointer<CleonaAudioEngine>);
 typedef _StopDart = void Function(Pointer<CleonaAudioEngine>);
 
@@ -70,6 +74,7 @@ class AudioEngineShim {
 
   late final _CreateDart _create;
   late final _StartDart _start;
+  late final _StartDirectedDart _startDirected;
   late final _StopDart _stop;
   late final _DestroyDart _destroy;
   late final _CaptureReadDart _captureRead;
@@ -86,6 +91,9 @@ class AudioEngineShim {
         'cleona_audio_create');
     _start = _lib.lookupFunction<_StartNative, _StartDart>(
         'cleona_audio_start');
+    _startDirected =
+        _lib.lookupFunction<_StartDirectedNative, _StartDirectedDart>(
+            'cleona_audio_start_directed');
     _stop = _lib.lookupFunction<_StopNative, _StopDart>(
         'cleona_audio_stop');
     _destroy = _lib.lookupFunction<_DestroyNative, _DestroyDart>(
@@ -170,6 +178,8 @@ class AudioEngineShim {
       _create(sampleRate, channels, frameSamples, ringCapacityFrames);
 
   int start(Pointer<CleonaAudioEngine> e) => _start(e);
+  int startDirected(Pointer<CleonaAudioEngine> e, int direction) =>
+      _startDirected(e, direction);
   void stop(Pointer<CleonaAudioEngine> e) => _stop(e);
   void destroy(Pointer<CleonaAudioEngine> e) => _destroy(e);
 

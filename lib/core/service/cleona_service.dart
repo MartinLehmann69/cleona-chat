@@ -258,6 +258,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Badge count changed — update launcher badge / tray icon (set by Flutter app or daemon).
   void Function(int totalUnread)? onBadgeCountChanged;
 
+  /// Android: post/cancel incoming call notification with fullScreenIntent.
+  void Function(String callerName, String callId)? onPostCallNotificationAndroid;
+  void Function()? onCancelCallNotificationAndroid;
+
   // Contact storage
   final Map<String, ContactInfo> _contacts = {};
   // Persistent deletion flag: prevents re-import of deleted contacts
@@ -422,7 +426,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.121';
+  static const String kCurrentAppVersion = '3.1.123';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -523,6 +527,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _calls.onGroupCallStarted = (info) => onGroupCallStarted?.call(info);
     _calls.onGroupCallEnded = (info) => onGroupCallEnded?.call(info);
     _calls.onStateChanged = () => onStateChanged?.call();
+    _calls.onPostCallNotificationAndroid = (name, id) => onPostCallNotificationAndroid?.call(name, id);
+    _calls.onCancelCallNotificationAndroid = () => onCancelCallNotificationAndroid?.call();
     // Forward whatever was buffered on the plain fields below (set by
     // callers that ran before startService, e.g. main.dart's
     // _wireServiceCallbacks) to the now-constructed CallService.

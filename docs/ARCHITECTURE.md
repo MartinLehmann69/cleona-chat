@@ -10,13 +10,13 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:73bb78ddbb95, 2026-07-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:2fcb430a19e2, 2026-07-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
 - **MessageQueue retired**: when "routes exhausted" the sender stops; S&F + mailbox pull take over offline delivery
 - **Onion-routing hook**: Outer-Frame format prepared for later multi-layer encryption, not active in V3.0
-- **Hard cut**: wire format and profile format incompatible with v2.2 — profile reset on upgrade
+- **Hard cut**: wire format and profile format incompatible with v2.2 (migration completed May 2026)
 
 ---
 
@@ -4328,7 +4328,7 @@ The four gossip messages `SYSCHAN_DIGEST`, `SYSCHAN_SUMMARY`, `SYSCHAN_WANT`, `S
 - **Push budget:** `k` adaptive (rate-limited per relay, §4.11-style backoff), TTL 5, dedup by record fingerprint — no per-event connection (the Nostr provider reuses a single WebSocket per relay/cycle, §4.11.6 / C2).
 
 **Feature-Request channel integration:**
-- The FR auto-poll is **embedded** in the `SystemChannelRecord` (no separate `POLL_CREATE` round-trip). Votes are open records tallied locally — no snapshot fan-out (the §24.3.2 channel-poll pattern inverted for an ownerless channel).
+- The FR auto-poll is **embedded** in the `SystemChannelRecord` (no separate `POLL_CREATE` round-trip). Votes are open records tallied locally — no snapshot fan-out (the §11.3.3.2 channel-poll pattern inverted for an ownerless channel).
 
 **RETRACT Tombstone (D2):**
 - **Author-only:** the retract signer must match the `SystemChannelRecord` author (same inline-pubkey signature path).
@@ -4353,6 +4353,10 @@ A 1:1 call between two users consists of two phases:
 2. **Live-media phase** — `CALL_AUDIO` and `CALL_VIDEO` frames are sent device-to-device via `sendToDevice(deviceId)` against the resolved peer device, encrypted under the negotiated `call_key`, and bypass two of the standard frame steps (see §10.3 below).
 
 Video uses **libvpx VP8** for compression with adaptive bitrate; audio is uncompressed PCM (see §10.4). Both audio and video frames are passed through a **JitterBuffer** on the receive side to absorb network reordering and short bursts of loss before playback.
+
+**Camera Rotation (Mobile):** CameraX (Android) and AVFoundation (iOS) deliver I420 frames in sensor orientation (typically 90° CW on portrait phones). The `chat.cleona/camera` MethodChannel includes `rotationDegrees` alongside frame data. The Dart `cam.onFrame` callback applies `VideoEngine.rotateI420()` (0/90/180/270° CW) before VP8 encoding, so the sent frame is upright. The local preview additionally applies `VideoEngine.mirrorI420Horizontal()` for the expected selfie-mirror effect; the outgoing frame is NOT mirrored.
+
+**Call UI Controls:** The `CallScreen` toggles for Mute and Speaker update both local UI state and the service layer (`toggleMute()` / `toggleSpeaker()`), which respectively gate the Capture Isolate's frame submission and the Main Isolate's `playFrame()` path.
 
 #### 10.1.1 Call Key Negotiation
 
@@ -4503,7 +4507,7 @@ Audio capture and playback are platform-agnostic and routed through **`libcleona
 
 The 250 ms AEC tail covers typical headset and integrated-laptop-mic echo paths. AGC is intentionally off — gain swings introduced by AGC are perceptually worse than a slightly-low input level on the kinds of devices Cleona targets.
 
-**Capture-isolate pattern:** The Dart side keeps the Capture-Isolate architecture: a dedicated isolate consumes 20 ms frames from a native ring buffer that the shim fills from a miniaudio capture callback. The isolate runs encryption (`AES-256-GCM` with the Call Session Key from §10.1.1) and forwards ciphertext frames to the main isolate via `SendPort`. No Dart code changes are needed at the layer above `AudioEngine` — the swap is transparent at the FFI seam.
+**Directed start and Capture-Isolate pattern:** Each `cleona_audio_start_directed(engine, direction)` call opens only the requested devices: direction 1 = capture-only (Capture Isolate), direction 2 = playback-only (Main Isolate). The legacy `cleona_audio_start(engine)` remains as a direction=0 (both) alias for non-call callers. The Capture-Isolate architecture is unchanged: a dedicated Dart isolate consumes 20 ms frames from the native capture ring buffer, runs AES-256-GCM encryption with the Call Session Key (§10.1.1), and forwards ciphertext to the main isolate via `SendPort`. The Main Isolate owns the playback engine exclusively. This split eliminates double-device contention on platforms where the audio backend enforces exclusive device access (notably Android AAudio in low-latency mode).
 
 **Why no codec:** With 16 kHz mono PCM at 640 bytes/frame, the on-wire bandwidth before AES-GCM overhead is ~256 kbps per direction. This is well within consumer broadband and 4G/5G mobile budgets, and the simplicity buys the project (a) a single ciphertext path, (b) no codec licensing concerns, (c) trivial AEC reference signal (the same PCM that goes to playback). A codec layer (Opus) can be added later behind the shim if metered-data deployments need it.
 
@@ -5597,7 +5601,7 @@ This allows changing votes while maintaining anonymity.
 
 #### 11.4.7 Honest Limitations: Transport Deanonymization & Quantum
 
-**Transport deanonymization (Phase 1, current behavior).** `POLL_VOTE_ANONYMOUS` and `POLL_VOTE_REVOKE` are delivered through the standard pairwise send path (§2.6): each recipient receives a KEM-encrypted Inner ApplicationFrame that carries the voter's `senderUserId` and hybrid user signature, wrapped in an Outer NetworkPacket carrying the voter's `senderDeviceId`, hybrid device signature and — on direct routes — source IP. **Every recipient of the vote therefore learns who voted and when**, even though the vote *content* record is keyed only by the key image. The ring signature currently protects the persisted tally (DB, snapshots, exports, UI) and any party that obtains vote records without having received the frames — it does not protect against the participants themselves. In channels, anonymous votes follow the same creator-only path as non-anonymous votes (§24.3.2) — this limits the transport-layer observer to the poll creator rather than all subscribers. In groups, the pairwise fan-out exposes the voter to all members. Until the planned anonymous submission path (a single re-origination hop, scheduled for a later phase) extends the guarantee to the transport layer, the UI must state this scope explicitly ("anonymous in results, not on the network").
+**Transport deanonymization (Phase 1, current behavior).** `POLL_VOTE_ANONYMOUS` and `POLL_VOTE_REVOKE` are delivered through the standard pairwise send path (§2.6): each recipient receives a KEM-encrypted Inner ApplicationFrame that carries the voter's `senderUserId` and hybrid user signature, wrapped in an Outer NetworkPacket carrying the voter's `senderDeviceId`, hybrid device signature and — on direct routes — source IP. **Every recipient of the vote therefore learns who voted and when**, even though the vote *content* record is keyed only by the key image. The ring signature currently protects the persisted tally (DB, snapshots, exports, UI) and any party that obtains vote records without having received the frames — it does not protect against the participants themselves. In channels, anonymous votes follow the same creator-only path as non-anonymous votes (§11.3.3.2) — this limits the transport-layer observer to the poll creator rather than all subscribers. In groups, the pairwise fan-out exposes the voter to all members. Until the planned anonymous submission path (a single re-origination hop, scheduled for a later phase) extends the guarantee to the transport layer, the UI must state this scope explicitly ("anonymous in results, not on the network").
 
 **Retroactive quantum deanonymization.** The ring construction is classical Ed25519 (§11.4.2). The `ringMembers` public keys travel in cleartext inside the (hybrid-KEM-protected) vote message and are held by all participants. A future CRQC can recover each member's secret scalar from its public key, recompute the candidate key image `I' = sk · H_p(pollId ‖ P)` for every ring member and match it against the recorded key image — identifying the voter retroactively — and can equally forge ring signatures for any poll whose ring keys it has. No production-grade post-quantum linkable ring signature library exists (liboqs ships plain signatures only; lattice LRS schemes are research code with signatures in the tens-to-hundreds of KB). **Decision:** Cleona accepts this limitation and documents it instead of shipping home-grown research cryptography. Anyone whose vote must remain secret against a decades-horizon quantum adversary should not use anonymous polls. In practice the dominant risks remain the anonymity-set size and N−1 collusion (§11.4.6), both of which are quantum-independent.
 
@@ -5688,7 +5692,7 @@ Four periodic timers run during normal operation:
 | Peer exchange | 120 seconds | Share peer list deltas with known peers (Mesh Discovery, §4.5) |
 | DV safety-net | 1 hour | Full Distance-Vector route exchange with all neighbors (§4.4) |
 
-**UDP receive-health self-probe.** `checkReceiveHealth()` (called by the 5s daemon heartbeat) sends a 4-byte raw probe (`0x43 0x50 0x52 0x42` = "CPRB") to 127.0.0.1 on the node's own port. The probe is intentionally too short for V3 outer-frame parsing — it serves solely to set `_lastUdpReceiveMs` in the `onUdpEvent` handler *before* any HMAC/parse step, confirming that the Dart `RawDatagramSocket` listen callback is alive. If no UDP event (including the self-probe) fires within 30 seconds, the socket is considered dead and `reconnectSockets()` triggers. The probe's parse failure is suppressed in the V3 parser (loopback + ≤4 bytes → no "HMAC fail" log line) to avoid misleading log noise. On iOS, an additional `recvPeek()` path detects EBADF socket death (see §25.2).
+**UDP receive-health self-probe.** `checkReceiveHealth()` (called by the 5s daemon heartbeat) sends a 4-byte raw probe (`0x43 0x50 0x52 0x42` = "CPRB") to 127.0.0.1 on the node's own port. The probe is intentionally too short for V3 outer-frame parsing — it serves solely to set `_lastUdpReceiveMs` in the `onUdpEvent` handler *before* any HMAC/parse step, confirming that the Dart `RawDatagramSocket` listen callback is alive. If no UDP event (including the self-probe) fires within 30 seconds, the socket is considered dead and `reconnectSockets()` triggers. The probe's parse failure is suppressed in the V3 parser (loopback + ≤4 bytes → no "HMAC fail" log line) to avoid misleading log noise. On iOS, an additional `recvPeek()` path detects EBADF socket death (see §24.2).
 
 Additionally, a **welcome route update** fires 500 ms after a new neighbor is detected, sending full DV routes to the newcomer. A **DV catch-up** is **epoch-gated**: each `_maybeSendCatchUpRouteUpdate` compares a monotonic `routeEpoch` counter (incremented only on genuine topology changes — new neighbor, neighbor removal, route-down, stale-route pruning, or `processRouteUpdateDetailed` with at least one changed destination) against the last epoch sent to that specific neighbor. If the epoch has not advanced, the catch-up is suppressed. This replaces the previous 60 s time-based throttle, which still caused O(N) full route-table sends per minute in a stable mesh (N = neighbor count).
 
@@ -6460,9 +6464,11 @@ Mapping to wire layers:
 - Multi-Identity dispatch mirrors the desktop daemon: `onApplicationFramePayload` implements the §2.4 step [9] KEM-Try-Loop (recency-ordered), `onInfrastructureFramePayload` implements service-routed InfraFrame dispatch (CR, Restore, Fragment-Store/Retrieve, etc.) — both wired in the GUI entry point (`main.dart`) rather than a separate daemon process
 - Foreground Service (canonical for background delivery, see §12.4 ADR Push Wake-Up Rejected): persistent notification, runs even when the Activity is closed
 - IPC: not required (in-process)
-- Camera: CameraX
+- Camera: CameraX (delivers I420 + rotationDegrees; Dart-side rotation before VP8 encode)
 - Notifications: Android NotificationManager
-- Audio: libcleona_audio (miniaudio with OpenSL ES backend)
+- Incoming Call Notification: channel `cleona_calls` (IMPORTANCE_HIGH, CATEGORY_CALL, `fullScreenIntent=true`) — launches Activity and routes to CallScreen even when backgrounded or screen-locked. Auto-cancels on accept/reject/hangup/60 s timeout. Sound via NotificationSoundService Dart loop (not notification channel sound).
+- Ringtone Looping: Dart-side async loop calling `playSound` MethodChannel repeatedly (500 ms gap); vibration loops 500 ms pulses at 1000 ms intervals until `stopRingtone()`.
+- Audio: libcleona_audio (miniaudio with AAudio/OpenSL ES backend)
 - Native libs: jniLibs for arm64-v8a + x86_64 (cross-compiled via `scripts/build-android-libs.sh`)
 
 **iOS**:
@@ -6750,8 +6756,7 @@ Beyond permissions, Cleona's architecture enforces privacy at the protocol level
 - **No analytics:** No telemetry, no crash reporting, no usage tracking. Zero outbound connections except P2P communication.
 - **No cloud dependencies:** No Google Play Services required. No Apple iCloud integration. (Push wake-up was considered and rejected; see §12.4.)
 - **KEX Gate (§8.2):** Messages from unknown senders are silently dropped at the protocol level. No notification, no "message request" UI — invisible to the recipient.
-- **Link previews:** Fetched by the sender, embedded encrypted in the message. The recipient makes zero network requests. SSRF hardening: DNS resolution is checked against private/reserved/loopback ranges before connection; the TCP socket is pinned to the validated IP via `connectionFactory`; HTTP redirects are followed manually with full SSRF re-validation on every hop; IPv6 NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) embeddings are decoded and their inner IPv4 checked. HTTPS only. <!-- TODO-XREF: Link-Preview detail section not yet assigned in v3.0 — v2.2 §14.8 had no clear successor in V3_MIGRATION_MAP.md. Candidate locations: §5 Message Delivery or §8 Identity-Authorization. -->
-
+- **Link previews:** Fetched by the sender, embedded encrypted in the message. The recipient makes zero network requests. SSRF hardening: DNS resolution is checked against private/reserved/loopback ranges before connection; the TCP socket is pinned to the validated IP via `connectionFactory`; HTTP redirects are followed manually with full SSRF re-validation on every hop; IPv6 NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) embeddings are decoded and their inner IPv4 checked. HTTPS only.
 ---
 
 ## 17. Internationalization
@@ -7291,225 +7296,11 @@ Signatur-Credentials (Zertifikat als .p12, Provisioning Profile, API Key) liegen
 
 
 ---
+## 23. Roadmap
 
-## 23. V2.2 → V3.0 Migration
+### 23.1 V3.0 Status
 
-This chapter documents the migration from Cleona Architecture v2.2 to v3.0. It remains in the spec long-term as a reference — both for developers who want to understand historical v2.2 concepts and as the rationale for why v3.0 became a hard cut rather than a patch.
-
-### 23.1 Why a Cut, Not a Patch
-
-V2.2 evolved over ~12 months from a clean architectural design into a patchwork spec of ~5750 lines. The last 30 days were dominated by an accumulating bug cascade: the 2D-DHT hard cut (commit `db14d0a`, 2026-04-26) removed the default-gateway resolution fallback and replaced it with sole identity resolution via the 2D-DHT. This made send success dependent on **five simultaneously satisfied conditions** (receiver publish, K=10 reachability, auth-manifest replication, liveness TTL, correct ID type at the resolver call) where previously **one** condition had been sufficient (default GW knows the target). Consequence: user tests reproducibly failed to deliver.
-
-Reactive patches (DV-1 surgical markRouteDown, DV-3 cost bias, DV-5 retry order, DV-6 dynamic cap, DV-7 step-2d fanout, DV-8 welcome-storm) cured symptoms but not the root cause. The user reality-check statement "before the 2D-DHT upgrade everything worked without issue" and the structural forensics in session 2026-05-01 led to the decision: no further quick fix, but a layer split in wire format and API layer.
-
-Because the refactor:
-- Changes the wire format incompatibly (NetworkPacket instead of MessageEnvelope)
-- Renames API callers in 38+ locations (sendEnvelope → sendToUser/sendToDevice)
-- Introduces the device-sig keypair as a new crypto-subject class
-- Removes MessageQueue completely
-
-a v2.2-to-v3.0 backwards compatibility is not practical. Cleona is in beta state with ~7 active nodes, no productive data inventory that would justify a migration layer. Instead of a half-refactor with compat bridges (which would themselves be sources of bugs), the cut is performed cleanly: all nodes upgrade to v3.0 simultaneously, profile reset.
-
-### 23.2 Profile Reset & Wire-Format Cut
-
-**Profile reset on upgrade**: A v3.0 daemon cannot read v2.2 profiles. Concretely affected:
-- Identities (regenerate user keys + device keys — the device key is new in v3.0)
-- Conversations (local message database lost)
-- Contacts (lost — recovery via QR-code reshare or restore broadcast)
-- Routing table (lost — rebuilt via mesh discovery: LAN burst, Subnet-Scan-Fallback, ContactSeed import)
-
-**Recovery path** for affected users:
-1. Install v3.0 daemon
-2. On first start: enter the 24-word recovery phrase (regenerates user identities via HD wallet)
-3. Restore broadcast (§6.3) reaches online contacts → contact list is rebuilt
-4. Local conversations are lost — but by Cleona's privacy model they are never backed up to a server anyway
-5. Multi-device setup (§7) is set up freshly, because device keys are new
-
-**Wire-format cut**: V3.0 nodes and v2.2 nodes cannot talk to each other:
-- The HMAC in the NetworkPacket outer (v3.0) has a different position and format than the HMAC in the MessageEnvelope (v2.2)
-- v2.2 nodes expect a `MessageEnvelope` top-level — v3.0 sends NetworkPacket
-- v3.0 nodes expect NetworkPacket — v2.2 nodes send MessageEnvelope (but the HMAC does not match, drop before parse)
-- In practice: both ignore each other — no crash risk, only "no peer there"
-
-**Deployment requirement**: All active Cleona nodes must upgrade to v3.0 **within a short time window** (~24h). Bootstrap nodes first, so the network does not fall apart.
-
-### 23.3 Code-Migration Map
-
-Overview of the code refactors needed to bring the v2.2 codebase up to v3.0 spec. The map is grouped by subsystem. **Estimate: ~1500-2500 LOC change.**
-
-**Wire-format layer** (`lib/core/network/`, `lib/generated/proto/cleona.pb.dart`):
-- Restructure proto file `proto/cleona.proto`: remove `MessageEnvelope`, add `NetworkPacket` + `ApplicationFrame`
-- Remove old fields (`senderId`, `senderDeviceNodeId`, `recipientId` as top-level)
-- Re-run `proto-gen` → new Dart classes
-- `transport.dart`: adapt send/receive paths to the new format
-
-**Routing layer** (`lib/core/network/`, `lib/core/dht/`):
-- `dv_routing.dart`: works with DeviceID instead of generic `nodeId` — terminology hygiene
-- `routing_table.dart`: `getPeer`, `getPeerByUserId` become `getPeerByDeviceId`, `getDevicesByUserId`. The secondary UserID index stays, but is now clearly communicated as a "User → List<Device>" map
-- `kbucket.dart`: keyed by deviceId, unchanged in substance
-
-**Identity-resolution layer** (`lib/core/identity_resolution/`):
-- `identity_resolver.dart`: contract stays (`resolve(userId) → List<ResolvedDevice>`), but is now called **before** routing (in the service layer), not in the send path
-- `identity_publisher.dart`: unchanged
-- `identity_dht_handler.dart`: unchanged
-
-**Crypto layer** (`lib/core/crypto/`):
-- New file: `device_signature.dart` — device-sig keypair generation, sign/verify operations
-- `key_manager.dart`: extend HD-wallet derivation with a device-key branch (locally generated, NOT seed-derived)
-- `per_message_kem.dart`: unchanged (KEM v2 stays)
-- Switch sig verify in `verify_outer_envelope.dart` to device sig instead of user sig
-
-**Service layer** (`lib/core/service/cleona_service.dart`, `lib/core/services/message_sender.dart`):
-- **Migrate 38 sendEnvelope callers**: each call is classified and switched to `sendToUser(userId)` or `sendToDevice(deviceId)`
-- New API in `cleona_node.dart`:
-  ```dart
-  Future<bool> sendToDevice(NetworkPacket packet, Uint8List deviceId);
-  Future<List<DeviceId>> resolveUserToDevices(Uint8List userId);
-  ```
-- New API in `cleona_service.dart`:
-  ```dart
-  Future<bool> sendToUser(MessageType type, Uint8List payload, Uint8List userId);
-  ```
-- **Remove** `sendEnvelope` as a function — not deprecated, but gone
-
-**MessageQueue removal** (`lib/core/network/message_queue.dart`):
-- Remove the file completely
-- Remove the `messageQueue` reference in `cleona_node.dart`
-- `message_queue.json` persistence no longer needed — old files can be deleted with the profile reset
-- Failure modes: on "all routes exhausted", `sendToDevice` simply returns `false`. The caller (sendToUser) decides whether the S&F backup (`_storeErasureCodedBackup`) is triggered
-
-**Receive pipeline** (`lib/core/services/message_receiver.dart`, `lib/core/services/message_handler.dart`):
-- Two-stage decap: first NetworkPacket layer (outer sig + HMAC + PoW + routing decision), then ApplicationFrame layer (KEM decrypt + user sig + identity dispatch)
-- Use `recipientUserId` from the ApplicationFrame for user-tab dispatch
-
-**Test files**: see §23.4
-
-**CLAUDE.md / architecture doc**:
-- `Cleona_Chat_Architecture_v2_2.md` gets a DEPRECATED header
-- Switch the `CLAUDE.md` pointer to `Cleona_Chat_Architecture_v3_0.md`
-- Update project memory (create v3.0-relevant project files)
-
-### 23.4 Test-Migration Map
-
-**Smoke tests** (`test/smoke/`):
-- **New wire-format tests**:
-  - `smoke_network_packet.dart` — parse/serialize roundtrip, version field, default values
-  - `smoke_application_frame.dart` — parse/serialize, KEM roundtrip
-  - `smoke_layered_pipeline.dart` — full sender + receiver pipeline, all failure modes
-- **Adapt existing tests**:
-  - `smoke_routing.dart` — switch from sendEnvelope to sendToDevice
-  - `smoke_identity_resolver.dart` — resolver contract stays, test setup adapted
-  - `smoke_dv_*.dart` — routing tests stay in substance, correct ID-type annotations
-  - `smoke_dht_*.dart` — test DHT replication with the new identity records
-- **Tests that fall away**:
-  - `smoke_message_queue.dart` (if it exists) — MessageQueue is gone
-  - Various v2.2-specific edge cases that are no longer possible due to the layer split
-
-**E2E tests** (`test/e2e/`):
-- **GUI tests are largely wire-format-agnostic** — they test the user view ("user types Hello, recipient sees Hello"). The code migration in the daemon is transparent to the GUI.
-- **IPC tests** (setup/teardown via IPC): remain functional, but the internal implementation of the IPC commands may change. `sendText` IPC, for example, stays semantically identical, internally now calls `sendToUser`.
-- **Cross-platform call tests** (gui-25, gui-34): should stay green unchanged, because calls have their own crypto pipeline (call_key in inner, device sig in outer)
-- **2D-DHT tests** (gui-55): resolver tests stay structurally the same, since the resolver contract remains stable
-
-**Migration test suite (NEW)** in `test/smoke/migration/`:
-- `smoke_v3_wire_format.dart` — wire-frame parse, roundtrip, failure modes
-- `smoke_v3_layered_encryption.dart` — sender → receiver end-to-end
-- `smoke_v3_service_api.dart` — sendToUser, multi-device fanout, sendToDevice, routing cascade
-- `smoke_v3_default_gateway_fallback.dart` — routing cascade hits defaultGW as last resort
-- `smoke_v3_no_message_queue.dart` — verifies that no MessageQueue persistence happens any more
-- `smoke_v3_profile_reset.dart` — daemon comes up cleanly after reset
-
-Detailed in §21.4 V3.0 Migration Tests.
-
-### 23.5 Git-Pipeline Adjustments
-
-Cleona's publishing pipeline (see `docs/PUBLISHING.md`) uses a 4-script pipeline with hookify enforcement. For the v2.2 → v3.0 cut, several places must be adjusted:
-
-**`scripts/sync-to-git.sh`**:
-- The master architecture file path changes: `Cleona_Chat_Architecture_v2_2.md` → `Cleona_Chat_Architecture_v3_0.md`
-- Hash snapshot before/after now for the v3.0 file
-- The public variant in `CleonaGit/docs/ARCHITECTURE.md` is generated from v3.0 (master copy + scrub + INTERNAL-marker stripping)
-- The v2.2 file is **not** touched by the sync script — it stays in the master repo as history, but does not land in the public repo
-
-**Hookify rules** (`docs/hookify_rules/`):
-- Extend the `block-master-arch-write` filename match to v3.0
-- `require-neutralized-cleonagit-commit` stays unchanged
-- `block-push-from-cleona` stays unchanged
-
-**v2.2 DEPRECATED header**:
-- `Cleona_Chat_Architecture_v2_2.md` gets a block at the top:
-  ```markdown
-  > **DEPRECATED — V2.2 is no longer the authoritative spec.**
-  > Active spec: [Cleona_Chat_Architecture_v3_0.md](Cleona_Chat_Architecture_v3_0.md)
-  > V2.2 is kept as history but no longer maintained. Cross-walk at §-level see `docs/V3_MIGRATION_MAP.md`.
-  ```
-- Body unchanged — no modifications to the body
-
-**`CLAUDE.md` pointer updates**:
-- Sentences referring to `Cleona_Chat_Architecture_v2_2.md` → switch to v3.0
-- Working rule #4 stays in substance, only the filename reference changes
-
-**Allowlist in the sync script**:
-- No change to the allowlist needed — v3.0 replaces v2.2 1:1, both have identical allowlist behavior
-
-**CleonaGit repo sync**:
-- After the first v3.0 sync: the old `ARCHITECTURE.md` in the public repo is overwritten with the v3.0-generated version
-- Public description in the public repo (`README.md`) optionally extended with a v3.0 hint
-
-### 23.6 v2.2 Sections Index (Cross-Walk)
-
-The full cross-walk table is maintained in `docs/V3_MIGRATION_MAP.md` — it is the primary tracking document that stays active during implementation. Here only a top-level summary:
-
-| v2.2 area | Fate | v3.0 position |
-|---|---|---|
-| §1 Executive Summary | REWRITE | §1 (with V3.0 Architecture Highlights as §1.2) |
-| §2 Network Architecture | SPLIT + REWRITE | §2 Wire-Format (NEW), §4 Network |
-| §3 Erasure Coding & Message Delivery | REWRITE | §5 Message Delivery |
-| §4 Encryption & Cryptography | REWRITE | §3 Identity & Cryptography |
-| §5 Identity & Authentication | REWRITE | §3 Identity (merged with §4) |
-| §6 Identity Recovery | PORT | §6 Identity Recovery |
-| §7 Synchronization Strategy | PORT | §12 Synchronization Strategy |
-| §8 App Permissions & Privacy | PORT | §16 Permissions & Privacy |
-| §9 DoS Protection | PORT | §13.1 DoS Protection |
-| §10 Channels & Moderation | PORT | §9 Group Features |
-| §11 Network Statistics | REWRITE | §18 Network Statistics |
-| §12 Tech Stack | PORT | §20 Tech Stack |
-| §13 i18n | PORT | §17 Internationalization |
-| §14 Feature Roadmap | REWRITE | §24 Roadmap |
-| §15 Data Management & Storage | PORT | §14 Storage & Data Management |
-| §16 Licensing, Funding & Donation | PORT | §19 Licensing, Funding & Donation |
-| §17 Security Considerations | SPLIT | §13 Network Resilience, §4.10 Closed Network Model |
-| §18 Application Architecture | REWRITE | §15 Application Architecture |
-| §19 Testing & Development Strategy | PORT + ADD | §21 Testing Strategy (+§21.4 V3.0 Migration Tests NEW) |
-| §20 Linux Development Environment | PORT | §22.1 Linux Setup |
-| §21 VM Test Infrastructure | PORT | §22.2 VM Test Infrastructure |
-| §22 Development Plan | REWRITE | §24 Roadmap |
-| §23 Calendar | PORT | §11.1 + §11.2 |
-| §24 Polls | PORT | §11.3 + §11.4 |
-| §25 In-Call Collaboration | PORT | §10.5 |
-| §26 Multi-Device Support | REWRITE | §7 Multi-Device Support |
-| §27 IPv6 Dual-Stack & CGNAT | PORT | §4.7 IPv6 Dual-Stack & CGNAT |
-| §28 Appendix Protocol Format | REWRITE | Appendix A: Protocol Message Format |
-
-**NEW v3.0 sections without a v2.2 counterpart**:
-- §1.2 V3.0 Architecture Highlights
-- §2 (complete: Wire-Format & Layered Frames, 6 subs)
-- §2.5 Onion-Routing Hook
-- §3.5 Device Identity Sigs
-- §13.3 Service Layer Resilience
-- §21.4 V3.0 Migration Tests
-- §23 V2.2 → V3.0 Migration (this chapter)
-- Appendix B: Frame Examples
-- Appendix C: V2.2 → V3.0 Section Cross-Walk
-
-**Section cross-walk in Appendix C**: at the end of the spec, automatically generated from `docs/V3_MIGRATION_MAP.md`. Identical to the table above, but per v2.2 subsection (not only top-level), fully end-to-end.
-
----
-## 24. Roadmap
-
-### 24.1 V3.0 Status
-
-V3.0 is an architectural major revision (see §1.2 V3.0 Architecture Highlights and §23 V2.2 → V3.0 Migration). Implementation status is tracked in the code repository via tags (`v3.0.0-beta.X`) and in the project memory — this spec is the authoritative architectural reference, not a project-plan tracker.
+V3.0 is an architectural major revision (see §1.2 V3.0 Architecture Highlights). Implementation status is tracked in the code repository via tags (`v3.0.0-beta.X`) and in the project memory — this spec is the authoritative architectural reference, not a project-plan tracker.
 
 **What V3.0 delivers** (compressed list, in full in §1.2):
 
@@ -7527,7 +7318,7 @@ V3.0 is an architectural major revision (see §1.2 V3.0 Architecture Highlights 
 - Multi-Identity HD-Wallet derivation
 - 2D-DHT identity resolution (mechanism retained, only clearly framed as a pre-send step)
 
-### 24.2 Post-V3.0 Plans
+### 23.2 Post-V3.0 Plans
 
 Concrete items to be addressed post-V3.0 — not part of V3.0, but deliberately staked out architecturally:
 
@@ -7581,11 +7372,11 @@ The roadmap is planned in the project memory with concrete sessions/sprints — 
 
 ---
 
-## 25. Platform Suitability
+## 24. Platform Suitability
 
 Cleona is a serverless P2P messenger. Its architecture requires: a permanently open UDP port, a long-running background process, and unrestricted network access. How well each operating system supports these requirements directly determines the user experience.
 
-### 25.1 Ranking
+### 24.1 Ranking
 
 | Rank | Platform | Verdict |
 |------|----------|---------|
@@ -7595,7 +7386,7 @@ Cleona is a serverless P2P messenger. Its architecture requires: a permanently o
 | 4 | Android | Good experience with one architectural compromise |
 | 5 | iOS | Significantly degraded background delivery |
 
-### 25.2 Platform Details
+### 24.2 Platform Details
 
 **Tier 1 — Linux Desktop**
 
@@ -7629,7 +7420,7 @@ The most restrictive platform for Cleona's use case. Apple does not offer a Fore
 
 These three constraints apply only to the foreground session. The BGTaskScheduler path (§12.5) opens fresh sockets per wakeup cycle and closes them before completion, sidestepping the fd-lifecycle issue entirely.
 
-### 25.3 Summary
+### 24.3 Summary
 
 The core pattern: the less a platform restricts background execution and network access, the better Cleona works. Linux and macOS let the daemon run as designed. Windows requires workarounds but achieves the same result. Android compromises with a Foreground Service. iOS cannot deliver the real-time P2P experience that the other platforms provide — background message delivery is at the mercy of the OS scheduler.
 
@@ -8313,129 +8104,3 @@ Total wire size for relay hop 1 ≈ **9.6 KB** (the inner carries no user sig �
 - Outer header (228 bytes) is minimal.
 - Compression helps most with large payloads (e.g. a 256 KB image can shrink to ~230 KB if it is not already compressed).
 
----
-
-## Appendix C. V2.2 → V3.0 Section Cross-Walk
-
-Complete sub-section cross-walk table, derived from `docs/V3_MIGRATION_MAP.md`. Use it to find every v2.2 statement again in the v3.0 spec. Use Ctrl-F on the v2.2 § number.
-
-| v2.2 § | v2.2 title | Status | v3.0 § |
-|---|---|---|---|
-| 1.1 | Core Principles | REWRITE | 1.1 |
-| 1.2 | Unique Innovations | REWRITE | 1.2 |
-| 2.1 | Communication Port | PORT | 4.1 |
-| 2.2 | Distributed Hash Table (intro) | PORT | 4.2 |
-| 2.2.1 | Node Identity | REWRITE | 3.1 + 3.5 |
-| 2.2.2 | Virtual Mailbox | PORT | 5.6 |
-| 2.2.3 | Routing Table (DV V3) | REWRITE | 4.4 |
-| 2.2.3.1 | User×Device dedup ADR | PORT | 7.1 |
-| 2.2.4 | Identity Resolution (2D-DHT) | REWRITE | 4.3 |
-| 2.3 | Mesh Discovery | PORT | 4.5 |
-| 2.3.1-2.3.6 | Mesh Discovery Subs | PORT | 4.5.1-4.5.6 |
-| 2.4 | NAT Traversal & Reachability | PORT | 4.6 |
-| 2.4.1-2.4.2 | NAT Subs | PORT | 4.6.1-4.6.2 |
-| 2.4.3 | Route-Based Delivery | REWRITE | 4.4 |
-| 2.4.4 / 4a | Connection Order + Address Priority | PORT | 4.6.3 / 4.6.3a |
-| 2.4.4b | Relay Route Learning | REWRITE | 5.3 |
-| 2.4.5 | IPv6 Advantage | PORT | 4.7 |
-| 2.4.6 | Active UDP Hole Punch | PORT | 4.6.4 |
-| 2.5 | Bootstrap Node + Subs | PORT | 4.8 + 4.8.x |
-| 2.6 | Complete Discovery Chain | PORT | 4.5.7 |
-| 2.7 / 2.7.x | Network Change Detection | PORT | 4.9 / 4.9.x |
-| 2.8 | Data Compression | PORT | 5.9 |
-| 2.9 / 2.9.1-4 / 2.9.6-10 | RUDP | PORT | 5.8 / 5.8.x |
-| 2.9.5 | SendQueue (MessageQueue) | DROP | — (S&F + mailbox take over) |
-| 3.1 / 3.2 | Erasure Coding | PORT | 5.4 |
-| 3.3 | Message Flow | REWRITE | 5.1 |
-| 3.3.1 | Three-Layer Delivery | REWRITE | 5.1 |
-| 3.3.2 | Recipient Online | REWRITE | 5.2 |
-| 3.3.3 | Recipient Offline | REWRITE | 5.4 + 5.5 |
-| 3.3.4 | Message Deduplication | PORT | 5.7 |
-| 3.3.5 / 5a / 6 | Mailbox & PK Lookup | PORT | 5.6 |
-| 3.3.7 | S&F on Contact Peers | REWRITE | 5.5 |
-| 3.4 / 3.4.1-3 | Two-Stage Media | PORT | 5.7 / 5.7.x |
-| 3.5 | Relay Storage Management | PORT | 5.5.x |
-| 4.1 / 4.2 | Crypto Philosophy + Primitives | PORT/REWRITE | 3.2 |
-| 4.3 / 4.3.1-7 | Per-Message KEM | REWRITE/PORT | 3.3 |
-| 4.4 / 4.4.1-6 | Call Encryption | PORT | 10.x |
-| 4.5 | Group Encryption | REWRITE | 9.1.x |
-| 4.6 | Encryption Order | REWRITE | 2.4 |
-| 4.7 / 4.7.x | Database Encryption | PORT | 3.8 |
-| 5.1 | Identity Model | REWRITE | 3.1 |
-| 5.2 / 5.2.x | Multi-Identity | REWRITE | 3.6 |
-| 5.3 | Profile Pictures | PORT | 8.3 |
-| 5.4 | Key Storage | REWRITE | 3.7 |
-| 5.5 | Contact Verification | PORT | 3.9 |
-| 5.6 | Contact Request Protocol | REWRITE | 8.1 |
-| 5.6.1 / 5.6.2 | Anti-Spam + KEX Gate | PORT | 8.2 |
-| 6.1 | Recovery Phrase | PORT | 6.1 |
-| 6.2 | Social Recovery (Shamir) | PORT | 6.2 |
-| 6.3 / 6.3.1-5 | Restore Broadcast | REWRITE/PORT | 6.3 / 6.3.x |
-| 6.4 / 6.4.1-3 | DHT Identity Registry | PORT | 6.4 / 6.4.x |
-| 7.1-7.5 | Sync Strategy + Background Timers | PORT | 12.1 / 12.2.x |
-| 7.6 | Network Change Recovery | PORT | 12.3 |
-| 7.7 | Platform-Specific Background | PORT | 12.5 |
-| 7.8 | Push Wake-Up Rejected (ADR) | PORT | 12.4 |
-| 8.1-8.6 | App Permissions | PORT | 16.1-16.6 |
-| 9.1-9.6 | DoS Protection (5 Layer) | PORT | 13.1.2-13.1.7 |
-| 10.1-10.3 | Private Channels | PORT | 9.1.x |
-| 10.4 / 10.4.1-3 | Public Channels | PORT | 9.2.x |
-| 10.4.4-6 | Decentralized Moderation | PORT | 9.3.1-9.3.3 |
-| 10.4.7-8 | Anti-Sybil + ModerationConfig | PORT | 9.4.1 / 9.4.2 |
-| 10.7 | Moderation Timer | PORT | 9.3.4 |
-| 11.1-11.6 | Network Statistics | REWRITE | 18.1-18.6 |
-| 12.1-12.6 | Tech Stack | PORT | 20.1-20.6 |
-| 13.1-13.5 | i18n | PORT | 17.1-17.5 |
-| 14.1-14.9 | Feature Roadmap | REWRITE | 24 |
-| 15.1 | Storage Priorities | PORT | 14.1 |
-| 15.1.x | Identity-Resolution Storage | REWRITE | 14.2 |
-| 15.2-15.6 | Storage + Per-Chat Config | PORT | 14.3-14.7 |
-| 15.7 / 15.7.x | Media Auto-Archive | PORT | 14.8 / 14.8.x |
-| 15.8 / 15.8.x | Voice Transcription | PORT | 14.9 / 14.9.x |
-| 16.1 / 16.1.1 | Source Available + Publishing | PORT | 19.1 / 19.2 |
-| 16.2-16.4 | Brand + Funding + Donation | PORT | 19.3-19.5 |
-| 16.4.1-7 | Donation/Update Subs | PORT | 19.5.x |
-| 17.1-17.3 / 17.4 | Security Considerations + Audit | PORT | 13.x |
-| 17.5 / 17.5.1-3 | Closed Network Model | REWRITE/PORT | 4.10 |
-| 17.5.4 | Packet-Level Authentication | REWRITE | 2.4 + 4.10 |
-| 17.5.5 | Secret Rotation | REWRITE | 13.2 |
-| 17.5.6-7 | Obfuscation + Defense-in-Depth | PORT | 4.10 |
-| 18.1 / 18.1.1 | Service+GUI + Six-Layer Model | REWRITE | 15.1 |
-| 18.2 | Platform-Specific Behavior | PORT | 15.2 |
-| 18.3 | Bootstrap Headless | PORT | 4.8 |
-| 18.4 / 18.5 | Service Layer Architecture | REWRITE | 15.3 |
-| 18.6 / 18.6.x | UI Message Chain | PORT | 15.4 |
-| 18.7 | Clipboard Integration | PORT | 15.7 |
-| 18.8 / 18.8.x | Notifications | PORT | 15.5 |
-| 19.1-19.9 | Testing | PORT | 21.x (+ 21.4 NEW) |
-| 20.1-20.5 | Linux Dev Environment | PORT | 22.1.x |
-| 21.1-21.8 | VM Test Infrastructure | PORT | 22.2.x |
-| 22.1-22.4 | Development Plan | REWRITE | 24 |
-| 23.1-23.11 | Calendar (all subs) | PORT | 11.1.x + 11.2.x |
-| 24.1-24.9 | Polls (all subs) | PORT | 11.3.x + 11.4.x |
-| 25.1-25.7 | In-Call Collaboration | PORT | 10.5.x |
-| 26.1 | Multi-Device Design | PORT | 7 (intro) |
-| 26.2.1-3 | Device Identity & Pairing | REWRITE/PORT | 7.1 |
-| 26.3 / 26.3.x | Twin-Sync Protocol | PORT | 7.2 |
-| 26.4 | Delivery to Multiple Devices | REWRITE | 7.3 |
-| 26.5-26.9 | Multi-Device Mgmt + Presence | PORT | 7.4 |
-| 27.1-27.10 | IPv6 Dual-Stack & CGNAT | PORT | 4.7 |
-| 27.10 | Doze-Whitelisting (Retired) | DROP | — |
-| 28 | Appendix Protocol Format | REWRITE | Appendix A |
-
-**Completely DROP** (no longer present in v3.0):
-- §2.9.5 SendQueue / MessageQueue — sender-side retry mechanism. S&F + mailbox-pull take over. See §1.2 highlight #4.
-- §27.10 Doze-Whitelisting Opt-out — already marked retired in v2.2.
-
-**NEW v3.0 sections without a v2.2 counterpart**:
-- §1.2 V3.0 Architecture Highlights
-- §2 Wire-Format & Layered Frames (complete, 6 subs)
-- §2.5 Onion-Routing Hook (format preparation)
-- §3.5 Device Identity Sigs
-- §4.3 Identity Resolution (REWRITE — structurally separated as a pre-send step)
-- §13.3 Service Layer Resilience
-- §15.3 Service Layer API (sendToUser/sendToDevice)
-- §21.4 V3.0 Migration Tests
-- §23 V2.2 → V3.0 Migration (entire chapter)
-- Appendix B: Frame Examples (Hex Dumps)
-- Appendix C: V2.2 → V3.0 Section Cross-Walk (this chapter)

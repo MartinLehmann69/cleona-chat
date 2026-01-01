@@ -73,6 +73,8 @@ class NotificationSoundService {
   String? _profileDir;
   String? _soundsDir;
   Process? _loopingProcess;
+  bool _androidLoopActive = false;
+  bool _vibrateLoopActive = false;
 
   /// Android: callback for sound playback via platform channel (set by Flutter app).
   Future<void> Function(String filename)? onPlaySoundAndroid;
@@ -196,6 +198,11 @@ class NotificationSoundService {
   /// Start looping a sound file. Kills any previous loop.
   Future<void> _startLoop(String filename) async {
     await _stopLoop();
+    if (Platform.isAndroid) {
+      _androidLoopActive = true;
+      _runAndroidSoundLoop(filename);
+      return;
+    }
     if (_soundsDir == null) return;
     final path = '$_soundsDir/$filename';
     if (!File(path).existsSync()) return;
@@ -218,8 +225,22 @@ class NotificationSoundService {
     } catch (_) {}
   }
 
+  void _runAndroidSoundLoop(String filename) async {
+    while (_androidLoopActive) {
+      if (onPlaySoundAndroid != null) {
+        try {
+          await onPlaySoundAndroid!(filename);
+        } catch (_) {}
+      }
+      if (!_androidLoopActive) break;
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+  }
+
   /// Stop the looping sound.
   Future<void> _stopLoop() async {
+    _androidLoopActive = false;
+    _vibrateLoopActive = false;
     if (_loopingProcess != null) {
       _loopingProcess!.kill();
       _loopingProcess = null;
@@ -283,6 +304,7 @@ class NotificationSoundService {
 
   /// Stop ringtone.
   Future<void> stopRingtone() async {
+    _vibrateLoopActive = false;
     await _stopLoop();
   }
 
@@ -319,14 +341,29 @@ class NotificationSoundService {
   Future<void> vibrate(VibrationType type) async {
     if (!_settings.vibrationEnabled) return;
     if (!Platform.isAndroid) return;
-    final duration = type == VibrationType.call ? 1000 : 200;
-    if (onVibrateAndroid != null) {
-      try { await onVibrateAndroid!(duration); } catch (_) {}
+    if (type == VibrationType.call) {
+      _vibrateLoopActive = true;
+      _runVibrateLoop();
+    } else {
+      if (onVibrateAndroid != null) {
+        try { await onVibrateAndroid!(200); } catch (_) {}
+      }
+    }
+  }
+
+  void _runVibrateLoop() async {
+    while (_vibrateLoopActive) {
+      if (onVibrateAndroid != null) {
+        try { await onVibrateAndroid!(500); } catch (_) {}
+      }
+      if (!_vibrateLoopActive) break;
+      await Future.delayed(const Duration(milliseconds: 1000));
     }
   }
 
   /// Stop all sounds (for cleanup).
   Future<void> stopAll() async {
+    _vibrateLoopActive = false;
     await _stopLoop();
   }
 

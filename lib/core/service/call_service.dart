@@ -57,6 +57,8 @@ class CallService {
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
       createVideoEngine;
   void Function()? onStateChanged;
+  void Function(String callerName, String callId)? onPostCallNotificationAndroid;
+  void Function()? onCancelCallNotificationAndroid;
 
   CallService(this._ctx, {required this.notificationSound, required CLogger log})
       : _log = log;
@@ -183,11 +185,13 @@ class CallService {
   }
 
   Future<void> acceptCall() async {
+    onCancelCallNotificationAndroid?.call();
     await notificationSound.stopRingtone();
     await callManager.acceptCall();
   }
 
   Future<void> rejectCall({String reason = 'busy'}) async {
+    onCancelCallNotificationAndroid?.call();
     await notificationSound.stopRingtone();
     await callManager.rejectCall(reason: reason);
   }
@@ -659,10 +663,18 @@ class CallService {
     }
     notificationSound.startRingtone();
     notificationSound.vibrate(VibrationType.call);
+    if (Platform.isAndroid) {
+      final senderHex = bytesToHex(Uint8List.fromList(f.senderUserId));
+      final contact = _ctx.contacts[senderHex];
+      final callerName = contact?.displayName ?? senderHex.substring(0, 8);
+      final callId = callManager.currentCall?.callIdHex ?? '';
+      onPostCallNotificationAndroid?.call(callerName, callId);
+    }
   }
 
   void handleCallAnswerV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
+    onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     try { notificationSound.playConnected(); } catch (_) {}
@@ -675,6 +687,7 @@ class CallService {
 
   void handleCallRejectV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
+    onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
@@ -686,6 +699,7 @@ class CallService {
 
   void handleCallHangupV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
+    onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {

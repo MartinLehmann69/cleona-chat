@@ -163,6 +163,7 @@ class CameraXHandler(
             val i420 = yuv420ToI420(imageProxy)
             val width = imageProxy.width
             val height = imageProxy.height
+            val rotation = imageProxy.imageInfo.rotationDegrees
 
             // Send to Dart via method channel on main thread
             activity.runOnUiThread {
@@ -171,6 +172,7 @@ class CameraXHandler(
                         "data" to i420,
                         "width" to width,
                         "height" to height,
+                        "rotation" to rotation,
                     ))
                 }
             }

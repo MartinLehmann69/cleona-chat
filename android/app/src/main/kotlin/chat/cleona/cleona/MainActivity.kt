@@ -40,6 +40,8 @@ class MainActivity : FlutterActivity() {
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
     private val MSG_CHANNEL_ID = "cleona_messages"
+    private val CALL_CHANNEL_ID = "cleona_calls"
+    private val CALL_NOTIFICATION_ID = 42001
     private val NOTIFICATION_PERMISSION_CODE = 1001
     private var cameraHandler: CameraXHandler? = null
 
@@ -161,6 +163,17 @@ class MainActivity : FlutterActivity() {
                     val count = call.argument<Int>("count") ?: 0
                     updateBadgeCount(count)
                     result.success(null)
+                }
+                "showIncomingCall" -> {
+                    val callerName = call.argument<String>("callerName") ?: "Unbekannt"
+                    val callId = call.argument<String>("callId") ?: ""
+                    showIncomingCallNotification(callerName, callId)
+                    result.success(true)
+                }
+                "cancelIncomingCall" -> {
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager.cancel(CALL_NOTIFICATION_ID)
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }
@@ -390,9 +403,45 @@ class MainActivity : FlutterActivity() {
                 setShowBadge(true)
                 enableVibration(true)
             }
+            val callChannel = NotificationChannel(
+                CALL_CHANNEL_ID,
+                "Anrufe",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Eingehende Cleona-Anrufe"
+                setSound(null, null)
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(callChannel)
         }
+    }
+
+    private fun showIncomingCallNotification(callerName: String, callId: String) {
+        val fullScreenIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("incoming_call", true)
+            putExtra("call_id", callId)
+        }
+        val fullScreenPending = PendingIntent.getActivity(
+            this, CALL_NOTIFICATION_ID, fullScreenIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(callerName)
+            .setContentText("Eingehender Anruf")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setFullScreenIntent(fullScreenPending, true)
+            .setAutoCancel(true)
+            .setOngoing(true)
+            .setTimeoutAfter(60000)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(CALL_NOTIFICATION_ID, notification)
     }
 
     private fun postMessageNotification(title: String, body: String, conversationId: String) {

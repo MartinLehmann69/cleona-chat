@@ -551,6 +551,122 @@ class VideoEngine {
     return rgba;
   }
 
+  /// Rotate an I420 frame by [degrees] (0/90/180/270, clockwise) to correct
+  /// for CameraX sensor orientation. Returns the (possibly reshaped) buffer
+  /// plus its new width/height — 90/270 swap width and height.
+  static (Uint8List, int, int) rotateI420(
+      Uint8List i420, int width, int height, int degrees) {
+    if (degrees == 0 || degrees == 360) return (i420, width, height);
+
+    final ySize = width * height;
+    final uvWidth = width ~/ 2;
+    final uvHeight = height ~/ 2;
+    final uvSize = uvWidth * uvHeight;
+
+    if (degrees == 180) {
+      final out = Uint8List(i420.length);
+      // Y plane: reverse all pixels
+      for (var i = 0; i < ySize; i++) {
+        out[i] = i420[ySize - 1 - i];
+      }
+      // U plane
+      for (var i = 0; i < uvSize; i++) {
+        out[ySize + i] = i420[ySize + uvSize - 1 - i];
+      }
+      // V plane
+      for (var i = 0; i < uvSize; i++) {
+        out[ySize + uvSize + i] = i420[ySize + 2 * uvSize - 1 - i];
+      }
+      return (out, width, height);
+    }
+
+    // 90° CW or 270° CW
+    final newWidth = height;
+    final newHeight = width;
+    final newUvWidth = newWidth ~/ 2;
+    final newYSize = newWidth * newHeight;
+    final newUvSize = newUvWidth * (newHeight ~/ 2);
+    final out = Uint8List(newYSize + 2 * newUvSize);
+
+    if (degrees == 90) {
+      // Y plane: 90° CW
+      for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) {
+          out[x * newWidth + (height - 1 - y)] = i420[y * width + x];
+        }
+      }
+      // U plane
+      for (var y = 0; y < uvHeight; y++) {
+        for (var x = 0; x < uvWidth; x++) {
+          out[newYSize + x * newUvWidth + (uvHeight - 1 - y)] =
+              i420[ySize + y * uvWidth + x];
+        }
+      }
+      // V plane
+      for (var y = 0; y < uvHeight; y++) {
+        for (var x = 0; x < uvWidth; x++) {
+          out[newYSize + newUvSize + x * newUvWidth + (uvHeight - 1 - y)] =
+              i420[ySize + uvSize + y * uvWidth + x];
+        }
+      }
+    } else {
+      // 270° CW (= 90° CCW)
+      for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) {
+          out[(width - 1 - x) * newWidth + y] = i420[y * width + x];
+        }
+      }
+      for (var y = 0; y < uvHeight; y++) {
+        for (var x = 0; x < uvWidth; x++) {
+          out[newYSize + (uvWidth - 1 - x) * newUvWidth + y] =
+              i420[ySize + y * uvWidth + x];
+        }
+      }
+      for (var y = 0; y < uvHeight; y++) {
+        for (var x = 0; x < uvWidth; x++) {
+          out[newYSize + newUvSize + (uvWidth - 1 - x) * newUvWidth + y] =
+              i420[ySize + uvSize + y * uvWidth + x];
+        }
+      }
+    }
+
+    return (out, newWidth, newHeight);
+  }
+
+  /// Mirror an I420 frame horizontally (selfie-view flip for the front
+  /// camera's local preview — NOT applied to the frame that is actually
+  /// sent to the remote peer).
+  static Uint8List mirrorI420Horizontal(Uint8List i420, int width, int height) {
+    final out = Uint8List(i420.length);
+    final ySize = width * height;
+    final uvWidth = width ~/ 2;
+    final uvHeight = height ~/ 2;
+    final uvSize = uvWidth * uvHeight;
+
+    // Y plane
+    for (var y = 0; y < height; y++) {
+      for (var x = 0; x < width; x++) {
+        out[y * width + (width - 1 - x)] = i420[y * width + x];
+      }
+    }
+    // U plane
+    for (var y = 0; y < uvHeight; y++) {
+      for (var x = 0; x < uvWidth; x++) {
+        out[ySize + y * uvWidth + (uvWidth - 1 - x)] =
+            i420[ySize + y * uvWidth + x];
+      }
+    }
+    // V plane
+    for (var y = 0; y < uvHeight; y++) {
+      for (var x = 0; x < uvWidth; x++) {
+        out[ySize + uvSize + y * uvWidth + (uvWidth - 1 - x)] =
+            i420[ySize + uvSize + y * uvWidth + x];
+      }
+    }
+
+    return out;
+  }
+
   /// Force next captured frame to be a keyframe (sender side — e.g. after
   /// a peer's [MTV3_CALL_KEYFRAME_REQUEST]).
   void forceKeyframe() {

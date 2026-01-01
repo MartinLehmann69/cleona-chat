@@ -173,61 +173,76 @@ static void playback_callback(ma_device* dev, void* output, const void* input_un
 
 // === Lifecycle: Start / Stop ===============================================
 
-CLEONA_AUDIO_API int32_t cleona_audio_start(cleona_audio_engine_t* e) {
+CLEONA_AUDIO_API int32_t cleona_audio_start_directed(cleona_audio_engine_t* e, int32_t direction) {
     if (!e) return -1;
     if (e->capture_started || e->playback_started) return -5;
+
+    int32_t want_capture  = (direction == 0 || direction == 1);
+    int32_t want_playback = (direction == 0 || direction == 2);
 
     // Initialize miniaudio context (auto-pick first available backend)
     ma_context_config ctx_cfg = ma_context_config_init();
     if (ma_context_init(NULL, 0, &ctx_cfg, &e->context) != MA_SUCCESS) return -1;
     e->context_inited = 1;
 
-    // Capture device
-    ma_device_config cap_cfg = ma_device_config_init(ma_device_type_capture);
-    cap_cfg.capture.format    = ma_format_s16;
-    cap_cfg.capture.channels  = e->channels;
-    cap_cfg.sampleRate        = e->sample_rate;
-    cap_cfg.periodSizeInFrames = e->frame_samples;
-    cap_cfg.dataCallback      = capture_callback;
-    cap_cfg.pUserData         = e;
-    if (ma_device_init(&e->context, &cap_cfg, &e->capture_dev) != MA_SUCCESS) {
-        ma_context_uninit(&e->context); e->context_inited = 0; return -2;
+    if (want_capture) {
+        // Capture device
+        ma_device_config cap_cfg = ma_device_config_init(ma_device_type_capture);
+        cap_cfg.capture.format    = ma_format_s16;
+        cap_cfg.capture.channels  = e->channels;
+        cap_cfg.sampleRate        = e->sample_rate;
+        cap_cfg.periodSizeInFrames = e->frame_samples;
+        cap_cfg.dataCallback      = capture_callback;
+        cap_cfg.pUserData         = e;
+        if (ma_device_init(&e->context, &cap_cfg, &e->capture_dev) != MA_SUCCESS) {
+            ma_context_uninit(&e->context); e->context_inited = 0; return -2;
+        }
     }
 
-    // Playback device
-    ma_device_config play_cfg = ma_device_config_init(ma_device_type_playback);
-    play_cfg.playback.format    = ma_format_s16;
-    play_cfg.playback.channels  = e->channels;
-    play_cfg.sampleRate         = e->sample_rate;
-    play_cfg.periodSizeInFrames = e->frame_samples;
-    play_cfg.dataCallback       = playback_callback;
-    play_cfg.pUserData          = e;
-    if (ma_device_init(&e->context, &play_cfg, &e->playback_dev) != MA_SUCCESS) {
-        ma_device_uninit(&e->capture_dev);
-        ma_context_uninit(&e->context); e->context_inited = 0; return -3;
+    if (want_playback) {
+        // Playback device
+        ma_device_config play_cfg = ma_device_config_init(ma_device_type_playback);
+        play_cfg.playback.format    = ma_format_s16;
+        play_cfg.playback.channels  = e->channels;
+        play_cfg.sampleRate         = e->sample_rate;
+        play_cfg.periodSizeInFrames = e->frame_samples;
+        play_cfg.dataCallback       = playback_callback;
+        play_cfg.pUserData          = e;
+        if (ma_device_init(&e->context, &play_cfg, &e->playback_dev) != MA_SUCCESS) {
+            if (want_capture) ma_device_uninit(&e->capture_dev);
+            ma_context_uninit(&e->context); e->context_inited = 0; return -3;
+        }
     }
 
-    if (ma_device_start(&e->capture_dev)  != MA_SUCCESS) goto fail_start_capture;
-    e->capture_started = 1;
-    if (ma_device_start(&e->playback_dev) != MA_SUCCESS) goto fail_start_playback;
-    e->playback_started = 1;
+    if (want_capture) {
+        if (ma_device_start(&e->capture_dev) != MA_SUCCESS) goto fail_start_capture;
+        e->capture_started = 1;
+    }
+    if (want_playback) {
+        if (ma_device_start(&e->playback_dev) != MA_SUCCESS) goto fail_start_playback;
+        e->playback_started = 1;
+    }
 
     return 0;
 
 fail_start_playback:
-    ma_device_stop(&e->capture_dev);
+    if (want_capture) ma_device_stop(&e->capture_dev);
     ma_device_uninit(&e->playback_dev);
-    ma_device_uninit(&e->capture_dev);
+    if (want_capture) ma_device_uninit(&e->capture_dev);
     ma_context_uninit(&e->context);
     e->context_inited = 0;
     e->capture_started = 0;
     return -3;
 fail_start_capture:
-    ma_device_uninit(&e->playback_dev);
+    if (want_playback) ma_device_uninit(&e->playback_dev);
     ma_device_uninit(&e->capture_dev);
     ma_context_uninit(&e->context);
     e->context_inited = 0;
     return -2;
+}
+
+CLEONA_AUDIO_API int32_t cleona_audio_start(cleona_audio_engine_t* e) {
+    return cleona_audio_start_directed(e, 0);
 }
 
 CLEONA_AUDIO_API void cleona_audio_stop(cleona_audio_engine_t* e) {

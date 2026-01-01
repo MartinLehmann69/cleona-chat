@@ -1703,7 +1703,7 @@ class CleonaNode {
       // discovery-side behaviour here keeps the two tables in sync regardless
       // of the discovery channel that brought the peer in.
       _touchPeer(senderDeviceId, from.address, fromPort,
-          isAuthoritative: true);
+          isAuthoritative: true, isUdp: isUdp);
 
       _debouncedNetworkStateSave();
 
@@ -4334,7 +4334,8 @@ class CleonaNode {
   /// [peerId] is the deviceNodeId (per-device routing key).
   /// [userId] is the stable identity (optional, attached to PeerInfo for lookups).
   void _touchPeer(Uint8List peerId, String ip, int port,
-      {bool isAuthoritative = false, Uint8List? userId}) {
+      {bool isAuthoritative = false, Uint8List? userId,
+       bool isUdp = true}) {
     final existing = routingTable.getPeer(peerId);
     if (existing != null) {
       existing.lastSeen = DateTime.now();
@@ -4352,6 +4353,25 @@ class CleonaNode {
         // identity (§26 §3.1). Primary field stays unchanged.
         routingTable.addExtraUserIdIndex(peerId, userId);
       }
+
+      // TLS (TCP) source ports are ephemeral — they are NOT the peer's
+      // listening port and must never be stored as a reachable address.
+      // A TLS-delivered packet proves the peer is alive (lastSeen updated
+      // above), but the source port is a one-shot client port that the OS
+      // assigns per connection. Storing it pollutes the address list with
+      // dead ports that outrank the real UDP listening port in
+      // allConnectionTargets() because they carry lastReceivedAt.
+      // For TLS: credit the liveness signal to the best known address
+      // with matching IP (if any), but do NOT add the ephemeral port.
+      if (!isUdp && ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
+        for (final addr in existing.addresses) {
+          if (addr.ip == ip) {
+            addr.recordReceived();
+            break;
+          }
+        }
+        routingTable.addPeer(existing);
+      } else {
       // Inbound packet from a known address is the only hard proof we
       // have that this address actually works. UDP sendto() returning OK
       // at the sender side does NOT prove delivery (kernel accepts the
@@ -4399,7 +4419,11 @@ class CleonaNode {
         }
       }
       routingTable.addPeer(existing);
+      }
     } else {
+      // TLS-only first contact: don't store the ephemeral port.
+      // The peer will be learned properly via UDP discovery or gossip.
+      if (!isUdp) return;
       final peer = PeerInfo(
         nodeId: peerId,
         userId: userId,
@@ -4429,7 +4453,7 @@ class CleonaNode {
       routingTable.addPeer(peer);
     }
 
-    if (isAuthoritative && ip.isNotEmpty && _needsKeepalive(ip) &&
+    if (isUdp && isAuthoritative && ip.isNotEmpty && _needsKeepalive(ip) &&
         port > 0) {
       // §4.6 IPv6-First: skip IPv4 keepalive if this peer has a global
       // IPv6 address (reachable without NAT pinhole maintenance).
@@ -4443,7 +4467,7 @@ class CleonaNode {
     }
 
     // §5.5b: Deliver stored First-CR-Mailbox entries to this device.
-    if (isAuthoritative && ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
+    if (isUdp && isAuthoritative && ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
       try {
         deliverFirstCrMailbox(peerId, InternetAddress(ip), port);
       } catch (_) {}

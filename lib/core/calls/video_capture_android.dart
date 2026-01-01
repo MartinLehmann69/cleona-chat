@@ -19,7 +19,7 @@ import 'package:flutter/services.dart';
 /// Usage:
 /// ```dart
 /// final cam = VideoCaptureAndroid();
-/// cam.onFrame = (i420, width, height) { /* process frame */ };
+/// cam.onFrame = (i420, width, height, rotation) { /* process frame */ };
 /// await cam.start(width: 640, height: 480);
 /// await cam.switchCamera();
 /// await cam.stop();
@@ -30,7 +30,8 @@ class VideoCaptureAndroid {
   bool _capturing = false;
 
   /// Called when a new I420 frame arrives from the camera.
-  void Function(Uint8List i420Data, int width, int height)? onFrame;
+  void Function(Uint8List i420Data, int width, int height, int rotation)?
+      onFrame;
 
   VideoCaptureAndroid() {
     _channel.setMethodCallHandler(_handleMethod);
@@ -42,7 +43,8 @@ class VideoCaptureAndroid {
       final data = args['data'] as Uint8List;
       final width = args['width'] as int;
       final height = args['height'] as int;
-      onFrame?.call(data, width, height);
+      final rotation = args['rotation'] as int? ?? 0;
+      onFrame?.call(data, width, height, rotation);
     }
   }
 

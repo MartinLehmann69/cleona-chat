@@ -245,7 +245,10 @@ class _CallScreenState extends State<CallScreen> {
                       icon: _muted ? Icons.mic_off : Icons.mic,
                       label: _muted ? 'Stumm' : 'Mikrofon',
                       active: _muted,
-                      onPressed: () => setState(() => _muted = !_muted),
+                      onPressed: () {
+                        setState(() => _muted = !_muted);
+                        _appStateRef?.service?.toggleMute();
+                      },
                     ),
                     _VideoCallButton(
                       icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
@@ -262,7 +265,10 @@ class _CallScreenState extends State<CallScreen> {
                       icon: _speaker ? Icons.volume_up : Icons.volume_down,
                       label: 'Lautsprecher',
                       active: _speaker,
-                      onPressed: () => setState(() => _speaker = !_speaker),
+                      onPressed: () {
+                        setState(() => _speaker = !_speaker);
+                        _appStateRef?.service?.toggleSpeaker();
+                      },
                     ),
                     _VideoCallButton(
                       icon: Icons.call_end,
@@ -355,13 +361,19 @@ class _CallScreenState extends State<CallScreen> {
                     icon: _muted ? Icons.mic_off : Icons.mic,
                     label: _muted ? 'Stumm' : 'Mikrofon',
                     active: _muted,
-                    onPressed: () => setState(() => _muted = !_muted),
+                    onPressed: () {
+                      setState(() => _muted = !_muted);
+                      _appStateRef?.service?.toggleMute();
+                    },
                   ),
                   _CallButton(
                     icon: _speaker ? Icons.volume_up : Icons.volume_down,
                     label: 'Lautsprecher',
                     active: _speaker,
-                    onPressed: () => setState(() => _speaker = !_speaker),
+                    onPressed: () {
+                      setState(() => _speaker = !_speaker);
+                      _appStateRef?.service?.toggleSpeaker();
+                    },
                   ),
                 ],
               ),

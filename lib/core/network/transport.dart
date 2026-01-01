@@ -328,20 +328,19 @@ class Transport {
     // Native UDP sender for Transport.sendUdp — bypasses Dart's
     // RawDatagramSocket.send() which silently returns 0 on Windows.
     //
-    // §4.5.2 (V3.1.72): the main data-port native sender is **Windows-only**.
-    // `cleona_udp_open` binds a real SO_REUSEADDR socket on the data port;
-    // on Linux the kernel then delivered inbound datagrams to *that* socket,
-    // which is send-only and never read — starving the Dart receive socket
-    // (`_udpSocket`) and breaking ALL inbound processing (no PONG → no peer
-    // ever confirmed). This was the 2fbc879 regression. §4.5.2: "Linux is
-    // unaffected — Dart's POSIX path behaves identically", so on Linux the
-    // main port uses the Dart socket for send too (see `_udpSendRaw`'s
-    // null-`_nativeSender` fallback). The discovery-port shim (LocalDiscovery,
-    // port 41338) is a separate instance and unchanged.
+    // §4.5.2 (V3.1.72+): localPort=0 (ephemeral) so this send-only socket
+    // does NOT share the data port with the Dart receive socket. The same
+    // dual-socket starvation hit Linux (2fbc879) and was fixed by removing
+    // the native sender there; on Windows it persisted because Dart's
+    // send() is broken. localPort=0 eliminates the conflict: the Dart
+    // socket is the sole owner of the data port and receives 100% of
+    // inbound traffic. The UDP source port is irrelevant — peers learn
+    // our data port from the CLEO discovery payload (bytes 36-37), not
+    // from the UDP header. Same pattern as LocalDiscovery (2026-05-15).
     if (Platform.isWindows && nativeUdpSupportedPlatform()) {
       try {
         _nativeSender = NativeUdpSender.open(
-          localPort: port,
+          localPort: 0,
           reuseAddr: true,
           broadcastEnable: true,
         );
@@ -1504,13 +1503,18 @@ class Transport {
   /// socket is dead from birth, nothing arrives and checkReceiveHealth()
   /// detects the 0-state.
   void _sendSelfProbe() {
+    final probe = Uint8List.fromList([0x43, 0x50, 0x52, 0x42]); // "CPRB"
+    // Try Dart socket first; on Windows send() may silently return 0,
+    // so also send via NativeUdpSender (ephemeral port → data port).
     try {
-      final probe = Uint8List.fromList([0x43, 0x50, 0x52, 0x42]); // "CPRB"
       _udpSocket?.send(probe, InternetAddress.loopbackIPv4, port);
-      _log.debug('Self-probe sent to 127.0.0.1:$port');
-    } catch (e) {
-      _log.debug('Self-probe send failed: $e');
+    } catch (_) {}
+    if (_nativeSender != null) {
+      try {
+        _nativeSender!.send('127.0.0.1', port, probe);
+      } catch (_) {}
     }
+    _log.debug('Self-probe sent to 127.0.0.1:$port');
   }
 
   void _setRecvBuffer(RawDatagramSocket socket) {

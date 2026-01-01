@@ -33,6 +33,13 @@ CLEONA_AUDIO_API cleona_audio_engine_t* cleona_audio_create(
 //   -5 = already started
 CLEONA_AUDIO_API int32_t cleona_audio_start(cleona_audio_engine_t* engine);
 
+// Same as cleona_audio_start(), but lets the caller restrict which device(s)
+// get opened. direction: 0 = both (identical to cleona_audio_start()),
+// 1 = capture_only, 2 = playback_only. Returns the same codes as
+// cleona_audio_start().
+CLEONA_AUDIO_API int32_t cleona_audio_start_directed(
+    cleona_audio_engine_t* engine, int32_t direction);
+
 // Stop devices. Idempotent. Drains pending playback (max 100 ms timeout).
 CLEONA_AUDIO_API void cleona_audio_stop(cleona_audio_engine_t* engine);
 
