@@ -51,7 +51,7 @@ class SystemChannels {
 
   static const int maxExceptionMsgChars = 500;
   static const int maxStackFrames = 20;
-  static const int maxLogTailLines = 30;
+  static const int maxLogTailLines = 200;
   static const int fingerprintFrameCount = 5;
 }
 

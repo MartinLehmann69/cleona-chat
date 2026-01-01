@@ -10,7 +10,7 @@ class CLogger {
 
   /// Ring buffer of the most recent log lines (across all modules).
   /// Used by the crash reporter (§9.5) to attach log context to reports.
-  static const int _ringCapacity = 50;
+  static const int _ringCapacity = 500;
   static final List<String> _ring = [];
 
   static List<String> getRecentLines([int count = 30]) {
