@@ -6,7 +6,7 @@ import 'dart:io';
 /// On Android: /data/data/`packageName`/files/.cleona (app-private)
 ///
 /// macOS uses $HOME/.cleona (not Application Support) for consistency with
-/// the many direct `$home/.cleona` references across main.dart / headless.dart /
+/// the many direct `$home/.cleona` references across main.dart / service_daemon.dart /
 /// service_daemon.dart. A later refactor could adopt the Apple convention if
 /// all call sites are migrated to AppPaths.dataDir.
 class AppPaths {

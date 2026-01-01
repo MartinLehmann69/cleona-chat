@@ -36,8 +36,8 @@ class CallService {
 
   // 1:1 video (§ F-B). `dynamic` because the concrete VideoEngine lives in
   // video_engine.dart, which pulls in dart:ui — call_service.dart must stay
-  // headless-daemon-safe (dart compile exe lib/service_daemon.dart /
-  // lib/headless.dart have no dart.library.ui). The engine is constructed
+  // daemon-safe (dart compile exe lib/service_daemon.dart has no
+  // dart.library.ui). The engine is constructed
   // by [createVideoEngine], injected from a Flutter-context caller (see
   // main.dart _wireServiceCallbacks), exactly like the group video path.
   dynamic _videoEngine;
@@ -412,7 +412,7 @@ class CallService {
   /// [CallState.inCall] (mirrors [_startAudioEngine], called from the same
   /// `onCallAccepted` hook so both caller-on-answer and callee-on-accept
   /// wire up identically). No-op for audio-only calls or when no video
-  /// engine factory has been injected (headless daemon builds without a
+  /// engine factory has been injected (daemon builds without a
   /// Flutter context, or platforms where camera capture is out of scope).
   Future<void> _startVideoEngine(CallSession session) async {
     if (!session.isVideo) return;

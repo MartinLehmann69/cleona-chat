@@ -87,6 +87,32 @@ CLEONA_NET_EXPORT int cleona_udp_send(
     int len);
 
 /*
+ * Open a UDP socket bound to local IPv6 ANY:port.
+ * Identical to cleona_udp_open() but uses AF_INET6. broadcast_enable is
+ * ignored (IPv6 uses multicast, not broadcast).
+ */
+CLEONA_NET_EXPORT cleona_udp_socket_t* cleona_udp_open6(
+    uint16_t local_port,
+    int reuse_addr);
+
+/*
+ * Send one UDP datagram to an IPv6 destination synchronously.
+ *   dest_ip6  — IPv6 address string ("2001:db8::1" or "fe80::1%eth0"),
+ *               null-terminated. Scope-id suffixes are stripped before parsing.
+ *   dest_port — destination port
+ *   data      — payload bytes
+ *   len       — payload length
+ *
+ * Returns: bytes sent on success, negative errno on failure.
+ */
+CLEONA_NET_EXPORT int cleona_udp_send6(
+    cleona_udp_socket_t* s,
+    const char* dest_ip6,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len);
+
+/*
  * Close the socket and release the handle. Safe to call with NULL.
  */
 CLEONA_NET_EXPORT void cleona_udp_close(cleona_udp_socket_t* s);

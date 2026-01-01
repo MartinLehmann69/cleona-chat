@@ -50,7 +50,6 @@ class BinaryUpdateManager {
   final BinaryFragmentStore _store;
   final UpdateChecker _checker;
   final CLogger _log;
-  final String? _profileDir;
 
   BinaryUpdateState _state = BinaryUpdateState.idle;
   String? _targetVersion;
@@ -70,7 +69,6 @@ class BinaryUpdateManager {
     String? profileDir,
   })  : _store = store,
         _checker = checker,
-        _profileDir = profileDir,
         _log = CLogger.get('bin-update', profileDir: profileDir) {
     _highestSeenMonotoneSeq = _loadMonotoneSeq();
   }
@@ -366,7 +364,7 @@ class BinaryUpdateManager {
     }
   }
 
-  String get _updateDir => '${_profileDir ?? AppPaths.dataDir}/update';
+  String get _updateDir => '${AppPaths.dataDir}/update';
 
   /// Whether to use in-network updates or redirect to Play Store.
   bool shouldUseInNetworkUpdate() {

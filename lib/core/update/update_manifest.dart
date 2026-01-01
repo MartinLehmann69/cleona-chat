@@ -222,6 +222,11 @@ class UpdateChecker {
     }
   }
 
+  /// True if [a] and [b] represent the same semver version (ignoring build metadata).
+  bool isSameVersion(String a, String b) {
+    return !isNewer(a, b) && !isNewer(b, a);
+  }
+
   /// Check if a manifest version is newer than the current version.
   bool isNewer(String manifestVersion, String currentVersion) {
     final mv = _parseVersion(manifestVersion);

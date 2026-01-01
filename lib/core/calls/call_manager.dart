@@ -268,8 +268,8 @@ class CallManager {
       // IKM: DH secret + KEM secrets (hybrid post-quantum)
       final ikm = <int>[
         ...dhSecret,
-        if (callerKemSecret != null) ...callerKemSecret,
-        if (kemSecret != null) ...kemSecret,
+        ...?callerKemSecret,
+        ...?kemSecret,
       ];
       call.sharedSecret = sodium.hkdfSha256(
         Uint8List.fromList(ikm),
@@ -458,8 +458,8 @@ class CallManager {
 
       final ikm = <int>[
         ...dhSecret,
-        if (call.kemSharedSecret != null) ...call.kemSharedSecret!,
-        if (calleeKemSecret != null) ...calleeKemSecret,
+        ...?call.kemSharedSecret,
+        ...?calleeKemSecret,
       ];
       call.sharedSecret = sodium.hkdfSha256(
         Uint8List.fromList(ikm),

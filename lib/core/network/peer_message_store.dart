@@ -21,6 +21,11 @@ class _HeldMessage {
   /// but is no longer eligible for proactive push — prevents endless flooding.
   int pushCount = 0;
 
+  /// When this message was first retrieved via PEER_RETRIEVE. Non-null means
+  /// the recipient has requested it; after a grace window the message is
+  /// garbage-collected by [PeerMessageStore.pruneExpired].
+  DateTime? _retrievedAt;
+
   _HeldMessage({
     required this.storeIdHex,
     required this.wrappedEnvelope,
@@ -42,6 +47,7 @@ class _HeldMessage {
     // keep JSON tidy for fresh messages.
     if (pushCount > 0) 'pushCount': pushCount,
     if (lastPushedAt != null) 'lastPushedAt': lastPushedAt!.millisecondsSinceEpoch,
+    if (_retrievedAt != null) 'retrievedAt': _retrievedAt!.millisecondsSinceEpoch,
   };
 
   static _HeldMessage fromJson(Map<String, dynamic> json) {
@@ -54,6 +60,8 @@ class _HeldMessage {
     m.pushCount = (json['pushCount'] as int?) ?? 0;
     final lpa = json['lastPushedAt'] as int?;
     if (lpa != null) m.lastPushedAt = DateTime.fromMillisecondsSinceEpoch(lpa);
+    final ra = json['retrievedAt'] as int?;
+    if (ra != null) m._retrievedAt = DateTime.fromMillisecondsSinceEpoch(ra);
     return m;
   }
 }
@@ -78,6 +86,11 @@ class PeerMessageStore {
   /// Global limits across all recipients.
   static const maxTotalMessages = 3000;
   static const maxTotalBytes = 100 * 1024 * 1024;
+
+  /// Grace window after PEER_RETRIEVE before messages are garbage-collected.
+  /// Protects against UDP loss: a second retrieve within this window still
+  /// returns the messages.
+  static const _retrieveGraceMs = 60 * 1000;
 
   final String _profileDir;
   final CLogger _log;
@@ -195,25 +208,28 @@ class PeerMessageStore {
     return true;
   }
 
-  /// Retrieve all messages for a recipient and remove them from the store.
+  /// Retrieve all messages for a recipient.
   ///
-  /// §5.5: "holds the message for at most 7 days or until the receiver
-  /// retrieves it" — retrieve is destructive, freeing the per-recipient
-  /// budget for new stores. Multi-device delivery uses Twin-Sync (§7),
-  /// not S&F re-retrieval.
+  /// §5.5: marks messages as retrieved and schedules deferred deletion
+  /// after [_retrieveGraceMs]. The grace window protects against UDP loss:
+  /// if the PEER_RETRIEVE_RESPONSE is lost, a second retrieve within the
+  /// window still returns the messages. After the window, messages are
+  /// garbage-collected by [pruneExpired].
   List<Uint8List> retrieveMessages(Uint8List recipientUserId) {
     final recipientHex = bytesToHex(recipientUserId);
-    final list = _messages.remove(recipientHex);
+    final list = _messages[recipientHex];
     if (list == null || list.isEmpty) return [];
 
+    final now = DateTime.now();
     final result = <Uint8List>[];
     for (final m in list) {
-      _knownStoreIds.remove(m.storeIdHex);
-      if (!m.isExpired) result.add(m.wrappedEnvelope);
+      if (m.isExpired) continue;
+      result.add(m.wrappedEnvelope);
+      m._retrievedAt ??= now;
     }
-    _dirty = true;
-    _log.info('Retrieved and removed ${result.length} messages for '
-        '${recipientHex.substring(0, 8)}');
+    if (result.isNotEmpty) _dirty = true;
+    _log.info('Retrieved ${result.length} messages for '
+        '${recipientHex.substring(0, 8)} (deferred delete in ${_retrieveGraceMs ~/ 1000}s)');
     return result;
   }
 
@@ -259,15 +275,27 @@ class PeerMessageStore {
     return list != null && list.isNotEmpty;
   }
 
-  /// Remove expired messages.
+  /// All recipient userIdHex values that have undelivered messages.
+  Iterable<String> get recipientUserIds =>
+      _messages.entries
+          .where((e) => e.value.any((m) =>
+              !m.isExpired && m._retrievedAt == null))
+          .map((e) => e.key);
+
+  /// Remove expired and retrieved-past-grace messages.
   int pruneExpired() {
     var pruned = 0;
     final emptyKeys = <String>[];
+    final now = DateTime.now();
 
     for (final entry in _messages.entries) {
       final before = entry.value.length;
       entry.value.removeWhere((m) {
-        if (m.isExpired) {
+        final shouldRemove = m.isExpired ||
+            (m._retrievedAt != null &&
+                now.difference(m._retrievedAt!).inMilliseconds >
+                    _retrieveGraceMs);
+        if (shouldRemove) {
           _knownStoreIds.remove(m.storeIdHex);
           return true;
         }

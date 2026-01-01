@@ -3,7 +3,7 @@
 # deploy-macos-app.sh — Assemble a ready-to-run Cleona.app bundle
 #
 # Runs the full macOS build pipeline:
-#   1. Compile the headless daemon (dart compile exe)
+#   1. Compile the daemon (dart compile exe)
 #   2. Build the Flutter GUI (flutter build macos)
 #   3. Copy native dylibs from build/macos-libs/<arch>/ into
 #      Cleona.app/Contents/Frameworks/
@@ -48,7 +48,7 @@ fi
 
 cd "$PROJECT_DIR"
 
-# ── 1. Compile headless daemon ───────────────────────────────────────────────
+# ── 1. Compile daemon ────────────────────────────────────────────────────────
 echo ">>> Compiling cleona-daemon (dart compile exe)"
 mkdir -p build
 dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos

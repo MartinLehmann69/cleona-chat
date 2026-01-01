@@ -93,7 +93,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
       if (svc is IpcClient) {
         result = await svc.manualReconnect();
       } else {
-        // In-process fallback (headless / direct service)
+        // In-process fallback (direct service)
         await svc.onNetworkChanged();
         result = {'debounced': false, 'peersFound': svc.peerCount};
       }

@@ -227,7 +227,7 @@ class IdentityContext {
 
   // ── Shared startup sequence (S106 fix) ──────────────────────────────
   // Single source of truth for crypto init + IdentityContext creation.
-  // All entry points (service_daemon, headless, main.dart) use these
+  // All entry points (service_daemon, main.dart) use these
   // instead of duplicating the init sequence.
 
   /// §3.7: Initialize crypto subsystem — keyring + migration.

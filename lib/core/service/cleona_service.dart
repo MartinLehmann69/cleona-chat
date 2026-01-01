@@ -475,7 +475,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.144';
+  static const String kCurrentAppVersion = '3.1.145';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1340,7 +1340,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// Legacy: Full start creating its own node. Used by headless mode / in-process fallback.
+  /// Legacy: Full start creating its own node. Used by daemon / in-process fallback.
   Future<void> start() async {
     await startService();
   }
@@ -1488,7 +1488,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final prev = _latestManifest;
       if (prev != null && !checker.isNewer(manifest.version, prev.version)) {
-        return;
+        if (checker.isNewer(prev.version, manifest.version)) return;
+        final newSeq = manifest.minMonotoneSeq ?? 0;
+        final prevSeq = prev.minMonotoneSeq ?? 0;
+        if (newSeq <= prevSeq) return;
+        _log.info('[update] Same version v${manifest.version} '
+            'but higher seq ($newSeq > $prevSeq) — accepting');
       }
       _latestManifest = manifest;
       try {
@@ -1678,6 +1683,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _log.info('§5.4 late-peer poll: ${deviceHex.substring(0, 8)}');
       }
     }
+
+    // Sender side: flush parked outbox entries — the recipient (or a relay
+    // toward it) just came online, so L1/L2/L3 may now succeed.
+    unawaited(_flushOutbox());
+
+    // Store-host side: proactively push S&F messages to the newly confirmed
+    // peer (they may be the intended recipient).
+    _pushStoredMessagesTo(deviceHex);
 
     // Replicator side: re-arm exhausted pushes (throttled 60s).
     final now = DateTime.now();
@@ -2490,6 +2503,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       innerPayload: Uint8List.fromList(retrieve.writeToBuffer()),
       recipientDeviceId: Uint8List.fromList(peer.nodeId),
     );
+  }
+
+  /// §5.5 proactive S&F push: when a peer comes online, check if we hold
+  /// stored messages for that peer's userId and push them proactively.
+  /// Uses peekMessages() rate-limiting (3 pushes max, 5min interval) to
+  /// prevent flooding.
+  void _pushStoredMessagesTo(String deviceHex) {
+    final store = node.peerMessageStore;
+    final recipientIds = store.recipientUserIds.toList();
+    if (recipientIds.isEmpty) return;
+
+    // Resolve deviceHex → userId: check contacts and routing table.
+    final deviceBytes = hexToBytes(deviceHex);
+    String? matchedUserHex;
+
+    // Path 1: contact with this deviceNodeId
+    for (final entry in _contacts.entries) {
+      if (entry.value.deviceNodeIds.contains(deviceHex)) {
+        matchedUserHex = entry.key;
+        break;
+      }
+    }
+
+    // Path 2: PeerInfo.userId in routing table
+    if (matchedUserHex == null) {
+      final peer = node.routingTable.getPeer(deviceBytes);
+      final uid = peer?.userIdHex;
+      if (uid != null && recipientIds.contains(uid)) {
+        matchedUserHex = uid;
+      }
+    }
+
+    if (matchedUserHex == null) return;
+    if (!recipientIds.contains(matchedUserHex)) return;
+
+    final recipientUserId = hexToBytes(matchedUserHex);
+    final envelopes = store.peekMessages(recipientUserId);
+    if (envelopes.isEmpty) return;
+
+    final response = proto.PeerRetrieveResponse()
+      ..storedEnvelopes.addAll(envelopes)
+      ..remaining = 0;
+    node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE,
+      innerPayload: Uint8List.fromList(response.writeToBuffer()),
+      recipientDeviceId: deviceBytes,
+    );
+    _log.info('S&F proactive push: sent ${envelopes.length} stored messages '
+        'to ${deviceHex.substring(0, 8)} (user ${matchedUserHex.substring(0, 8)})');
   }
 
   /// §4.11: build RendezvousContact list from accepted contacts.
@@ -3389,7 +3451,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
       }
       _log.debug('L1 retry: all resolved devices unreachable for '
-          '${recipientHex.substring(0, 8)}');
+          '${recipientHex.substring(0, 8)} — re-tracking for retry budget');
+      unawaited(node.ackTracker.trackSend(
+        messageIdHex,
+        recipientHex,
+        const <PeerAddress>[],
+        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+        serializedPacket: serializedPacket,
+        recipientUserId: recipientUserId,
+      ));
       return;
     }
 
@@ -3401,7 +3471,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final contact = _contacts[recipientHex];
     if (contact == null || contact.deviceNodeIds.isEmpty) {
       _log.debug('L1 retry: no devices resolved and no cached deviceNodeIds '
-          'for ${recipientHex.substring(0, 8)}');
+          'for ${recipientHex.substring(0, 8)} — re-tracking for retry budget');
+      unawaited(node.ackTracker.trackSend(
+        messageIdHex,
+        recipientHex,
+        const <PeerAddress>[],
+        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+        serializedPacket: serializedPacket,
+        recipientUserId: recipientUserId,
+      ));
       return;
     }
     _log.info('L1 retry: legacy fallback via ${contact.deviceNodeIds.length} '
@@ -3425,7 +3503,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     _log.debug('L1 retry: all legacy devices unreachable for '
-        '${recipientHex.substring(0, 8)}');
+        '${recipientHex.substring(0, 8)} — re-tracking for retry budget');
+    unawaited(node.ackTracker.trackSend(
+      messageIdHex,
+      recipientHex,
+      const <PeerAddress>[],
+      AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+      serializedPacket: serializedPacket,
+      recipientUserId: recipientUserId,
+    ));
   }
 
   // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
@@ -3473,7 +3559,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// §5.5 F4(a) (S121): infrastructure-node S&F policy — when true, this
   /// node stores PEER_STORE messages for ANY recipient (within budgets),
-  /// not only for its own accepted contacts. Set by headless/bootstrap
+  /// not only for its own accepted contacts. Set by bootstrap
   /// runners; GUI daemons and mobile devices keep contact-only storage.
   bool acceptAnyPeerStore = false;
 
@@ -10961,7 +11047,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             final json = utf8.decode(frag.data);
             final m = checker.verifyManifest(json);
             if (m == null) continue;
-            if (best == null || checker.isNewer(m.version, best.version)) {
+            if (best == null || checker.isNewer(m.version, best.version) ||
+                (checker.isSameVersion(m.version, best.version) &&
+                    (m.minMonotoneSeq ?? 0) > (best.minMonotoneSeq ?? 0))) {
               best = m;
               bestData = frag.data;
               bestJson = json;
@@ -10975,13 +11063,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
         final prev = _latestManifest;
         if (prev != null && !checker.isNewer(best.version, prev.version)) {
-          _log.debug('[update] No update available '
-              '(manifest: v${best.version}, current: v$currentAppVersion)');
           if (checker.isNewer(prev.version, best.version)) {
+            _log.debug('[update] Poll manifest v${best.version} older than cached v${prev.version}');
             final prevJson = utf8.encode(jsonEncode(prev.toJson()));
             _pushManifestToPeers(Uint8List.fromList(prevJson));
+            return;
           }
-          return;
+          final bestSeq = best.minMonotoneSeq ?? 0;
+          final prevSeq = prev.minMonotoneSeq ?? 0;
+          if (bestSeq <= prevSeq) {
+            _log.debug('[update] No update available '
+                '(manifest: v${best.version} seq=$bestSeq, '
+                'cached: v${prev.version} seq=$prevSeq)');
+            return;
+          }
+          _log.info('[update] Poll: same version v${best.version} '
+              'but higher seq ($bestSeq > $prevSeq) — accepting');
         }
 
         _latestManifest = best;
@@ -11135,10 +11232,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         platform: platform,
         version: version,
         addresses: const [],
-        binaryHash: '',
+        binaryHash: _latestManifest?.binaryHashes?[platform] ?? '',
         hasFullBinary: hasComplete,
         fragmentIndices: fragments,
-        seq: 0,
+        seq: _latestManifest?.minMonotoneSeq ?? 0,
       ));
     }
     return records;
@@ -11190,10 +11287,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
         return;
       }
+      final expectedHash = _latestManifest?.binaryHashes?[platform];
       final profileDir = _binaryFragmentStore!.profileDir;
       final maxFragments = Platform.isAndroid ? 2 : 8;
       final count = await _runSeedIsolate(
-          binaryPath, profileDir, platform, version, maxFragments);
+          binaryPath, profileDir, platform, version, maxFragments,
+          expectedHash: expectedHash);
       if (count > 0) {
         _log.info('[update] Self-seeded $count fragments for $platform/$version');
         node.binaryHasContentToShare = true;
@@ -11206,13 +11305,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   static Future<int> _runSeedIsolate(String binaryPath, String profileDir,
-      String platform, String version, int maxFragments) {
+      String platform, String version, int maxFragments,
+      {String? expectedHash}) {
     return Isolate.run(() => _selfSeedInIsolate(
       binaryPath: binaryPath,
       profileDir: profileDir,
       platform: platform,
       version: version,
       maxFragments: maxFragments,
+      expectedHash: expectedHash,
     ));
   }
 
@@ -12501,7 +12602,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // §5.5 receiver-side validation: only store for recipients that are
       // our accepted contacts.  This enforces "contact peer" at the storage
       // node rather than relying on sender-side heuristics.
-      // S121 F4(a): infrastructure nodes (headless/bootstrap) accept stores
+      // S121 F4(a): infrastructure nodes (bootstrap) accept stores
       // for ANY recipient within the existing budgets (30/recipient,
       // sender rate limit) — they have no contacts by design, and they are
       // the peers every device confirms and polls at coming-online. This
@@ -16190,10 +16291,16 @@ Future<int> _selfSeedInIsolate({
   required String platform,
   required String version,
   required int maxFragments,
+  String? expectedHash,
 }) async {
   final file = File(binaryPath);
   if (!file.existsSync()) return 0;
   final binary = await file.readAsBytes();
+
+  if (expectedHash != null) {
+    final actualHash = bytesToHex(SodiumFFI().sha256(binary));
+    if (actualHash != expectedHash) return 0;
+  }
 
   final params = BinarySeeder.paramsFor(platform);
   final rs = ReedSolomon.withParams(params.n, params.k);

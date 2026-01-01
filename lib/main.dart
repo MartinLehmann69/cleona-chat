@@ -160,7 +160,7 @@ void main() async {
   SemanticsBinding.instance.ensureSemantics();
 
   // H7 (#U17): Globale Error-Handler — uncaught exceptions crashen sonst
-  // Android stillschweigend. Mirror des Patterns aus headless.dart:20.
+  // Android stillschweigend. Mirror des Patterns aus service_daemon.dart.
   FlutterError.onError = (details) {
     _logCrash('FlutterError', details.exception, details.stack);
     if (details.stack != null) {
@@ -1177,7 +1177,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// Check if the running daemon has DISPLAY (= tray icon possible).
-  /// On Windows/macOS: always true — no headless SSH daemon story there, and
+  /// On Windows/macOS: always true — no SSH daemon story there, and
   /// macOS has no procfs for env inspection, so we'd otherwise falsely kill
   /// the running daemon on every GUI launch.
   bool _daemonHasDisplay() {
@@ -2037,8 +2037,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // in-process services (Android/iOS/macOS-no-daemon) — because it needs
     // dart:ui (VideoEngine) and, on Android, package:flutter/services.dart
     // (VideoCaptureAndroid MethodChannel), neither of which call_service.dart
-    // may import (it's part of the headless daemon's dependency graph via
-    // CleonaService — see service_daemon.dart / headless.dart). Linux/
+    // may import (it's part of the daemon's dependency graph via
+    // CleonaService — see service_daemon.dart). Linux/
     // Windows run CleonaService inside the separate daemon process, which
     // never calls _wireServiceCallbacks, so createVideoEngine stays null
     // there — CallService already degrades to audio-only when it is.

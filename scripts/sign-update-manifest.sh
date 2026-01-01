@@ -153,14 +153,15 @@ if [ -n "$BIN_DIR" ]; then
         BIN_FILE="$BIN_DIR/cleona-$PLATFORM"
         [ -f "$BIN_FILE" ] || continue
 
-        HASH_HEX=$(openssl dgst -sha256 "$BIN_FILE" | awk '{print $NF}')
-        SIZE=$(stat -c%s "$BIN_FILE" 2>/dev/null || stat -f%z "$BIN_FILE")
+        REAL_FILE=$(realpath "$BIN_FILE")
+        HASH_HEX=$(openssl dgst -sha256 "$REAL_FILE" | awk '{print $NF}')
+        SIZE=$(stat -c%s "$REAL_FILE" 2>/dev/null || stat -f%z "$REAL_FILE")
         # Sign the RAW 32-byte SHA-256 digest (not the hex string) — this is
         # the exact scheme BinaryUpdateManager.verify() and
         # PhysicalTransferHelper.importAndVerifyBinary() check against on the
         # receiving node (SodiumFFI().sha256() returns raw bytes, and
         # verifyEd25519() is called with those raw bytes as the message).
-        SIG_B64=$(openssl dgst -sha256 -binary "$BIN_FILE" | ed25519_sign_stdin)
+        SIG_B64=$(openssl dgst -sha256 -binary "$REAL_FILE" | ed25519_sign_stdin)
 
         BIN_HASH["$PLATFORM"]="$HASH_HEX"
         BIN_SIG["$PLATFORM"]="$SIG_B64"

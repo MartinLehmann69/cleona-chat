@@ -54,6 +54,26 @@ typedef _CleonaUdpSendDart = int Function(
 typedef _CleonaUdpCloseC = ffi.Void Function(ffi.Pointer<ffi.Void>);
 typedef _CleonaUdpCloseDart = void Function(ffi.Pointer<ffi.Void>);
 
+// cleona_udp_socket_t* cleona_udp_open6(uint16_t local_port, int reuse_addr)
+typedef _CleonaUdpOpen6C = ffi.Pointer<ffi.Void> Function(
+    ffi.Uint16 localPort, ffi.Int32 reuseAddr);
+typedef _CleonaUdpOpen6Dart = ffi.Pointer<ffi.Void> Function(
+    int localPort, int reuseAddr);
+
+// int cleona_udp_send6(cleona_udp_socket_t*, const char* dest_ip6, uint16_t dest_port, const uint8_t* data, int len)
+typedef _CleonaUdpSend6C = ffi.Int32 Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Pointer<Utf8> destIp6,
+    ffi.Uint16 destPort,
+    ffi.Pointer<ffi.Uint8> data,
+    ffi.Int32 len);
+typedef _CleonaUdpSend6Dart = int Function(
+    ffi.Pointer<ffi.Void>,
+    ffi.Pointer<Utf8> destIp6,
+    int destPort,
+    ffi.Pointer<ffi.Uint8> data,
+    int len);
+
 // const char* cleona_net_version()
 typedef _CleonaNetVersionC = ffi.Pointer<Utf8> Function();
 typedef _CleonaNetVersionDart = ffi.Pointer<Utf8> Function();
@@ -232,5 +252,61 @@ class NativeUdpSender {
     final lib = _libCache ??= _openLibrary();
     final fn = lib.lookupFunction<_CleonaNetVersionC, _CleonaNetVersionDart>('cleona_net_version');
     return fn().toDartString();
+  }
+}
+
+/// IPv6 variant of [NativeUdpSender]. Opens an AF_INET6 socket via
+/// `cleona_udp_open6` and sends via `cleona_udp_send6`. Same safety
+/// properties: synchronous WSASendTo with non-blocking retry on Windows,
+/// plain sendto on POSIX. No IOCP involvement.
+class NativeUdpSender6 {
+  final ffi.Pointer<ffi.Void> _handle;
+  final _CleonaUdpSend6Dart _send6;
+  final _CleonaUdpSetBuffersDart _setBuffers;
+  final _CleonaUdpCloseDart _close;
+  bool _closed = false;
+
+  NativeUdpSender6._(this._handle, this._send6, this._setBuffers, this._close);
+
+  factory NativeUdpSender6.open({
+    required int localPort,
+    bool reuseAddr = true,
+  }) {
+    final lib = NativeUdpSender._libCache ??= _openLibrary();
+    final openFn = lib.lookupFunction<_CleonaUdpOpen6C, _CleonaUdpOpen6Dart>('cleona_udp_open6');
+    final sendFn = lib.lookupFunction<_CleonaUdpSend6C, _CleonaUdpSend6Dart>('cleona_udp_send6');
+    final setBuffersFn = lib.lookupFunction<_CleonaUdpSetBuffersC, _CleonaUdpSetBuffersDart>('cleona_udp_set_buffers');
+    final closeFn = lib.lookupFunction<_CleonaUdpCloseC, _CleonaUdpCloseDart>('cleona_udp_close');
+
+    final handle = openFn(localPort, reuseAddr ? 1 : 0);
+    if (handle == ffi.nullptr) {
+      throw NativeUdpOpenException(localPort);
+    }
+    return NativeUdpSender6._(handle, sendFn, setBuffersFn, closeFn);
+  }
+
+  bool setBuffers({int rcvBytes = 0, int sndBytes = 4 * 1024 * 1024}) {
+    if (_closed) return false;
+    return _setBuffers(_handle, rcvBytes, sndBytes) == 0;
+  }
+
+  int send(String destIp6, int destPort, Uint8List data) {
+    if (_closed) return -1;
+    final ipPtr = destIp6.toNativeUtf8();
+    final dataPtr = malloc.allocate<ffi.Uint8>(data.length);
+    try {
+      final native = dataPtr.asTypedList(data.length);
+      native.setAll(0, data);
+      return _send6(_handle, ipPtr, destPort, dataPtr, data.length);
+    } finally {
+      malloc.free(dataPtr);
+      malloc.free(ipPtr);
+    }
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _close(_handle);
   }
 }

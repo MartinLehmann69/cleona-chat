@@ -281,6 +281,7 @@ class Transport {
   /// valid socket — see §4.5.2). Initialized in [start] on supported
   /// platforms; null on Android/macOS or when the library is missing.
   NativeUdpSender? _nativeSender;
+  NativeUdpSender6? _nativeSender6;
 
   /// iOS native sendto() bypass. Dart's RawDatagramSocket.send() returns 0
   /// on iOS (errno 64/65). Uses the SAME fd as the Dart socket — no second
@@ -419,6 +420,20 @@ class Transport {
         _log.warn('Native UDP transport sender unavailable, '
             'falling back to Dart socket: $e');
         _nativeSender = null;
+      }
+    }
+
+    // Native IPv6 sender — same rationale as IPv4 native sender: bypass
+    // Dart's IOCP-based RawDatagramSocket.send() which can crash the VM
+    // on Windows when IPv6 routes are unreachable (Ingo crash report).
+    if (Platform.isWindows && nativeUdpSupportedPlatform()) {
+      try {
+        _nativeSender6 = NativeUdpSender6.open(localPort: 0, reuseAddr: true);
+        _nativeSender6!.setBuffers(sndBytes: 4 * 1024 * 1024);
+        _log.info('Native UDP6 transport sender attached');
+      } catch (e) {
+        _log.info('Native UDP6 transport sender unavailable: $e');
+        _nativeSender6 = null;
       }
     }
 
@@ -909,7 +924,16 @@ class Transport {
       // Negative = errno from WSASendTo/sendto; fall through to Dart socket
       // only if the native sender returned a transient error.
     }
-    return socket.send(data, address, remotePort);
+    if (_nativeSender6 != null && address.type == InternetAddressType.IPv6) {
+      final sent = _nativeSender6!.send(address.address, remotePort, data);
+      if (sent > 0) return sent;
+    }
+    try {
+      return socket.send(data, address, remotePort);
+    } catch (e) {
+      _log.warn('socket.send() threw for ${address.address}:$remotePort: $e');
+      return 0;
+    }
   }
 
   /// Whether a send failure (return value <= 0 from _udpSendRaw) should count
@@ -1931,6 +1955,18 @@ class Transport {
           _log.warn('Android native sendto() reattach failed: $e');
         }
       }
+      // Windows IPv6 native sender: close stale handle, reopen
+      if (_nativeSender6 != null) {
+        _nativeSender6!.close();
+        _nativeSender6 = null;
+        try {
+          _nativeSender6 = NativeUdpSender6.open(localPort: 0, reuseAddr: true);
+          _nativeSender6!.setBuffers(sndBytes: 4 * 1024 * 1024);
+          _log.info('Native UDP6 transport sender reattached');
+        } catch (e) {
+          _log.info('Native UDP6 transport sender reattach failed: $e');
+        }
+      }
       // Multi-interface: refresh per-interface sockets after reconnect
       unawaited(refreshMultiInterface());
       _log.info('UDP sockets reconnected on port $port');
@@ -2053,6 +2089,8 @@ class Transport {
     _tlsRebindAttempt = 0;
     _nativeSender?.close();
     _nativeSender = null;
+    _nativeSender6?.close();
+    _nativeSender6 = null;
     _iosUdpSender = null;
     _androidUdpSender = null;
     _udpSocket?.close();

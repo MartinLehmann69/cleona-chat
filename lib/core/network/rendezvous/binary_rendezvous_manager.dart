@@ -3,7 +3,7 @@
 /// Publishes and resolves binary-availability records (which nodes hold the
 /// complete or partial application binary, per platform) under a
 /// network-wide, platform-scoped tag derived from the network secret. No
-/// user identity or contacts required — headless daemons participate.
+/// user identity or contacts required — infrastructure daemons participate.
 library;
 
 import 'dart:async';

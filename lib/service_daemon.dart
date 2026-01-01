@@ -24,6 +24,7 @@ import 'package:cleona/core/calendar/reminder_service.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/service/notification_sound_service.dart' show VibrationType;
 import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Holds the machine-global single-instance flock (§15.1) for the entire
@@ -43,6 +44,12 @@ void main(List<String> args) {
   String? zoneLogBaseDir;
   runZonedGuarded(() async {
     final config = _parseArgs(args);
+
+    if (config.exportContactSeed) {
+      await _exportContactSeed(config);
+      return;
+    }
+
     zoneLogBaseDir = config.baseDir;
     final log = CLogger.get('daemon', profileDir: config.baseDir);
 
@@ -692,6 +699,10 @@ class _MultiServiceDaemon {
       // §4.8 / §5.5 F4: bootstrap nodes accept S&F stores for any recipient.
       if (config.bootstrapMode) {
         service.acceptAnyPeerStore = true;
+        service.onContactRequestReceived = (nodeId, name) {
+          log.info('Bootstrap auto-accept contact: $name ($nodeId)');
+          service.acceptContactRequest(nodeId);
+        };
       }
       // Wire badge count to tray icon
       service.onBadgeCountChanged = (count) => _updateTrayBadge();
@@ -777,7 +788,12 @@ class _MultiServiceDaemon {
     // the daemon without any external server. Opt-in; disabled by default.
     await _startLocalCalDAVServer();
 
-    // §19.6: mark previous update as healthy after 30s of stable running.
+    // §19.6: check for crashed update at startup, mark healthy after 30s.
+    final pending = BinaryUpdateManager.checkUpdatePending(config.baseDir);
+    if (pending != null) {
+      final pendingVer = pending['version'] as String?;
+      log.info('[update] Previous update marker found: v$pendingVer');
+    }
     Timer(const Duration(seconds: 30), () {
       BinaryUpdateManager.markUpdateHealthy(config.baseDir);
     });
@@ -1586,6 +1602,9 @@ class _DaemonConfig {
   /// Infrastructure mode (§4.8 / §5.5 F4): accept PEER_STORE for any
   /// recipient within budgets, not just own contacts. Used on bootstrap nodes.
   final bool bootstrapMode;
+  final bool exportContactSeed;
+  final String? identitySelector;
+  final String? name;
 
   _DaemonConfig({
     required this.baseDir,
@@ -1594,6 +1613,9 @@ class _DaemonConfig {
     this.publicIp,
     this.ignoreSingleInstance = false,
     this.bootstrapMode = false,
+    this.exportContactSeed = false,
+    this.identitySelector,
+    this.name,
   });
 }
 
@@ -1604,6 +1626,9 @@ _DaemonConfig _parseArgs(List<String> args) {
   String? publicIp;
   bool ignoreSingleInstance = false;
   bool bootstrapMode = false;
+  bool exportContactSeed = false;
+  String? identitySelector;
+  String? name;
 
   // Legacy: --profile and --name still accepted for compatibility
   String? legacyProfile;
@@ -1634,8 +1659,7 @@ _DaemonConfig _parseArgs(List<String> args) {
         if (i + 1 < flat.length) port = int.tryParse(flat[++i]);
         break;
       case '--name':
-        // Legacy: ignored in multi-identity mode
-        if (i + 1 < flat.length) i++;
+        if (i + 1 < flat.length) name = flat[++i];
         break;
       case '--icon':
         if (i + 1 < flat.length) iconPath = flat[++i];
@@ -1650,6 +1674,12 @@ _DaemonConfig _parseArgs(List<String> args) {
         break;
       case '--bootstrap':
         bootstrapMode = true;
+        break;
+      case '--export-contact-seed':
+        exportContactSeed = true;
+        break;
+      case '--identity':
+        if (i + 1 < flat.length) identitySelector = flat[++i];
         break;
     }
   }
@@ -1674,5 +1704,80 @@ _DaemonConfig _parseArgs(List<String> args) {
     publicIp: publicIp,
     ignoreSingleInstance: ignoreSingleInstance,
     bootstrapMode: bootstrapMode,
+    exportContactSeed: exportContactSeed,
+    identitySelector: identitySelector,
+    name: name,
   );
+}
+
+Future<void> _exportContactSeed(_DaemonConfig config) async {
+  SodiumFFI();
+  OqsFFI().init();
+
+  await IdentityContext.initCrypto(config.baseDir);
+  final mgr = IdentityManager(baseDir: config.baseDir);
+  final identities = mgr.loadIdentities();
+  if (identities.isEmpty) {
+    stderr.writeln('ERROR: No identities found in ${config.baseDir}');
+    exit(1);
+  }
+  final Identity activeId;
+  if (config.identitySelector != null) {
+    final sel = config.identitySelector!.toLowerCase();
+    final match = identities.where((id) =>
+        id.displayName.toLowerCase() == sel ||
+        (id.nodeIdHex != null && id.nodeIdHex!.toLowerCase().startsWith(sel)));
+    if (match.isEmpty) {
+      stderr.writeln('ERROR: No identity matching "${config.identitySelector}"');
+      exit(1);
+    }
+    activeId = match.first;
+  } else {
+    activeId = identities.first;
+  }
+  final identity = await IdentityContext.createFromIdentity(
+    identity: activeId,
+    baseDir: config.baseDir,
+    masterSeed: mgr.loadMasterSeed(),
+    overrideDisplayName: config.name,
+  );
+
+  final interfaces = await NetworkInterface.list();
+  final localIps = <String>[];
+  for (final iface in interfaces) {
+    for (final addr in iface.addresses) {
+      if (addr.isLoopback || addr.isLinkLocal) continue;
+      localIps.add(addr.address);
+    }
+  }
+
+  final ownAddrs = localIps.take(2).map((ip) => '$ip:${config.port}').toList();
+
+  var publicIp = config.publicIp;
+  if (publicIp == null) {
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      final req = await client.getUrl(Uri.parse('https://api.ipify.org'));
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final ip = (await resp.transform(const SystemEncoding().decoder).join()).trim();
+      client.close(force: true);
+      if (ip.isNotEmpty && ip.contains('.')) publicIp = ip;
+    } catch (_) {}
+  }
+  if (publicIp != null) {
+    ownAddrs.add('$publicIp:${config.port}');
+  }
+
+  final seed = ContactSeed(
+    nodeIdHex: identity.userIdHex,
+    displayName: config.name ?? activeId.displayName,
+    ownAddresses: ownAddrs,
+    seedPeers: const [],
+    channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+    deviceIdHex: identity.deviceNodeIdHex,
+    userEd25519Pk: identity.ed25519PublicKey,
+    createdAtMs: DateTime.now().millisecondsSinceEpoch,
+  );
+
+  stdout.writeln(seed.toUri());
 }

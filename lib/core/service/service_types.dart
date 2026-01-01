@@ -1089,7 +1089,7 @@ class JuryRequest {
 /// Jury vote result (matches JuryVote in moderation_config).
 enum JuryVoteResult { approve, reject, abstain }
 
-/// Peer information for UI/headless display.
+/// Peer information for UI/daemon display.
 class PeerSummary {
   final String nodeIdHex;
   final String address;

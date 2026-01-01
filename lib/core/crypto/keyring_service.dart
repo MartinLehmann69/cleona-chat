@@ -12,8 +12,8 @@ import 'package:cleona/core/platform/dpapi_ffi.dart';
 /// Windows: DPAPI (CryptProtectData / CryptUnprotectData)
 /// Android/macOS/iOS: file-based fallback (platform backends TBD)
 ///
-/// Falls back to file-based storage when no OS keyring is available (headless
-/// daemons, unsupported platforms).
+/// Falls back to file-based storage when no OS keyring is available (daemons
+/// without desktop session, unsupported platforms).
 ///
 /// All operations are synchronous — keyring access happens only at daemon
 /// start/shutdown, not in hot paths.
@@ -118,7 +118,7 @@ class _LinuxSecretToolKeyring extends KeyringService {
       if (which.exitCode != 0) return false;
       // Probe: lookup a key that won't exist. If the Secret Service daemon is
       // reachable, secret-tool returns quickly with exit 1 (not found). If no
-      // daemon is running (headless), it hangs or errors.
+      // daemon is running (no display session), it hangs or errors.
       final probe = await Process.run(
         'secret-tool', ['lookup', 'application', 'cleona', 'type', '_probe'],
       ).timeout(const Duration(seconds: 3));

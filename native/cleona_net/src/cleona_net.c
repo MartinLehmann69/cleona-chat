@@ -43,7 +43,7 @@ struct cleona_udp_socket {
   cleona_native_socket_t fd;
 };
 
-#define CLEONA_NET_VERSION_STR "cleona_net 1.1.0 (non-blocking WSASendTo)"
+#define CLEONA_NET_VERSION_STR "cleona_net 1.2.0 (IPv6 + non-blocking WSASendTo)"
 
 #if defined(_WIN32)
 /* WSAStartup / WSACleanup are global to the process; the first call to
@@ -234,6 +234,136 @@ CLEONA_NET_EXPORT int cleona_udp_send(
    * For UDP datagrams under SO_SNDBUF the kernel never returns partial; either
    * the full datagram is queued or sendto returns -1 with EAGAIN/EWOULDBLOCK
    * (only in non-blocking mode — we use blocking sockets). */
+  ssize_t n = sendto(s->fd, data, (size_t)len, 0,
+                     (struct sockaddr*)&dst, sizeof(dst));
+  if (n < 0) {
+    return -errno;
+  }
+  return (int)n;
+#endif
+}
+
+CLEONA_NET_EXPORT cleona_udp_socket_t* cleona_udp_open6(
+    uint16_t local_port,
+    int reuse_addr) {
+
+#if defined(_WIN32)
+  if (cleona_wsa_init_once() != 0) {
+    return NULL;
+  }
+#endif
+
+#if defined(_WIN32)
+  cleona_native_socket_t fd = socket(AF_INET6, SOCK_DGRAM, 0);
+#else
+  cleona_native_socket_t fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#endif
+  if (fd == CLEONA_INVALID_SOCKET) {
+#if defined(_WIN32)
+    cleona_wsa_cleanup_one();
+#endif
+    return NULL;
+  }
+
+  if (reuse_addr) {
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+  }
+
+  /* IPV6_V6ONLY=1: receive only IPv6, not IPv4-mapped. The IPv4 socket
+   * handles IPv4 traffic; mixing causes port conflicts on Windows. */
+  {
+    int yes = 1;
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&yes, sizeof(yes));
+  }
+
+  struct sockaddr_in6 addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin6_family = AF_INET6;
+  addr.sin6_addr = in6addr_any;
+  addr.sin6_port = htons(local_port);
+  if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == CLEONA_SOCKET_ERROR) {
+    CLEONA_CLOSE(fd);
+#if defined(_WIN32)
+    cleona_wsa_cleanup_one();
+#endif
+    return NULL;
+  }
+
+  cleona_udp_socket_t* s = (cleona_udp_socket_t*)malloc(sizeof(cleona_udp_socket_t));
+  if (!s) {
+    CLEONA_CLOSE(fd);
+#if defined(_WIN32)
+    cleona_wsa_cleanup_one();
+#endif
+    return NULL;
+  }
+  s->fd = fd;
+
+#if defined(_WIN32)
+  {
+    u_long nonblocking = 1;
+    ioctlsocket(fd, FIONBIO, &nonblocking);
+  }
+#endif
+
+  return s;
+}
+
+CLEONA_NET_EXPORT int cleona_udp_send6(
+    cleona_udp_socket_t* s,
+    const char* dest_ip6,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len) {
+  if (!s || !dest_ip6 || !data || len <= 0) {
+    return -1;
+  }
+
+  /* Strip scope-id suffix (%eth0) — inet_pton does not accept it. */
+  char ip_buf[64];
+  strncpy(ip_buf, dest_ip6, sizeof(ip_buf) - 1);
+  ip_buf[sizeof(ip_buf) - 1] = '\0';
+  char* pct = strchr(ip_buf, '%');
+  if (pct) *pct = '\0';
+
+  struct sockaddr_in6 dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.sin6_family = AF_INET6;
+  dst.sin6_port = htons(dest_port);
+  if (inet_pton(AF_INET6, ip_buf, &dst.sin6_addr) != 1) {
+    return -2;
+  }
+
+#if defined(_WIN32)
+  WSABUF buf;
+  buf.buf = (CHAR*)data;
+  buf.len = (ULONG)len;
+  DWORD bytes_sent = 0;
+  int rc = WSASendTo(s->fd, &buf, 1, &bytes_sent, 0,
+                     (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
+  if (rc != CLEONA_SOCKET_ERROR) {
+    return (int)bytes_sent;
+  }
+  int err = CLEONA_LAST_ERROR();
+  if (err != WSAEWOULDBLOCK) {
+    return -err;
+  }
+  for (int retry = 0; retry < 3; retry++) {
+    Sleep(1);
+    bytes_sent = 0;
+    rc = WSASendTo(s->fd, &buf, 1, &bytes_sent, 0,
+                   (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
+    if (rc != CLEONA_SOCKET_ERROR) {
+      return (int)bytes_sent;
+    }
+    err = CLEONA_LAST_ERROR();
+    if (err != WSAEWOULDBLOCK) {
+      return -err;
+    }
+  }
+  return -WSAEWOULDBLOCK;
+#else
   ssize_t n = sendto(s->fd, data, (size_t)len, 0,
                      (struct sockaddr*)&dst, sizeof(dst));
   if (n < 0) {

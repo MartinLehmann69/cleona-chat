@@ -97,8 +97,15 @@ class NatTraversal {
   // ── Public IP Observation (Decentralized STUN) ────────────────────────
 
   /// Record a peer's observation of our public address.
-  void addObservation(String peerNodeIdHex, String observedIp, int observedPort) {
-    if (observedIp.isEmpty || observedIp == '0.0.0.0') return;
+  ///
+  /// Returns `true` when a NEW public IP was confirmed (= address changed),
+  /// so the caller can trigger an immediate address broadcast to peers.
+  ///
+  /// V3 adaptation: [peerDeviceIdHex] is the sender's deviceNodeId (one vote
+  /// per physical device, regardless of how many identities it hosts — matches
+  /// V2 semantics where each node had a single ID).
+  bool addObservation(String peerDeviceIdHex, String observedIp, int observedPort) {
+    if (observedIp.isEmpty || observedIp == '0.0.0.0') return false;
     // Private IPs are normally rejected (an echo of our own LAN IP can't be
     // a public address), but a *cross-class* private observation IS a real
     // egress: e.g. an Android emulator on 10.0.2.x sees its packets exit
@@ -110,17 +117,17 @@ class NatTraversal {
     if (PeerAddress.isPrivateIp(observedIp)) {
       final localPrivates =
           PeerAddress.currentLocalIps.where(PeerAddress.isPrivateIp).toList();
-      if (localPrivates.isEmpty) return; // can't disambiguate
+      if (localPrivates.isEmpty) return false; // can't disambiguate
       final sameClassFound = localPrivates
           .any((local) => PeerAddress.samePrivateClass(observedIp, local));
       if (sameClassFound) {
         // Observation is in the same RFC1918 class as a local IP — most
         // likely an echo of our own LAN, not a real egress. Reject.
-        return;
+        return false;
       }
       // Cross-class private: accept as bridged-LAN egress.
     }
-    _observations[peerNodeIdHex] = observedIp;
+    _observations[peerDeviceIdHex] = observedIp;
 
     // Count confirmations for the most-reported IP
     final ipCounts = <String, int>{};
@@ -138,8 +145,10 @@ class NatTraversal {
         _confirmedPublicIp = newIp;
         _confirmedPublicPort = observedPort;
         _classifyNat();
+        return true;
       }
     }
+    return false;
   }
 
   void _classifyNat() {

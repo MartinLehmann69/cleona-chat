@@ -585,15 +585,16 @@ class CleonaNode {
   Set<String> get confirmedPeerIds =>
       _confirmedPeers.keys.where(isPeerConfirmed).toSet();
 
-  /// S119 B (Problem 2): authoritative "reachable" set for UI counters and
-  /// peer lists — confirmed (bidirectional UDP within TTL) ∪ alive DV route.
-  /// Deliberately NOT [DvRouting.allDestinations]: `_routes` retains dead
-  /// and never-pruned routes for destinations without traffic, which
-  /// inflated the connection sheet with unreachable peers.
+  /// S119 B / S210: authoritative "reachable" set for UI counters and peer
+  /// lists — confirmed (bidirectional UDP within TTL) ∪ recently-alive DV
+  /// route.  Uses [hasRecentAliveRouteTo] (10 min window) instead of bare
+  /// [hasAliveRouteTo] to exclude relay-route-hints that were never used
+  /// for actual traffic and accumulated indefinitely.
   Set<String> get reachablePeerIds {
     final set = confirmedPeerIds;
     for (final destHex in dvRouting.allDestinations) {
-      if (!set.contains(destHex) && dvRouting.hasAliveRouteTo(destHex)) {
+      if (!set.contains(destHex) &&
+          dvRouting.hasRecentAliveRouteTo(destHex)) {
         set.add(destHex);
       }
     }
@@ -1236,11 +1237,11 @@ class CleonaNode {
     // NOTE: no convergence delay here. _startBase() is shared by start() and
     // startQuick(); a blocking delay here delayed startQuick() → IpcServer.start()
     // → cleona.port on slow hosts (Windows first-run "Verbinde mit Dienst" hang).
-    // The convergence wait now lives only in start() (headless), which blocks on
+    // The convergence wait now lives only in start() (daemon), which blocks on
     // bootstrap by design.
   }
 
-  /// Full start (blocking bootstrap). Used by headless mode.
+  /// Full start (blocking bootstrap). Used by daemon mode.
   Future<void> start({List<String> bootstrapPeers = const []}) async {
     await _startBase(bootstrapPeers: bootstrapPeers);
 
@@ -2478,9 +2479,14 @@ class CleonaNode {
       proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
       InternetAddress from, int fromPort) {
     try {
+      // V3 STUN echo: report the sender's source address back so they can
+      // learn their public/NAT'd address via natTraversal.addObservation().
+      // Mirrors the V2 _handlePing which set observedIp/observedPort.
       final pongPayload = (proto.DhtPong()
         ..senderId = primaryIdentity.deviceNodeId
-        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch))
+        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
+        ..observedIp = from.address
+        ..observedPort = fromPort)
           .writeToBuffer();
       // Send PONG directly back to the sender's source address. This
       // bypasses the routing-table lookup in sendToDevice — critical when
@@ -3580,6 +3586,34 @@ class CleonaNode {
     // send-path is alive, not just our receive-path. See
     // [OutboundLivenessTracker].
     _outboundLiveness.noteConfirmed();
+
+    // V3 Decentralized STUN: when a PONG arrives, extract the observed
+    // address the responder echoed back and feed it into NAT traversal.
+    // This restores the V2 _handlePong logic that was lost during the
+    // V2→V3 hard-cut (commit c0b66b5a). Key = senderDeviceId (one vote
+    // per physical device, matching V2 semantics).
+    if (v3ResponseType == proto.MessageTypeV3.MTV3_DHT_PONG) {
+      try {
+        final pong = proto.DhtPong.fromBuffer(frame.payload);
+        if (pong.observedIp.isNotEmpty) {
+          final senderDeviceHex =
+              bytesToHex(Uint8List.fromList(frame.senderDeviceId));
+          final changed = natTraversal.addObservation(
+            senderDeviceHex,
+            pong.observedIp,
+            pong.observedPort,
+          );
+          if (changed) {
+            _log.info('STUN: public IP changed to ${pong.observedIp}:'
+                '${pong.observedPort} — broadcasting updated address');
+            _broadcastAddressUpdate();
+          }
+        }
+      } catch (_) {
+        // Unparseable PONG body — proceed with DhtRpc bridge regardless.
+      }
+    }
+
     dhtRpc.handleResponse(
       v3ResponseType,
       Uint8List.fromList(frame.payload),
@@ -4958,6 +4992,14 @@ class CleonaNode {
     if (expiredDests.isNotEmpty) {
       _log.info('Maintenance: pruned ${expiredDests.length} expired DV destinations');
     }
+    // S210: prune relay-route-hints that were never ACK-confirmed and
+    // whose lastConfirmed is >10 min old. These accumulate from
+    // addRelayRouteHint() without ever carrying traffic.
+    final staleRelayHints =
+        dvRouting.pruneStaleRelayHints(const Duration(minutes: 10));
+    if (staleRelayHints > 0) {
+      _log.info('Maintenance: pruned $staleRelayHints stale relay hints');
+    }
     // Prune stale addresses (>14 days without lastSuccess)
     var staleAddrs = 0;
     for (final peer in routingTable.allPeers) {
@@ -5123,7 +5165,7 @@ class CleonaNode {
     // §4.5: reset discovery gate — the cascade must re-confirm the mesh.
     _discoveryComplete = false;
 
-    // Notify daemon/headless to re-query public IP
+    // Notify daemon to re-query public IP
     onNetworkChangeDetected?.call();
 
     // 0. Abort any running subnet scan BEFORE reconnecting sockets — the scan
@@ -5388,7 +5430,7 @@ class CleonaNode {
     // 10. §4.7 IPv6 Inbound Probe: if a global IPv6 is already known at the
     // time of the network change (e.g. mobile interface with SLAAC), issue a
     // fresh inbound probe. The probe is also triggered whenever
-    // natTraversal.setPublicIpv6 is called externally (headless / GUI path)
+    // natTraversal.setPublicIpv6 is called externally (daemon / GUI path)
     // via [probeIpv6InboundIfNeeded]. We fire here with a small delay so
     // the NAT reset (step 1) and discovery burst (step 2) have settled and
     // a confirmed peer is likely available.
@@ -5727,7 +5769,7 @@ class CleonaNode {
   }
 
   /// Broadcast our current address info to all peers.
-  /// Called internally on network changes and externally by headless public IP polling.
+  /// Called internally on network changes and externally by daemon public IP polling.
   void broadcastAddressUpdate() => _broadcastAddressUpdate(force: true);
 
   /// §5.11 / §5.12 — Send a single firstParty self-broadcast PEER_LIST_PUSH
@@ -5828,7 +5870,7 @@ class CleonaNode {
     }
   }
 
-  /// Initiate a port probe for an external IP (public API for daemon/headless ipify fallback).
+  /// Initiate a port probe for an external IP (public API for daemon ipify fallback).
   void probePublicPort(String externalIp) => _initiatePortProbe(externalIp);
 
   void _broadcastAddressUpdate({bool force = false}) {
@@ -5892,7 +5934,7 @@ class CleonaNode {
   void Function()? onPeersChanged;
 
   /// Called when a network change is detected (ip monitor, mass route-down, etc.).
-  /// Used by daemon/headless to re-query public IP via ipify.
+  /// Used by daemon to re-query public IP via ipify.
   void Function()? onNetworkChangeDetected;
 
   /// Fires when the §4.5 discovery cascade completes (first PEER_LIST_PUSH
@@ -6610,7 +6652,7 @@ class CleonaNode {
   }
 
   /// §4.7 Public entry point: issue an IPv6 inbound probe if one has not yet
-  /// completed for the current address. Called by headless.dart / main.dart /
+  /// completed for the current address. Called by main.dart /
   /// service_daemon.dart immediately after [natTraversal.setPublicIpv6].
   ///
   /// No-op when:

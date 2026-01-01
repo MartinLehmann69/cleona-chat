@@ -2,7 +2,7 @@
 ///
 /// Publishes and resolves network entry-point addresses (bootstrap, any node
 /// with a public IP) under a network-wide tag derived from the network secret.
-/// No user identity or contacts required — headless daemons participate.
+/// No user identity or contacts required — infrastructure daemons participate.
 library;
 
 import 'dart:async';

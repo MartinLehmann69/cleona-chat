@@ -123,7 +123,7 @@ class NativeTray {
 
     // Linux: log display context up-front — StatusNotifierItem on GNOME/KDE
     // needs GTK to bind to a DISPLAY or WAYLAND_DISPLAY. If neither is set
-    // (headless/tty session) gtk_init_check returns 0 and app_indicator_new
+    // (no-display/tty session) gtk_init_check returns 0 and app_indicator_new
     // still produces a non-null handle but never registers on DBus → tray
     // invisible while daemon log claims "OK". See gui-46.02.
     final dispX = Platform.environment['DISPLAY'] ?? '';

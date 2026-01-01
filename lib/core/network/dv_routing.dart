@@ -745,6 +745,45 @@ class DvRoutingTable {
   /// Whether at least one alive route to the destination exists.
   bool hasAliveRouteTo(String destHex) => bestRouteTo(destHex) != null;
 
+  /// Like [hasAliveRouteTo] but also requires [lastConfirmed] within [maxAge].
+  /// Relay-route-hints that were never used for actual traffic stay alive
+  /// indefinitely (consecutiveFailures never increments) — this variant
+  /// prevents them from inflating reachability counts.
+  bool hasRecentAliveRouteTo(String destHex,
+      {Duration maxAge = const Duration(minutes: 10)}) {
+    final routes = _routes[destHex];
+    if (routes == null) return false;
+    final cutoff = DateTime.now().subtract(maxAge);
+    for (final r in routes) {
+      if (r.isAlive && r.lastConfirmed.isAfter(cutoff)) return true;
+    }
+    return false;
+  }
+
+  /// Remove relay-type routes whose [lastConfirmed] is older than [maxAge]
+  /// and that were never ACK-confirmed. These are speculative hints from
+  /// [addRelayRouteHint] that accumulated without ever carrying traffic.
+  int pruneStaleRelayHints(Duration maxAge, {DateTime? now}) {
+    final tNow = now ?? DateTime.now();
+    var removed = 0;
+    final emptiedDests = <String>[];
+    _routes.forEach((destHex, routes) {
+      final before = routes.length;
+      routes.removeWhere((r) =>
+          r.type == RouteType.relay &&
+          !r.ackConfirmed &&
+          tNow.difference(r.lastConfirmed) > maxAge);
+      removed += before - routes.length;
+      if (routes.isEmpty) emptiedDests.add(destHex);
+    });
+    for (final destHex in emptiedDests) {
+      _routes.remove(destHex);
+      onRouteChanged?.call(destHex, Route.infinity);
+    }
+    if (removed > 0) routeEpoch++;
+    return removed;
+  }
+
   /// All known destinations.
   Set<String> get allDestinations => _routes.keys.toSet();
 
