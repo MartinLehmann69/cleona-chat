@@ -837,7 +837,14 @@ class CallService {
   CallInfo? get currentCall => callManager.currentCall?.toCallInfo();
 
   Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false}) async {
-    if (groupCallManager.currentGroupCall != null) return null;
+    if (groupCallManager.currentGroupCall != null) {
+      // S425 N4-1: this was the one silent refusal of startCall (33.A01 on
+      // 16.11.: a group call that never ended swallowed the 1:1 call). A
+      // hint for the user follows after the release (owner „3 b“).
+      _log.info('1:1 call to ${peerNodeIdHex.substring(0, 8)} not started — '
+          'a group call is still running on this device');
+      return null;
+    }
     // §17 principle, RL-7, D-69: the INVITE carries this device's address
     // candidates (§17.3) — with "allow calls" off for this contact it does
     // not go out, and the user is told why instead.
@@ -869,6 +876,7 @@ class CallService {
     // the display in `call_screen.dart` — three foreign files. Until then
     // the user sees the existing state and hears nothing until it
     // really rings.
+    if (video) await _requestCameraForVideoCall();
     final session = await callManager.startCall(peerNodeIdHex, video: video);
     if (session == null) {
       return null;
@@ -909,7 +917,37 @@ class CallService {
       await callManager.rejectCall(reason: kCallRejectMediaUnavailable);
       return;
     }
+    // If the caller hangs up while the dialog stands open, the accept below
+    // is a no-op: CallManager.acceptCall only answers a call still ringing.
+    if (ringing != null &&
+        ringing.direction == CallDirection.incoming &&
+        ringing.isVideo) {
+      await _requestCameraForVideoCall();
+    }
     await callManager.acceptCall();
+  }
+
+  /// §23.2: CAMERA is requested at the first video call — when the user
+  /// starts one or accepts one in the app, BEFORE the INVITE/ANSWER goes out,
+  /// so this dialog never coincides with the RECORD_AUDIO dialog of
+  /// [_startVoiceSession]. Asked only on a user action, never in a loop; after
+  /// repeated refusals Android itself stops showing the dialog.
+  ///
+  /// A refusal keeps the call (§23.1 point 2, graceful failure): the video
+  /// engine then finds no CAMERA, ends in `startFailed`, own video is off and
+  /// the peer is told (§17.5). The next video call asks again.
+  ///
+  /// The answer from the system call UI (`onAnswerCall`, e.g. a headset
+  /// button) does not come through here: no Activity is guaranteed to be in
+  /// front there, so no dialog is shown and the call connects without own
+  /// video, as above.
+  Future<void> _requestCameraForVideoCall() async {
+    if (!Platform.isAndroid) return;
+    final granted = await AudioPermissions.requestCamera();
+    if (!granted) {
+      _log.warn('CAMERA permission denied — video call continues without '
+          'own video');
+    }
   }
 
   Future<void> rejectCall({String reason = 'declined'}) async {

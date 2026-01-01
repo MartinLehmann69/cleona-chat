@@ -322,8 +322,8 @@ class NotificationSoundService {
       ['--media', url, '--start', '${start.inMilliseconds}'];
 
   /// Parses the probe output ([windowsMediaProbeArgs]); null if unreadable.
-  static Duration? parseWindowsMediaProbe(String stdout) {
-    final ms = int.tryParse(stdout.trim());
+  static Duration? parseWindowsMediaProbe(String probeOutput) {
+    final ms = int.tryParse(probeOutput.trim());
     return ms == null || ms <= 0 ? null : Duration(milliseconds: ms);
   }
 

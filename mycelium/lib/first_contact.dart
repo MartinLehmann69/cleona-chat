@@ -120,6 +120,7 @@ class Join {
   Uint8List? _pairRandom;
   Address? _counterpart;
   int? _window;
+  RequestProof? _proven; Future<RequestProof>? _proving; // proof of (2) off the event loop ([joinStartProven], S427)
   Map<int, Uint8List> _counterpartDayKeys = const {};
   List<CardAddress> _counterpartNeighbours = const [];
   CardAddress? _proof;
@@ -242,7 +243,9 @@ class Join {
 
   /// Packet (0): request bundle. Contains NO identity. With a line the
   /// bundle is already here: straight to the request (2) (proposal E).
-  void start() {
+  void start([RequestProof? proven, Future<RequestProof>? proving]) {
+    _proven = proven;
+    _proving = proving;
     if (lineBundle case final l?) {
       _counterpart = l;
       report?.call('Bundle from the line — it is the right one');
@@ -313,8 +316,10 @@ class Join {
   /// and own fixed neighbour (proposal M), own day keys (proposal E), the
   /// introduction — without it Bob would decide without knowing who asks.
   void _request() {
+    final p = _proving; _proving = null; // still computing: (2) waits for it, the plea (0) did not (S427 V-3)
+    if (p != null) return p.then((v) => _proven = v, onError: (Object _) => null).whenComplete(_request).ignore();
     report?.call('computing the proof of work…');
-    final w = _window = ProofOfWork.windowNow();
+    final w = _window = _proven?.window ?? ProofOfWork.windowNow();
     final request = requestBuild(
         card: card,
         me: me,
@@ -322,19 +327,16 @@ class Join {
         answerCode: answerCode,
         neighbour: pairHook[me]?.ownNeighbour(),
         introduction: introduction,
-        window: w);
+        window: w, proof: _proven);
     report?.call('request sent (${request.length} B)');
     send(request, _proof);
     _underCode(request);
   }
 
-  /// Proposal M: additionally under the first-contact code to the card's
-  /// neighbour — the route that carries behind NAT (sending: part M2).
+  /// Proposal M: also under the first-contact code to the card's neighbour (behind NAT, part M2).
   void _underCode(Uint8List packet) {
     final n = card.neighbourAddress;
-    if (n != null) {
-      pairHook[me]?.underCodeSend(firstContactCode(card.code), n, packet);
-    }
+    if (n != null) pairHook[me]?.underCodeSend(firstContactCode(card.code), n, packet);
   }
 
   void _answerCame(Uint8List packet, CardAddress? origin) {

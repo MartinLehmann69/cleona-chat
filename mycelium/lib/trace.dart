@@ -41,6 +41,11 @@ import 'package:mycelium/kinds.dart' as kinds;
 /// lines to the TRACE level of their logger (`hostStart`, S406).
 const String kTraceLinePrefix = 'TRACE ';
 
+/// What a line starts with that the app logs at its ERROR level (`hostStart`,
+/// S427): the delivery layer writes everything through one report, and a
+/// node without any address of any kind (§11.1) is an error, not news.
+const String kErrorLinePrefix = 'ERROR ';
+
 /// Whether the diagnosis writes (beta network only).
 bool get traceOn => _forced ?? activeNetworkChannel == NetworkChannel.beta;
 bool? _forced;

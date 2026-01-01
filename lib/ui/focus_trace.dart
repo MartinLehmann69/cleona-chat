@@ -29,6 +29,7 @@
 // method in its context — is logged by `flutter_error_route.dart` together
 // with the focus at that moment.
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 /// At most [maxLines] lines per [window]; what is cut is counted and named
@@ -144,5 +145,35 @@ class FocusTrace {
         WidgetsBinding.instance.lifecycleState?.name ?? 'unknown';
     _write('${prefix}focus ${describeFocusNode(before)} -> '
         '${describeFocusNode(now)} (lifecycle $lifecycle)');
+  }
+}
+
+/// S425 N4-3 measurement (00w.05: field 14 had the focus, the engine said
+/// "no client is set", the word never stood there): one line per key press
+/// that reaches the window — the kind of event and the focus node, NEVER
+/// the key or a character. Beta builds only (the caller decides), at most
+/// [budget] lines per minute. Observes only: the handler never consumes.
+class KeyTrace {
+  KeyTrace(this._write, {LineBudget? budget})
+      : _budget = budget ?? LineBudget(maxLines: 300);
+
+  final void Function(String line) _write;
+  final LineBudget _budget;
+  bool _installed = false;
+
+  void install() {
+    if (_installed) return;
+    _installed = true;
+    HardwareKeyboard.instance.addHandler(_onKey);
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final prefix = _budget.admit();
+    if (prefix != null) {
+      _write('${prefix}key down -> '
+          '${describeFocusNode(FocusManager.instance.primaryFocus)}');
+    }
+    return false;
   }
 }

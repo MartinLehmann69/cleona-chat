@@ -33,12 +33,19 @@ const String kGuiFieldLocale = 'locale';
 /// hidden; absent = shown.
 const String kGuiFieldDonationBannerUntil = 'donationBannerUntil';
 
+/// Field: the functions whose "content leaves the application's protection"
+/// notice was already shown on this device — a list of
+/// `LeavesProtectionKind` names (v4_2 §21.4.2: "At each of these functions
+/// the application says so once", D-49; S432). Absent = none shown yet.
+const String kGuiFieldLeavesNoticeShown = 'leavesNoticeShown';
+
 /// The fields a writer may set — anything else is refused, so the row never
 /// becomes a general-purpose store.
 const Set<String> kGuiFields = {
   kGuiFieldTheme,
   kGuiFieldLocale,
   kGuiFieldDonationBannerUntil,
+  kGuiFieldLeavesNoticeShown,
 };
 
 /// Reads the row; an absent database or row gives an empty map.

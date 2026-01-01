@@ -38,7 +38,8 @@ import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart'
     show CardAddress, CardFormatError, addressRead, addressWrite;
-import 'package:mycelium/neighbourhood.dart' show Neighbour;
+import 'package:mycelium/neighbourhood.dart' show Neighbour, NeighbourAddress;
+import 'package:mycelium/node_helpers.dart' show outTheSegment;
 import 'package:mycelium/wire_target.dart' show asAddressKind;
 
 /// Maximum number of entries per list — the same number as the neighbourhood
@@ -62,15 +63,32 @@ class AddressEntry {
       : ageMinutes = math.max(0, math.min(ageMinutes, kAgeAtMostMinutes));
 
   /// From a confirmed neighbour: ONE entry per node — its address in the
-  /// address family of [family] confirmed within a day, if it has one (the
+  /// address family of [reader] confirmed within a day, if it has one (the
   /// reader demonstrably speaks that family), otherwise its most recently
-  /// confirmed one.
+  /// confirmed one. Among the confirmed addresses of that family the one of
+  /// the reader's kind goes first (S426-00W-1, §7.1): a reader inside a
+  /// local segment ([outTheSegment]) gets the neighbour's segment address,
+  /// which it reaches directly; a reader on the open network gets an open
+  /// one, because a segment address is of no use to it. Lab 16.11.2026: a
+  /// node knew node1 under its LAN address and named it to a LAN reader
+  /// under the router's public address, which answered nobody but itself.
   factory AddressEntry.fromNeighbour(Neighbour n, DateTime now,
-      [InternetAddress? family]) {
-    final a = (family == null
-            ? null
-            : n.confirmedIn(family.type, now.subtract(const Duration(days: 1)))) ??
-        n.first;
+      [InternetAddress? reader]) {
+    final since = now.subtract(const Duration(days: 1));
+    NeighbourAddress? a;
+    if (reader != null) {
+      final inSegment = outTheSegment(asAddressKind(reader));
+      for (final x in n.addresses) {
+        if (x.address.type == reader.type &&
+            !x.last.isBefore(since) &&
+            outTheSegment(asAddressKind(x.address)) == inSegment) {
+          a = x;
+          break;
+        }
+      }
+      a ??= n.confirmedIn(reader.type, since);
+    }
+    a ??= n.first;
     return AddressEntry(a.asCardAddress, now.difference(a.last).inMinutes);
   }
 }

@@ -1,910 +1,1344 @@
 # Cleona Chat -- User Manual
 
-Version 3.1.125 | July 2026
+Version 4.2 | As of November 2026
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [What is Cleona Chat?](#1-what-is-cleona-chat)
-2. [Getting Started](#2-getting-started)
+2. [Getting started](#2-getting-started)
 3. [Contacts](#3-contacts)
-4. [Messaging](#4-messaging)
+4. [Messages](#4-messages)
 5. [Groups](#5-groups)
-6. [Public Channels](#6-public-channels)
+6. [Public channels](#6-public-channels)
 7. [Calls](#7-calls)
 8. [Calendar](#8-calendar)
 9. [Polls](#9-polls)
-10. [Multiple Identities](#10-multiple-identities)
-11. [Multi-Device](#11-multi-device)
+10. [Multiple identities](#10-multiple-identities)
+11. [Several devices](#11-several-devices)
 12. [Recovery](#12-recovery)
 13. [Settings](#13-settings)
 14. [Security](#14-security)
-15. [Software Updates](#15-software-updates)
-16. [FAQ](#16-faq)
+15. [Software updates](#15-software-updates)
+16. [Frequently asked questions](#16-frequently-asked-questions)
 
 ---
 
 ## 1. What is Cleona Chat?
 
-Cleona Chat is a messenger that works without any central server. When you send a
-message, it travels directly from your device to the recipient -- no company in the
-middle, no cloud, no data center.
+### Your messenger, your data
 
-**Your messages belong to you.** There is no server that stores your conversations.
-No one can read them, not even the developer. Everything is encrypted on your
-device before it leaves, and only the intended recipient can decrypt it.
+Cleona Chat is a messenger that works entirely without a central server.
+Your messages travel from your device to your counterpart's device --
+with no detour through a company headquarters, no cloud, no data center.
+Where another device happens to help along the way, it only forwards
+encrypted packets. No company can read, store, or pass on your messages,
+simply because no company sits in between.
 
-**No phone number or email required.** Your identity is created entirely on your
-device using modern cryptography. You do not need to hand over any personal
-information to use Cleona. No phone number, no email address, no name -- unless
-you choose to set one.
+### No account, no phone number
 
-**Built for the future.** Cleona uses post-quantum encryption, which means your
-messages are protected even against the theoretical threat of future quantum
-computers. Most messengers do not offer this yet.
+With Cleona you need neither a phone number nor an email address to sign
+up. Your identity consists of a cryptographic key pair that is generated
+automatically on your device the first time you start it. This means:
+nobody can track you down via your phone number or email address, unless
+you share your contact details yourself.
 
-**Available on Android, iOS, macOS, Linux, and Windows.** The same experience
-across all five platforms.
+### Future-proof encryption
+
+Cleona uses so-called post-quantum encryption. This means: even future
+quantum computers would not be able to crack your messages. You do not
+have to understand the details -- what matters is only that your
+communication is protected as well as the current state of the art
+allows.
+
+### How does it work without a server?
+
+The network of Cleona consists only of the devices of its users. Every
+device is a node, no node is more important than another, and each one
+knows only its neighbors. Four things make this network special:
+
+- **No fixed point.** There is no server address in the app, and the
+  network does not depend on any single node. There is nothing anyone
+  could switch off to switch off Cleona.
+- **Instant.** Your message sets off the moment you send it. It waits
+  for no clock and for nothing else.
+- **Cover traffic on the side.** Your device constantly sends small
+  cover packets, so that from the outside no one can tell when you
+  are really writing. No message depends on it -- the cover traffic just
+  runs alongside.
+- **Codes instead of names.** Whoever forwards a message sees only a
+  code that changes every day. Normally, none of them knows sender and
+  recipient at the same time; the exceptions are listed in chapter 14.
+
+**Three routes, all at once.** When you send a message, Cleona does not
+try one route after another, but all suitable ones at the same time. As
+soon as your counterpart confirms receipt, the others are aborted.
+
+1. **In the same network:** If you are in the same Wi-Fi, the message
+   goes straight across.
+2. **Over the fixed neighbors:** On the internet, your device hands the
+   message to its fixed neighbor. That one forwards it to your
+   counterpart's fixed neighbors (up to three at once), and one of them
+   delivers it.
+3. **Mailbox:** If your counterpart is offline, Cleona deposits the
+   message encrypted at three neighbors. It stays there for up to 7
+   days. When your counterpart comes back online, they pick it up.
+
+**How do you get into the network?** There is no server address in the
+app. You get your entry point from your first contact: their invitation
+contains the addresses through which your device finds its first
+neighbors. In the same Wi-Fi, Cleona devices also find each other on
+their own. From then on, your device gets to know more neighbors with
+every neighbor it meets.
+
+### Platforms
+
+Cleona is available for Android, iOS, macOS, Linux and Windows. On
+computers and on Android, messages and calls arrive within seconds. On
+the iPhone this holds while the app is open. When it is not open, iOS
+only wakes it briefly now and then; iOS decides when. Cleona then
+collects everything kept for you and shows a notification with a number
+on the app icon. Calls do not reach an iPhone whose app is not open.
+This is a rule of Apple, not a fault in Cleona.
 
 ---
 
-## 2. Getting Started
+## 2. Getting started
 
-### Installing the App
+### Install the app
 
-- **Android:** Download the APK from the Cleona website or GitHub Releases and
-  install it. You may need to allow installation from unknown sources in your phone
-  settings (this is normal for apps distributed outside the Play Store).
-- **iOS:** Install via TestFlight. Open the TestFlight invitation link on your
-  iPhone and tap "Install." TestFlight is Apple's official way to distribute beta
-  apps.
-- **macOS:** Download the DMG from the Cleona website or GitHub Releases. Open the
-  DMG and drag Cleona to your Applications folder. On first launch, macOS may ask
-  you to confirm that you want to open an app from an identified developer.
-- **Linux (Ubuntu/Debian):** Download the .deb package and install with
-  `sudo dpkg -i cleona-chat_VERSION_amd64.deb`. Launch from your application menu
-  or run `cleona-chat` in a terminal.
-- **Linux (Fedora/openSUSE):** Download the .rpm package and install with
-  `sudo dnf install cleona-chat-VERSION.x86_64.rpm`.
-- **Linux (any distro -- AppImage):** Download the .AppImage file, make it
-  executable (`chmod +x cleona-chat-*.AppImage`), and double-click to run. No
-  installation needed.
-- **Windows:** Download and run the installer from the Cleona website or GitHub
-  Releases.
+**Android:**
+1. Download the APK file from the Cleona website or from GitHub Releases.
+2. Open the file on your phone. If necessary, allow installation from
+   unknown sources (Android asks you automatically).
+3. Tap "Install" and wait until the installation is complete.
 
-### First Launch
+**iOS:**
+1. Open the TestFlight invitation link on your iPhone.
+2. Tap "Install". TestFlight is Apple's official way of distributing
+   beta apps.
+3. After installation you will find Cleona on your home screen.
 
-When you open Cleona for the first time, a fresh identity is created automatically.
-This only takes a moment. You will see your new display name (which you can change
-at any time) and you are ready to chat.
+**macOS:**
+1. Download the DMG file from the Cleona website or from GitHub Releases.
+2. Open the DMG and drag Cleona into your Applications folder.
+3. On first launch, macOS may ask whether you want to open an app from
+   an identified developer -- confirm this.
 
-There is no sign-up form, no verification code, no waiting.
+**Linux (Ubuntu/Debian):**
+1. Download the .deb file from the Cleona website or from GitHub Releases.
+2. Install with a double-click or in the terminal: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Start Cleona from the application menu or in the terminal with `cleona-chat-beta`.
 
-### Write Down Your Seed Phrase
+**Linux (Fedora/openSUSE):**
+1. Download the .rpm file from the Cleona website or from GitHub Releases.
+2. Install with: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Start Cleona from the application menu or in the terminal with `cleona-chat-beta`.
 
-This is the single most important step. Go to Settings and look for your seed
-phrase. It is a list of 24 words.
+**Linux (all distributions -- AppImage):**
+1. Download the .AppImage file from the Cleona website or from GitHub Releases.
+2. Make the file executable: right-click, properties, executable, or in
+   the terminal: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Start with a double-click or in the terminal: `./cleona-chat-beta-VERSION-x86_64.AppImage`
 
-**Write these words down on paper and keep them safe.** This seed phrase is your
-master key. If you ever lose your phone, switch devices, or need to reinstall,
-these 24 words are all you need to restore your entire account -- your identity,
-your contacts, your message history.
+The package names apply to the beta, which is currently the only
+published version; they are called `cleona-chat-beta`.
 
-Do not store the seed phrase in a screenshot, a note on the same device, or in a
-cloud service. Paper in a safe place is the best option.
+**Windows:**
+1. Download the installer from the Cleona website or from GitHub Releases.
+2. Run the installation file and follow the instructions.
+3. Start Cleona from the Start menu or the desktop shortcut.
 
-If you lose your seed phrase and your device, recovery becomes much harder (though
-not impossible -- see the Recovery section).
+### Create an identity
 
-### Adding Your First Contact
+On first launch, Cleona automatically creates a new identity for you.
+You can give yourself a display name -- that is the name your contacts
+see. This name can be changed at any time.
 
-You need at least one contact to start chatting. There are several ways to add
-someone -- see the next section for all the details.
+### Write down the seed phrase -- the most important thing of all
+
+After creating your identity, Cleona shows you 24 words. That is your
+**seed phrase** -- your personal recovery key.
+
+**Write these 24 words down on paper and keep them safe.**
+
+Why is this so important?
+
+- If your phone breaks, gets lost, or is stolen, you can restore your
+  entire identity on a new device with these 24 words.
+- Without the seed phrase there is no way back. There is no "forgot
+  password" button and no support that could give you back your account
+  -- because there is no account on a server at all. Even your contacts
+  cannot restore your identity, no matter how many of them. A second
+  device with the same identity comes with a later version (see
+  chapter 11).
+- Never pass the seed phrase on to others. Whoever knows these words can
+  impersonate you.
+
+You can find the 24 words later in the settings under "Backup" ->
+"Show recovery phrase", in case you want to read them off again. On
+Android you confirm this with your screen lock.
+
+### Add your first contact
+
+To chat with someone, you first have to add that person as a contact.
+There are several ways to do this -- all of them are explained in the
+next section.
 
 ---
 
 ## 3. Contacts
 
-### Adding a Contact
+### Your invitation
 
-There are four ways to add a contact in Cleona:
+Contacts in Cleona come about only through an invitation. Your
+invitation is there from the first start -- even without internet and
+before your device has even found a neighbor. You find it on your
+identity detail page (tap your own name in the top bar).
 
-**QR Code** -- The easiest method when you are in the same room. One person opens
-their contact QR code (from the identity detail page), and the other scans it. The
-connection is established immediately. This also gives you the highest verification
-level because you met in person.
+The invitation comes in two forms that contain exactly the same thing:
 
-**NFC Tap** -- If both phones support NFC, simply hold them together. The contact
-exchange happens automatically. Like QR, this counts as in-person verification.
+- as a **QR code**, when your counterpart is standing next to you, and
+- as a **text line**, which you send by email, SMS, or through another
+  messenger.
 
-**Link** -- Share a `cleona://` link via email, SMS, or any other messenger. The
-other person pastes this link into the Add Contact dialog in Cleona. This works
-even when you are not on the same network. The link contains enough information
-for the two devices to find each other.
+The invitation contains no phone number and no name from a directory. It
+contains your public keys and the addresses through which your
+counterpart reaches you and your neighbors. For someone who has freshly
+installed Cleona, your invitation is therefore also the entry point into
+the network.
 
-**Manual Entry** -- You can also enter a contact's node ID directly (a long hex
-string). This is mainly a technical fallback.
+### Scan QR code (recommended)
 
-After adding a contact, a contact request is sent. The other person can accept or
-decline. Once both sides have accepted, you can start chatting.
+When you meet in person:
 
-### Verification Levels
+1. You show your counterpart the QR code of your invitation.
+2. Your counterpart taps the plus button, selects "Scan QR code", and
+   holds the camera up to your screen. This also works with a computer's
+   webcam.
+3. The request goes to you and is **accepted automatically** -- because
+   you just showed the code yourself.
 
-You may notice small indicators next to your contacts' names. These show how
-confident you can be that the person is who they claim to be:
+A QR code is valid only once: the first valid request is accepted, after
+that the invitation is used up. The QR code is the safest method,
+because while doing it you know exactly with whom you are exchanging the
+contact.
 
-- **Level 1 -- Unverified:** You added this contact via a link or ID, but have not
-  met in person. The connection is still fully encrypted, but you have not personally
-  confirmed their identity.
-- **Level 2 -- Seen:** A key exchange has been completed successfully. You are
-  communicating, but identity has not been verified face to face.
-- **Level 3 -- Verified:** You exchanged contacts in person via QR code or NFC.
-  You know this person is who they say they are.
-- **Level 4 -- Trusted:** You have explicitly marked this contact as trusted.
-  This is reserved for people you know very well.
+### NFC (hold phones together)
 
-Higher verification levels do not change how encryption works -- all messages are
-always fully encrypted regardless of level. The levels help you judge whether a
-contact is genuinely who they claim to be.
+When both devices support NFC:
 
-### Renaming a Contact
+1. Open the add-contact function on both.
+2. Hold your phones back to back against each other.
+3. The invitation is transferred and accepted automatically.
 
-You can give any contact a local nickname. This name is only visible to you -- it
-does not change anything for the other person. If the contact changes their own
-display name later, you will see a notification and can choose whether to adopt
-the new name or keep your local nickname.
+NFC, like the QR code, offers a high level of security, because the
+exchange only works when you are physically standing next to each other.
+
+### Send the text line
+
+When you cannot meet:
+
+1. Open your invitation and copy the text line.
+2. Send it to the person who is supposed to add you -- by email, SMS, or
+   through another messenger.
+3. The other person pastes the line in Cleona in the add-contact dialog.
+4. The request appears under **"Requests"** on your side. Here it is
+   **not** accepted automatically: you decide yourself, because you
+   cannot know who else read the line on the way.
+
+### Accept contact requests
+
+An incoming request does not yet create a contact. It poses a question
+to you and appears in the **"Requests"** tab. There you see the name and
+the verification level and can choose:
+
+- **Accept** -- only now does the person become your contact.
+- **Decline** -- the request is discarded.
+- **Block** -- the person cannot send you further requests.
+
+### Never use as a fixed neighbor
+
+In a contact's menu you find the switch **"Never use as a fixed
+neighbor"** (default: off). When it is on, this contact does not forward
+messages for you and therefore also does not learn when you send or
+receive messages. This is intended for the case that danger threatens
+you from your own surroundings.
+
+From unknowns (neither a contact nor a member of a shared group),
+Cleona lets nothing through besides such a request -- no message, no
+call, no file. And even the request only gets through if the
+sender has first solved a small computational task. That makes mass spam
+expensive.
+
+### Verification levels
+
+Cleona shows you how securely a contact's identity is confirmed:
+
+| Level | Meaning |
+|-------|-----------|
+| Not verified | You are connected, but nothing confirms that the right person is really behind it. |
+| Seen | The key exchange was successful; you can communicate encrypted. |
+| Verified | You met in person and connected via camera scan or NFC. |
+| Trusted | You have explicitly marked this contact as trustworthy. |
+
+"Verified" exists only for an in-person exchange. An invitation that
+came through a chat or by email never reaches this level -- even if it
+contains the same data.
+
+If a contact's keys change without notice, Cleona resets them to "Not
+verified". That protects you from someone impersonating your contact
+unnoticed.
 
 ---
 
-## 4. Messaging
+## 4. Messages
 
-### Sending and Receiving Text
+### Send and receive text
 
-Type your message in the input field at the bottom and press Enter (or the send
-button). Messages are delivered directly between devices. You will see delivery
-confirmations: a checkmark means the message reached the recipient's device.
+Simply type your message into the input field at the bottom and press
+Enter or the send button. Your message is encrypted automatically before
+it leaves your device.
 
-If the recipient is offline, your message is stored securely across the network
-and delivered as soon as they come back online. Messages are kept for up to 7 days.
+Incoming messages appear in the chat history.
 
-### Sending Images, Videos, and Files
+### What the marks on your message mean
 
-Tap the paperclip icon (or attachment button) to pick a file from your device. You
-can send images, videos, audio files, documents -- any file type.
+| Mark | Meaning |
+|---------|-----------|
+| Clock | The message has been created, but no route has carried it yet. |
+| One check | The message is on its way. This also applies while it is waiting in the mailbox for your counterpart. |
+| Two checks | Delivered: your counterpart's device has confirmed receipt. |
+| Warning sign | For 14 days, no route carried the message. Tap it to resend it. |
 
-On desktop, you can also **drag and drop** files directly into the chat window, or
-**paste** images and files from the clipboard.
+**Offline is not an error.** If your counterpart is not reachable, the
+message stays at one check until it is picked up -- it is not lost. If
+your device itself has no connection, the message stays at the clock
+and sets off on its own as soon as a route is there again. The warning
+sign appears only when it has found no route for 14 days; then you can
+resend it.
 
-Small files are sent inline with the message. Larger files use a two-stage
-transfer: the metadata arrives first, then the full file is transferred directly.
+This also holds for an iPhone whose app is not open: the message waits
+in the post box until iOS briefly wakes the app or until the other
+person opens it. That can take longer than on other devices.
 
-### Voice Messages
+Two checks only exist when the recipient confirms receipt themselves.
+This receipt is encrypted and signed -- no one along the way can forge
+it to fake a delivery to you.
 
-Press and hold the microphone button to record a voice message. Release to send.
-Voice messages are automatically transcribed to text on your device (if the
-transcription feature is enabled in settings), so the recipient can read the
-message even when they cannot listen to audio.
+### Send images, videos, and files
 
-### Replying to Messages
+You have several options:
 
-To reply to a specific message, use the three-dot menu on the message and select
-"Reply." Your reply will include a quote of the original message so both sides
-can see what you are referring to.
+- **Paperclip icon** in the input field: tap it to select a file, an
+  image, or a video from your gallery or your file system.
+- **Drag and drop** (desktop): simply drag a file into the chat window.
+- **Paste from the clipboard** (desktop): copy an image and paste it in
+  the chat.
 
-### Editing and Deleting Messages
+Small files (under 256 KB) travel directly inside the message. Larger
+files are split into pieces and given error correction, so that
+individual lost pieces do not matter. If you are both online, they are
+streamed over a neighbor; otherwise they are deposited at devices that
+are constantly reachable, until your counterpart picks them up.
 
-Made a mistake? You can edit your own messages within 15 minutes of sending
-them. Use the three-dot menu on the message and choose "Edit." Edits are
-visible to the recipient (the message updates in place).
+From 256 KB, Cleona asks you per file before it is sent: a large file
+cannot take the route of your messages. Its content stays encrypted,
+and your counterpart does not learn your internet address. But from
+the outside the transfer is visible as an event, and a foreign device
+that forwards or keeps it sees who uploads and who fetches it. Your
+consent applies only to this one file.
 
-You can delete your own messages at any time -- there is no time limit for
-deletion. Use the three-dot menu and choose "Delete." Deletions remove the
-message from both sides.
+### Voice messages
 
-### Emoji Reactions
+1. Press and hold the microphone button in the input field.
+2. Speak your message.
+3. Release the button to send the message.
 
-You can react to any message with an emoji. Long-press (or use the three-dot menu
-on) a message to see the reaction picker. Quick reactions are shown at the top,
-and you can browse or search for any emoji.
+If speech recognition is activated on your device (see settings), your
+voice message is automatically transcribed to text. Your counterpart
+then sees both the recording and the transcribed text.
 
-Reactions are encrypted just like regular messages.
+### Reply to messages (quote)
 
-### Link Previews
+To reply to a specific message:
 
-When you send a message containing a URL, Cleona generates a link preview on your
-device showing the page title, description, and thumbnail. The recipient sees this
-preview without their device ever connecting to the linked website -- protecting
-their privacy.
+1. Open the three-dot menu next to the message.
+2. Select "Reply".
+3. A banner with the quoted message appears above the input field.
+4. Write your reply and send it.
 
-When you tap a link, you can choose to open it in your regular browser, in an
-incognito/private window, or to be asked each time.
+The quoted message is shown in your reply, so that the reference is
+clear.
 
-### Searching Messages
+### Edit and delete messages
 
-Use the search function in a chat to find specific messages. Results are highlighted
-and you can jump between matches using the navigation arrows.
+- **Edit:** three-dot menu of the message, then "Edit". Change the text
+  and send it again. Your counterpart sees that the message was edited.
+  Editing is possible within 15 minutes of sending.
+- **Delete:** three-dot menu of the message, then "Delete". The message
+  is removed from your side and your counterpart's. You can delete your
+  own messages at any time -- there is no time window for deleting.
 
-You can also use the search/filter bar on the home screen to search across all your
-conversations.
+### Emoji reactions
 
-### Read Receipts and Typing Indicators
+Instead of writing a reply, you can react to a message with an emoji:
 
-You can see when the other person has read your message and when they are currently
-typing. These features work in both one-on-one chats and groups.
+1. Open the three-dot menu or press and hold the message.
+2. Choose an emoji from the quick selection, or open the emoji picker
+   for the full selection.
+3. Your reaction appears under the message.
+
+### Copy text
+
+Via the three-dot menu of a message you can copy the message text to the
+clipboard.
+
+### Search messages
+
+At the top of the chat window you find the search function. Enter a
+search term, and Cleona shows you all hits in the current chat. With the
+arrow keys you can jump back and forth between the hits.
+
+On the start page there is additionally a cross-tab search filter, with
+which you can search all conversations for a term.
+
+### Link preview
+
+When you send a link, Cleona automatically generates a preview (title,
+description, preview image). This preview is created by your device and
+sent along -- your counterpart does not have to establish a connection
+to the linked website for it.
+
+What a tap on a received link does, you set in the settings under
+"Open links": "Normally", "Prefer a private window" (where the device
+cannot open a private window, the link opens normally), or "Ask every
+time".
 
 ---
 
 ## 5. Groups
 
-### Creating a Group
+### Create a group
 
-Tap the floating action button (the round button, usually in the bottom-right
-corner) on the home screen and choose "New Group." Give the group a name and select
-the contacts you want to invite.
+1. Switch to the "Groups" tab.
+2. Tap the plus button.
+3. Give the group a name.
+4. Select the contacts you want to invite.
+5. Tap "Create".
+
+The invited contacts receive a notification and can join the group.
+
+### How group messages are protected
+
+In a group with up to 16 members, Cleona sends each message to each
+member individually -- encrypted only for that member, just as if you
+had written a separate message to each one. The checks on a group
+message show the status of the member for whom it has progressed the
+least.
+
+If the group grows beyond 16 members, it uses a shared key. It changes
+every day and is redrawn when a member leaves or is removed; a new
+member reads only from their joining onwards. There, the checks no
+longer show the status of each member, but that the message is
+deposited in the network. If the group drops to 12 or fewer members,
+it returns to individual sending.
+
+### Images in groups and channels
+
+In the settings of a group or a channel, you use "Always load images"
+to set whether images are loaded immediately or only when you tap one.
+
+### Invite members
+
+Even after creation, you can invite further contacts:
+
+1. Open the group info (three-dot menu in the group overview or top bar
+   in the group chat).
+2. Tap "Invite".
+3. Select the contacts you want to add.
 
 ### Roles
 
-Groups have three roles:
+Every group has three roles:
 
-- **Owner** -- The person who created the group. Can manage members, change group
-  settings, promote others to admin, and remove members. The owner can transfer
-  ownership to another member.
-- **Admin** -- Can manage messages, remove members, and help keep order.
-- **Member** -- Can read and send messages.
+- **Owner:** has full control. Can add and remove members, appoint
+  admins, and manage the group. The owner can also transfer their
+  status to another member.
+- **Admin:** can remove members and help with management.
+- **Member:** can read and write messages.
 
-### Inviting Members
+### Leave a group
 
-The group owner or admin can add new members at any time from the group info screen.
+1. Open the three-dot menu in the group overview.
+2. Select "Leave".
+3. Confirm your decision.
 
-### Leaving a Group
-
-Open the group info (tap the group name at the top of the chat) and choose "Leave
-Group." You will stop receiving messages from this group. If you are the last owner,
-consider promoting someone else first.
-
----
-
-## 6. Public Channels
-
-Channels are different from groups. They are one-way broadcasts: the owner and
-admins can post, and everyone else reads. Think of them like a news feed or
-announcement board.
-
-### Finding and Joining Channels
-
-Open the Channels tab and switch to the "Search" view. You will see a list of
-public channels available on the network. You can filter by language. Tap a
-channel to see its description, then subscribe to start receiving posts.
-
-Some channels are marked as adult content. You will only see these if you have
-confirmed your age in your identity settings.
-
-### Creating Your Own Channel
-
-Tap the floating action button and choose "New Channel." Set a name (must be unique
-across the network), pick a language, and decide whether it should be public or
-private. For public channels, you can toggle the adult-content flag.
-
-### Reporting Content
-
-If you see content that violates community standards, you can report it. Reports
-are handled by a decentralized jury system -- a randomly selected group of peers
-reviews the report and decides on action. There is no central authority making
-these decisions.
-
-### System Channels
-
-Cleona includes two built-in system channels:
-
-- **Bug Log:** When Cleona detects an error, it asks whether you want to
-  send an anonymized crash report. These reports appear in the Bug Log
-  channel where the community can review them. No personal data is
-  transmitted -- only technical error descriptions. You can also manually
-  submit a log report (with a preview dialog and explicit consent).
-- **Feature Requests:** Users can submit feature requests and vote on
-  existing proposals. Proposals are sorted by vote count.
-
-Both system channels have a 25 MB size limit and are moderated by the jury
-system.
+When you leave a group, your previous messages remain visible to the
+other members.
 
 ---
 
+## 6. Public channels
+
+### What are channels?
+
+Channels are public discussion forums within the Cleona network. In
+contrast to groups, anyone can read along here without having to be
+invited. Only the owner and admins can publish posts -- subscribers read
+along.
+
+### Find and join channels
+
+1. Switch to the "Channels" tab.
+2. Open the "Search" tab.
+3. Search the available channels by name or topic.
+4. Tap a channel and then "Subscribe".
+
+Channels can be filtered by language. Some channels are marked as "Not
+safe for minors" -- these are only visible if you have confirmed in your
+profile that you are over 18.
+
+### Create your own channel
+
+1. Switch to the "Channels" tab.
+2. Tap the plus button.
+3. Enter a channel name (must be unique across the entire network).
+4. Choose the language and whether the channel should be public or
+   private.
+5. Optional: add a description and an image.
+6. Tap "Create".
+
+For public channels you can set whether the content is classified as
+"Not safe for minors".
+
+### Report content
+
+If you notice inappropriate content in a public channel, you can report
+it. Cleona uses a decentralized moderation system: reports are evaluated
+by randomly selected members of the network (a kind of "jury"). If a
+violation is found, the channel receives a warning. For repeated
+violations it is downgraded in the search index or blocked.
+
+### System channels
+
+Cleona has two built-in system channels:
+
+- **Bug Log:** When Cleona detects an error, it asks you whether you
+  want to send an error report; beforehand you see exactly what will
+  be published. These reports land in the Bug Log channel, where they
+  can be viewed by the community. A report carries no name and no
+  content of your conversations, but a pseudonym. In the beta it
+  additionally states your identifier (User ID), so that the developers
+  can ask follow-up questions. You can also send a log report manually
+  (with a preview dialog and explicit consent).
+- **Feature Requests:** Here users can submit feature wishes and vote
+  on existing proposals. The proposals are sorted by votes.
+
+Every computer keeps up to 25 MB per system channel, every phone up to
+5 MB; when that is full, the oldest goes first -- never anything you
+yourself have already seen.
+
+---
 ## 7. Calls
 
-### Voice Calls
+### Start a voice call
 
-Open a chat with a contact and tap the phone icon. The call is direct, peer-to-peer,
-and encrypted -- no server relays your voice. Call quality adapts automatically to
-your connection.
+1. Open the chat with the contact you want to call.
+2. Tap the phone symbol in the top bar.
+3. Wait until your counterpart accepts the call.
 
-When someone calls you, you will hear a ringtone and see the incoming call screen
-with options to accept or decline.
+During the call you see a timeline, the call duration, and have access
+to mute and speaker.
 
-### Video Calls
+To hang up, tap the red hang-up button.
 
-Tap the video icon instead of the phone icon to start a video call. Video calls
-support picture-in-picture mode so you can keep chatting or using your phone while
-on a call.
+If you see "Not reachable", the other person's device cannot be reached
+right now, for example an iPhone whose app is not open. Send a message
+instead.
 
-On Android, Cleona uses your device camera directly. Video quality adjusts
-automatically based on your network conditions.
+### Start a video call
 
-### Group Calls
+1. Open the chat with the contact.
+2. Tap the camera symbol in the top bar.
+3. Your video image appears in a small window, your counterpart's image
+   in the large area.
 
-You can start a group call from within a group chat. Group calls use an efficient
-relay tree so that not every participant needs to connect to every other
-participant directly. Audio from all participants is mixed, and you can see
-video from multiple people.
+You can switch between the front and rear camera during the call.
 
-Group calls are encrypted with keys that rotate during the call for added security.
+### Incoming calls
 
-### Ringtones
+When someone calls you, a notification window appears with the caller's
+name. You can:
 
-You can choose from 6 different ringtones in Settings. Message notification sounds
-and vibration (on Android) can also be configured there.
+- **Accept** -- the call begins.
+- **Decline** -- the caller is notified.
+
+If you are currently in a call, a new call does not ring; instead you
+get a "Missed call" message. The same applies to a group call you have
+not accepted -- the message then stands in the group chat.
+
+If someone calls one of your identities that is currently not shown,
+it rings anyway; the call screen names which of your identities is
+being called.
+
+On the iPhone it only rings while the app is open. Whoever calls you
+while it is not open sees "Not reachable" after 10 seconds. As soon as
+you open the app, you find a missed-call message.
+
+### Group calls
+
+You can also hold group calls in which several people participate at the
+same time. The call is organized over an intelligent forwarding tree, so
+that not every participant has to be directly connected to every other.
+All calls are encrypted throughout.
+
+Every group member can start a group call. Two participants who are not
+contacts of each other never see the other's internet address: their
+audio and video run via a participant who is a contact of both. If
+there is no such participant, the two are not connected, and the tile
+says "No common contact in the call". If a forwarding is busy, the
+audio stays and the video drops for this pair.
+
+### Encryption for calls
+
+All calls are encrypted with one-time keys that exist only for the
+duration of the call. After hanging up, these keys are deleted
+immediately. No one can decrypt a past call afterwards.
+
+Honestly: calls run, wherever possible, directly between the devices,
+because even a small delay is disturbing when speaking. Unlike with
+messages, your internet provider can therefore see, during a call, which
+internet address you are connected to. What you say, it does not see.
+
+During a call, your contact sees your internet address too. If you do
+not want that with a contact, switch off "Allow calls" in their menu
+(default: on). If you switch it off later, an address they have already
+seen remains known to them.
 
 ---
 
 ## 8. Calendar
 
-Cleona includes a built-in calendar that is encrypted and fully peer-to-peer --
-no cloud service involved.
+Cleona contains a built-in calendar that works encrypted and completely
+decentralized -- without a cloud service.
 
 ### Views
 
-The calendar offers five views: Day, Week, Month, Year, and a Tasks view. Switch
-between them using the tabs at the top of the calendar screen.
+The calendar offers five views: day, week, month, year, and a tasks
+view. Switch between them via the tabs at the top of the calendar
+screen.
 
-### Creating Events
+### Create appointments
 
-Tap on a time slot or use the add button to create a new event. You can set a
-title, date, time, location, and notes. Events are stored encrypted on your device.
+Tap a time slot or use the add button to create a new appointment. You
+can enter title, date, time, location, and notes. Appointments are
+stored encrypted on your device.
 
-### Recurring Events
+### Recurring appointments
 
-Events can repeat on a daily, weekly, monthly, or yearly schedule. You can
-customize the pattern (e.g. every second Tuesday, every first of the month) and
-set an end date or a number of repetitions.
+Appointments can repeat daily, weekly, monthly, or yearly. You can
+adjust the pattern (e.g. every second Tuesday, the first of every month)
+and set an end date or a number of repetitions.
 
-### Inviting Contacts
+### Invite contacts
 
-When creating or editing an event, you can invite your Cleona contacts. They
-receive an encrypted calendar invite and can respond with Accept, Decline, or
-Tentative. Updates to the event are automatically sent to all invitees.
+When creating or editing an appointment, you can invite your Cleona
+contacts. They receive an encrypted calendar invitation and can respond
+with yes, no, or maybe. Changes to the appointment are sent
+automatically to all invitees.
 
-### Free/Busy Sharing
+### Free/busy display
 
-You can share your availability with contacts without revealing event details.
-There are three privacy levels: full details, time blocks only, or hidden. You
-can set a default and override it per contact.
+You can share your availability with contacts without revealing
+appointment details. There are three privacy levels: full details, time
+blocks only, or hidden. You can set a default and override it per
+contact.
 
 ### Reminders
 
-Events can have reminders that trigger a system notification before the event
-starts. You can snooze reminders if needed.
+Appointments can have reminders that trigger a system notification
+before the appointment starts. You can snooze reminders if needed.
 
-### External Calendar Sync
+### External calendar sync
 
-Cleona can sync with external calendar services:
+Cleona can synchronize with external calendar services:
 
-- **CalDAV** -- Connect to any CalDAV-compatible server (Nextcloud, Radicale,
-  etc.).
-- **Google Calendar** -- Sync via Google Calendar API with secure OAuth2
-  authentication.
-- **Local CalDAV server** -- Cleona can run a local CalDAV server on your device,
-  allowing desktop calendar apps (Thunderbird, Outlook, Apple Calendar, Evolution)
-  to sync with your Cleona calendar.
-- **Android system calendar** -- Events from Cleona can be pushed to your
-  Android device's built-in calendar app.
-- **ICS files** -- Import and export events in standard iCalendar format.
+- **CalDAV** -- connect to any CalDAV-compatible server (Nextcloud,
+  Radicale, etc.).
+- **Google Calendar** -- synchronization via the Google Calendar API
+  with secure OAuth2 authentication.
+- **Local CalDAV server** -- Cleona can start a local CalDAV server on
+  your device, so that desktop calendar apps (Thunderbird, Outlook,
+  Apple Calendar, Evolution) can sync with your Cleona calendar.
+- **Android system calendar** -- appointments from Cleona can be
+  transferred to the built-in calendar app of your Android device.
+- **ICS files** -- import and export appointments in the standard
+  iCalendar format.
 
-### PDF Export
+### PDF export
 
-You can print or export any calendar view (Day, Week, Month, Year) as a PDF
-document.
+You can print or export any calendar view (day, week, month, year) as a
+PDF document.
 
 ---
 
 ## 9. Polls
 
-You can create polls in any chat or group to gather opinions or plan events.
+You can create polls in any chat or group to gather opinions or plan
+dates.
 
-### Poll Types
+### Poll types
 
-Cleona supports five types of polls:
+Cleona supports five kinds of polls:
 
-- **Single Choice** -- Participants pick one option.
-- **Multiple Choice** -- Participants can select several options.
-- **Date Poll** -- Find a date that works for everyone. Each participant marks
-  dates as available, maybe, or unavailable.
-- **Scale** -- Rate something on a numeric scale (e.g. 1 to 5).
-- **Free Text** -- Participants write their own answer.
+- **Single choice** -- participants choose one option.
+- **Multiple choice** -- participants can choose several options.
+- **Date poll** -- find a date that suits everyone. Each participant
+  marks dates as available, maybe, or not available.
+- **Scale** -- rate something on a numerical scale (e.g. 1 to 5).
+- **Free text** -- participants write their own answer.
 
-### Creating a Poll
+### Create a poll
 
-Open a chat and tap the poll icon (or use the attachment menu). Choose the poll
-type, add your question and options, then send. The poll appears as a message in
-the chat.
+Open a chat and tap the poll symbol (or use the attachment menu). Choose
+the poll type, phrase your question and the options, and send the poll.
+It appears as a message in the chat.
 
-### Voting
+### Vote
 
-Tap on a poll to cast your vote. You can change your vote or revoke it at any
-time.
+Tap a poll to cast your vote. You can change or withdraw your vote at
+any time.
 
-### Anonymous Voting
+### Anonymous voting
 
-Polls can be configured for anonymous voting. When enabled, votes are
-cryptographically anonymous -- no one, not even the poll creator, can see who
-voted for what. The vote count is still visible.
+Polls can be configured for anonymous voting. When activated, votes are
+cryptographically anonymous -- no one, not even the poll creator, can
+see who voted for what. The vote count remains visible nonetheless.
 
-### Date Poll to Calendar
+### Date poll to calendar
 
-When a date poll is complete, the winning date can be converted directly into a
-calendar event with one tap.
+When a date poll is finished, the winning date can be turned into a
+calendar entry with one tap.
 
 ---
+## 10. Multiple identities
 
-## 10. Multiple Identities
+### Why multiple identities?
 
-### Why Multiple Identities?
+Imagine you want to separate your professional life and your private life
+-- similar to two different phone numbers, but without a second phone.
+In Cleona you can use multiple identities on one device. Each identity
+has its own name, its own profile picture, its own contacts, and its own
+conversations.
 
-You might want to keep your work life and personal life separate, or have a
-dedicated identity for a community you are part of. Cleona lets you create
-multiple identities under the same app, all derived from your single seed phrase.
+### Create a new identity
 
-### Creating a New Identity
+1. In the top bar you see your current identity as a tab.
+2. Tap the plus sign (+) to the right of your identity tabs.
+3. Enter a name for the new identity.
+4. Done -- the new identity is active immediately.
 
-Go to the identity list (accessible from the home screen menu or by tapping the
-plus sign next to your identity tabs) and create a new identity. Give it a display
-name and it is ready to use. Each identity has its own contacts, conversations,
-and profile.
+### Switch between identities
 
-### Switching Between Identities
+Simply tap the identity tab in the top bar. The switch is immediate --
+no waiting time, no reloading.
 
-Tap the identity tab in the top bar to switch. The switch is instant -- no
-reloading, no waiting.
+### All run at the same time
 
-### You Never Miss a Message
+An important point: all your identities are active at the same time.
+Even if you are currently shown as "Work", your "Private" identity
+continues to receive messages. You miss nothing, no matter which
+identity you have currently selected.
 
-All your identities are active at the same time. Even if you are currently viewing
-one identity, messages for your other identities are still received and stored.
-You will see notifications for all of them.
+### Identity detail page
 
-### Identity Detail Page
+When you tap the tab of your currently active identity, the detail page
+opens. Here you can:
 
-Tap on the currently active identity tab to open its detail page. Here you can:
-
-- View your QR code for sharing with contacts.
-- Change your profile picture.
+- Show your QR code for contacts.
+- Change or remove your profile picture.
 - Add a profile description.
 - Change your display name.
-- Pick a visual theme (skin) for this identity.
-- Delete the identity if you no longer need it.
+- Choose a design (skin) for this identity.
+- Delete the identity, if you no longer need it.
 
-### Deleting an Identity
+### Delete an identity
 
-When you delete an identity, your contacts are notified. The identity and all
-associated data are removed from your device. This action cannot be undone.
+When you delete an identity, your contacts are notified about it. The
+identity and all associated data are removed from your device. This
+process is not reversible.
 
 ---
 
-## 11. Multi-Device
+## 11. Several devices
 
-### Using Cleona on Multiple Devices
+### One identity, one device -- for now
 
-You can use the same identity on up to 5 devices simultaneously. One device acts
-as the primary (it holds the seed phrase), and additional devices are linked to it.
+Today, an identity runs on one device. A second device for the same
+identity comes with a later version; in the settings under "Devices" ->
+"Manage devices", "Pair another device" therefore still says "Not
+available yet".
 
-### Linking a New Device
+When it comes, this applies: all devices are equal, there is no main
+device. You set up a further device with your 24 words, and one of your
+existing devices agrees. At most 5 devices.
 
-1. Open Settings on your primary device.
-2. Go to "Linked Devices."
-3. Choose "Link New Device."
-4. On the new device, install Cleona and choose "Link to Existing Device" during
-   setup.
-5. Scan the pairing QR code shown on your primary device, or use the pairing link.
+If you enter your 24 words on a new device today, you move: the
+identity is restored to the new device, and your previous device then
+removes it from itself (see chapter 12).
 
-The linked device receives a delegation certificate from the primary device.
-Messages sent from a linked device are cryptographically signed with a delegated
-key, so contacts can verify that the message genuinely comes from your identity.
+On several devices you can today use different identities (chapter 10).
 
-### How It Works
+### Rotate identity keys
 
-- The primary device holds your seed phrase and master keys.
-- Linked devices receive derived signing keys and a delegation certificate -- they
-  never receive the seed phrase itself.
-- All devices share the same identity and contacts. Messages arrive on all devices.
-- Delegation certificates are automatically renewed before they expire.
-
-### Device Management
-
-Open Settings and go to "Linked Devices" to see all your linked devices, their
-status, and when they were last active. You can revoke a linked device at any time
-if it is lost or stolen.
-
-### Emergency Key Rotation
-
-If you suspect a device has been compromised, you can trigger an emergency key
-rotation. This generates new keys and requires confirmation from a quorum of your
-other devices (a majority must approve). This prevents a single stolen device from
-rotating keys on its own.
+If you suspect that someone has got at your keys, you can generate new
+keys under "Manage devices" -> "Rotate identity keys". Your contacts
+are notified, your open invitations are revoked. Important: after that,
+the 24 words alone only produce the old keys. Therefore create a new
+recovery package directly afterwards; you can then restore only
+together with this package.
 
 ---
 
 ## 12. Recovery
 
-### Seed Phrase Recovery
+### Use the seed phrase
 
-If you lose your device or need to reinstall, enter your 24-word seed phrase
-during setup (choose "Restore" instead of creating a new identity). Cleona will:
+When you lose your device or set up a new one:
 
-1. Recreate your identity with the exact same keys.
-2. Broadcast a restore request to your contacts.
-3. Your contacts automatically respond with your contact list, group memberships,
-   and message history.
+1. Install Cleona on the new device.
+2. Select "Restore" on start.
+3. Enter your 24 words.
+4. Cleona generates all your identities from them -- with the same keys
+   as before. To your contacts you are the same person.
 
-One single contact being online is enough to restore your account. The more
-contacts that are online, the more complete your history will be. Messages arrive
-in stages: contacts and group structures first, then recent messages, then full
-history.
+### What comes back -- and what does not
 
-### Guardian Recovery (Shamir Secret Sharing)
+Your identity is in the 24 words, your contacts and your history are
+not. What comes back is your access to the network via the **recovery
+package**: your device deposits a small, encrypted packet in the
+network. Only your 24 words can find and open it. It states what your
+new device needs to reach your contacts again, and what was lying in
+the network for you in the meantime. No contact has to be online for
+this.
 
-For extra safety, you can split your seed phrase among 5 trusted people (called
-guardians). Each guardian receives a fragment that is meaningless on its own. Any
-3 of the 5 fragments can reconstruct your full seed phrase.
+A restoration does not bring back your previous chat history.
 
-This means even if 2 guardians are unavailable or lose their fragment, you can
-still recover. And no single guardian (or even two working together) can access
-your account.
+The recovery package lives for 7 days and is renewed by your device as
+long as it runs; in the settings you see until when it is valid. If
+none of your devices ran for more than 7 days, it has expired. The 24
+words still restore your identity then, but you have to re-invite your
+contacts; what was lying in the network for you in the meantime is
+lost.
 
-### Why Your Contacts Are Your Backup
+### Restoring means moving
 
-In Cleona, your contacts serve as a distributed backup of your data. Each contact
-stores information about your conversations with them. When you restore, they send
-this information back to you. There is no cloud backup because there is no cloud.
-Your social network IS your backup network.
+If your previous device later finds that the identity was restored
+elsewhere, it removes it from itself -- along with its history.
+Therefore: whoever has your 24 words can take your identity off your
+device this way. Until all contacts are back, the app reminds you; with
+"Finish and renew keys" you end the restoration yourself.
+
+### What no one can restore
+
+This is important, and we therefore state it clearly:
+
+- **No one but you can restore your identity.** Not the developer, not
+  a support, and not your contacts either -- no matter how many there
+  are. There is no master key and no part of your key that would be
+  deposited with others.
+- **If you have lost the 24 words and have no device left, your
+  identity is lost.** Then the only option is to create a new one and
+  re-invite your contacts.
+
+The best protection: write the 24 words down on paper and keep them
+safe.
 
 ---
-
 ## 13. Settings
 
-### Notifications and Ringtones
+You reach the settings via the gear symbol in the top right corner.
 
-Configure notification sounds for incoming messages and calls. Choose from 6
-ringtones for calls. On Android, you can also toggle vibration.
+### Notifications and ringtones
 
-### Skins and Themes
+- Choose from six different ringtones for incoming calls.
+- Set a message sound.
+- On Android devices you can additionally activate or deactivate
+  vibration.
+- **"Mute everything"** lets no message ring, vibrate, or announce
+  itself on this device anymore -- for all identities. Calls keep
+  ringing.
+- **"Quiet hours"** you set per identity with from/until. During this
+  time, no message of this identity rings, vibrates, or announces
+  itself; the messages still arrive.
+- **"Notifications without content"** (default: off) shows only that a
+  message, invitation, or reminder has arrived -- without sender, name,
+  and text. Calls keep showing the name.
+- Whatever arrives all at once after startup, Cleona announces in a
+  batch notification ("5 new messages in 2 conversations"); everything
+  later individually. A tap on a message notification opens the
+  conversation, even in another identity.
 
-Cleona comes with 10 visual themes (called skins): Teal, Ocean, Sunset, Forest,
-Amethyst, Fire, Storm, Slate, Gold, and Contrast. The Contrast skin meets WCAG AAA
-accessibility standards for maximum readability.
+### Designs (skins)
 
-Each identity can have its own skin. You can also switch between light, dark, and
-system theme modes.
+Cleona offers ten different designs: Teal, Ocean, Sunset, Forest,
+Amethyst, Fire, Storm, Slate, Gold, and Contrast. The Contrast design
+meets the highest accessibility level (WCAG AAA) and is particularly
+easy to read with limited vision.
 
-### Language
+Each identity can have its own design. You change the design in the
+identity detail page (tap the active identity tab).
 
-Cleona is available in 33 languages, including right-to-left languages like Arabic
-and Hebrew. Change the language in Settings -- the entire interface updates
-immediately.
+Additionally, you can switch between light, dark, and the system theme
+in the settings under "Appearance".
 
-### Storage Limit
+### Change language
 
-You can set how much storage Cleona is allowed to use on your device (between
-100 MB and 2 GB, depending on your platform). When the limit is reached, older
-media files are cleaned up automatically. Text messages are not affected.
+Cleona is available in 34 languages, including languages with
+right-to-left script (e.g. Arabic, Hebrew). Change the language in the
+settings under "Language".
 
-### Auto-Download
+### Media archiving
 
-Configure which types of media (images, videos, audio, documents) are downloaded
-automatically and set size thresholds for each type. Large files will show a
-download button instead of downloading automatically.
+If you have a network storage (NAS) or a shared folder at home, Cleona
+can automatically offload your media there. SMB, SFTP, FTPS, and WebDAV
+are supported.
 
-### Download Directory
+This is how the tiered storage works:
+- The first 30 days: everything stays on your device.
+- After 30 days: a preview image stays on the device, the original is
+  archived.
+- After 90 days: only a small preview image stays on the device.
+- After one year: only a placeholder remains, the original lies safely
+  in the archive.
 
-Choose where downloaded and received files are saved on your device.
+You can tap an archived medium at any time to fetch it back --
+provided you are connected to your home network. Particularly important
+media can be pinned so that they are never offloaded.
 
-### Media Archiving
+Under "Storage Budget" you set how many MB of media stay on the device
+(default: 100 MB on the phone, 2 GB on the computer). When it is full,
+the oldest medium that is not pinned is archived first. An original is
+deleted only when it is safely in the archive -- text messages are
+always retained.
 
-If you have a NAS or network share, you can configure automatic archiving of
-media files to an external location via SMB, SFTP, FTPS, or HTTP. Media files
-are tiered automatically:
+### Transcription for voice messages
 
-- First 30 days: originals stay on your device.
-- After 30 days: a thumbnail stays, the original is archived.
-- After 90 days: only a small thumbnail remains on your device.
-- After 1 year: only a placeholder remains; the original is safe in the archive.
+When activated, your voice messages are converted to text locally on
+your device (with the open-source model Whisper). The transcribed text
+is sent together with the recording to your counterpart. The
+transcription happens entirely on your device -- no data goes to
+external services.
 
-You can tap any archived media to retrieve it from the archive (when connected
-to your home network). Important media can be pinned so it is never archived.
+Which model (tiny, base, small) is downloaded, you set once for the
+device; the language (automatic or fixed) per identity.
 
-### Voice Message Transcription
+### Auto-download
 
-When enabled, voice messages you send are automatically transcribed to text before
-being sent. The transcription happens entirely on your device using the open-source
-Whisper model -- no audio is sent to any external service. The recipient sees both
-the voice message and the text.
+You can set from which size media should be downloaded automatically.
+This way you can, for example, have images load automatically but
+decide manually on large videos.
 
-### Linked Devices
+### Devices
 
-Manage your linked devices from this settings section. See the Multi-Device chapter
-for details.
+Under "Devices" -> "Manage devices" you see this device. Pairing a
+further device comes with a later version (chapter 11).
+
+### Network
+
+Cleona needs no network settings to work. There are three network
+switches:
+
+- **Port forwarding on the router** (default: on). Cleona asks your own
+  router to open a door for Cleona. If that works, your device is
+  better reachable for others and helps the network. Cleona only talks
+  to your router, not to the internet.
+- **Public address entries** (default: on). If your device still has
+  too few neighbors, it looks up further entry points in a public
+  directory (Nostr), and if it is itself well reachable, it enters
+  itself there. The entry contains an address, no name and no contact.
+  If you switch it off, your device finds neighbors only via
+  invitations, the local network, and the neighbors it already knows.
+- **Fewer cover packets in the Wi-Fi** (default: off). In the Wi-Fi
+  or on a cable you can switch off the empty cover packets. But
+  then it is again visible when you are writing. There is no such
+  switch on mobile data -- there Cleona sends only one cover
+  packet per minute anyway.
+
+The cover traffic as a whole cannot be switched off. That is
+intentional: only if it always runs does the activity of your device
+say nothing about whether you are currently writing.
+
+Above the three switches stands the **Data-saving mode**: on mobile
+data, Cleona suggests it, but never switches it on itself. It saves
+data, but as a result your device is easier to recognize from the
+outside.
+
+Below that you set the **"Cache for other people’s media"**: your
+device keeps encrypted parts of other people's media for up to 7 days,
+so that they reach their recipients (default: 100 MB on the phone,
+1 GB on the computer). A smaller size frees the space immediately --
+the oldest parts first.
 
 ---
 
 ## 14. Security
 
-### What is Post-Quantum Encryption?
+### What does post-quantum encryption mean?
 
-Regular encryption (used by most messengers today) could theoretically be broken
-by powerful quantum computers in the future. Post-quantum encryption uses
-mathematical problems that even quantum computers cannot solve efficiently.
+Today's encryption is based on mathematical problems that are extremely
+hard to solve for normal computers. Quantum computers could solve some
+of these problems quickly in the future. Post-quantum encryption uses
+additional methods that withstand quantum computers too.
 
-Cleona uses a hybrid approach: it combines classical encryption (X25519) with
-post-quantum encryption (ML-KEM-768). This means your messages are protected by
-both layers. Even if one is somehow broken, the other still keeps you safe.
+Cleona combines both approaches: classical encryption for reliability
+and post-quantum methods for future-proofing. This way you are
+protected against today's and future threats at the same time.
 
-Every single message uses a fresh set of encryption keys. There is no "session"
-that could be compromised -- each message is independently secured.
+A separate key is generated for each individual message. Even if an
+attacker cracked the key of one message, they could not read any other
+message with it.
 
-### Why No Server is More Secure
+### Why no server is safer
 
-In traditional messengers, a server sees who talks to whom, when, and how often,
-even if it cannot read the content. Metadata can reveal a lot about your life.
+With conventional messengers, your messages run through the provider's
+servers. Even if they may be encrypted there: the provider has access
+to metadata (who communicates with whom, when, how often, from where)
+and may have to hand these out on a court order.
 
-Cleona has no server. Messages travel directly between devices (or through other
-Cleona users acting as relays, but relays cannot read the content either). There
-is no central point that collects metadata, no single point of failure, and no
-single target for hackers or government requests.
+With Cleona there is no such central point. There is no place where all
+metadata converge, and no directory in which one could look up who you
+are or whom you know.
 
-### What Happens When You Are Offline?
+### Who sees that you are writing with someone?
 
-When you are offline, people can still send you messages. Here is what happens:
+Encryption protects **what** you write. Just as important is that no
+single observer learns **with whom** and **when** you write. Cleona
+ensures that as follows:
 
-1. The sender's device tries to reach you directly first.
-2. If that fails, it routes the message through other Cleona users who are online
-   (relays). The relays cannot read your messages -- they just pass along encrypted
-   data.
-3. If you are completely unreachable, the message is stored on mutual contacts'
-   devices (people you both know) and on the network using an error-correction
-   technique that spreads small pieces across multiple devices.
-4. When you come back online, all waiting messages are delivered. Messages are kept
-   for up to 7 days.
+- **On the internet never directly.** If your device sent a message
+  directly to your counterpart's internet address, your provider could
+  see with whom you are writing. That is why a message on the internet
+  always goes via your fixed neighbors: yours and your counterpart's.
+- **Neighbors you trust.** Your fixed neighbors are, wherever possible,
+  devices of your own contacts -- up to three that are currently
+  reachable from the outside. If one drops out, another contact moves
+  up. A contact cannot be bought with servers; an arbitrary node in the
+  network can. If you do not yet have a reachable contact, Cleona takes
+  another neighbor. Your invitation never names any of your contacts,
+  so that no one learns the address of a friend via them.
+- **Codes instead of names.** The neighbors see no names and no
+  identifiers, only a code. It applies to exactly the two of you, in
+  one direction, for one day -- the next day it is a different one.
+  Your neighbor knows where the packet comes from, but not where it
+  goes in the end. Your counterpart's neighbor knows where it goes, but
+  not where it came from. Normally, no one along the way sees both ends.
+- **The cover traffic.** Your device constantly sends, at irregular
+  intervals, cover packets to its neighbors. They are just as
+  large as real packets, go over the same port, and are
+  indistinguishable from them from the outside. Whether a human is
+  currently writing or the device is just running cannot be told from
+  it. Your messages never wait for the cover traffic -- they start
+  immediately, it just runs alongside.
 
-You do not need to do anything -- this all happens automatically.
+**What the cover traffic costs:** in the Wi-Fi about 13 MB per day.
+On mobile data, Cleona sends only one cover packet per minute,
+that is about 1.7 MB per day. The reason for the throttling on mobile
+data is not the data volume, but the battery: every packet wakes up
+the radio modem.
 
-### Anti-Censorship
+**What Cleona cannot hide** -- honestly:
 
-If your network blocks the standard connection method (UDP), Cleona automatically
-switches to an alternative transport (TLS) that is harder to detect and block. This
-happens transparently -- you do not need to configure anything.
+- No **single** observer sees who is writing with whom -- neither your
+  provider nor the nodes along the way. Whoever, however, monitors
+  **both ends at the same time**, for example a state that watches your
+  connection and your counterpart's or sets up both neighbors, can
+  correlate over time: packet out at your side, shortly after a packet
+  in at your counterpart's. Repeated often enough, that yields a
+  connection.
+- The cover traffic makes this correlation harder, but does not
+  prevent it. It hides individual messages, not the volume: whoever
+  sends a lot increases the total traffic of their device.
+- A contact who is your fixed neighbor learns **when** and **how much**
+  you send and receive -- not with whom and not what. If the danger
+  comes from your own surroundings, you can exempt every contact from
+  it (see chapter 3, "Never use as a fixed neighbor").
+- If two new users have only the same one neighbor, their message runs
+  over exactly this node, and it sees both ends. As soon as one of the
+  two has further neighbors, that is over.
+- Your invitation contains your internet addresses. Whoever has the
+  text line sees where you are online -- give it only to people you
+  trust with that.
+- A neighbor that forwards sees that two codes exchange packets -- not
+  who is behind them, and not what is inside.
+- A signal of a running call can, when the first neighbor is
+  momentarily not answering, go via a node that sees both ends; it
+  learns that the two of you are calling together.
+- A large file you have consented to is seen by the computer that
+  forwards or keeps it, at both ends (see chapter 4).
+- For calls, the protection against the provider does not apply, and
+  your contact sees your internet address (see chapter 7).
 
-### Secure Key Storage
+### What happens when your counterpart is offline?
 
-On supported platforms, Cleona stores your encryption keys in the operating
-system's secure keyring (Android Keystore, iOS Keychain, macOS Keychain). This
-provides hardware-backed protection for your keys where available.
+1. Cleona starts all suitable routes at the same time: in the same Wi-Fi
+   directly, on the internet via two neighbors -- and additionally the
+   mailbox.
+2. For the mailbox, Cleona deposits the encrypted message at three
+   neighbors. As soon as two have confirmed receipt, it counts as
+   deposited.
+3. Cleona preferably chooses neighbors for this at which your
+   counterpart also looks -- first the neighbor that their invitation
+   names.
+4. The message waits there for up to 7 days. When your counterpart
+   returns, they pick it up and confirm receipt to you. Only then do
+   you see two checks.
 
-### Database Encryption
+Only your counterpart can empty the mailbox: picking up and deleting
+works only with a key that only they have, and deletion happens only
+after they have confirmed receipt. The neighbors see only encrypted
+packets under a value that changes every day.
 
-All your data stored on your device (messages, contacts, settings) is encrypted.
-Even if someone gets access to your device's file system, they cannot read your
-Cleona data without your encryption keys, which are derived from your seed.
+### Strangers do not get through
 
-### Closed Network
+From someone who is neither your contact nor a member of a shared
+group, Cleona accepts exactly two
+things: the request for your public keys, as long as one of your
+invitations is still open, and a contact request. The request must
+carry a valid invitation from you, and the sender must have solved a
+computational task beforehand. Everything else -- messages, calls,
+files -- is discarded before it even reaches the app. Whoever only has
+your printed business card therefore cannot simply call you. A member
+of a shared group reaches you only in that group -- with group messages
+and group calls, never individually.
 
-Cleona operates as a closed network. Every network packet is authenticated, which
-means only legitimate Cleona devices can participate. This prevents outsiders from
-injecting fake messages or eavesdropping on network traffic.
+### Anti-censorship
+
+Cleona is built so that it is hard to block:
+
+- **No server, no fixed address.** There is no address in the app that
+  one could block, and the network does not depend on any single node.
+- **No fixed port.** Every device chooses a random port on first start.
+  There is no known port number by which one could recognize Cleona
+  traffic.
+- **Like random data.** The connection setup between two devices is
+  coded so that it is indistinguishable from random data.
+- **Many entry points.** Every invitation, every neighbor, and every
+  device in the same Wi-Fi is a possible route back into the network.
+
+### Secure key storage
+
+On supported platforms, Cleona stores your encryption keys in the
+operating system's secure keyring (Android Keystore, iOS Keychain,
+macOS Keychain). Where available, that offers hardware-backed
+protection for your keys.
+
+### Database encryption
+
+Your messages and conversations lie in an encrypted database -- a
+separate one for each identity, each with its own key. Not only the
+database itself is encrypted, but also its temporary files; nothing is
+written to disk unencrypted, not even briefly. Settings, contacts, and
+media are also stored encrypted.
+
+The keys are derived from your 24 words and exist only on your device.
+Even someone who gets their hands on your device and reads out the data
+finds only unreadable data without these keys.
+
+It becomes unencrypted only where you yourself take content out of
+Cleona:
+- when you save a file from a chat onto your device,
+- when you put an image into your pictures with the screenshot button,
+- when you share something to another app,
+- when you set up media archiving (chapter 13): the archived originals
+  lie unencrypted on your network storage at home, so that you can
+  open them there even without Cleona,
+- when you mirror appointments to the Android system calendar: there,
+  other apps with calendar access can read them.
+
+What has left this way is not deleted with the message and does not
+expire with it.
+
+### Protection on the screen
+
+On Android, Windows, and macOS, Cleona does not allow screen recording
+by other apps. If you need an image, use the screenshot button in the
+top bar: it puts the image into your pictures -- unencrypted. In a
+conversation in which forwarding is not allowed, there is no
+screenshot.
 
 ---
 
-## 15. Software Updates
+## 15. Software updates
 
-### How Do I Get Updates?
+### How do I get updates?
 
-Cleona can be updated through multiple channels. The goal is to ensure you
-can receive updates even if individual distribution channels are blocked or
-unavailable:
+Cleona can be updated via various routes. The goal is that you can
+receive updates even when individual distribution channels fail or are
+blocked:
 
-1. **App Store / Play Store:** If you installed Cleona from an app store,
-   updates arrive through the store as usual.
-2. **GitHub Releases:** The project's GitHub page provides signed
+1. **App Store / Play Store:** As soon as Cleona appears there and you
+   installed it via a store, you receive updates via the store as
+   usual. On the iPhone, updates come via TestFlight.
+2. **GitHub Releases:** On the project's GitHub page you find signed
    installation packages for all platforms.
-3. **In-Network Updates:** If another Cleona user on your network already
-   has the latest version, Cleona can download the update directly over the
-   P2P network -- no external server required. The new version is split into
-   error-correcting fragments and distributed across multiple nodes. Your
-   device collects enough fragments to reconstruct the update. Authenticity
-   is verified via the developer's Ed25519 signature.
-4. **Invite Links:** You can create invite links that contain everything a
-   new user needs to install Cleona and connect to the network.
-5. **Physical Transfer:** In environments without internet, you can share
-   Cleona via USB drive or local network.
+3. **Updates over the network:** Cleona can fetch an update directly
+   over the network -- without a download server. The new version is
+   split into error-corrected pieces that spread in the network; a part
+   of them even travels along in the cover traffic. Your device
+   collects enough pieces and assembles the update. What is transferred
+   is usually only the change -- a few MB instead of the whole app.
+   This applies to Linux, Windows, and Android; under macOS you
+   download new versions from the website or from GitHub.
+4. **Invitation links:** You can create invitation links that contain
+   everything a new user needs to install Cleona and connect to the
+   network.
+5. **Physical transfer:** In environments without internet you can pass
+   Cleona on to others via USB stick or in the local network.
 
-### Update Notifications
+### How an update runs
 
-When a new update is available, Cleona shows a notification on the home
-screen. If the update is also available via the network (in-network update),
-you can choose to download it directly from the network.
+1. Cleona collects the pieces of a new update automatically in the
+   background and assembles them.
+2. Only when the update is **complete** and its **signature has been
+   verified** does Cleona offer it to you. You are thus never offered a
+   half or unverified update.
+3. When you tap "Install", the installation starts without further
+   asking. On Android, the system additionally shows its installation
+   dialog.
 
-### Binary Distribution
+Older versions are not offered -- an update always only goes forward.
+If a version is so old that it can no longer cooperate with the
+network, Cleona indicates that clearly and asks you to update.
 
-By default, your device helps distribute updates to other users on the
-network. If you prefer not to participate, you can disable this in Settings
-under "Network." Storage used for update fragments is limited (5 MB on
-mobile, 20 MB on desktop) and cleaned up regularly.
+### Signature verification
 
-### Signature Verification
+Every update is signed twice: with a classical and a post-quantum
+method. Cleona verifies both signatures automatically. This ensures
+that only updates from the official developer are accepted -- even if
+the update came over the network from foreign devices. An update is
+never created automatically from development, but only when the
+developer signs it by hand.
 
-Every update is cryptographically signed. Cleona verifies the signature
-automatically before installing any update. This ensures that only updates
-from the official developer are accepted -- even when the update was
-obtained via the P2P network.
+---
+## 16. Frequently asked questions
+
+### "Can I use Cleona without internet?"
+
+Cleona needs a network connection, but not necessarily the internet:
+in the same Wi-Fi, Cleona devices find each other on their own and can
+write with each other entirely without internet access. You do not have
+to be online at the same time as your counterpart: if they are offline,
+the message waits up to 7 days in the mailbox at three neighbors, until
+they pick it up.
+
+### "What if I lose my seed phrase?"
+
+As long as one device with your identity is still running, nothing is
+lost -- you simply keep writing there. On the device on which you
+created the identity, you can usually read off the 24 words again
+(see chapter 2). Do not rely on it: a reinstallation clears this copy
+away, and on Android removing or changing the screen lock destroys it
+too. If you have neither the words nor a device, there is
+no way back -- not via your contacts, the developer, or anyone else.
+That is why it is so important to keep the 24 words safe.
+
+### "Can someone read along on my messages?"
+
+No. Every message is encrypted with a one-time key that applies only to
+this one message. Only you and your counterpart can decrypt the
+message. There is no central server, no master key, and no access for
+the developer. Even if a device forwards the message on the transport
+route, it sees only encrypted mush and a code. Your neighbor knows that
+the packet comes from you, but not to whom it is going; your
+counterpart's neighbor knows to whom it is going, but not from whom.
+
+### "Why don't I need a phone number?"
+
+Because your identity is purely cryptographic. Instead of a phone
+number or email address that is linked to your real name, a key pair
+that was generated on your device identifies you. You add contacts via
+QR code, NFC, or the text line of your invitation -- not via a phone
+book. That means more privacy, because your messenger account is not
+bound to your real identity.
+
+### "How do I find people on Cleona?"
+
+Cleona deliberately has no contact search by phone number or name --
+that would be a privacy problem. Instead, you exchange invitations
+directly: via QR code, NFC, or as a text line via another route. That
+is like exchanging business cards instead of looking up in a phone
+book.
+
+### "Does Cleona also work abroad?"
+
+Yes. As long as you have an internet connection, Cleona works
+everywhere in the world. Since there is no central server and no fixed
+address, the service cannot simply be switched off for particular
+countries. How Cleona makes blocking harder is described in the
+"Security" chapter under "Anti-censorship". A country that blocks every
+unknown traffic at the border can, however, also stop Cleona.
+
+### "Is Cleona free?"
+
+Yes. Cleona is free to use and without advertising. Since there is no
+central server, no server costs accrue for operation either. In the
+settings under "Support Cleona" -> "Donate" you can support the
+development voluntarily.
+
+### "My message has only one check -- what does that mean?"
+
+The message is on its way, but your counterpart has not yet confirmed
+receipt -- mostly because they are currently offline. That is not an
+error: the message waits up to 7 days in the mailbox. As soon as they
+pick it up, you see two checks. A clock means that no route has carried
+the message yet -- it sets off on its own as soon as one is there; a
+warning sign means that it has found no route for 14 days and that you
+can resend it.
+
+### "Why do messages arrive late on my iPhone?"
+
+iOS does not let apps run permanently in the background. Cleona is only
+woken briefly now and then; iOS decides when. It then collects
+everything. As soon as you open the app, Cleona collects what was kept
+for you.
+
+### "Can I switch from WhatsApp to Cleona?"
+
+Yes, but you cannot transfer your WhatsApp chats. Cleona and WhatsApp
+are fundamentally different systems. You have to add your contacts
+individually in Cleona. The easiest way is to send the text line of
+your invitation to your contacts. Every request that arrives this way
+you confirm yourself under "Requests".
+
+### "Can I use Cleona on several devices at the same time?"
+
+Not yet. A second device for the same identity comes with a later
+version (chapter 11). On several devices you can today use different
+identities.
+
+### "How do I get updates when the app store is blocked?"
+
+Cleona can fetch updates directly over the network, without depending
+on an app store, a website, or a download server. If another device in
+the network has the latest version, your device can load the update
+from there. Authenticity is verified by a digital signature of the
+developer. Alternatively, a contact can pass the app on to you via an
+invitation link or USB stick. More on this in the "Software updates"
+chapter.
 
 ---
 
-## 16. FAQ
+## Help and contact
 
-**Can I use Cleona without internet?**
-
-No, you need a network connection to send and receive messages. However, if you go
-offline temporarily, messages sent to you are stored across the network and
-delivered when you reconnect -- for up to 7 days. On a local network (e.g. the
-same Wi-Fi), you can communicate even without internet access.
+If you have questions or run into a problem, you find current
+information on the Cleona website and on GitHub. Since Cleona is a
+decentralized project, there is no classic customer support -- but an
+active community that gladly helps.
 
 ---
 
-**What if I lose my seed phrase?**
-
-If you have set up guardian recovery (Shamir Secret Sharing), any 3 of your 5
-guardians can help you reconstruct the seed phrase. If you have not set up
-guardians, recovery is still possible as long as you have at least one device
-where Cleona is still installed and running -- you can view your seed phrase in
-the settings.
-
-The best approach: write down your seed phrase on paper and store it somewhere safe.
-Consider setting up guardian recovery for additional peace of mind.
-
----
-
-**Can anyone read my messages?**
-
-No. Not the developer, not a server operator (there is none), not your internet
-provider, not anyone who relays your messages. Every message is encrypted on your
-device with keys that only you and the intended recipient possess. The encryption
-is end-to-end and post-quantum secure.
-
----
-
-**Why don't I need a phone number?**
-
-Because your identity is purely cryptographic. When you first launch Cleona, a
-unique key pair is generated on your device. This key pair IS your identity. You
-prove who you are by signing messages with your private key, not by receiving an
-SMS code. This means you cannot be tracked by your phone number, and you do not
-need to give up any personal information.
-
----
-
-**Is Cleona open source?**
-
-Cleona is developed transparently. The source code is available for review on
-GitHub.
-
----
-
-**Can I use Cleona on multiple devices?**
-
-Yes. You can link up to 5 devices to the same identity. One device is the primary
-(it holds the seed phrase), and additional devices are linked via a secure pairing
-process. All devices share the same identity, contacts, and conversations. See the
-Multi-Device chapter for details.
-
----
-
-**How does Cleona find other users without a server?**
-
-When you are on the same local network, Cleona discovers other users automatically
-via network broadcasts (IPv4 and IPv6). For users on different networks, Cleona
-uses the contact information embedded in QR codes, NFC exchanges, or cleona://
-links to establish an initial connection. Once connected, your device learns about
-the network and can route messages efficiently.
-
----
-
-**What happens if I delete a contact?**
-
-The contact is removed from your list and you will no longer receive messages from
-them. If you are both in the same group, you can still see their group messages.
-Deleted contacts cannot be accidentally re-imported through restore or network
-sync -- you would need to explicitly add them again via a new QR scan or link.
-
----
-
-**How much data does Cleona use?**
-
-Cleona is designed to be efficient with bandwidth. Text messages are tiny (a few
-kilobytes). Media files depend on their size, of course. There is no background
-polling or unnecessary traffic -- the network protocol is designed to minimize
-data usage.
-
----
-
-**What does the network stats screen show?**
-
-This is a diagnostic screen (accessible from settings) that shows you how your
-device is connected to the network: how many peers you can see, routing
-information, and connection quality. You generally do not need this screen, but
-it can be helpful if you are troubleshooting connection issues.
-
----
-
-**I switched from WhatsApp/Signal. What is different?**
-
-The biggest differences:
-- **No server.** Your messages do not pass through any company's infrastructure.
-- **No phone number.** Your identity is a cryptographic key, not tied to your SIM.
-- **Seed phrase.** Instead of SMS verification, you have 24 words that control
-  your identity. Guard them well.
-- **Contacts must be added explicitly.** There is no contact list upload from your
-  phone book. You add people by scanning QR codes, tapping NFC, or sharing links.
-- **Multiple identities.** You can have separate personas in one app.
-- **Multi-device.** Link up to 5 devices to the same identity.
-- **Calendar and polls.** Built-in encrypted calendar and poll features.
-- **Offline delivery.** Messages wait for you, stored across the network.
-
-Everything else -- sending text, sharing photos, making calls, creating groups --
-works much like you would expect from any modern messenger.
-
----
-
-**Does Cleona work abroad?**
-
-Yes. As long as you have an internet connection, Cleona works anywhere in the
-world. Since there is no central server, the service cannot be blocked for specific
-countries. Cleona also has an anti-censorship fallback: if the standard connection
-(UDP) is blocked, Cleona automatically switches to an alternative transport (TLS)
-that is harder to detect and block.
-
----
-
-**Is Cleona free?**
-
-Yes. Cleona is free and ad-free. Since there is no central server, there are no
-server costs to cover. You can find a "Donate" option in the app to voluntarily
-support development.
-
----
-
-**My message shows a clock icon -- what does that mean?**
-
-It means the message has not been delivered yet. The recipient is probably offline.
-Once the message is delivered, the icon changes. Messages are kept for up to 7 days
-for delivery.
-
----
-
-**Can I switch from WhatsApp to Cleona?**
-
-Yes, but you cannot transfer your WhatsApp chats. Cleona and WhatsApp are
-fundamentally different systems. You need to add your contacts individually in
-Cleona. The easiest way is to share your cleona:// link in a WhatsApp group and
-ask others to add you.
-
----
-
-**How do I get updates if the app store is blocked?**
-
-Cleona can receive updates directly over the P2P network without relying on
-any app store, website, or download server. If another user on the network
-has the latest version, your device can download the update from them.
-Authenticity is verified via the developer's digital signature. Alternatively,
-a contact can share the app via an invite link or USB drive. See the Software
-Updates chapter for details.
-
----
-
-*Cleona Chat -- Private by design, decentralized by nature.*
+*This manual describes Cleona Chat version 4.2. Individual functions
+may change or be extended in newer versions.*

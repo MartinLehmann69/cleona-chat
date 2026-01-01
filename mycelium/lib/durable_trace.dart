@@ -73,6 +73,39 @@ void durableTraceDepositRefused(void Function(String)? report, Uint8List hash,
     _line(report, 'deposit-refused',
         '${_short(hash)} ch=$channel from ${nodeKey(from)} — 0x94, next holder');
 
+/// Author: a deposit starts (S424 M-4) — the [candidates] in the order they
+/// are asked, and the nodes of the holder order [leftOut] because they were
+/// reached and stayed silent earlier this run. Not in [kDurableTraceSteps]:
+/// a diagnosis line, written once per deposit, never in idle.
+/// [noteOf] (S425 N3-3 measurement): per candidate when its address was last
+/// confirmed and whether it answered in this run — a candidate confirmed only
+/// in an earlier run of the daemon is told apart.
+void durableTraceDepositStart(void Function(String)? report, Uint8List hash,
+        int channel, List<CardAddress> candidates, List<CardAddress> leftOut,
+        {String Function(CardAddress)? noteOf}) =>
+    _line(report, 'deposit-start',
+        '${_short(hash)} ch=$channel — ${candidates.length} candidate(s): '
+        '${candidates.map((c) => noteOf == null ? nodeKey(c) : '${nodeKey(c)} (${noteOf(c)})').join(', ')}; left out as failed: '
+        '${leftOut.isEmpty ? 'none' : leftOut.map(nodeKey).join(', ')}');
+
+/// Author: holder [holder] gave way without `0x91`/`0x94` (S424 M-4) —
+/// [why] from [DurableAsk]; [reached]: the request reached it and it stayed
+/// silent (failed only if it never showed the capability, S424 F-9),
+/// otherwise the handshake was unanswered.
+void durableTraceDepositGone(void Function(String)? report, Uint8List hash,
+        int channel, CardAddress holder, String why, {required bool reached}) =>
+    _line(report, 'deposit-gone',
+        '${_short(hash)} ch=$channel from ${nodeKey(holder)} — $why, '
+        '${reached ? 'reached and silent' : 'not reached'}, next holder');
+
+/// Asker: an edge of §16.0 reached the stock questions, or the first capable
+/// node became known and released an edge kept back (S429 VL2-4 measurement:
+/// in run 20261119-000447 node1 asked for the stock for the first time 38 min
+/// after its start, with no line naming why). Not in [kDurableTraceSteps]: a
+/// diagnosis line, written at an edge or once per run, never in idle.
+void durableTraceEdge(void Function(String)? report, String what) =>
+    _line(report, 'edge', what);
+
 /// Asker: a `0x95` for [channel] went to [to]; [to] `null`: no capable node
 /// known, the question waits for the first one.
 void durableTraceStockAsk(void Function(String)? report, int channel,

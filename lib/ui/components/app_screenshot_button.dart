@@ -21,6 +21,7 @@ import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/platform/app_screenshot.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/main.dart' show CleonaAppState;
+import 'package:cleona/ui/components/leaves_protection_notice.dart';
 
 class AppScreenshotButton extends StatelessWidget {
   /// False in a conversation whose `allow_forwarding` is off (§21.5.4):
@@ -77,6 +78,11 @@ class AppScreenshotButton extends StatelessWidget {
       await _feedback(sound, saved: false);
       return;
     }
+
+    // §21.4.2 / D-49 (S432): the picture lands unencrypted in the picture
+    // collection — said once per device, before the first capture.
+    await LeavesProtectionNotice.showOnce(
+        context, LeavesProtectionKind.screenshot);
 
     final capture = debugCaptureOverride ?? AppScreenshot.capture;
     final result = await capture();

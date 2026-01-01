@@ -70,6 +70,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart';
+export 'package:mycelium/code_send_urgent.dart' show resortAtOnce, resortAtOnceLine; // D-127
 import 'package:mycelium/neighbour.dart';
 import 'package:mycelium/neighbour_list.dart';
 
@@ -85,6 +86,11 @@ typedef StepThreePlan = ({
   String why,
   List<CardAddress> later,
   CardAddress? resort,
+  // S429 measurement (45a.A01, S429-RCA-AGENT-F-45A.md M-1): the open set as
+  // this plan saw it, with live markers and bars — for the hand-on report of
+  // `code_send_retry.dart`, NOT part of [why] (the report of a fixed hop
+  // names no open set).
+  String open,
 });
 
 /// The open set with the neighbours whose link is live first (OP-23, S398):
@@ -224,6 +230,7 @@ StepThreePlan? stepThreePlan({
             why: '0x20 direct (no own fixed neighbour)',
             later: const <CardAddress>[],
             resort: null,
+            open: '',
           );
   }
   bool isNode(Neighbour n, CardAddress c) =>
@@ -248,6 +255,8 @@ StepThreePlan? stepThreePlan({
     return null;
   }
 
+  final openSeen =
+      live == null ? '' : _openNote(open, live, reach, isNamed, contact);
   final ownLeftOut = [
     for (final a in named)
       if (!fixed.any((f) => isNode(f, a))) a,
@@ -296,6 +305,7 @@ StepThreePlan? stepThreePlan({
               'is one the recipient named$note)',
       later: hops.skip(1).toList(),
       resort: resort,
+      open: openSeen,
     );
   }
   if (resort != null) {
@@ -308,6 +318,7 @@ StepThreePlan? stepThreePlan({
           'LAST RESORT, that node sees both ends (no other hop$note)',
       later: const <CardAddress>[],
       resort: null,
+      open: openSeen,
     );
   }
   return null;

@@ -12,9 +12,9 @@
 /// was attached ([DurableNode.attach]) names nothing, fetches nothing,
 /// answers nothing — the kinds `0x90`–`0x9F` are dropped in the dispatch
 /// as a 4.2.3 node drops them. A stock whose [DurableStock.heldChannels]
-/// is empty (a phone) names nothing and holds nothing, but deposits, asks
-/// about fingerprints and fetches what it lacks when the user opens a
-/// channel (§16.7).
+/// is empty (a 4.2 phone before S426 V1) names nothing and holds nothing,
+/// but deposits, asks about fingerprints and fetches what it lacks when the
+/// user opens a channel; since D-126 every device holds (§16.7).
 ///
 /// **No clock.** Fetching happens when an identifier is named, the stock
 /// is asked at the edges of §16.0, and a deposit when the application calls.
@@ -38,10 +38,12 @@ import 'package:mycelium/durable_id.dart';
 import 'package:mycelium/durable_questions.dart';
 import 'package:mycelium/durable_serve.dart';
 import 'package:mycelium/durable_stock.dart';
+import 'package:mycelium/durable_trace.dart' show durableTraceDepositStart;
 import 'package:mycelium/host.dart';
-import 'package:mycelium/host_media.dart' show bulkHolderOrder;
+import 'package:mycelium/durable_candidates.dart' show durableCandidates;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
+import 'package:mycelium/shell_counterpart.dart' show askedCard;
 
 /// §16.7 "Per neighbour that hands out new objects: at most 250 a day".
 const int kNewObjectsPerNamerDay = 250;
@@ -62,8 +64,12 @@ class DurableNode implements DurableTransport {
   /// Where every packet of this class leaves — replaceable for probes.
   DurableSend send;
 
-  /// Holder candidates in the order of §9.4 lane 3 — the host sets the one
-  /// with the classes stated in `0x53`.
+  /// This device is a phone: it holds and names like every device, but on a
+  /// metered link it fetches only at edges (§16.0, S426 V1).
+  bool phone = false;
+
+  /// Holder candidates in the order of §16.7 (`durable_candidates.dart`,
+  /// S426 V2) — the host sets the one with the classes stated in `0x53`.
   List<CardAddress> Function() holderOrder;
 
   late final DurableFetcher fetcher;
@@ -75,15 +81,18 @@ class DurableNode implements DurableTransport {
   /// class), the most recent last. Memory only.
   final LinkedHashMap<String, CardAddress> _capable = LinkedHashMap();
 
-  /// Nodes that failed a request of this class — not asked again this run
-  /// unless they show the capability again (§16.0 "never asked twice").
+  /// Nodes that never showed the capability and failed a request of this
+  /// class — not asked again this run unless they show it after all (§16.0
+  /// "never asked twice, because it never shows the capability"). A capable
+  /// node that stays silent is never entered here ([failed], S424 F-9).
   final Set<String> _failed = {};
   final Map<String, int> _writtenOff = {};
   final Map<String, (int, int)> _perNamer = {};
 
   DurableNode._(this.node, this.stock, this.report)
       : send = node.rawSend,
-        holderOrder = (() => bulkHolderOrder(node.neighbourhood, const [])) {
+        holderOrder = (() => durableCandidates(node.neighbourhood,
+            evidence: node.neighbourhood.reachabilitySaid)) {
     fetcher = DurableFetcher(
         send: (p, to) => send(p, to),
         report: report,
@@ -118,8 +127,11 @@ class DurableNode implements DurableTransport {
 
   // ── Naming (§5.5 rule 2) ───────────────────────────────────────────────
 
-  /// The young identifiers of every held channel, youngest first, or
-  /// `null`: the identifiers count as one object only while there are any.
+  /// The young identifiers of every held channel, or `null`: the
+  /// identifiers count as one object only while there are any. More than
+  /// one packet holds are named in turn, the youngest first in each round
+  /// (§5.5 rule 2, S426 V4): with only the youngest 57, older ones of the
+  /// same day were never named.
   List<DurableId>? names() {
     final all = <DurableId>[
       for (final c in stock.heldChannels())
@@ -127,10 +139,16 @@ class DurableNode implements DurableTransport {
             .where((i) => i.ageHours < kCoverAgeHours),
     ]..sort((a, b) => a.ageHours.compareTo(b.ageHours));
     if (all.isEmpty) return null;
-    return all.length > kIdentifiersPerCover
-        ? all.sublist(0, kIdentifiersPerCover)
-        : all;
+    if (all.length <= kIdentifiersPerCover) return all;
+    final start = _nameAt >= all.length ? 0 : _nameAt; // a new round: youngest
+    final end = start + kIdentifiersPerCover > all.length
+        ? all.length
+        : start + kIdentifiersPerCover;
+    _nameAt = end;
+    return all.sublist(start, end);
   }
+
+  int _nameAt = 0; // where the next round of naming starts (S426 V4)
 
   // ── Hearing and fetching (§16.0) ───────────────────────────────────────
 
@@ -138,6 +156,9 @@ class DurableNode implements DurableTransport {
   /// ones it neither holds nor has rejected.
   void heard(List<DurableId> ids, CardAddress from) {
     capable(from);
+    // §16.0 (S426 V1): a phone fetches a named identifier at once only on an
+    // unmetered link; on a metered one the next edge or opening fetches it.
+    if (phone && node.coverStream.metered) return;
     final held = stock.heldChannels();
     for (final id in ids) {
       if (held.contains(id.channel)) want(id, from);
@@ -192,14 +213,20 @@ class DurableNode implements DurableTransport {
     final known = _capable.remove(k) != null;
     _capable[k] = a;
     if (!known) _remember();
-    if (first) questions.capableKnown();
+    if (first) questions.capableKnown(a);
   }
 
-  /// [a] failed a request of this class.
-  void failed(CardAddress a) {
+  /// [a] was reached and stayed silent. Locked out for this run only when
+  /// it never showed the capability (§16.0 "Older 4.2 versions … never
+  /// asked twice, because it never shows the capability"); a node that did
+  /// show it is no older version, its silence is a lost request (§11.3a,
+  /// e.g. a network change) and it stays capable (S424 F-9). Returns
+  /// whether [a] is now locked out.
+  bool failed(CardAddress a) {
     final k = nodeKey(a);
-    if (_capable.remove(k) != null) _remember();
+    if (_capable.containsKey(k)) return false;
     _failed.add(k);
+    return true;
   }
 
   /// Hands the membership to the application's device data — only when it
@@ -217,6 +244,28 @@ class DurableNode implements DurableTransport {
   /// Capable nodes, the most recent first, without the failed ones.
   List<CardAddress> get capableNodes => _capable.values.toList().reversed.toList();
 
+  /// Every address of every open neighbour (§11.8.8) as [nodeKey] — the
+  /// further stock questions of an edge go only there (S426 V3).
+  Set<String> openNodeKeys() => {
+        for (final n in node.neighbourhood.openSet())
+          for (final a in n.addresses) nodeKey(a.asCardAddress),
+      };
+
+  /// S425 N3-3 measurement for `deposit-start`: when [c] was last confirmed
+  /// and whether it answered in this run (an `earlier run` stamp is the case
+  /// that stays unexplained in 73.W2).
+  String _confirmNote(CardAddress c) {
+    final a = InternetAddress.fromRawAddress(c.address);
+    final n = node.neighbourhood.holding(a, c.port);
+    for (final x in n?.addresses ?? const []) {
+      if (x.port != c.port || x.address != a) continue;
+      return x.confirmedEver
+          ? 'confirmed ${x.last.toUtc().toIso8601String()}, ${x.answering ? "this run" : "earlier run"}'
+          : 'never confirmed';
+    }
+    return 'not in the list';
+  }
+
   /// Candidates for a deposit or a fingerprint question (§16.7).
   List<CardAddress> holders() => durableHolderOrder(holderOrder(),
       isContact: stock.isContactNode, capable: isCapable, failed: isFailed);
@@ -225,11 +274,16 @@ class DurableNode implements DurableTransport {
 
   @override
   Stream<DepositEvent> deposit(int channel, Uint8List object) {
-    final d = DurableDeposit(channel, object, holders(),
+    final candidates = holders();
+    final d = DurableDeposit(channel, object, candidates,
         isContact: stock.isContactNode,
         send: (p, to) => send(p, to),
         onHolder: (h, answered) => answered ? capable(h) : failed(h),
         report: report);
+    // S424 M-4: which holders this deposit asks, and which it leaves out.
+    durableTraceDepositStart(report, d.hash, channel, candidates,
+        [for (final c in holderOrder()) if (isFailed(nodeKey(c))) c],
+        noteOf: _confirmNote);
     _deposits
       ..removeWhere((x) => x.over)
       ..add(d);
@@ -253,8 +307,23 @@ class DurableNode implements DurableTransport {
 
   // ── Dispatch (`node_helpers.dart`) ─────────────────────────────────────
 
-  void receive(Uint8List p, CardAddress from) {
+  /// D73B-2 (§11.8.4): the asked node an answer from [from] belongs to
+  /// (`askedCard`, the shell's link test on the outside route).
+  CardAddress _asked(CardAddress from) => askedCard(
+      node.outsideRoute.sameCounterpart,
+      [...questions.askedAt, for (final d in _deposits) ...d.candidates],
+      from);
+
+  void receive(Uint8List p, CardAddress at) {
     final k = p[0];
+    final from = switch (k) {
+      kinds.kDurableStockAnswer ||
+      kinds.kDurableFingerprintAnswer ||
+      kinds.kDurableDeposited ||
+      kinds.kDurableNotHeld =>
+        _asked(at),
+      _ => at,
+    };
     if (k == kinds.kDurableDeposit) {
       serve.deposit(p, from);
     } else if (k == kinds.kDurableFetch) {
@@ -271,7 +340,7 @@ class DurableNode implements DurableTransport {
         d.receive(p, from);
       }
     } else if (k == kinds.kDurablePiece || k == kinds.kDurableNotHeld) {
-      fetcher.receive(p, from);
+      fetcher.receive(p, at); // a fetch run is keyed by the namer it went to
       if (k == kinds.kDurableNotHeld) {
         for (final d in List.of(_deposits)) {
           d.receive(p, from);
@@ -310,18 +379,21 @@ void durableDispatch(Node node, Uint8List p, InternetAddress from, int port) =>
 
 /// The one place where the application hands its [DurableStock] to the
 /// transport. The seam (`lib/core/service/`, SK-4) calls [durableAttach]
-/// once after the host started: a desktop with a stock that holds both
-/// system channels, a phone with one that holds none (it names nothing, but
-/// deposits and reads, §16.7). A host that never attaches a stock behaves
-/// as 4.2.3 does. The holder order is the host's lane-3 order with the
-/// classes stated in `0x53` (`host_media.dart`, desktops first, §9.4); the
-/// contact rule of §16.7 lies over it (`durable_deposit.dart`).
+/// once after the host started; every device holds and names both system
+/// channels (§16.7, S426 V1). A host that never attaches a stock behaves
+/// as 4.2.3 does. The holder order is §16.7's (`durable_candidates.dart`,
+/// S426 V2) with the classes stated in `0x53`, desktops first; the contact
+/// rule of §16.7 lies over it (`durable_deposit.dart`).
 extension HostDurable on Host {
-  /// Attaches [stock]; a second call returns the first attachment.
-  DurableTransport durableAttach(DurableStock stock) =>
+  /// Attaches [stock]; a second call returns the first attachment. [phone]:
+  /// this device is a phone (S426 V1, fetching on a metered link).
+  DurableTransport durableAttach(DurableStock stock, {bool phone = false}) =>
       DurableNode.of(node) ??
       (DurableNode.attach(node, stock, report: report)
-        ..holderOrder = () => bulk.holderOrder(const []));
+        ..phone = phone
+        ..holderOrder = () => durableCandidates(node.neighbourhood,
+            classOf: bulk.placer.classOf,
+            evidence: node.neighbourhood.reachabilitySaid));
 
   /// The attached transport, or `null`.
   DurableTransport? get durable => DurableNode.of(node);

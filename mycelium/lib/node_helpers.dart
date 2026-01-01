@@ -193,6 +193,12 @@ bool outTheSegment(InternetAddress a) {
 /// the line budget. Two nodes in the same process share them anyway.
 List<NetworkInterface> get interfaces => _immediateInterfaces;
 List<NetworkInterface> _immediateInterfaces = const [];
+bool _interfacesRead = false;
+
+/// [interfaces] once read, `null` before — a wire opened before any read
+/// (a node started without `Host.start`, the probes) reads them itself
+/// instead of taking the empty list for "no address of any kind" (S427, §11.1).
+List<NetworkInterface>? get interfacesAsRead => _interfacesRead ? _immediateInterfaces : null;
 
 /// Whether [to] is [k] itself — the ONE rule "own address" for every layer
 /// (the neighbourhood's admission, the channel keepers, lane 3; S407 B-19,
@@ -244,6 +250,7 @@ bool ownTarget(Node k, CardAddress to) {
 /// IPv6 neighbours are remembered.
 Future<void> interfacesRead() async {
   _immediateInterfaces = await NetworkInterface.list();
+  _interfacesRead = true;
 }
 
 /// The base construction of a node: wire, shell, cover stream.
@@ -261,7 +268,7 @@ Future<(Wire, Shell, cover.CoverStream)> socketBuild(
   // the node starts. Passing them along saves the second system call and
   // — more importantly — lets the wire see the same environment as the card.
   final wire = await Wire.open(
-      port: port, interfaces: interfaces, report: report);
+      port: port, interfaces: interfacesAsRead, report: report);
   // S391 (W6): the passive proof lies UNDER the shell — only there is the
   // first packet of a stranger visible before the own handshake answer.
   final proof = ReachabilityProof(wire);

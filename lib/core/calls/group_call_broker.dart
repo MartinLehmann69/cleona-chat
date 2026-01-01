@@ -226,6 +226,12 @@ class GroupCallBroker {
   final Map<String, String> _bindOpen = <String, String>{};
   final Map<String, Set<String>> _refused = <String, Set<String>>{};
 
+  /// The participants a punch window of OURS runs for right now (§17.3),
+  /// from just before it starts until it has decided or failed. Not the
+  /// pairs that are merely `pending`: a pair whose material never comes
+  /// stays `pending` without a window, and must not hold every binding.
+  final Set<String> _windowsRunning = <String>{};
+
   // ── broker side ──
   /// Pairs this device carries: "lo|hi" → video carried.
   final Map<String, bool> _carried = <String, bool>{};
@@ -332,9 +338,30 @@ class GroupCallBroker {
     _reconsider();
   }
 
+  /// A punch window of ours for the media pair with [peerHex] starts
+  /// (§17.3). Until it ends, this device binds no broker: that pair may yet
+  /// carry and make [peerHex] a candidate (L5-GCB-1, D-69).
+  void punchWindowStarted(String peerHex) {
+    if (peerHex == ownHex) return;
+    _windowsRunning.add(peerHex);
+  }
+
+  /// The punch window for [peerHex] ended — called after its decision
+  /// ([setPairState]) or without one (it threw, or the call is no longer
+  /// the current one). Binding may go on now.
+  void punchWindowEnded(String peerHex) {
+    if (_windowsRunning.remove(peerHex)) _reconsider();
+  }
+
+  /// Whether a punch window of ours runs for an undecided media pair with
+  /// a joined participant.
+  bool get _ownWindowRunning => _windowsRunning.any((hex) =>
+      isJoined(hex) && pairState(hex) == MediaPairState.pending);
+
   /// [peerHex] left the call — an edge (§17.7).
   void participantLeft(String peerHex) {
     final wasPair = pairState(peerHex) == MediaPairState.carrying;
+    _windowsRunning.remove(peerHex);
     _state.remove(peerHex);
     if (wasPair) _mediaPairEnded(peerHex);
     if (_binding.remove(peerHex) != null) onBinding?.call(peerHex, null);
@@ -373,6 +400,7 @@ class GroupCallBroker {
     _binding.clear();
     _bindOpen.clear();
     _refused.clear();
+    _windowsRunning.clear();
     _carried.clear();
     _wantsVideo.clear();
     _askers.clear();
@@ -493,6 +521,17 @@ class GroupCallBroker {
     // 2. Only the member with the smaller identifier binds. The streams of
     //    our own binds that no `relayHave` reflects yet count against their
     //    broker, so that two pairs of ours chosen at one edge spread.
+    //
+    //    Not while a punch window of OUR OWN runs for a joined participant:
+    //    a joiner holds its media pair with the initiator first and would
+    //    bind it for every pair before its media pairs with the others
+    //    carry — the initiator would win for being first (D-69, L5-GCB-1).
+    //    The window's end is an edge that calls this again
+    //    ([punchWindowEnded]); the asks of step 1 are out already.
+    if (_ownWindowRunning) {
+      onChanged?.call();
+      return;
+    }
     final pendingOf = <String, int>{};
     for (final b in _bindOpen.values) {
       pendingOf[b] = (pendingOf[b] ?? 0) + 2;

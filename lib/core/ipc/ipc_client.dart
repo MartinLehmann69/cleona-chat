@@ -190,7 +190,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// exactly the constant that
   /// `smoke_ipc_interface_completeness.dart` looks for.
   bool _dataSaverActive = false;
-  bool _dataSaverLockedBySecure = false;
 
   /// V4.2 §11.9 — source 4 on/off, transmitted by the daemon (S388). Initial
   /// value as in the host (on); the first state packet overwrites it.
@@ -586,9 +585,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
             _independentSyncPartners;
         _dataSaverActive =
             event.data['dataSaverActive'] as bool? ?? _dataSaverActive;
-        _dataSaverLockedBySecure = event.data['dataSaverLockedBySecure']
-                as bool? ??
-            _dataSaverLockedBySecure;
         _externalRecordsEnabled =
             event.data['externalRecordsEnabled'] as bool? ??
                 _externalRecordsEnabled;
@@ -991,8 +987,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _independentSyncPartners =
         state['independentSyncPartners'] as int? ?? _independentSyncPartners;
     _dataSaverActive = state['dataSaverActive'] as bool? ?? _dataSaverActive;
-    _dataSaverLockedBySecure =
-        state['dataSaverLockedBySecure'] as bool? ?? _dataSaverLockedBySecure;
     _externalRecordsEnabled =
         state['externalRecordsEnabled'] as bool? ?? _externalRecordsEnabled;
     _readNetworkSwitches(state);
@@ -1490,8 +1484,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// §24.4.2, transmitted — no constant, no local recomputation.
   @override
   bool get dataSaverActive => _dataSaverActive;
-  @override
-  bool get dataSaverLockedBySecure => _dataSaverLockedBySecure;
 
   /// §11.9, transmitted — no constant.
   @override
@@ -2966,21 +2958,11 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   // per-chat setting of the send path, so there is also no IPC verb with
   // which the UI passes it to the daemon.
 
-  /// §24.4.2 — the setter across the IPC boundary.
-  ///
-  /// THE LATCH IS NOT REINVENTED HERE, but PULLED A SECOND TIME. The
-  /// daemon is authoritative (`CoverSaver.instance.request`); this side
-  /// knows only the transmitted [dataSaverLockedBySecure]. It nevertheless
-  /// aborts itself if that is set — otherwise the switch in the UI would
-  /// only snap back at the next `state_changed`, and the user would for a
-  /// moment see an active saver mode that does not exist.
-  ///
-  /// The optimistic anticipation applies ONLY to switching on without a
-  /// latch and is overwritten by the next snapshot — the same pattern as
-  /// [setSecureMode].
+  /// §24.4.2 — the setter across the IPC boundary. The daemon is
+  /// authoritative (`CoverSaver.instance.request`); the anticipation here
+  /// is overwritten by the next snapshot.
   @override
   String setDataSaver(bool on) {
-    if (on && _dataSaverLockedBySecure) return kDataSaverLockedBySecure;
     _dataSaverActive = on;
     onStateChanged?.call();
     _sendRequest('set_data_saver', params: {'on': on});
@@ -4165,6 +4147,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
           : ShareIdentityState.values.asNameMap()[identity],
     );
   }
+
+  /// The surface behind IPC is Linux/Windows: its daemon logs in to an SFTP
+  /// share with the operating-system account's keys and/or the share
+  /// password (`ArchiveTransport.forProtocol`), not with an identity key —
+  /// there is none to show, and no IPC command for it.
+  @override
+  Future<String?> archiveSftpPublicKey({bool create = false}) async => null;
 
   // ── Binary Seeding (§19.6.2) ─────────────────────────────────────────────
 

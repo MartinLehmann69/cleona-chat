@@ -20,12 +20,11 @@
 ///
 /// ── WHAT IT KEEPS, AND WHAT GOES FIRST ────────────────────────────────────
 ///
-/// A desktop holds both channels, 25 MB each. A phone holds none and names
-/// none; it keeps at most 5 MB per channel of what it fetched for its user
-/// (the read cache, own data — §21.3.1). When a budget is full the oldest
+/// Every device holds and names both channels (§16.7, D-126, S426 V1): a
+/// desktop 25 MB each, a phone 5 MB each (§21.3.1). When a budget is full the oldest
 /// object goes first — oldest by its stated creation time — never one the
-/// user of this device has seen (own data, §21.1; a phone's read cache is
-/// the exception: its cap is hard, so seen objects go last, not never), and
+/// user of this device has seen (own data, §21.1; a phone is the exception:
+/// its cap is hard, so seen objects go last, not never), and
 /// never a tombstone before its original: a tombstone takes the place of the
 /// original's creation time in the order. An evicted object goes into the
 /// rejected set ("limit exceeded", §16.0) — otherwise the next neighbour
@@ -110,8 +109,8 @@ class SystemObjectStore {
   /// Budget per channel of a holder (desktop), §16.7, §21.3.1, D-55.
   static const int kDesktopBudget = SystemChannels.maxChannelStorageBytes;
 
-  /// The read cache per channel of a phone, §16.7, §21.3.1, D-55.
-  static const int kPhoneReadCache = 5 * 1024 * 1024;
+  /// The budget per channel of a phone, §16.7, §21.3.1, D-126.
+  static const int kPhoneBudget = 5 * 1024 * 1024;
 
   /// Share of the CHANNEL's budget (25 MB, on every receiver) one pseudonym
   /// may fill (§16.7: at most 2 %).
@@ -131,9 +130,9 @@ class SystemObjectStore {
 
   final EncryptedStore? _db;
 
-  /// A holder (always-on desktop) — `false` for a retention-bounded node
-  /// (phone), which holds none and names none (§16.0, §5.5).
-  final bool holds;
+  /// A phone: it holds and names like every device (D-126), within
+  /// [kPhoneBudget] instead of [kDesktopBudget], and a seen object may go.
+  final bool phone;
 
   /// The network this build runs on; decides the beta field (D-57).
   final NetworkChannel network;
@@ -168,12 +167,12 @@ class SystemObjectStore {
   /// the unsigned beta field differs) is a twin, not a variant.
   final Map<String, String> _bySignature = {};
 
-  /// [budgetForTests] replaces the budget of [holds] — only so that a smoke
-  /// can fill a channel without 25 MB; the pseudonym share stays 2 % of the
-  /// channel's real budget.
+  /// [budgetForTests] replaces the budget of the device class — only so that
+  /// a smoke can fill a channel without 25 MB; the pseudonym share stays 2 %
+  /// of the channel's real budget.
   SystemObjectStore({
     EncryptedStore? store,
-    required this.holds,
+    this.phone = false,
     NetworkChannel? network,
     DateTime Function()? clock,
     String? profileDir,
@@ -181,14 +180,14 @@ class SystemObjectStore {
   })  : _db = store,
         network = network ?? activeNetworkChannel,
         _now = clock ?? DateTime.now,
-        _budget = budgetForTests ?? (holds ? kDesktopBudget : kPhoneReadCache),
+        _budget = budgetForTests ?? (phone ? kPhoneBudget : kDesktopBudget),
         _log = CLogger.get('syschan', profileDir: profileDir);
 
   static const List<int> channels = [kChannelBugLog, kChannelFeatureRequests];
 
   final int _budget;
 
-  /// Bytes per channel: 25 MB on a holder, 5 MB read cache on a phone.
+  /// Bytes per channel: 25 MB on a desktop, 5 MB on a phone (D-126).
   int get budget => _budget;
 
   int get _nowMinutes => minutesOf(_now());
@@ -638,7 +637,7 @@ class SystemObjectStore {
     final unseen = all.where((h) => !h.seen).toList()..sort(order);
     final queue = [
       ...unseen,
-      if (!holds) ...(all.where((h) => h.seen).toList()..sort(order)),
+      if (phone) ...(all.where((h) => h.seen).toList()..sort(order)),
     ];
     var n = 0;
     for (final h in queue) {

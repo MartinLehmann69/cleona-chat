@@ -51,8 +51,9 @@ class _Waiting {
   final List<CardAddress> later;
   final CardAddress? resort;
   final String code;
+  final String open; // S429 measurement (45a.A01 M-1): the open set at planning
   final DateTime since;
-  _Waiting(this.inside, this.next, this.later, this.resort, this.code, this.since);
+  _Waiting(this.inside, this.next, this.later, this.resort, this.code, this.open, this.since);
 }
 
 /// The sendings of step 3 that wait for their first hop's verdict.
@@ -75,7 +76,7 @@ class StepThreeRetry {
   /// [inside] (the `0x20`) went to [hop] inside a `0x22` naming [next];
   /// [later] and [resort] are what follows if [hop] does not answer.
   void sent(CardAddress hop, Uint8List inside, List<CardAddress> next,
-      List<CardAddress> later, CardAddress? resort, String code) {
+      List<CardAddress> later, CardAddress? resort, String code, {String open = ''}) {
     _forgetOld();
     if (later.isEmpty && resort == null) return;
     if (_byHop.values.fold<int>(0, (n, l) => n + l.length) >= kWaitingSendingsAtMost) {
@@ -83,7 +84,7 @@ class StepThreeRetry {
     }
     _byHop
         .putIfAbsent(_keyOf(hop), () => [])
-        .add(_Waiting(inside, next, later, resort, code, _now()));
+        .add(_Waiting(inside, next, later, resort, code, open, _now()));
   }
 
   /// [end] is how the `0x22` to [hop] ended: without the hop's end mark the
@@ -106,10 +107,16 @@ class StepThreeRetry {
       handedOn++;
       if (w.later.isNotEmpty) {
         final hop = w.later.first;
-        sent(hop, w.inside, w.next, w.later.skip(1).toList(), w.resort, w.code);
+        final rest = w.later.skip(1).toList();
+        sent(hop, w.inside, w.next, rest, w.resort, w.code, open: w.open);
         watch(_out(Forwarder.buildDetour(w.next, w.inside), hop), hop);
+        // S429 measurement (45a.A01 M-1): what is left after this hop —
+        // "nothing" with no last resort means a silent [hop] ends step 3 for
+        // this sending, and only the post box carries it (§8.2).
         _report('Step 3: hop $gone did not answer — the same sending via the '
-            'next possible hop $hop to ${w.next.join(", ")} under code ${w.code}');
+            'next possible hop $hop to ${w.next.join(", ")} under code ${w.code}'
+            ' — after it ${rest.isEmpty ? "nothing" : rest.join(", ")}, '
+            'last resort ${w.resort ?? "none"}${w.open}');
       } else {
         _out(w.inside, w.resort!);
         _report('Step 3: hop $gone did not answer — no other hop: 0x20 to the '

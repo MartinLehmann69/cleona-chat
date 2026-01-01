@@ -422,6 +422,39 @@ int main(void) {
     check(read_one(s, MFB, &size, &flags, &idx) == CLEONA_VIDEO_READ_FRAME,
           "the session is still running after a rejected reconfigure", NULL);
 
+    /* (e2) Erratum 8: a request below the camera floor is its own answer,
+     *      never a larger geometry, and leaves the session untouched. */
+    {
+        cleona_video_config_t small = before_fail;
+        cleona_video_config_t sgot;
+        small.width = 192;
+        small.height = 144;
+        cleona_video_mock_set_min_capture_size(s, 320, 240);
+        memset(&sgot, 0x5a, sizeof(sgot));
+        check(cleona_video_reconfigure(s, &small, &sgot) ==
+                  CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM,
+              "request below the camera floor -> ERR_BELOW_DEVICE_MINIMUM", NULL);
+        cleona_video_get_report(s, &rr1);
+        snprintf(d, sizeof(d), "%dx%d", rr1.negotiated_width, rr1.negotiated_height);
+        check(rr1.negotiated_width == before_fail.width &&
+                  rr1.negotiated_height == before_fail.height,
+              "ERR_BELOW_DEVICE_MINIMUM leaves the session untouched", d);
+        check(read_one(s, MFB, &size, &flags, &idx) == CLEONA_VIDEO_READ_FRAME,
+              "the session keeps sending after ERR_BELOW_DEVICE_MINIMUM", NULL);
+        cleona_video_mock_set_min_capture_size(s, 0, 0);
+        memset(&sgot, 0, sizeof(sgot));
+        check(cleona_video_reconfigure(s, &small, &sgot) == CLEONA_VIDEO_OK,
+              "floor cleared -> the same request is accepted", NULL);
+        snprintf(d, sizeof(d), "%dx%d", sgot.width, sgot.height);
+        check(sgot.width == 192 && sgot.height == 144,
+              "accepted geometry is the request", d);
+        check(cleona_video_reconfigure(s, &before_fail, &sgot) == CLEONA_VIDEO_OK,
+              "back to the previous geometry", NULL);
+        MFB = sgot.max_frame_bytes;
+        check(read_one(s, MFB, &size, &flags, &idx) == CLEONA_VIDEO_READ_FRAME,
+              "read after returning to the previous geometry", NULL);
+    }
+
     /* (f) argument validation */
     check(cleona_video_reconfigure(s, NULL, &rgot) == CLEONA_VIDEO_ERR_INVALID,
           "reconfigure(NULL cfg) -> ERR_INVALID", NULL);

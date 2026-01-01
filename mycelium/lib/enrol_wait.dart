@@ -90,7 +90,18 @@ class EnrolWait {
   /// deposit. Does not throw.
   Future<int> request(Uint8List sealed, Uint8List valueE,
       {List<CardAddress> named = const [], List<CardAddress>? lan}) async {
-    unawaited(call(sealed, valueE, lan ?? segmentNodes()));
+    final to = lan ?? segmentNodes();
+    // §14.6.1 step 2 "on the LAN it also sends it as an enrolment call":
+    // a segment node that becomes known only after this moment is called at
+    // the next collection edge ([_callLate]). An explicit [lan] is the whole
+    // list (the smoke's choice).
+    if (lan == null) {
+      _laid = (sealed: sealed, valueE: valueE);
+      for (final t in to) {
+        _called.add(_key(t));
+      }
+    }
+    unawaited(call(sealed, valueE, to));
     final (done, n) = await node.depositNamed(sealed, valueE, named);
     _say('request ${sealed.length} B '
         '${done ? "placed" : "NOT placed"} with $n receipt(s)');
@@ -117,7 +128,32 @@ class EnrolWait {
       ];
 
   void _edge(List<Neighbour>? only, Future<int>? _) {
-    if (_attached) unawaited(collect(withWhom: only));
+    if (!_attached) return;
+    unawaited(collect(withWhom: only));
+    _callLate();
+  }
+
+  /// The request as laid (segment mode) and the segment nodes already called
+  /// — S425-E1: the existing device was admitted as a neighbour 10 s after
+  /// the request and never heard the call. Each node is called once; no
+  /// clock (§5.4): only at a collection edge, and only until a device with
+  /// an open window answered ([heard]).
+  ({Uint8List sealed, Uint8List valueE})? _laid;
+  final Set<String> _called = {};
+
+  static String _key(CardAddress a) =>
+      '${a.address.join('.')}:${a.port}';
+
+  void _callLate() {
+    final laid = _laid;
+    if (laid == null || heard) return;
+    final fresh = [
+      for (final t in segmentNodes())
+        if (_called.add(_key(t))) t,
+    ];
+    if (fresh.isEmpty) return;
+    _say('call to ${fresh.length} segment node(s) known since the request');
+    unawaited(call(laid.sealed, laid.valueE, fresh));
   }
 
   /// Asks for the answer under the reply values; every piece goes to

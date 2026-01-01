@@ -23,10 +23,11 @@
 ///
 /// Each question is sent once and waits for its answer ([DurableAsk]); the
 /// repeats on silence belong to the transport (§11.3a). A question the node
-/// took and left unanswered marks it as failed (§16.0 "Older 4.2 versions");
-/// a question that never reached the node (handshake unanswered) skips it
-/// only until the next edge or opening (S420, BL-2). Either way the question
-/// goes to the next capable node.
+/// took and left unanswered marks it as failed only if it never showed the
+/// capability (§16.0 "Older 4.2 versions", `DurableNode.failed`, S424 F-9);
+/// a capable node that stayed silent, and one the question never reached
+/// (handshake unanswered), is skipped only until the next edge or opening
+/// (S420, BL-2). Either way the question goes to the next capable node.
 library;
 
 import 'dart:async';
@@ -35,7 +36,8 @@ import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/durable_ask.dart';
-import 'package:mycelium/durable_deposit.dart' show kDepositHolders;
+import 'package:mycelium/durable_deposit.dart'
+    show kDepositHolders, kStockAskOpenAtMost;
 import 'package:mycelium/durable_fetch.dart' show nodeKey;
 import 'package:mycelium/durable_node.dart';
 import 'package:mycelium/durable_packets.dart';
@@ -70,6 +72,14 @@ class DurableQuestions {
   final Map<String, _Fingerprint> _prints = {};
   bool _edgePending = false;
 
+  /// The nodes the running questions went to (D73B-2, `durable_node.dart`).
+  Iterable<CardAddress> get askedAt => [
+        for (final s in _stock.values) s.$1,
+        for (final s in _spread.values) s.$1,
+        for (final f in _prints.values)
+          if (f.at != null) f.at!,
+      ];
+
   /// Capable nodes a stock question did not reach since the last edge or
   /// opening: skipped by [ask] until then, so a failed question does not
   /// go to the same node again at once, and the capability memory stays.
@@ -88,19 +98,28 @@ class DurableQuestions {
     _unreached.clear();
     if (d.capableNodes.isEmpty) {
       _edgePending = true;
+      durableTraceEdge(d.report, 'kept back — no capable node known');
       return;
     }
     final held = d.stock.heldChannels();
+    durableTraceEdge(d.report, '— ${d.capableNodes.length} capable node(s), '
+        'held ch=${held.join(',')}, read ch=${d.stock.readChannels().join(',')}');
     for (final c in held) {
       ask(c, fetch: true);
+      _spreadAsk(c);
     }
     for (final c in d.stock.readChannels()) {
       if (!held.contains(c)) ask(c, fetch: false);
     }
   }
 
-  /// The first capable node became known.
-  void capableKnown() {
+  /// The first capable node ([who]) became known.
+  void capableKnown([CardAddress? who]) {
+    // Only when it releases something — otherwise it is idle (§16.7).
+    if (_edgePending || _openPending.isNotEmpty) {
+      durableTraceEdge(d.report, 'first capable node ${who == null ? '-' : nodeKey(who)} — '
+          'edge kept back: $_edgePending, opened channels waiting: ${_openPending.length}');
+    }
     final opened = List.of(_openPending);
     _openPending.clear();
     for (final c in opened) {
@@ -118,6 +137,44 @@ class DurableQuestions {
   void opened(int channel) {
     _unreached.clear();
     ask(channel, fetch: true);
+    _spreadAsk(channel);
+  }
+
+  /// S426 V3 (§16.0 "each of its open neighbours"): the further stock
+  /// questions of one edge — channel and node → the running question.
+  final Map<String, (CardAddress, DurableAsk)> _spread = {};
+
+  /// Asks every OTHER open neighbour that has shown the capability (at most
+  /// [kStockAskOpenAtMost] together with the question of [ask]) — the
+  /// anti-entropy half of epidemic dissemination: with one neighbour per
+  /// edge, an object that neighbour lacks stays hidden from this node. One
+  /// packet each, and one back when the roots agree. A silent one is simply
+  /// not asked again before the next edge; [ask] keeps its own fallback.
+  void _spreadAsk(int channel) {
+    final primary = _stock[channel]?.$1;
+    final open = d.openNodeKeys();
+    var asked = primary == null ? 0 : 1;
+    for (final to in d.capableNodes) {
+      if (asked >= kStockAskOpenAtMost) break;
+      final k = nodeKey(to);
+      if (primary != null && nodeKey(primary) == k) continue;
+      if (!open.contains(k) || _unreached.contains(k)) continue;
+      final key = '$channel|$k';
+      if (_spread.containsKey(key)) continue;
+      final held = d.stock.held(channel);
+      final since = held.isNotEmpty ? held.first.ageHours : kSinceBeginning;
+      final p = stockAskPacket(channel, since, stateRootOf(d.stock, channel));
+      final a = DurableAsk(() => d.send(p, to), (why, reached) {
+        _spread.remove(key);
+        _unreached.add(k);
+        d.report('Durable: stock question to $k failed — $why');
+      });
+      _spread[key] = (to, a);
+      asked++;
+      stockAsked++;
+      a.start();
+      durableTraceStockAsk(d.report, channel, to, since: since, fetch: true);
+    }
   }
 
   /// "Identifiers of channel [channel] since T" to the most recent capable
@@ -158,9 +215,9 @@ class DurableQuestions {
     final a = DurableAsk(() => d.send(p, to), (why, reached) {
       final f = _stock.remove(channel)?.$3 ?? fetch;
       d.report('Durable: stock question to ${nodeKey(to)} failed — $why');
-      if (reached) {
-        d.failed(to);
-      } else {
+      // Locked out only a node that never showed the capability; a capable
+      // one, reached or not, is skipped until the next edge (S424 F-9).
+      if (!(reached && d.failed(to))) {
         _unreached.add(nodeKey(to));
       }
       ask(channel, fetch: f); // the next capable node, if any
@@ -202,10 +259,20 @@ class DurableQuestions {
   void receive(Uint8List p, CardAddress from) {
     if (p[0] == kinds.kDurableStockAnswer) {
       final a = stockAnswerRead(p);
-      final run = a == null ? null : _stock[a.channel];
-      if (a == null || run == null || nodeKey(run.$1) != nodeKey(from)) return;
-      run.$2.answered();
-      _stock.remove(a.channel);
+      if (a == null) return;
+      final run = _stock[a.channel];
+      final bool fetch;
+      if (run != null && nodeKey(run.$1) == nodeKey(from)) {
+        run.$2.answered();
+        _stock.remove(a.channel);
+        fetch = run.$3;
+      } else {
+        // S426 V3: the answer of a further open neighbour asked at the edge.
+        final s = _spread.remove('${a.channel}|${nodeKey(from)}');
+        if (s == null) return;
+        s.$2.answered();
+        fetch = true;
+      }
       d.capable(from);
       durableTraceStockAnswer(d.report, a.channel, from,
           same: a.same, ids: a.ids.length);
@@ -213,7 +280,7 @@ class DurableQuestions {
         sameAnswers++;
         return;
       }
-      if (!run.$3) {
+      if (!fetch) {
         // A read channel at an edge: handed over as new, not fetched (§16.7).
         _learnedAt[a.channel] = DateTime.now();
         final fresh = [
@@ -245,6 +312,10 @@ class DurableQuestions {
       r.$2.cancel();
     }
     _stock.clear();
+    for (final s in _spread.values) {
+      s.$2.cancel();
+    }
+    _spread.clear();
     for (final f in _prints.values) {
       f.ask?.cancel();
       if (!f.done.isCompleted) {

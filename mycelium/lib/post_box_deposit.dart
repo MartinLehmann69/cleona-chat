@@ -11,6 +11,7 @@ import 'package:mycelium/post_box_place.dart';
 import 'package:mycelium/post_box_runs.dart';
 import 'package:mycelium/post_box_log.dart';
 import 'package:mycelium/post_box_disk.dart';
+import 'package:mycelium/shell_counterpart.dart' show SameCounterpart, askedOf;
 import 'package:mycelium/silence.dart';
 import 'package:mycelium/split_flow.dart' show SendEnd;
 import 'package:mycelium/kinds.dart' as kinds;
@@ -235,6 +236,22 @@ class PostBoxDeposit {
   List<Question> collectUnasked(Neighbour holder, List<Question> ask) =>
       _collector.unasked(holder, ask);
 
+  /// Whether two addresses stand under one link (`Shell.sameCounterpart`,
+  /// D73B-2); `null` (no shell) keeps the strict comparison.
+  SameCounterpart? sameCounterpart;
+
+  /// D73B-2 (§8.2 "answers are matched to their question by the
+  /// identifier", §11.8.4): an answer from another address under the link of
+  /// an asked holder is that holder's answer. The asked holder itself first.
+  Neighbour _askedHolder(Neighbour n) {
+    final asked = [..._placing.askedHolders, ..._collector.askedHolders];
+    if (asked.any((h) => h.$1.address == n.$1.address && h.$2 == n.$2)) return n;
+    for (final h in asked) {
+      if (askedOf(sameCounterpart, h, n.$1, n.$2) != null) return h;
+    }
+    return n;
+  }
+
   /// A packet of one of the eight kinds of this file; everything else is ignored.
   void receive(Uint8List packet, InternetAddress from, int fromPort) {
     if (packet.isEmpty) return;
@@ -247,21 +264,21 @@ class PostBoxDeposit {
         // No running deposit with this id: then it is the delete receipt of
         // a collector for an own entry (0x31 carries both roles,
         // distinguished only by the id).
-        if (!_placing.acknowledged(packet, n)) {
+        if (!_placing.acknowledged(packet, _askedHolder(n))) {
           _holder.onDeleteReceipt(packet, n);
         }
       case kinds.kCollect:
         _holder.onCollect(packet, n);
       case kinds.kHereItIs:
-        _collector.onHereItIs(packet, n);
+        _collector.onHereItIs(packet, _askedHolder(n));
       case kinds.kNothingThere:
-        _collector.onNothingThere(packet, n);
+        _collector.onNothingThere(packet, _askedHolder(n));
       case kinds.kRefused:
-        if (!_placing.refused(packet, n)) {
-          _collector.onNothingThere(packet, n, refused: true);
+        if (!_placing.refused(packet, _askedHolder(n))) {
+          _collector.onNothingThere(packet, _askedHolder(n), refused: true);
         }
       case kinds.kCollectTask:
-        _collector.onTask(packet, n);
+        _collector.onTask(packet, _askedHolder(n));
       case kinds.kCollectProof:
         _holder.onProof(packet, n);
     }

@@ -86,6 +86,12 @@ class Update implements UpdateCarrier {
         UpdateAssembler(send: send, partialDir: partialDir, report: report);
     foreign = UpdateAssembler(
         send: send, partialDir: '$partialDir-foreign', report: report);
+    // D73B-2: the shell's link test, read when an answer arrives (the shell
+    // is attached after this object, `node_split.dart`).
+    bool same(InternetAddress a, int ap, InternetAddress b, int bp) =>
+        node.outsideRoute.sameCounterpart?.call(a, ap, b, bp) ?? false;
+    assembler.sameCounterpart = same;
+    foreign.sameCounterpart = same;
     compartment = ManifestCompartment(
       compartment: manifestValue(channel),
       check: manifestCheck,

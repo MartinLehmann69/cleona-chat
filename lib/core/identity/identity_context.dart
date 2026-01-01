@@ -438,6 +438,13 @@ class IdentityContext {
 
     final keyring = await KeyringService.init(baseDir);
 
+    // §4.2 (D-130): name the AES-256-GCM way of this process once at start —
+    // libsodium where the processor carries it, otherwise the software way.
+    // Here and not earlier: the line above has built the logger on `baseDir`
+    // (the deletion path must run before any write, see above).
+    CLogger.get('identity', profileDir: baseDir)
+        .info(SodiumFFI().aesGcmBackendDescription);
+
     // ── THE SECOND HALF OF THE SAME WIPE (RB-4, S370) ───────────────
     //
     // The line above clears the disk. On four of five platforms the
@@ -670,6 +677,15 @@ class IdentityContext {
   MessageStore? get storeOrNull {
     final k = _fileEncKey;
     if (k == null) return null;
+    if (_storeRetired) {
+      // S427-NT-2: a wiped identity's store stays closed. Reopened, it
+      // recreated `messages.db` (with `-wal`/`-shm`) and held the profile
+      // directory on Windows, so its deletion failed with errno 32 (run
+      // 20261118-101320). The caller is named: who still reaches for it.
+      _log.warn('Store of a wiped identity not opened again — caller: '
+          '${StackTrace.current.toString().split('\n').skip(1).take(6).join(' | ')}');
+      return null;
+    }
     if (_store != null) return _store;
     Directory(profileDir).createSync(recursive: true);
     return _store = MessageStore.open('$profileDir/messages.db', k, logger: _log);
@@ -702,6 +718,18 @@ class IdentityContext {
   void closeStore() {
     _store?.close();
     _store = null;
+  }
+
+  bool _storeRetired = false;
+
+  /// Whether [retireStore] ran: the identity was wiped on this device.
+  bool get storeRetired => _storeRetired;
+
+  /// Closes the storage for good — the identity is being wiped (§21.5.2,
+  /// §14.4, §13.3.4): [storeOrNull] does not open it again (S427-NT-2).
+  void retireStore() {
+    closeStore();
+    _storeRetired = true;
   }
 
   /// The area with the key material of this identity.

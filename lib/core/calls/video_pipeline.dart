@@ -110,6 +110,7 @@ const int _kErrBackend = -4;
 const int _kErrBufferTooSmall = -5;
 const int _kErrDecode = -6;
 const int _kErrRateUnachievable = -7;
+const int _kErrBelowDeviceMinimum = -8;
 
 const int _kReadFrame = 1;
 const int _kReadTimeout = 0;
@@ -439,6 +440,28 @@ final class VideoRateUnachievable extends VideoReconfigureOutcome {
   String toString() => 'VideoRateUnachievable($reason)';
 }
 
+/// The requested width or height lies below the smallest geometry this
+/// device can produce (Erratum 8). The session is unchanged and keeps
+/// sending with [stillRunningWith]. Not a link condition: the caller stays
+/// on its current step and switches nothing off.
+final class VideoReconfigureBelowDeviceMinimum extends VideoReconfigureOutcome {
+  const VideoReconfigureBelowDeviceMinimum({
+    required this.requested,
+    required this.stillRunningWith,
+  });
+
+  /// What was asked for and lies below the device's smallest geometry.
+  final VideoConfig requested;
+
+  /// What the session is still configured with and still sending.
+  final VideoConfig stillRunningWith;
+
+  @override
+  String toString() =>
+      'VideoReconfigureBelowDeviceMinimum(${requested.width}x${requested.height} '
+      'below the device minimum, still $stillRunningWith)';
+}
+
 /// Outcome of [VideoPipeline.open] — Erratum 6b.
 ///
 /// Modelled on [VideoReconfigureOutcome], and split along the same line: the
@@ -506,6 +529,21 @@ final class VideoOpenRateUnachievable extends VideoOpenOutcome {
 
   @override
   String toString() => 'VideoOpenRateUnachievable($reason)';
+}
+
+/// The requested width or height lies below the smallest geometry this
+/// device can produce (Erratum 8). No session exists. Not "no video on this
+/// device" and not the link: the caller opens again with a larger geometry.
+final class VideoOpenBelowDeviceMinimum extends VideoOpenOutcome {
+  const VideoOpenBelowDeviceMinimum({required this.requested});
+
+  /// What was asked for and lies below the device's smallest geometry.
+  final VideoConfig requested;
+
+  @override
+  String toString() =>
+      'VideoOpenBelowDeviceMinimum(${requested.width}x${requested.height} '
+      'below the device minimum)';
 }
 
 /// The verification report — a normative part of the ABI, not a debug extra
@@ -783,6 +821,11 @@ class VideoPipeline {
   /// every reconfigure.
   VideoConfig get negotiated => _negotiated;
 
+  /// The native session handle, for test fixtures that drive a backend's own
+  /// test switches (the mock's `cleona_video_mock_set_*`, e.g. the camera
+  /// floor of Erratum 8). The app never uses it.
+  Pointer<Void> get nativeSessionForTests => _session;
+
   bool _closed = false;
   bool _running = false;
 
@@ -884,6 +927,10 @@ class VideoPipeline {
           case _kErrRateUnachievable:
             // The link, not the caller. The one branch that produces a text.
             return VideoOpenRateUnachievable(requested: config);
+          case _kErrBelowDeviceMinimum:
+            // Erratum 8: the device cannot go this small. Not the link; the
+            // caller opens again with a larger geometry.
+            return VideoOpenBelowDeviceMinimum(requested: config);
           case _kErrInvalid:
             throw VideoPipelineException(
                 'backend rejected the configuration as invalid: $config',
@@ -974,6 +1021,12 @@ class VideoPipeline {
           return VideoReconfigureAccepted(_negotiated);
         case _kErrRateUnachievable:
           return VideoRateUnachievable(
+            requested: config,
+            stillRunningWith: _negotiated,
+          );
+        case _kErrBelowDeviceMinimum:
+          // Erratum 8: session unchanged, still sending; not a link condition.
+          return VideoReconfigureBelowDeviceMinimum(
             requested: config,
             stillRunningWith: _negotiated,
           );

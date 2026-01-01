@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import 'package:meta/meta.dart';
 
 import 'package:cleona/core/archive/archive_config.dart';
+import 'package:cleona/core/archive/sftp_dart_transport.dart';
 import 'package:cleona/core/archive/share_identity.dart';
 import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/platform/process_runner.dart';
@@ -174,13 +175,43 @@ abstract class ArchiveTransport {
   /// identity's profile ([archiveKnownHostsPath]), and what a helper
   /// program must read as a file lies in the identity's transient
   /// directory (`TransientFiles`).
+  ///
+  /// SFTP has two implementations (S423 A-1); login by key AND by password
+  /// on every platform (owner, 14.11.2026):
+  /// * Android/iOS ship no `ssh`/`sftp` program: always
+  ///   [DartSftpTransport] — the identity's own key ([sftpClientKey], from
+  ///   `SftpClientKey`) and/or the share password.
+  /// * Linux, Windows, macOS WITHOUT a share password ([sftpPassword]
+  ///   false): [SftpTransport], unchanged — it logs in as the
+  ///   operating-system account does (its keys, `ssh-agent`,
+  ///   `~/.ssh/config`), which a library cannot reproduce.
+  /// * Desktop WITH a share password: [DartSftpTransport] — the programs
+  ///   run with `BatchMode=yes` and cannot give a password (asking
+  ///   `sshpass` for it would put a third program and the password into
+  ///   the process environment). The account's default keys
+  ///   ([accountSshKeyPems]) are offered first, so a key login keeps
+  ///   working next to the password.
+  /// Both share the identity's pin file; how a pin written by one is held
+  /// by the other: `upgradeFingerprintPins`. [mobile] overrides the
+  /// platform check (probes).
   static ArchiveTransport forProtocol(ArchiveProtocol protocol,
-      {required String profileDir}) {
+      {required String profileDir,
+      String? Function()? sftpClientKey,
+      bool sftpPassword = false,
+      bool? mobile}) {
     final tempDir = TransientFiles.directoryIn(profileDir).path;
     switch (protocol) {
       case ArchiveProtocol.smb:
         return SmbTransport(tempDir: tempDir);
       case ArchiveProtocol.sftp:
+        final isMobile = mobile ?? (Platform.isAndroid || Platform.isIOS);
+        if (isMobile || sftpPassword) {
+          return DartSftpTransport(
+              knownHostsFile: archiveKnownHostsPath(profileDir),
+              profileDir: profileDir,
+              clientKey: sftpClientKey,
+              accountKeys: isMobile ? null : accountSshKeyPems);
+        }
         return SftpTransport(
             knownHostsFile: archiveKnownHostsPath(profileDir),
             tempDir: tempDir);
@@ -203,9 +234,12 @@ abstract class ArchiveTransport {
 Future<({bool reachable, ShareIdentityState? identity})> testArchiveConnection(
     ArchiveConfig config,
     {required String profileDir,
+    String? Function()? sftpClientKey,
     Duration timeout = const Duration(seconds: 5)}) async {
   final t = ArchiveTransport.forProtocol(config.defaultProtocol,
-      profileDir: profileDir);
+      profileDir: profileDir,
+      sftpClientKey: sftpClientKey,
+      sftpPassword: (config.archivePassword ?? '').isNotEmpty);
   await t.connect(
     host: config.archiveHost,
     path: config.archivePath,
@@ -588,11 +622,41 @@ class SftpTransport extends ArchiveTransport {
     _basePath = path.endsWith('/') ? path : '$path/';
     _username = username;
     _port = port ?? 22;
-    // SFTP prefers SSH keys, password via sshpass if needed.
+    // The programs log in with the account's keys only (BatchMode); with a
+    // share password `forProtocol` picks DartSftpTransport instead.
   }
 
   @override
   Future<void> disconnect() async {}
+
+  /// State of the pin as of the last [_reconcilePin].
+  SshPinUpgrade _pinState = SshPinUpgrade.none;
+
+  /// Before every ssh/sftp call: a fingerprint line written by
+  /// [DartSftpTransport] (a password was set before) must not let ssh pin
+  /// anew. The host's keys are fetched WITHOUT login (`ssh-keyscan`); the
+  /// one with the pinned fingerprint replaces the line in OpenSSH form
+  /// ([upgradeFingerprintPins]). Otherwise the call runs with
+  /// `StrictHostKeyChecking=yes` and ssh refuses before login. Costs
+  /// nothing while no such line exists (one file read).
+  Future<void> _reconcilePin() async {
+    final f = File(knownHostsFile);
+    final text = f.existsSync() ? f.readAsStringSync() : '';
+    if (fingerprintOnlyPins(text, _host, _port).isEmpty) {
+      _pinState = SshPinUpgrade.none;
+      return;
+    }
+    final r = await _run('ssh-keyscan', ['-p', '$_port', _host],
+        timeout: ArchiveTransport.kMetadataTimeout);
+    final u = upgradeFingerprintPins(text, _host, _port,
+        r == null || r.exitCode != 0 ? null : '${r.stdout}');
+    if (u.result == SshPinUpgrade.upgraded) {
+      f.writeAsStringSync(u.text!, flush: true);
+      _pinState = SshPinUpgrade.none;
+    } else {
+      _pinState = u.result;
+    }
+  }
 
   /// The host-key options on EVERY ssh/sftp call.
   ///
@@ -607,12 +671,16 @@ class SftpTransport extends ArchiveTransport {
   /// * `HashKnownHosts=no`, so the pin can be read back for display;
   ///   `CheckHostIP=no` and `UpdateHostKeys=no`, so the file holds exactly
   ///   the one key ssh met first.
+  /// * `StrictHostKeyChecking=yes` instead of `accept-new` while a
+  ///   fingerprint-only pin is unconfirmed ([_reconcilePin]).
   List<String> get _hostKeyArgs {
     final f = knownHostsFile.replaceAll('\\', '/');
     return [
       '-oUserKnownHostsFile="$f"',
       '-oGlobalKnownHostsFile="$f"',
-      '-oStrictHostKeyChecking=accept-new',
+      _pinState == SshPinUpgrade.none
+          ? '-oStrictHostKeyChecking=accept-new'
+          : '-oStrictHostKeyChecking=yes',
       '-oHashKnownHosts=no',
       '-oCheckHostIP=no',
       '-oUpdateHostKeys=no',
@@ -621,6 +689,18 @@ class SftpTransport extends ArchiveTransport {
 
   @override
   Future<ShareIdentityProbe> probeIdentity({required String? pinned}) async {
+    await _reconcilePin();
+    switch (_pinState) {
+      case SshPinUpgrade.changed:
+        return const ShareIdentityProbe.refused(
+            'the host presents another key than the pinned fingerprint');
+      case SshPinUpgrade.unconfirmed:
+        return const ShareIdentityProbe.unavailable(
+            'pinned fingerprint not confirmed (ssh-keyscan gave no key)');
+      case SshPinUpgrade.none:
+      case SshPinUpgrade.upgraded:
+        break;
+    }
     final r = await _run('ssh', _sshArgs(['exit', '0']),
         timeout: ArchiveTransport.kMetadataTimeout);
     if (r == null) {
@@ -650,6 +730,7 @@ class SftpTransport extends ArchiveTransport {
   Future<bool> testConnectivity({Duration? timeout}) async {
     final effectiveTimeout = timeout ?? ArchiveTransport.kProbeTimeout;
     try {
+      await _reconcilePin();
       final target = _username != null ? '$_username@$_host' : _host;
       final result = await _run(
         'sftp',
@@ -671,6 +752,7 @@ class SftpTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SFTP upload');
+    await _reconcilePin();
     final tmpFile = _transientFile(tempDir,
         'cleona_sftp_upload_${DateTime.now().millisecondsSinceEpoch}');
     final batchFile = _transientFile(
@@ -719,6 +801,7 @@ class SftpTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     requireIdentity('SFTP download');
+    await _reconcilePin();
     final tmpFile = _transientFile(tempDir,
         'cleona_sftp_download_${DateTime.now().millisecondsSinceEpoch}');
     final batchFile = _transientFile(tempDir,
@@ -774,6 +857,7 @@ class SftpTransport extends ArchiveTransport {
   @override
   Future<void> createDirectory(String remotePath) async {
     requireIdentity('SFTP mkdir');
+    await _reconcilePin();
     // null (deadline) is treated like an exit code != 0 — as before,
     // the exit code is not evaluated here.
     await _run(
@@ -786,6 +870,7 @@ class SftpTransport extends ArchiveTransport {
   @override
   Future<bool> fileExists(String remotePath) async {
     requireIdentity('SFTP stat');
+    await _reconcilePin();
     final result = await _run(
       'ssh',
       _sshArgs(['test', '-f', '$_basePath$remotePath']),
@@ -797,6 +882,7 @@ class SftpTransport extends ArchiveTransport {
   @override
   Future<void> deleteFile(String remotePath) async {
     requireIdentity('SFTP delete');
+    await _reconcilePin();
     await _run(
       'ssh',
       _sshArgs(['rm', '-f', '$_basePath$remotePath']),
@@ -807,6 +893,7 @@ class SftpTransport extends ArchiveTransport {
   @override
   Future<List<String>> listDirectory(String remotePath) async {
     requireIdentity('SFTP list');
+    await _reconcilePin();
     final result = await _run(
       'ssh',
       _sshArgs(['ls', '$_basePath$remotePath']),

@@ -191,7 +191,18 @@ class VideoSession private constructor(
     private var encodeThread: Thread? = null
     private var decodeOutThread: Thread? = null
     private var decodeInThread: Thread? = null
+    /** Generation of the whole running pipeline: bumped by [start] and
+     *  [stop] only. The two decode threads run against it. */
     @Volatile private var generation = 0
+    /** Separate from [generation]: a geometry change of OUR encoder in
+     *  [reconfigure] restarts camera + encoder only and bumps just this one.
+     *  The decoder renders the PEER's stream into the texture whose id
+     *  cleona_video.h promises stable between start() and stop() — it must
+     *  not restart because our own picture changed size. Monotonic and never
+     *  reused, so a stale encode thread can never be revived by a later
+     *  value. Bumped by [stop], by [stopEncodeThreadLocked] and by
+     *  [launchEncodeThreadLocked]. */
+    @Volatile private var encodeGeneration = 0
 
     /** Erratum 7: a decode-only session never had a camera. That is its state,
      *  not a user mute — [setCaptureEnabled] cannot lift it. */
@@ -211,9 +222,12 @@ class VideoSession private constructor(
     @Volatile private var pendingSyncFrameRequest = true
     private var framesSinceKeyframe = 0
 
-    // Codec-config bytes (SPS/PPS) buffered from BUFFER_FLAG_CODEC_CONFIG and
-    // prepended to the next keyframe -- see encodeLoop().
-    @Volatile private var pendingConfigBytes: ByteArray? = null
+    // Codec-config bytes (SPS/PPS) of the current encoder, taken from
+    // BUFFER_FLAG_CODEC_CONFIG and prepended to EVERY keyframe -- see
+    // encodeLoop(). Kept, not consumed: a receiver whose decoder missed the
+    // first keyframe could otherwise never decode (S431 33.G14; the Apple
+    // backend does the same, cleona_video_apple.m avcc_to_annexb).
+    @Volatile private var configBytes: ByteArray? = null
 
     // Presentation clock: accumulated per frame, never `index * 1e6 / fps`, so
     // that a reconfigure which raises fps again cannot walk pts backwards
@@ -285,17 +299,44 @@ class VideoSession private constructor(
         return VErr.OK
     }
 
-    /** Resets per-run state and launches the three data-path threads against
-     *  [gen]. Shared by [start] and reconfigure()'s geometry-change restart
-     *  path (both success and post-failure fallback) so the two can never
-     *  drift apart -- a session with a live pipeline but no threads driving
-     *  it would hang every future readEncoded()/submitEncoded() silently.
-     *  Caller holds [lock] and has already set `encoder`/`decoder` (via
+    /** Resets per-run state and launches the data-path threads: the two
+     *  decode threads against [gen], the encode thread via
+     *  [launchEncodeThreadLocked]. Called by [start] only -- a geometry
+     *  change in reconfigure() restarts the encode side alone through
+     *  [launchEncodeThreadLocked] and leaves the decode side (threads,
+     *  [awaitingKeyframe], [inputQueue], texture) running. Caller holds
+     *  [lock] and has already set `encoder`/`decoder` (via
      *  [openCameraAndPipeline]) for the generation being launched. */
     private fun launchDataThreadsLocked(gen: Int) {
+        awaitingKeyframe = true
+        inputQueue.reset()
+
+        // Erratum 7: no camera and no encoder, so there is nothing for the
+        // encode thread to drive. encodeLoop() would return immediately on its
+        // `val codec = encoder ?: return`, but a group call with three remote
+        // tiles (docs/CALLS.md) would still have started three threads to do
+        // nothing. stop() joins these null-safely.
+        if (!decodeOnly) launchEncodeThreadLocked()
+        decodeOutThread = Thread({ decodeOutLoop(gen) }, "cleona-video-decode-out").apply {
+            start()
+        }
+        decodeInThread = Thread({ decodeInLoop(gen) }, "cleona-video-decode-in").apply {
+            start()
+        }
+    }
+
+    /** Resets the encode-side per-run state and launches the encode thread
+     *  against a fresh [encodeGeneration]. Shared by [start] (through
+     *  [launchDataThreadsLocked]) and reconfigure()'s geometry-change restart
+     *  (success and post-failure fallback) so the two can never drift apart
+     *  -- a session with a live encoder but no thread draining it would hang
+     *  every future readEncoded() silently. Caller holds [lock], has already
+     *  set `encoder` for the run being launched, and -- on the reconfigure
+     *  path -- has stopped the previous encode thread with
+     *  [stopEncodeThreadLocked], so nothing races the resets below. */
+    private fun launchEncodeThreadLocked() {
         pendingSyncFrameRequest = true
         framesSinceKeyframe = 0
-        awaitingKeyframe = true
         // ptsOriginUs is reset (a brand-new MediaCodec instance has its own
         // raw presentation-time clock starting near zero, so the old offset
         // is meaningless) -- but lastPtsUs is deliberately NOT reset here.
@@ -310,28 +351,32 @@ class VideoSession private constructor(
         // the anchor still lands at pts=0 for the first frame, matching
         // "starts near zero at first start()" (cleona_video.h).
         ptsOriginUs = -1L
-        pendingConfigBytes = null
+        configBytes = null
         outputRing.reset()
         pendingTooSmall = null
-        inputQueue.reset()
+        val egen = ++encodeGeneration
+        encodeThread = Thread({ encodeLoop(egen) }, "cleona-video-encode").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+    }
 
-        // Erratum 7: no camera and no encoder, so there is nothing for the
-        // encode thread to drive. encodeLoop() would return immediately on its
-        // `val codec = encoder ?: return`, but a group call with three remote
-        // tiles (docs/CALLS.md) would still have started three threads to do
-        // nothing. stop() joins these null-safely.
-        if (!decodeOnly) {
-            encodeThread = Thread({ encodeLoop(gen) }, "cleona-video-encode").apply {
-                priority = Thread.MAX_PRIORITY
-                start()
-            }
-        }
-        decodeOutThread = Thread({ decodeOutLoop(gen) }, "cleona-video-decode-out").apply {
-            start()
-        }
-        decodeInThread = Thread({ decodeInLoop(gen) }, "cleona-video-decode-in").apply {
-            start()
-        }
+    /** Ends the current encode thread BEFORE its encoder is released under
+     *  it. Bumping [encodeGeneration] makes [encodeLoop] leave at its next
+     *  loop check, at the latest after one ENCODER_DEQUEUE_TIMEOUT_US;
+     *  joining here means the old thread is no longer inside a MediaCodec
+     *  call (a released codec throws IllegalStateException) and no longer
+     *  writes [outputRing], [framesSinceKeyframe] or the pts state that
+     *  [launchEncodeThreadLocked] resets. Safe under [lock]: encodeLoop never
+     *  takes [lock], and [VideoFrameRing.offer] does not block. Should the
+     *  join time out anyway, encodeLoop's own IllegalStateException catch
+     *  still ends the thread quietly. */
+    private fun stopEncodeThreadLocked() {
+        ++encodeGeneration
+        val t = encodeThread ?: return
+        runCatching { t.join(THREAD_JOIN_MS) }
+        if (t.isAlive) Log.w(TAG, "encode thread did not end within ${THREAD_JOIN_MS}ms")
+        encodeThread = null
     }
 
     /** `cleona_video_stop`. Idempotent; drops everything queued. */
@@ -341,6 +386,7 @@ class VideoSession private constructor(
             if (state != ST_RUNNING) return
             state = ST_OPEN
             gen = ++generation
+            ++encodeGeneration
             teardownPipelineLocked()
         }
         outputRing.wakeAll()
@@ -379,6 +425,22 @@ class VideoSession private constructor(
      *  the ABI defines reconfigure's failure channel as the return code, not
      *  the out array (unlike open()'s Erratum 6b in-band channel). */
     fun reconfigure(cfg: IntArray, out: IntArray): Int = lock.withLock {
+        // S431 measurement M-3 for 33.G14 L5-33-3 (S431-RCA-33G14-CODE.md):
+        // when reconfigure() runs and how long it holds the caller (the Dart
+        // isolate that also feeds the decoder). Lines only; the body below is
+        // unchanged and still runs under the same lock. Read only, removed
+        // once the cause is proven.
+        val diagEnterMs = android.os.SystemClock.elapsedRealtime()
+        Log.i(TAG, "[video-diag] reconfigure enter t=$diagEnterMs " +
+            "own=${negotiated.width}x${negotiated.height} state=$state")
+        val rc = reconfigureLocked(cfg, out)
+        val diagExitMs = android.os.SystemClock.elapsedRealtime()
+        Log.i(TAG, "[video-diag] reconfigure exit t=$diagExitMs durationMs=${diagExitMs - diagEnterMs} " +
+            "rc=$rc own=${negotiated.width}x${negotiated.height}")
+        rc
+    }
+
+    private fun reconfigureLocked(cfg: IntArray, out: IntArray): Int {
         if (state == ST_CLOSED) return VErr.ERR_STATE
         val req = VConfig.fromInts(cfg) ?: return VErr.ERR_INVALID
         if (!req.isValid()) return VErr.ERR_INVALID
@@ -396,7 +458,16 @@ class VideoSession private constructor(
         } else {
             val chars = runCatching { cameraManager!!.getCameraCharacteristics(cameraId) }
                 .getOrNull() ?: return VErr.ERR_BACKEND
-            choosePreset(chars, req) ?: return VErr.ERR_RATE_UNACHIEVABLE
+            when (val choice = choosePreset(chars, req)) {
+                is PresetChoice.Fits -> choice.preset
+                is PresetChoice.BelowDeviceMinimum -> {
+                    Log.i(TAG, "request ${req.width}x${req.height} below the camera's smallest " +
+                        "size ${choice.smallestWidth}x${choice.smallestHeight} -- " +
+                        "ERR_BELOW_DEVICE_MINIMUM, session unchanged")
+                    return VErr.ERR_BELOW_DEVICE_MINIMUM
+                }
+                PresetChoice.RateUnachievable -> return VErr.ERR_RATE_UNACHIEVABLE
+            }
         }
 
         val geometryChanged = preset.width != negotiated.width || preset.height != negotiated.height
@@ -411,35 +482,53 @@ class VideoSession private constructor(
         )
 
         if (state == ST_RUNNING) {
-            if (geometryChanged) {
+            if (decodeOnly) {
+                // Erratum 7: no camera and no encoder, so a new size has
+                // nothing to restart. The decoder follows the PEER's stream
+                // (its SPS), not this negotiation, and restarting it would
+                // replace the texture whose id cleona_video.h promises stable
+                // between start() and stop(). Only `negotiated` changes,
+                // below.
+            } else if (geometryChanged) {
                 // The peer's decoder cannot continue from a reference picture
-                // of a different size -- restart camera + encoder with the
-                // new geometry. A failure here is a device condition
+                // of a different size -- restart OUR camera + encoder with
+                // the new geometry. The decode side (decoder, its threads,
+                // awaitingKeyframe, inputQueue and the texture) belongs to
+                // the peer's stream and stays untouched: the id returned by
+                // getTextureId() is stable between start() and stop()
+                // (cleona_video.h). A failure here is a device condition
                 // (ERR_BACKEND), not a link condition: phase 1 already
                 // proved a step fits: getting the hardware to actually run it
                 // is a separate question.
-                val gen = ++generation
-                teardownPipelineLocked()
-                val rc = openCameraAndPipeline(next)
+                teardownCameraOnlyLocked()
+                stopEncodeThreadLocked()
+                Log.i(TAG, "[video-diag] reconfigure phase=encodeThreadStopped " +
+                    "t=${android.os.SystemClock.elapsedRealtime()} " +
+                    "${negotiated.width}x${negotiated.height}->${next.width}x${next.height}")
+                releaseEncoderLocked()
+                val rc = openCameraAndEncoder(next)
                 if (rc != VErr.OK) {
                     // Side-effect free on failure (cleona_video.h): fall back
                     // to the previous configuration rather than leaving the
-                    // session half-torn-down. openCameraAndPipeline() closes
+                    // session half-torn-down. openCameraAndEncoder() closes
                     // whatever it partially opened before returning a
                     // non-OK code (see its own doc), so there is nothing left
                     // to tear down before retrying with the old config.
-                    val fallbackRc = openCameraAndPipeline(negotiated)
+                    val fallbackRc = openCameraAndEncoder(negotiated)
                     if (fallbackRc == VErr.OK) {
-                        // The old encode/decode threads already exited (their
-                        // captured `gen` no longer matches `generation`,
-                        // bumped above) -- new ones are required, or
-                        // readEncoded()/submitEncoded() would hang forever
-                        // against a live but undriven pipeline.
-                        launchDataThreadsLocked(gen)
+                        // The old encode thread was ended above -- a new one
+                        // is required, or readEncoded() would wait forever
+                        // against a live but undriven encoder.
+                        launchEncodeThreadLocked()
+                    } else {
+                        // Neither geometry runs: the session keeps decoding
+                        // the peer (decode side untouched) and sends nothing;
+                        // readEncoded() reports READ_TIMEOUT until stop().
+                        Log.e(TAG, "reconfigure: encoder fallback to the previous geometry failed ($fallbackRc)")
                     }
                     return rc
                 }
-                launchDataThreadsLocked(gen)
+                launchEncodeThreadLocked()
             } else {
                 // Pure rate change: dynamic bitrate via PARAMETER_KEY_VIDEO_BITRATE,
                 // no restart, no forced keyframe (cleona_video.h: "a pure rate
@@ -562,24 +651,29 @@ class VideoSession private constructor(
         // this by blocking here to wait for the decode to finish; the
         // correct fix is removing self-inflicted latency instead.
         //
-        // A stale `decoder` reference (torn down concurrently by
-        // reconfigure()'s geometry-change restart) throws on these calls;
+        // A stale `decoder` reference (torn down concurrently by stop();
+        // reconfigure() never touches the decoder) throws on these calls;
         // caught and treated as "fast path unavailable", falling through to
         // the queued path below, which is generation-scoped in
         // [decodeInLoop] and therefore already race-safe.
         val d = decoder
         if (d != null) {
+            val diagDeqStartMs = android.os.SystemClock.elapsedRealtime()
             val idx = try {
                 d.dequeueInputBuffer(0)
             } catch (e: Exception) {
                 -1
             }
+            logIfSlow("dequeueInputBuffer(fast)", diagDeqStartMs)
             if (idx >= 0) {
                 try {
                     val ib = d.getInputBuffer(idx)
                     ib?.clear()
                     ib?.put(data)
+                    val diagQueueStartMs = android.os.SystemClock.elapsedRealtime()
                     d.queueInputBuffer(idx, 0, data.size, 0, bufferFlags)
+                    logIfSlow("queueInputBuffer(fast)", diagQueueStartMs)
+                    diagInQueued.incrementAndGet()
                     return VErr.SUBMIT_ACCEPTED
                 } catch (e: Exception) {
                     Log.w(TAG, "direct queueInputBuffer failed, falling back to the queue", e)
@@ -594,6 +688,7 @@ class VideoSession private constructor(
         }
 
         if (!inputQueue.offer(data, bufferFlags)) {
+            diagQueueFull.incrementAndGet()
             // Queue full: the decoder is falling behind. Dropping is the
             // right call for a live-media path (I8) -- this frame is stale by
             // the time it could be fed anyway. Counted as a decode failure
@@ -757,6 +852,40 @@ class VideoSession private constructor(
         return rebuildCaptureSessionBlocking(cfg)
     }
 
+    /** Camera + encoder only, for reconfigure()'s geometry change; the
+     *  decoder and its texture stay as they are. Caller holds [lock], has
+     *  already closed the previous camera ([teardownCameraOnlyLocked]) and
+     *  released the previous encoder ([releaseEncoderLocked]), and never
+     *  calls this on a decode-only session. Same phase-2 discipline as
+     *  [openCameraAndPipeline]: every failure is ERR_BACKEND or
+     *  ERR_UNSUPPORTED, never ERR_RATE_UNACHIEVABLE. Unlike
+     *  [openCameraAndPipeline] (whose caller start() tears down on failure),
+     *  this closes everything it opened on EVERY non-OK return, including a
+     *  capture session that did not configure, so reconfigure() can retry
+     *  with the previous geometry and leaves nothing half-open if that fails
+     *  too. */
+    private fun openCameraAndEncoder(cfg: VConfig): Int {
+        val device = openCameraDeviceBlocking(cameraId)
+        // S431 measurement M-3 (see reconfigure()): only caller is reconfigure().
+        Log.i(TAG, "[video-diag] reconfigure phase=cameraOpened " +
+            "t=${android.os.SystemClock.elapsedRealtime()} ok=${device != null}")
+        if (device == null) return VErr.ERR_BACKEND // reason logged in openCameraDeviceBlocking
+        cameraDevice = device
+        val encRc = configureEncoder(cfg)
+        Log.i(TAG, "[video-diag] reconfigure phase=encoderConfigured " +
+            "t=${android.os.SystemClock.elapsedRealtime()} rc=$encRc ${cfg.width}x${cfg.height}")
+        if (encRc != VErr.OK) {
+            teardownCameraOnlyLocked()
+            return encRc
+        }
+        val capRc = rebuildCaptureSessionBlocking(cfg)
+        if (capRc != VErr.OK) {
+            teardownCameraOnlyLocked()
+            releaseEncoderLocked()
+        }
+        return capRc
+    }
+
     /** Opens [id]. Returns null on ANY failure and logs which of the four
      *  device-level reasons it was — all four map to ERR_BACKEND at the call
      *  site above except "no camera at all", which is caught earlier by
@@ -778,8 +907,9 @@ class VideoSession private constructor(
             return null
         }
         // Erratum 7: a decode-only session has no CameraManager. It never
-        // reaches this function -- openCameraAndPipeline() returns before it
-        // and switchCamera() refuses with ERR_UNSUPPORTED -- so this is a
+        // reaches this function -- openCameraAndPipeline() returns before it,
+        // reconfigure() never calls openCameraAndEncoder() for it, and
+        // switchCamera() refuses with ERR_UNSUPPORTED -- so this is a
         // guard against a future caller, not a live path. Returning null (the
         // documented "device condition" answer) rather than `!!` keeps that
         // hypothetical bug a logged ERR_BACKEND instead of a crash in JNI.
@@ -1018,12 +1148,14 @@ class VideoSession private constructor(
     }
 
     /** Releases the decoder AND the texture/surface [acquireDecodeSurfaceLocked]
-     *  created for it. The two are 1:1 with the decoder's lifetime: a geometry
-     *  change in [reconfigure] tears the whole pipeline down and calls
-     *  [configureDecoder] again, which acquires a brand-new texture. Without
-     *  releasing the old one here first, every geometry-changing reconfigure
-     *  would leak a Flutter texture (or, in the conformance harness, a GL
-     *  context and its thread). */
+     *  created for it. The two are 1:1 with the decoder's lifetime, which is
+     *  exactly start() .. stop(): the next start() calls [configureDecoder]
+     *  again, which acquires a brand-new texture, so without releasing the
+     *  old one here every stop/start cycle would leak a Flutter texture (or,
+     *  in the conformance harness, a GL context and its thread). A geometry
+     *  change in [reconfigure] never comes here -- it restarts camera +
+     *  encoder only, so the texture id stays stable between start() and
+     *  stop() (cleona_video.h). */
     private fun releaseDecoderLocked() {
         runCatching { decoder?.stop() }
         runCatching { decoder?.release() }
@@ -1041,11 +1173,31 @@ class VideoSession private constructor(
     // ═════════════════════════════════════════════════════════════════════
 
     /** Drains the encoder's output side: assembles SPS/PPS + IDR into one
-     *  keyframe, enforces the I9 ceiling, and pushes into [outputRing]. */
-    private fun encodeLoop(gen: Int) {
+     *  keyframe, enforces the I9 ceiling, and pushes into [outputRing].
+     *  Runs against [encodeGeneration] ([egen]), not [generation]: a
+     *  geometry change in reconfigure() ends this thread on its own
+     *  ([stopEncodeThreadLocked]) while the decode threads keep running. */
+    private fun encodeLoop(egen: Int) {
         val codec = encoder ?: return
+        try {
+            encodeLoopBody(codec, egen)
+        } catch (e: IllegalStateException) {
+            // A MediaCodec call on an encoder that was stopped/released under
+            // this thread (stop(), or a geometry change whose join timed out)
+            // throws IllegalStateException -- CodecException is a subclass,
+            // a plain "released" state error is not. Either way the encoder
+            // is gone and so is this thread's job; ending here instead of
+            // letting the exception reach the thread's uncaught handler,
+            // which on Android ends the whole process.
+            if (encodeGeneration == egen && state == ST_RUNNING) {
+                Log.e(TAG, "encoder threw while running", e)
+            }
+        }
+    }
+
+    private fun encodeLoopBody(codec: MediaCodec, egen: Int) {
         val info = MediaCodec.BufferInfo()
-        while (generation == gen && state == ST_RUNNING) {
+        while (encodeGeneration == egen && state == ST_RUNNING) {
             if (pendingSyncFrameRequest) {
                 pendingSyncFrameRequest = false
                 runCatching {
@@ -1076,7 +1228,7 @@ class VideoSession private constructor(
             codec.releaseOutputBuffer(idx, false)
 
             if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                pendingConfigBytes = bytes
+                configBytes = bytes
                 continue
             }
 
@@ -1109,10 +1261,9 @@ class VideoSession private constructor(
             val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
             var payload = bytes
             if (isKey) {
-                val cfgBytes = pendingConfigBytes
+                val cfgBytes = configBytes
                 if (cfgBytes != null) {
                     payload = cfgBytes + bytes
-                    pendingConfigBytes = null
                 }
                 framesSinceKeyframe = 0
             } else {
@@ -1143,7 +1294,7 @@ class VideoSession private constructor(
             if (ptsOriginUs < 0) {
                 // Anchor the new encoder generation's raw clock so the first
                 // frame continues from lastPtsUs, not from zero (see
-                // launchDataThreadsLocked's doc). lastPtsUs is -1 only before
+                // launchEncodeThreadLocked's doc). lastPtsUs is -1 only before
                 // the very first frame of the session, giving origin=rawPts
                 // and pts=0 for that frame, matching "starts near zero at
                 // first start()".
@@ -1174,23 +1325,29 @@ class VideoSession private constructor(
             var idx = -1
             var tries = 0
             while (idx < 0 && tries < 25 && generation == gen && state == ST_RUNNING) {
+                val diagDeqStartMs = android.os.SystemClock.elapsedRealtime()
                 idx = try {
                     codec.dequeueInputBuffer(DECODER_DEQUEUE_TIMEOUT_US)
                 } catch (e: MediaCodec.CodecException) {
                     Log.e(TAG, "decoder dequeueInputBuffer threw", e)
                     -1
                 }
+                logIfSlow("dequeueInputBuffer", diagDeqStartMs)
                 tries++
             }
             if (idx < 0) {
                 decodeFailures.incrementAndGet()
+                diagInDropped.incrementAndGet()
                 continue
             }
             try {
                 val ib = codec.getInputBuffer(idx)
                 ib?.clear()
                 ib?.put(item.data)
+                val diagQueueStartMs = android.os.SystemClock.elapsedRealtime()
                 codec.queueInputBuffer(idx, 0, item.data.size, 0, item.flags)
+                logIfSlow("queueInputBuffer", diagQueueStartMs)
+                diagInQueued.incrementAndGet()
             } catch (e: Exception) {
                 Log.e(TAG, "queueInputBuffer failed", e)
                 decodeFailures.incrementAndGet()
@@ -1205,20 +1362,66 @@ class VideoSession private constructor(
         val codec = decoder ?: return
         val info = MediaCodec.BufferInfo()
         while (generation == gen && state == ST_RUNNING) {
+            val diagDeqStartMs = android.os.SystemClock.elapsedRealtime()
             val idx = try {
                 codec.dequeueOutputBuffer(info, DECODER_DEQUEUE_TIMEOUT_US)
             } catch (e: MediaCodec.CodecException) {
                 Log.e(TAG, "decoder dequeueOutputBuffer threw", e)
                 break
             }
+            logIfSlow("dequeueOutputBuffer", diagDeqStartMs)
             when {
-                idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
-                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> continue
+                idx == MediaCodec.INFO_TRY_AGAIN_LATER -> diagOutTryAgain.incrementAndGet()
+                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> diagOutFormat.incrementAndGet()
                 idx >= 0 -> {
                     codec.releaseOutputBuffer(idx, true)
                     framesDecoded.incrementAndGet()
+                    diagOutReleased.incrementAndGet()
                 }
             }
+            logDecoderDiag()
+        }
+    }
+
+    // S430 measurement for 33.G14 L5-33-3 (S430-VORLAGE-BEFUNDE.md): in the
+    // re-run of 20.11.2026 the receiver's goldfish H.264 decoder took no input
+    // after 12:27:03, and every later frame was refused with a full input
+    // queue. Which side stalls — no free input buffers (decodeInLoop drops
+    // after 25 x 20 ms), or no output coming back — the logs did not say. One
+    // line per second while a decoder runs; read only, removed once the cause
+    // is proven.
+    private val diagInQueued = java.util.concurrent.atomic.AtomicInteger()
+    private val diagInDropped = java.util.concurrent.atomic.AtomicInteger()
+    private val diagOutReleased = java.util.concurrent.atomic.AtomicInteger()
+    private val diagOutTryAgain = java.util.concurrent.atomic.AtomicInteger()
+    private val diagOutFormat = java.util.concurrent.atomic.AtomicInteger()
+    private val diagQueueFull = java.util.concurrent.atomic.AtomicInteger()
+    @Volatile private var diagLastMs = 0L
+
+    private fun logDecoderDiag() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - diagLastMs < 1000L) return
+        // M-3 (S431): the gap since the previous line, taken before
+        // diagLastMs is overwritten — tells "thread stood" from "lines lost".
+        val sinceLastMs = now - diagLastMs
+        diagLastMs = now
+        Log.i(TAG, "[video-diag] decoder 1s: sinceLastMs=$sinceLastMs inQueued=${diagInQueued.getAndSet(0)} " +
+            "inDropped=${diagInDropped.getAndSet(0)} queueFull=${diagQueueFull.getAndSet(0)} " +
+            "queueSize=${inputQueue.size()} " +
+            "outReleased=${diagOutReleased.getAndSet(0)} outTryAgain=${diagOutTryAgain.getAndSet(0)} " +
+            "outFormatChanged=${diagOutFormat.getAndSet(0)} decodeFailures=${decodeFailures.get()}")
+    }
+
+    // S431 measurement M-2 for 33.G14 L5-33-3 (S431-RCA-33G14-CODE.md): how
+    // long each decoder call takes. One line only from 200 ms on, so a
+    // healthy decoder writes nothing. Timing only around existing calls, no
+    // change of result or flow; read only, removed once the cause is proven.
+    private val diagSlowCallMs = 200L
+
+    private fun logIfSlow(call: String, startMs: Long) {
+        val ms = android.os.SystemClock.elapsedRealtime() - startMs
+        if (ms >= diagSlowCallMs) {
+            Log.i(TAG, "[video-diag] slow $call ${ms}ms thread=${Thread.currentThread().name}")
         }
     }
 
@@ -1273,15 +1476,19 @@ class VideoSession private constructor(
          *  [reconfigure], touching no camera and no codec — only static
          *  `CameraCharacteristics` and arithmetic. Mirrors the mock's single
          *  `negotiate()` so open() and a later reconfigure() can never
-         *  disagree about what this backend supports. Returns null when
-         *  nothing achievable fits `req.maxFrameBytes` — the ONLY condition
-         *  under which this backend returns ERR_RATE_UNACHIEVABLE anywhere. */
-        private fun choosePreset(chars: CameraCharacteristics, req: VConfig): Preset? {
+         *  disagree about what this backend supports. Returns
+         *  [PresetChoice.RateUnachievable] when nothing achievable fits
+         *  `req.maxFrameBytes` — the ONLY condition under which this backend
+         *  returns ERR_RATE_UNACHIEVABLE anywhere — and
+         *  [PresetChoice.BelowDeviceMinimum] when the requested width or
+         *  height lies below every size the camera offers (Erratum 8: never
+         *  negotiate up). */
+        private fun choosePreset(chars: CameraCharacteristics, req: VConfig): PresetChoice {
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                ?: return null
+                ?: return PresetChoice.RateUnachievable
             val sizes = runCatching { map.getOutputSizes(android.media.MediaCodec::class.java) }
                 .getOrNull()?.toList().orEmpty()
-            if (sizes.isEmpty()) return null
+            if (sizes.isEmpty()) return PresetChoice.RateUnachievable
 
             val fpsRanges = chars.get(
                 CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
@@ -1293,13 +1500,13 @@ class VideoSession private constructor(
             val resSteps = sizes.filter { it.width <= req.width && it.height <= req.height }
                 .distinct()
                 .sortedByDescending { it.width.toLong() * it.height }
-                .ifEmpty {
-                    // The camera's smallest MediaCodec-class size still exceeds
-                    // the request on one axis (unusual, but not a link
-                    // condition) -- fall back to the globally smallest size the
-                    // camera offers; still capped downward relative to itself.
-                    listOf(sizes.minByOrNull { it.width.toLong() * it.height } ?: return null)
-                }
+            if (resSteps.isEmpty()) {
+                // Erratum 8: every MediaCodec-class size of the camera exceeds
+                // the request on at least one axis. Not a link condition, and
+                // never negotiated up: the camera cannot go this small.
+                val smallest = sizes.minByOrNull { it.width.toLong() * it.height }!!
+                return PresetChoice.BelowDeviceMinimum(smallest.width, smallest.height)
+            }
 
             val reqArea = (req.width.toLong() * req.height).coerceAtLeast(1)
 
@@ -1312,11 +1519,11 @@ class VideoSession private constructor(
                     )
                     val estimate = estimateWorstCaseKeyframeBytes(bitrateKbps, fps)
                     if (estimate <= req.maxFrameBytes * CEILING_SAFETY_MARGIN) {
-                        return Preset(size.width, size.height, fps, bitrateKbps)
+                        return PresetChoice.Fits(Preset(size.width, size.height, fps, bitrateKbps))
                     }
                 }
             }
-            return null
+            return PresetChoice.RateUnachievable
         }
 
         /**
@@ -1324,7 +1531,9 @@ class VideoSession private constructor(
          *
          * A decode-only session has no sensor that could cap the geometry, so
          * the requested width/height/fps stand as-is; they remain meaningful
-         * because the decoder and the texture are sized from them. What does
+         * because the decoder is configured with them at start() (a later
+         * reconfigure() only records them; the decoder and its texture stay
+         * and follow the peer's stream, see [reconfigure]). What does
          * NOT change is the rate arithmetic: the erratum keeps the encode-side
          * fields' validity rules intact precisely so open() and reconfigure()
          * cannot disagree about the same configuration (Erratum 6b case 1).
@@ -1389,6 +1598,7 @@ class VideoSession private constructor(
         fun abiConstants(): IntArray = intArrayOf(
             VErr.OK, VErr.ERR_INVALID, VErr.ERR_STATE, VErr.ERR_UNSUPPORTED, VErr.ERR_BACKEND,
             VErr.ERR_BUFFER_TOO_SMALL, VErr.ERR_DECODE, VErr.ERR_RATE_UNACHIEVABLE,
+            VErr.ERR_BELOW_DEVICE_MINIMUM,
             VErr.READ_FRAME, VErr.READ_TIMEOUT,
             VErr.SUBMIT_ACCEPTED, VErr.SUBMIT_AWAITING_KEYFRAME,
             VAbi.FLAG_KEYFRAME,
@@ -1483,12 +1693,20 @@ class VideoSession private constructor(
                 Log.e(TAG, "getCameraCharacteristics failed", e)
                 return fail(VErr.ERR_BACKEND)
             }
-            val preset = choosePreset(chars, req)
-            if (preset == null) {
-                Log.i(TAG, "no achievable preset fits maxFrameBytes=${req.maxFrameBytes} " +
-                    "for ${req.width}x${req.height}@${req.fps} (link too slow) -- " +
-                    "ERR_RATE_UNACHIEVABLE, no camera was opened")
-                return fail(VErr.ERR_RATE_UNACHIEVABLE)
+            val preset = when (val choice = choosePreset(chars, req)) {
+                is PresetChoice.Fits -> choice.preset
+                is PresetChoice.BelowDeviceMinimum -> {
+                    Log.i(TAG, "request ${req.width}x${req.height} below the camera's smallest " +
+                        "size ${choice.smallestWidth}x${choice.smallestHeight} -- " +
+                        "ERR_BELOW_DEVICE_MINIMUM, no camera was opened")
+                    return fail(VErr.ERR_BELOW_DEVICE_MINIMUM)
+                }
+                PresetChoice.RateUnachievable -> {
+                    Log.i(TAG, "no achievable preset fits maxFrameBytes=${req.maxFrameBytes} " +
+                        "for ${req.width}x${req.height}@${req.fps} (link too slow) -- " +
+                        "ERR_RATE_UNACHIEVABLE, no camera was opened")
+                    return fail(VErr.ERR_RATE_UNACHIEVABLE)
+                }
             }
 
             val negotiated = VConfig(
@@ -1599,6 +1817,7 @@ internal object VErr {
     const val ERR_BUFFER_TOO_SMALL = -5
     const val ERR_DECODE = -6
     const val ERR_RATE_UNACHIEVABLE = -7
+    const val ERR_BELOW_DEVICE_MINIMUM = -8
 
     const val READ_FRAME = 1
     const val READ_TIMEOUT = 0
@@ -1704,6 +1923,15 @@ private fun writeCfgInto(out: IntArray, c: VConfig) {
 /** One achievable encoder step from the preset ladder (Phase 1). */
 private data class Preset(val width: Int, val height: Int, val fps: Int, val bitrateKbps: Int)
 
+/** Result of the PHASE 1 negotiation (see the class doc's "one trap"). */
+private sealed interface PresetChoice {
+    data class Fits(val preset: Preset) : PresetChoice
+    /** Erratum 8: width or height below the camera's smallest MediaCodec size. */
+    data class BelowDeviceMinimum(val smallestWidth: Int, val smallestHeight: Int) : PresetChoice
+    /** No bitrate step fits req.maxFrameBytes (Erratum 1). */
+    object RateUnachievable : PresetChoice
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // Bounded, drop-oldest frame ring for the encoder->readEncoded() hand-off.
 // Mirrors VoiceSession.kt's FrameRing in shape (recycling would not help
@@ -1796,6 +2024,8 @@ private class InputQueue(private val capacity: Int) {
 
     fun wakeAll() = lock.withLock { closed = true; notEmpty.signalAll() }
     fun reset() = lock.withLock { queue.clear(); closed = false }
+    /** Fill level, for the S430 decoder measurement line only. */
+    fun size(): Int = lock.withLock { queue.size }
 }
 
 // ═════════════════════════════════════════════════════════════════════════

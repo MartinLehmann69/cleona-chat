@@ -32,9 +32,9 @@ void systemChannelsAttach(Host host, CleonaService service,
   final hub = service.systemChannelHub;
   _hubOfHost[host] = hub;
   hub.isContact = (node) => isContactDevice(host, node);
-  hub.attach(host.durableAttach(hub.stock));
+  hub.attach(host.durableAttach(hub.stock, phone: hub.store.phone));
   report?.call('mycelium:system channels attached '
-      '(${hub.store.holds ? 'holder' : 'reader'})');
+      '(holder, ${hub.store.phone ? 'phone' : 'desktop'})');
 }
 
 /// The edge "network change" or "a new neighbour" for the system channels.

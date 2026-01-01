@@ -56,8 +56,14 @@ enum {
     SABV_CAPTURE_CLOSED,  /* I12 — "own video off" reported as "session gone"  */
     SABV_NO_H264,         /* §10.6 — no mandatory interop level                */
     SABV_OPEN_ERR_SWAP,   /* E6b — unreachable rate reported as a caller bug   */
-    SABV_LEAK             /* leak surface of open()                            */
+    SABV_LEAK,            /* leak surface of open()                            */
+    SABV_FLOOR_UP         /* E8  — below the camera floor, answers larger      */
 };
+
+/* The imagined camera floor of SABV_FLOOR_UP — the smallest size of the
+ * camera in case 33.G14 (S431). */
+#define SABV_FLOOR_W 320
+#define SABV_FLOOR_H 240
 
 static int sabv_mode(void) {
     static int cached = -1;
@@ -70,6 +76,7 @@ static int sabv_mode(void) {
     else if (strcmp(v, "no_h264") == 0)       cached = SABV_NO_H264;
     else if (strcmp(v, "open_err_swap") == 0) cached = SABV_OPEN_ERR_SWAP;
     else if (strcmp(v, "leak") == 0)          cached = SABV_LEAK;
+    else if (strcmp(v, "floor_up") == 0)      cached = SABV_FLOOR_UP;
     else                                      cached = SABV_NONE;
     return cached;
 }
@@ -116,6 +123,22 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
 CLEONA_VIDEO_API int32_t cleona_video_reconfigure(cleona_video_session_t* s,
                                                   const cleona_video_config_t* cfg,
                                                   cleona_video_config_t* out_negotiated) {
+    if (sabv_mode() == SABV_FLOOR_UP && cfg && cfg->width > 0 && cfg->height > 0 &&
+        (cfg->width < SABV_FLOOR_W || cfg->height < SABV_FLOOR_H)) {
+        /* Erratum 8: a request below the imagined camera floor is accepted
+         * with the floor geometry, i.e. negotiated UP, instead of being
+         * answered with ERR_BELOW_DEVICE_MINIMUM — what the Android backend
+         * did in case 33.G14. Every other field stays as requested, so only
+         * the geometry check of V35 can see it. */
+        cleona_video_config_t up = *cfg;
+        if (up.width < SABV_FLOOR_W) up.width = SABV_FLOOR_W;
+        if (up.height < SABV_FLOOR_H) up.height = SABV_FLOOR_H;
+        int32_t ur = sabv_reconfigure(s, &up, out_negotiated);
+        if (ur == CLEONA_VIDEO_OK && out_negotiated && out_negotiated->fps > 0) {
+            g_fps = out_negotiated->fps;
+        }
+        return ur;
+    }
     int32_t r = sabv_reconfigure(s, cfg, out_negotiated);
     if (r == CLEONA_VIDEO_OK && out_negotiated && out_negotiated->fps > 0) {
         g_fps = out_negotiated->fps;

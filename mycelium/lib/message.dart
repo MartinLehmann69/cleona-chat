@@ -24,11 +24,8 @@ export 'package:mycelium/message_plaintext.dart' show messagePlaintext;
 /// ── IT CARRIES BYTES, IT DOES NOT INTERPRET THEM ───────────────────────────
 /// The content is a [Uint8List] and nothing else (until S385 a [String],
 /// which broke the application's protobuf frames). Text is encoded ABOVE, at
-/// exactly one place (`MailboxOutbound.sendText`).
-///
-/// There is deliberately NO byte here that says what the content is. The
-/// application brings its own typing; a second one here would be
-/// a second truth that at some point deviates from the first.
+/// exactly one place (`MailboxOutbound.sendText`). NO byte here says what the
+/// content is: the application brings its own typing, a second would drift.
 ///
 /// ── THE SEALED PLAINTEXT ───────────────────────────────────────────────────
 /// ```
@@ -103,14 +100,10 @@ typedef Back = void Function(
 
 /// The way out for an OWN message.
 ///
-/// [destination] is the SUGGESTION for the first ladder step and may be `null`.
-/// That is no convenience but §8.2: the post box depends
-/// on the OWN neighbours, not on an address of the recipient
-/// (`node.dart`, `inPostBox` gets only `target.identifier`). Until S390
-/// this parameter was not nullable, and the mailbox's outbound therefore returned
-/// without an address BEFORE the ladder was entered at all —
-/// step 4 was unreachable exactly in the case for which §8.2 provides it
-/// (`berichte/S390-EVAL-NACHRICHT.md`, finding B-2).
+/// [destination] is the SUGGESTION for the first ladder step and may be `null`
+/// (§8.2: the post box depends on the OWN neighbours, not on an address of
+/// the recipient; until S390 step 4 was unreachable without one —
+/// `berichte/S390-EVAL-NACHRICHT.md`, finding B-2).
 typedef Out = void Function(Uint8List packet, CardAddress? destination);
 
 /// A received message as the recipient sees it.
@@ -167,8 +160,13 @@ class Messages {
 
   /// A receipt for no open outbound — after a restart the one the history
   /// still holds (§9.2, OP-30). [from] is the proven sender; the application
-  /// decides, without it the receipt is discarded.
-  void Function(Uint8List identifier, Address from)? onReceiptUnknown;
+  /// decides, without it the receipt is discarded. `true`: it took this
+  /// receipt as the FIRST for its message — only then is its list heard.
+  bool Function(Uint8List identifier, Address from)? onReceiptUnknown;
+
+  /// `true`: this identity already took a message under [identifier] — this
+  /// copy is a duplicate and its list is not heard (§9.2, owner 14.11.2026).
+  bool Function(Uint8List identifier)? known;
 
   /// An acknowledgement under eight zero bytes from [from]: the answer to an
   /// own `0x23` (§8.1, `where_are_you_answer.dart`) — D-76 sends again.
@@ -179,8 +177,10 @@ class Messages {
   ({List<CardAddress> list, bool keys}) Function(Address to) ownNeighbours =
       (_) => (list: const [], keys: false);
 
-  /// A peer's fixed neighbours came in a message or acknowledgement; [from]
-  /// is the sender inside the seal; [keyed]: the list carried the S407 bit.
+  /// A peer's fixed neighbours came in the FIRST copy of a message or
+  /// acknowledgement — a duplicate's list is ignored (§9.2 "duplicate
+  /// acknowledgement — ignored", owner 14.11.2026, S423); [from] is the
+  /// sender inside the seal; [keyed]: the list carried the S407 bit.
   /// An empty list is reported only with the bit.
   void Function(Address from, List<CardAddress> neighbours, bool keyed)? onNeighbours;
 
@@ -270,8 +270,10 @@ class Messages {
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
     );
-    final (identifier, content) = _cut(plaintext, sender);
-
+    final p = messagePlaintextRead(plaintext);
+    final identifier = p.identifier, content = p.rest;
+    // Asked BEFORE [onInbound], which keeps the identifier as taken.
+    if (!(known?.call(identifier) ?? false)) _heard(sender, p);
     report?.call('Message ${_short(identifier)} arrived');
     final inbound = Inbound(
       identifier: identifier,
@@ -316,17 +318,23 @@ class Messages {
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
     );
-    final (identifier, rest) = _cut(plaintext, sender);
-    if (rest.isNotEmpty) {
-      throw MessageError('Receipt with ${rest.length} B after the list');
+    final p = messagePlaintextRead(plaintext);
+    final identifier = p.identifier;
+    if (p.rest.isNotEmpty) {
+      throw MessageError('Receipt with ${p.rest.length} B after the list');
     }
     final outbound = _open[_key(identifier)];
     if (outbound == null) {
       final late = onReceiptUnknown;
       report?.call('Receipt ${_short(identifier)} without open outbound '
           '— ${late == null ? 'discarded' : 'handed to the application'}');
-      if (identifier.every((b) => b == 0)) onWhereAreYouAnswer?.call(sender);
-      late?.call(identifier, sender);
+      // Eight zero bytes: the answer to an own `0x23` — its list is the
+      // point (§8.1), heard before the edge it starts.
+      if (identifier.every((b) => b == 0)) {
+        _heard(sender, p);
+        onWhereAreYouAnswer?.call(sender);
+      }
+      if (late?.call(identifier, sender) ?? false) _heard(sender, p);
       return;
     }
     // Only the one to whom the message went may receipt — the IDENTITY, not
@@ -337,6 +345,7 @@ class Messages {
           '— discarded');
       return;
     }
+    _heard(sender, p); // the first: it closes the open outbound below
     outbound.state = DeliveryState.delivered;
     outbound..acknowledgedAt = DateTime.now()..acknowledgedFrom = origin;
     if (outbound.carriedChain) me.book.chainArrived(sender);
@@ -352,14 +361,13 @@ class Messages {
     return messagePlaintext(identifier, n.list, rest, keys: n.keys);
   }
 
-  /// Counterpart to [_head]: identifier and the rest
-  /// ([messagePlaintextRead]); the list goes to [onNeighbours].
-  (Uint8List, Uint8List) _cut(Uint8List plaintext, Address sender) {
-    final p = messagePlaintextRead(plaintext);
+  /// The list read by [messagePlaintextRead] goes to [onNeighbours] (only
+  /// for the first copy, see there).
+  void _heard(Address sender,
+      ({Uint8List identifier, List<CardAddress> neighbours, bool keyed, Uint8List rest}) p) {
     if (p.neighbours.isNotEmpty || p.keyed) {
       onNeighbours?.call(sender, p.neighbours, p.keyed);
     }
-    return (p.identifier, p.rest);
   }
 
   /// No route has carried — the caller gives up.

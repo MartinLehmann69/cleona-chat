@@ -577,8 +577,21 @@ extension CleonaServiceEnrolment on CleonaService {
       deviceNodeIdHex: q.namesSigningKeys
           ? bytesToHex(HdWallet.computeDeviceNodeId(q.deviceEd25519Pk!))
           : null,
+      // §14.6.3 "directly on the LAN while both devices are present, like
+      // §14.6.1 step 4" (S425 N5-00W08-1): until its first own-line deposit
+      // names where it is (§14.7, `_ownWhereFrom` replaces this), the new
+      // device is where its request said — the addresses the handover goes
+      // to directly and the holders it asks. Without them the initial
+      // reconciliation header went to the post box although both devices
+      // stood in the same LAN.
+      whereSegmentHex: bytesToHex(mycelium.ownWhereWire(
+          [for (final a in q.addresses) CardAddress(a.ip, a.port)])),
+      whereNeighboursHex: bytesToHex(mycelium.ownWhereWire(
+          [for (final h in q.holders) CardAddress(h.ip, h.port)])),
     );
     _saveDevices();
+    final addedId = _ownLineDeviceId(q.deviceIdHex);
+    if (addedId != null) _ownWhereHand(addedId, _devices[q.deviceIdHex]!);
     final body = enrolBodyOf(_enrolHandoverBuild());
     final placed = await _enrolAnswer(q, EnrolAnswerType.handover, body);
     _enrolAnnounce(q);

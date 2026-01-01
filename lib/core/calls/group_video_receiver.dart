@@ -208,6 +208,14 @@ class GroupVideoReceiver {
         _log.warn('Decode-only session for $short answered '
             'RATE_UNACHIEVABLE — backend does not honour Erratum 7');
         return PeerVideoState();
+      case VideoOpenBelowDeviceMinimum():
+        // Erratum 8: only a decode path with a geometry floor of its own
+        // answers this (Linux: below one macroblock). The peer's stream is
+        // smaller than this device can decode; no receive for this peer.
+        _log.warn('Decode-only session for $short answered '
+            'BELOW_DEVICE_MINIMUM for ${config.width}x${config.height} — '
+            'peer stays without picture');
+        return PeerVideoState();
     }
   }
 

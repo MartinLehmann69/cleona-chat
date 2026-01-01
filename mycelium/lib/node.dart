@@ -127,14 +127,14 @@ class Node {
       this.onEdit,
       this.onReadMark});
   int get port => _wire.port;
-  Future<({bool ipv4, bool? ipv6})> socketsReopen() => _wire.reopen(); // §11.1, §31.3
+  Future<({bool? ipv4, bool? ipv6})> socketsReopen() => _wire.reopen(); // §11.1, §31.3
   WireCounters get wireCounters => _wire.counters; // §25.5, read on looking
   bool linkLive(Neighbour n) => n.addresses.any((a) => stands(a.address, a.port)); // OP-23
   bool stands(InternetAddress a, int port) => _shell.stands(a, port); // a link to this address stands
 
-  /// A socket for the address family of [a]? IPv4 always, IPv6 while the wire has one (§11.1, V1).
+  /// A socket for the address kind of [a]? Each kind while the wire has one (§11.1, V1; S427 both equal).
   bool speaks(InternetAddress a) =>
-      asAddressKind(a).type == InternetAddressType.IPv4 || _wire.hasIpv6;
+      asAddressKind(a).type == InternetAddressType.IPv4 ? _wire.hasIpv4 : _wire.hasIpv6;
 
   /// Creates a node and wires up everything. [postBoxes] must not be
   /// empty: a node without an identity would have nobody to serve.
@@ -251,7 +251,7 @@ class Node {
       // Under the code of the shipment, via the own fixed neighbour (§8.1).
       viaNeighbour: (p, destination, target) => codeRoute.stepThree(
           p, target.neighbours.isEmpty ? [destination] : target.neighbours, target.code,
-          recipientAt: [if (target.lan case final l?) l, ...target.recipientOwn]), // S408: no hop
+          recipientAt: [if (target.lan case final l?) l, ...target.recipientOwn], urgent: target.signal), // S408; D-127
       inPostBox: stepFour, // node_step_four.dart (OP-20)
       search: search, here: deliverHere, // node_call.dart; §4.5.1 node_helpers.dart
       speaks: (c) => speaks(InternetAddress.fromRawAddress(c.address)),
@@ -392,7 +392,7 @@ class Node {
   /// its IPv6 in the process — or conversely only gets one there.
   Future<void> networkEnvironmentNewRead() async {
     await interfacesRead();
-    await _wire.ipv6FollowUp(interfaces);
+    await _wire.followUp(interfaces); // both kinds (S427, §11.1)
     neighbourhood.socketsChanged(); // V1: the socket may have come or gone
     await networkKindNewRead(); // cover rate per network type (§5.3, node_cover.dart)
     codeRoute.newRegister(); // registration with the fixed neighbour (§8.1)

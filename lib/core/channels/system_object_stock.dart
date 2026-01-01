@@ -38,15 +38,14 @@ class SystemObjectStock implements DurableStock {
       this.readCapable,
       this.writeCapable});
 
-  /// A retention-bounded node (phone) holds none and names none (§16.0).
+  /// Every device holds and names both channels, a phone within 5 MB each
+  /// (§16.0, §16.7, D-126 — S426 V1).
   @override
-  List<int> heldChannels() =>
-      store.holds ? List.of(SystemObjectStore.channels) : const [];
+  List<int> heldChannels() => List.of(SystemObjectStore.channels);
 
   @override
-  List<DurableId> held(int channel, {int? sinceHours}) => store.holds
-      ? store.identifiers(channel, sinceHours: sinceHours)
-      : const [];
+  List<DurableId> held(int channel, {int? sinceHours}) =>
+      store.identifiers(channel, sinceHours: sinceHours);
 
   @override
   Uint8List stateRoot(int channel) => store.stateRoot(channel);
@@ -55,11 +54,10 @@ class SystemObjectStock implements DurableStock {
   bool isHeldOrRejected(DurableId id) =>
       store.isHeld(id.channel, id.hash) || store.isRejected(id.channel, id.hash);
 
-  /// Handed out only by a holder (0x93); a phone names nothing, so nobody
-  /// has a reason to ask it.
+  /// Handed out (0x93) by every device that holds it (D-126).
   @override
   Uint8List? object(DurableId id) =>
-      store.holds ? store.objectOf(id.channel, id.hash)?.bytes : null;
+      store.objectOf(id.channel, id.hash)?.bytes;
 
   @override
   DurableVerdict offer(int channel, Uint8List object,
@@ -76,11 +74,9 @@ class SystemObjectStock implements DurableStock {
   @override
   bool isContactNode(String nodeId) => isContact(nodeId);
 
-  /// A phone reads both channels without holding them; a holder reads what
-  /// it holds.
+  /// Every device holds what it reads (D-126); no channel is only read.
   @override
-  List<int> readChannels() =>
-      store.holds ? const [] : List.of(SystemObjectStore.channels);
+  List<int> readChannels() => const [];
 
   @override
   void learned(int channel, List<DurableId> ids) =>

@@ -1,13 +1,13 @@
-# Cleona Chat -- Käyttöopas
+# Cleona Chat -- Käyttöohje
 
-Versio 3.1.125 | Heinäkuu 2026
+Versio 4.2 | Tilanne marraskuu 2026
 
 ---
 
 ## Sisällysluettelo
 
-1. [Mikä on Cleona Chat?](#1-mikä-on-cleona-chat)
-2. [Alkuun pääseminen](#2-alkuun-pääseminen)
+1. [Mikä Cleona Chat on?](#1-mikä-cleona-chat-on)
+2. [Aloittaminen](#2-aloittaminen)
 3. [Yhteystiedot](#3-yhteystiedot)
 4. [Viestit](#4-viestit)
 5. [Ryhmät](#5-ryhmät)
@@ -16,284 +16,402 @@ Versio 3.1.125 | Heinäkuu 2026
 8. [Kalenteri](#8-kalenteri)
 9. [Kyselyt](#9-kyselyt)
 10. [Useita identiteettejä](#10-useita-identiteettejä)
-11. [Multi-Device](#11-multi-device)
-12. [Palautus](#12-palautus)
+11. [Useita laitteita](#11-useita-laitteita)
+12. [Palauttaminen](#12-palauttaminen)
 13. [Asetukset](#13-asetukset)
-14. [Turvallisuus](#14-turvallisuus)
+14. [Tietoturva](#14-tietoturva)
 15. [Ohjelmistopäivitykset](#15-ohjelmistopäivitykset)
 16. [Usein kysytyt kysymykset](#16-usein-kysytyt-kysymykset)
 
 ---
+## 1. Mikä Cleona Chat on?
 
-## 1. Mikä on Cleona Chat?
+### Sinun viestimesi, sinun datasit
 
-### Sinun viestimesi, sinun tietosi
-
-Cleona Chat on viestisovellus, joka toimii täysin ilman keskitettyä palvelinta.
-Viestisi kulkevat suoraan laitteeltasi vastaanottajan laitteelle -- ilman
-kiertotietä minkään yrityksen kautta, ilman pilvipalvelua, ilman
-datakeskusta. Mikään yritys ei voi lukea, tallentaa tai luovuttaa viestejäsi,
-koska välissä ei yksinkertaisesti ole mitään yritystä.
+Cleona Chat on viestiohjelma, joka toimii täysin ilman keskitettyä palvelinta.
+Viestisi matkaavat laitteeltasi keskustelukumppanisi laitteelle -- ilman
+kierrosta yrityksen pääkonttorin, pilven tai datakeskuksen kautta. Jos matkalla
+jokin toinen laite auttaa, se vain välittää salattuja paketteja eteenpäin.
+Mikään yritys ei voi lukea viestejäsi, tallentaa niitä tai välittää niitä
+eteenpäin, koska yksinkertaisesti mikään yritys ei ole välissä.
 
 ### Ei tiliä, ei puhelinnumeroa
 
-Cleonassa et tarvitse puhelinnumeroa etkä sähköpostiosoitetta
-rekisteröitymiseen. Identiteettisi koostuu kryptografisesta avainparista, joka
-luodaan automaattisesti laitteellasi ensimmäisellä käynnistyskerralla. Tämä
-tarkoittaa: kukaan ei voi löytää sinua puhelinnumerosi tai
-sähköpostiosoitteesi perusteella, ellet itse jaa yhteystietojasi.
+Cleonassa et tarvitse puhelinnumeroa etkä sähköpostiosoitetta kirjautuaksesi.
+Identiteettisi muodostuu kryptografisesta avainparista, joka luodaan
+automaattisesti laitteellasi ensimmäisen käynnistyksen yhteydessä. Tämä tarkoittaa:
+kukaan ei voi jäljittää sinua puhelinnumerosi tai sähköpostiosoitteesi perusteella,
+ellei itse anna yhteystietojasi eteenpäin.
 
-### Tulevaisuudenkestävä salaus
+### Tulevaisuusvarma salaus
 
-Cleona käyttää niin sanottua Post-Quantum-salausta. Tämä tarkoittaa: edes
-tulevaisuuden kvanttitietokoneet eivät pystyisi murtamaan viestejäsi. Sinun
-ei tarvitse ymmärtää yksityiskohtia -- tärkeää on vain, että viestintäsi on
-suojattu parhaalla mahdollisella tavalla nykytekniikan mukaisesti.
+Cleona käyttää nk. post-kvanttisalausta. Se tarkoittaa: edes tulevat
+kvanttikoneet eivät voivat murtaa viestejäsi. Sinun ei tarvitse ymmärtää
+yksityiskohtia -- tärkeää on vain, että viestintäsi on nykytekniikan mukaisesti
+parhaalla mahdollisella tavalla suojattu.
 
 ### Miten se toimii ilman palvelinta?
 
-Kuvittele, että sinä ja yhteyshenkilösi muodostatte yhdessä verkon. Jokainen
-laite auttaa viestien välittämisessä. Jos vastaanottajasi on parhaillaan
-verkossa, viesti menee suoraan perille. Jos vastaanottajasi on offline,
-yhteiset kontaktit tallentavat viestin väliin ja toimittavat sen heti, kun
-vastaanottaja on taas tavoitettavissa. Yhteyshenkilösi ovat siis samalla myös
-sinun verkkosi.
+Cleona-verkko koostuu vain sen käyttäjien laitteista. Jokainen laite on
+solmu, yksikään solmu ei ole toista tärkeämpi, ja jokainen tuntee vain
+naapurinsa. Neljä asiaa tekevät tästä verkon erityisen:
+
+- **Ei kiinteää pistettä.** Sovelluksessa ei ole palvelinosoitetta, eikä verkko
+  riipu mistään yksittäisestä solmusta. Ei ole mitään, jonka voisi katkaista
+  sammuttaakseen Cleonan.
+- **Välitön.** Viestisi lähtee heti, kun lähetät sen. Se ei odota rytmiä eikä
+  mitään muutakaan.
+- **Häivitysliikenne rinnalla.** Laitteesi lähettää jatkuvasti pienhiä
+  häivytyspaketteja, jotta ulkoapäin ei näe, milloin oikeasti kirjoitat. Mikään
+  viesti ei riipu siitä -- häivitysliikenne vain pyörii vieressä.
+- **Koodeja nimien sijaan.** Viekö, joka välittää viestin, näkee vain koodin,
+  joka vaihtuu joka päivä. Normaalitilanteessa kukaan heistä ei tunne
+  lähettäjää ja vastaanottajaa yhtä aikaa; poikkeukset ovat luvussa 14.
+
+**Kolme reittiä, kaikki yhtä aikaa.** Kun lähetät viestin, Cleona ei kokeile
+reittiä toisensa jälkeen, vaan kaikki sopivat kerralla. Heti kun
+keskustelukumppanisi vahvistaa vastaanoton, muut keskeytetään.
+
+1. **Samassa verkossa:** Jos olette samassa Wi-Fi-verkossa, viesti menee
+   suoraan toiselle puolelle.
+2. **Kiinteiden naapureiden kautta:** Internetissä laitteesi antaa viestin
+   kiinteälle naapurilleen. Se välittää sen keskustelukumppanisi
+   kiinteille naapureille (enintään kolme kerralla), ja yksi heistä toimittaa
+   sen perille.
+3. **Postilaatikko:** Jos keskustelukumppanisi on offline-tilassa, Cleona
+   tallentaa viestin salattuna kolmen naapurin luo. Se pysyy siellä enintään
+   7 päivää. Kun keskustelukumppanisi tulee takaisin online-tilaan, hän noutaa
+   sen.
+
+**Miten pääset verkkoon?** Sovelluksessa ei ole palvelinosoitetta. Pääsysi
+saat ensimmäiseltä yhteystiedoltasi: hänen kutsunsa sisältää osoitteet,
+joiden kautta laitteesi löytää ensimmäiset naapurinsa. Samassa Wi-Fi-verkossa
+Cleona-laitteet löytävät toisensa myös itsestään. Siitä eteenpäin laitteesi
+oppii tuntemaan joka naapurin myötä lisää naapureita.
 
 ### Alustat
 
-Cleona on saatavilla Androidille, iOS:lle, macOS:lle, Linuxille ja Windowsille.
+Cleona on saatavilla Androidille, iOS:lle, macOS:lle, Linuxille ja
+Windowsille. Tietokoneilla ja Androidilla viestit ja puhelut saapuvat
+sekunneissa. iPhonessa näin on, niin kauan kuin sovellus on auki. Kun se ei
+ole auki, iOS herättää sen vain ajoittain lyhyeksi aikaa; milloin, iOS
+päättää. Cleona noutaa tällöin kaiken sinulle säilytetyn ja näyttää
+ilmoituksen numerolla sovelluksen kuvakkeessa. Puhelut eivät tavoita
+iPhonea, jonka sovellus ei ole auki. Tämä on Applen sääntö, ei virhe
+Cleonassa.
 
 ---
 
-## 2. Alkuun pääseminen
+## 2. Aloittaminen
 
-### Sovelluksen asentaminen
+### Asenna sovellus
 
 **Android:**
-1. Lataa APK-tiedosto Cleonan verkkosivuilta tai GitHub Releases -sivulta.
-2. Avaa tiedosto puhelimessasi. Tarvittaessa salli asentaminen tuntemattomista
-   lähteistä (Android kysyy automaattisesti).
+1. Lataa APK-tiedosto Cleona-sivustolta tai GitHub Releases -julkaisuista.
+2. Avaa tiedosto puhelimessasi. Tarvittaessa salli asennus tuntemattomista
+   lähteistä (Android kysyy sinulta tätä automaattisesti).
 3. Napauta "Asenna" ja odota, kunnes asennus on valmis.
 
 **iOS:**
-1. Avaa TestFlight-kutsulinkki iPhonessasi.
+1. Avaa TestFlight-kutsulinkki iPhonellasi.
 2. Napauta "Asenna". TestFlight on Applen virallinen tapa jakaa
    beta-sovelluksia.
-3. Asennuksen jälkeen löydät Cleonan aloitusnäytöltäsi.
+3. Asennuksen jälkeen löydät Cleonan kotinäytöltäsi.
 
 **macOS:**
-1. Lataa DMG-tiedosto Cleonan verkkosivuilta tai GitHub Releases -sivulta.
-2. Avaa DMG ja vedä Cleona Ohjelmat-kansioon.
-3. Ensimmäisellä käynnistyskerralla macOS saattaa kysyä, haluatko avata
+1. Lataa DMG-tiedosto Cleona-sivustolta tai GitHub Releases -julkaisuista.
+2. Avaa DMG ja vedä Cleona Ohjelmat-kansioosi.
+3. Ensimmäisen käynnistyksen yhteydessä macOS saattaa kysyä, haluatko avata
    tunnistetun kehittäjän sovelluksen -- vahvista tämä.
 
 **Linux (Ubuntu/Debian):**
-1. Lataa .deb-tiedosto Cleonan verkkosivuilta tai GitHub Releases -sivulta.
-2. Asenna kaksoisnapsauttamalla tai terminaalissa: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Käynnistä Cleona sovellusvalikosta tai terminaalissa komennolla `cleona-chat`.
+1. Lataa .deb-tiedosto Cleona-sivustolta tai GitHub Releases -julkaisuista.
+2. Asenna kaksoisklikkauksella tai terminaalissa: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Käynnistä Cleona sovellusvalikosta tai terminaalissa komennolla `cleona-chat-beta`.
 
 **Linux (Fedora/openSUSE):**
-1. Lataa .rpm-tiedosto Cleonan verkkosivuilta tai GitHub Releases -sivulta.
-2. Asenna komennolla: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Käynnistä Cleona sovellusvalikosta tai terminaalissa komennolla `cleona-chat`.
+1. Lataa .rpm-tiedosto Cleona-sivustolta tai GitHub Releases -julkaisuista.
+2. Asenna komennolla: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Käynnistä Cleona sovellusvalikosta tai terminaalissa komennolla `cleona-chat-beta`.
 
 **Linux (kaikki jakelut -- AppImage):**
-1. Lataa .AppImage-tiedosto Cleonan verkkosivuilta tai GitHub Releases -sivulta.
-2. Tee tiedostosta suoritettava: hiiren oikea painike, Ominaisuudet, Suoritettava, tai terminaalissa: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Käynnistä kaksoisnapsauttamalla tai terminaalissa: `./cleona-chat-VERSION-x86_64.AppImage`
+1. Lataa .AppImage-tiedosto Cleona-sivustolta tai GitHub Releases -julkaisuista.
+2. Tee tiedostosta suoritettava: oikea klikkaus, ominaisuudet, suoritettava,
+   tai terminaalissa: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Käynnistä kaksoisklikkauksella tai terminaalissa: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+Pakettien nimet koskevat betaa, joka on tällä hetkellä ainoa julkaistu
+versio; ne ovat nimeltään `cleona-chat-beta`.
 
 **Windows:**
-1. Lataa asennusohjelma Cleonan verkkosivuilta tai GitHub Releases -sivulta.
+1. Lataa asennusohjelma Cleona-sivustolta tai GitHub Releases -julkaisuista.
 2. Suorita asennustiedosto ja seuraa ohjeita.
 3. Käynnistä Cleona Käynnistä-valikosta tai työpöydän pikakuvakkeesta.
 
-### Identiteetin luominen
+### Luo identiteetti
 
-Ensimmäisellä käynnistyskerralla Cleona luo automaattisesti uuden identiteetin
-sinulle. Voit antaa itsellesi näyttönimen -- se on nimi, jonka yhteyshenkilösi
-näkevät. Tätä nimeä voi muuttaa milloin tahansa.
+Ensimmäisen käynnistyksen yhteydessä Cleona luo sinulle automaattisesti uuden
+identiteetin. Voit antaa itsellesi näyttönimen -- se on nimi, jonka
+yhteystiedot näkevät. Tätä nimeä voi vaihtaa milloin tahansa.
 
-### Seed-lauseen kirjoittaminen muistiin -- kaikkein tärkein asia
+### Kirjoita siemenfraasi ylös -- kaikkein tärkeintä
 
-Identiteetin luomisen jälkeen Cleona näyttää sinulle 24 sanaa. Tämä on
-**seed-lauseesi** -- henkilökohtainen palautusavaimesi.
+Identiteetin luomisen jälkeen Cleona näyttää sinulle 24 sanaa. Se on
+**siemenfraasisi** -- henkilökohtainen palautusavaimesi.
 
-**Kirjoita nämä 24 sanaa paperille ja säilytä ne turvallisessa paikassa.**
+**Kirjoita nämä 24 sanaa paperille ja säilytä ne turvassa.**
 
 Miksi tämä on niin tärkeää?
 
 - Jos puhelimesi hajoaa, katoaa tai varastetaan, voit näillä 24 sanalla
-  palauttaa koko identiteettisi uudella laitteella.
-- Ilman seed-lausetta paluutietä ei ole. Mitään "Unohdin salasanan"
-  -painiketta ei ole eikä tukea, joka voisi palauttaa tilisi -- koska
-  mitään tiliä ei ole millään palvelimella.
-- Älä koskaan anna seed-lausetta muille. Se joka tuntee nämä sanat, voi
-  esiintyä sinuna.
+  palauttaa koko identiteettisi uudelle laitteelle.
+- Ilman siemenfraasia ei ole paluutietoa. Ei ole "unohtunut salasana"
+  -painiketta eikä tukea, joka voisi palauttaa tilisi -- koska tilinäkään
+  ei ole palvelimella. Eivätkä yhteystietosikaan voi palauttaa identiteettiäsi,
+  kuinka monia tahansa. Toinen laite samalla identiteetillä tulee myöhemmässä
+  versiossa (katso luku 11).
+- Älä koskaan anna siemenfraasia muille. Ken tahansa, joka tuntee nämä sanat,
+  voi esiintyä sinuna.
 
-Löydät seed-lauseen myöhemmin myös asetuksista kohdasta "Turvallisuus", jos
-haluat lukea sen uudelleen.
+Löydät 24 sanaa myöhemmin myös asetuksista kohdasta "Varmuuskopio" ->
+"Näytä palautuslause", jos haluat lukea ne uudelleen. Androidissa
+vahvistat sen näyttölukituksellasi.
 
-### Ensimmäisen yhteyshenkilön lisääminen
+### Lisää ensimmäinen yhteystieto
 
-Jotta voit keskustella jonkun kanssa, sinun täytyy ensin lisätä henkilö
-yhteyshenkilöksi. Tähän on useita tapoja -- ne kaikki selitetään seuraavassa
-osiossa.
+Keskustellaksesi jonkun kanssa sinun on ensin lisättävä henkilö yhteystiedoksi.
+Siihen on useita tapoja -- kaikki selitetään seuraavassa osiossa.
 
 ---
 
 ## 3. Yhteystiedot
 
-### QR-koodin skannaaminen (suositeltu)
+### Kutsusi
 
-Helpoin tapa lisätä yhteyshenkilö:
+Yhteystiedot Cleonassa syntyvät vain kutsun kautta. Kutsusi on olemassa
+ensimmäisestä käynnistyksestä asti -- jopa ilman internetiä ja ennen kuin
+laitteesi on löytänyt naapurinakaan. Löydät sen identiteetin tietosivulta
+(napauta omaa nimeäsi yläpalkissa).
 
-1. Vastaanottajasi avaa identiteettisivunsa (napauta omaa nimeä yläpalkissa) ja
-   näyttää sinulle QR-koodinsa.
-2. Napauta plus-painiketta ja valitse "Skannaa QR-koodi".
-3. Pidä puhelintasi vastaanottajasi QR-koodin edessä.
-4. Yhteystietopyyntö lähetetään automaattisesti. Kun vastaanottajasi hyväksyy
-   sen, voitte alkaa keskustella.
+Kutsu on saatavilla kahdessa muodossa, jotka sisältävät täsmälleen saman:
 
-Kun tapaatte henkilökohtaisesti, QR-koodi on turvallisin menetelmä, koska
-tiedät tarkalleen kenen kanssa vaihdat yhteystiedot.
+- **QR-koodina**, kun keskustelukumppanisi seisoo vieressäsi, ja
+- **tekstirivinä**, jonka lähetät sähköpostilla, tekstiviestillä tai jonkin
+  toisen viestiohjelman kautta.
 
-### NFC (puhelimien pitäminen vastakkain)
+Kutsu ei sisällä puhelinnumeroa eikä nimeä hakemistosta. Se sisältää
+julkiset avaimesi ja osoitteet, joiden kautta keskustelukumppanisi tavoittaa
+sinut ja naapurisi. Siksi joku, joka on juuri asentanut Cleonan, saa kutsustasi
+myös sisäänpääsyn verkkoon.
 
-Jos molemmat laitteet tukevat NFC:tä:
+### Skannaa QR-koodi (suositeltu)
 
-1. Avatkaa molemmat yhteystiedon lisäystoiminto.
-2. Pitäkää puhelimianne selät vastakkain.
-3. Yhteystiedot vaihdetaan automaattisesti.
+Kun tapaatte henkilökohtaisesti:
 
-NFC tarjoaa QR-koodin tavoin korkean turvallisuustason, koska vaihto toimii
-vain kun seisotte fyysisesti vierekkäin.
+1. Näytät keskustelukumppanillesi kutsusi QR-koodin.
+2. Keskustelukumppanisi napauttaa plus-painiketta, valitsee "Skannaa QR-koodi"
+   ja pitää kameran näyttöösi. Tämä toimii myös tietokoneen web-kameralla.
+3. Pyyntö tulee sinulle ja **hyväksytään automaattisesti** -- sillä näytit
+   koodinhan juuri itse.
 
-### Linkin jakaminen (cleona://-URI)
+QR-koodi kelpaa kerran: ensimmäinen kelvollinen pyyntö hyväksytään, sen
+jälkeen kutsu on käytetty. QR-koodi on turvallisin tapa, koska silloin
+tiedätte tarkalleen, kenen kanssa vaihdatte yhteystiedot.
 
-Voit myös lähettää yhteystietolinkisi sähköpostilla, tekstiviestillä tai
-toisen viestisovelluksen kautta:
+### NFC (pidä puhelimet yhdessä)
 
-1. Avaa identiteettisivusi.
-2. Kopioi cleona://-linkkisi.
-3. Lähetä linkki henkilölle, jonka haluat lisäävän sinut.
-4. Toinen henkilö avaa linkin tai liittää sen
-   yhteystiedon lisäysikkunassa.
+Kun molemmat laitteet tukevat NFC:tä:
 
-Huomaa: Tässä menetelmässä luotat siihen, ettei linkkiä ole muutettu
-siirron aikana. Erityisen arkaluontoisille yhteystiedoille suosittelemme
-QR-koodia tai NFC:tä.
+1. Avaa yhteystiedon lisääminen molemmissa.
+2. Pitäkää puhelimienne selät vastakkain kiinni toisissaan.
+3. Kutsu siirtyy ja hyväksytään automaattisesti.
 
-### Yhteystietopyyntöjen hyväksyminen
+NFC tarjoaa kuten QR-koodikin korkean turvallisuustason, koska vaihto
+toimii vain, kun seisotte fyysisesti vierekkäin.
 
-Kun joku lähettää sinulle yhteystietopyynnön, se näkyy saapuneet-kansiossasi
-(viimeinen välilehti alapalkissa). Siellä voit:
+### Lähetä tekstirivi
 
-- **Hyväksyä** -- henkilö lisätään yhteystietoihisi.
-- **Hylätä** -- pyyntö hylätään.
-- **Estää** -- henkilö ei voi lähettää sinulle enää pyyntöjä.
+Kun ette voi tavata:
+
+1. Avaa kutsusi ja kopioi tekstirivi.
+2. Lähetä se henkilölle, jonka pitäisi lisätä sinut -- sähköpostilla,
+   tekstiviestillä tai jonkin toisen viestiohjelman kautta.
+3. Toinen henkilö liittää rivin Cleonan yhteystiedon lisääminen -ikkunaan.
+4. Pyyntö ilmestyy sinulle kohtaan **"Pyynnöt"**. Tässä ei **hyväksytä**
+   automaattisesti: päätät itse, sillä et voi tietää, kuka luki riviä
+   matkalla.
+
+### Hyväksy yhteystietopyynnöt
+
+Saapuva pyyntö ei vielä luo yhteystietoa. Se esittää sinulle kysymyksen ja
+ilmestyy välilehdelle **"Pyynnöt"**. Siellä näet nimen ja
+vahvistustason ja voit valita:
+
+- **Hyväksy** -- vasta nyt henkilöstä tulee yhteystietosi.
+- **Hylkää** -- pyyntö hylätään.
+- **Estä** -- henkilö ei voi lähettää sinulle lisäpyyntöjä.
+
+### Älä koskaan käytä kiinteänä naapurina
+
+Yhteystiedon valikossa löydät kytkimen **"Älä koskaan käytä kiinteänä
+naapurina"** (oletus: pois). Kun se on päällä, tämä yhteystieto ei välitä
+viestejä sinulle eteenpäin eikä siksi myöskään saa tietää, milloin lähetät
+tai vastaanotat viestejä. Se on tarkoitettu tilanteeseen, jossa uhka
+uhkaa sinua omasta piiristäsi.
+
+Tuntemattomilta (eivät kontaktejasi eivätkä yhteisen ryhmän jäseniä)
+Cleona päästää läpi tällaisen pyynnön lisäksi ei mitään --
+ei viestiä, ei puhelua, ei tiedostoa. Ja edes pyyntö pääsee läpi vain, jos
+lähettäjä on ensin ratkaissut pienen laskentatehtävän. Se tekee
+massaroskapostista kallista.
 
 ### Vahvistustasot
 
-Cleona näyttää sinulle, kuinka varmasti yhteyshenkilön identiteetti on
+Cleona näyttää sinulle, kuinka varmasti yhteystiedon identiteetti on
 vahvistettu:
 
 | Taso | Merkitys |
-|------|----------|
-| Tuntematon | Olet saanut vain Node-ID:n tai linkin. |
-| Nähty | Avainten vaihto onnistui, voitte kommunikoida salattuina. |
-| Vahvistettu | Olette tavanneet henkilökohtaisesti ja vahvistaneet QR-koodilla tai NFC:llä. |
-| Luotettu | Olet nimenomaisesti merkinnyt tämän yhteyshenkilön luotetuksi. |
+|-------|-----------|
+| Ei vahvistettu | Olette yhteydessä, mutta mikään ei vahvista, että oikea henkilö on todella takana. |
+| Nähty | Avainten vaihto onnistui; voitte viestiä salattuna. |
+| Vahvistettu | Tapasitte henkilökohtaisesti ja yhdistyitte kameraskannauksella tai NFC:llä. |
+| Luotettu | Olet nimenomaisesti merkinnyt tämän yhteystiedon luotettavaksi. |
 
-Mitä korkeampi taso, sitä varmempi voit olla, että puhut todella oikean
-henkilön kanssa.
+"Vahvistettu" on olemassa vain henkilökohtaiseen vaihtoon. Kutsu, joka
+tuli keskustelun kautta tai sähköpostilla, ei saavuta koskaan tätä tasoa --
+vaikka se sisältäisi samat tiedot.
+
+Jos yhteystiedon avaimet muuttuvat ilmoitusta antamatta, Cleona palauttaa
+hänet tasolle "Ei vahvistettu". Se suojaa sinua siltä, että joku esiintyy
+huomaamattasi yhteystietonasi.
 
 ---
-
 ## 4. Viestit
 
 ### Tekstin lähettäminen ja vastaanottaminen
 
-Kirjoita viestisi alareunan syöttökenttään ja paina Enter tai Lähetä-painiketta.
-Viestisi salataan automaattisesti ennen kuin se lähtee laitteestasi.
+Kirjoita viestisi yksinkertaisesti syöttökenttään alareunassa ja paina Enter
+tai lähetä-painiketta. Viestisi salataan automaattisesti, ennen kuin se lähtee
+laitteeltasi.
 
-Saapuvat viestit näkyvät keskusteluhistoriassa. Merkki näyttää sinulle, onko
-viestisi toimitettu.
+Saapuvat viestit ilmestyvät keskusteluhistoriaan.
+
+### Mitä viestisi merkit tarkoittavat
+
+| Merkki | Merkitys |
+|---------|-----------|
+| Kello | Viesti on luotu, mutta yksikään reitti ei ole vielä kantanut sitä. |
+| Yksi ruks | Viesti on matkalla. Tämä pätee myös silloin, kun se odottaa postilaatikossa keskustelukumppaniasi. |
+| Kaksi ruksia | Toimitettu: Keskustelukumppanisi laite on vahvistananut vastaanoton. |
+| Varoitustermerkki | 14 päivän ajan mikään reitti ei kantanut viestiä. Napauta sitä lähettääksesi sen uudelleen. |
+
+**Offline ei ole virhe.** Jos keskustelukumppanisi ei ole tavoitettavissa,
+viesti pysyy yhden ruksin tilassa, kunnes se noudetaan -- se ei ole
+hukkunut. Jos laitteellasi itsellään ei ole yhteyttä, viesti pysyy kellon
+kohdalla ja lähtee itsestään, kunhan reitti on taas olemassa.
+Varoitustermerkki ilmestyy vasta, kun viesti ei 14 päivän aikana ole
+löytänyt reittiä; silloin voit lähettää sen uudelleen.
+
+Näin on myös iPhonen kohdalla, jonka sovellus ei ole auki: viesti odottaa
+postilaatikossa, kunnes iOS herättää sovelluksen hetkeksi tai kunnes
+keskustelukumppanisi avaa sen. Se voi kestää pidempään kuin muilla
+laitteilla.
+
+Kaksi ruksia on olemassa vain, kun vastaanottaja itse vahvistaa vastaanoton.
+Tämä kuittaus on salattu ja allekirjoitettu -- kukaan matkalla ei voi
+väärentää sitä teeskennellykseen toimitusta.
 
 ### Kuvien, videoiden ja tiedostojen lähettäminen
 
-Sinulla on useita vaihtoehtoja:
+Sinulla on useita mahdollisuuksia:
 
-- **Paperiliitinkuvake** syöttökentässä: napauta sitä valitaksesi tiedoston,
-  kuvan tai videon galleriastasi tai tiedostojärjestelmästäsi.
-- **Vedä ja pudota** (työpöytä): vedä tiedosto keskusteluikkunaan.
-- **Leikepöydältä liittäminen** (työpöytä): kopioi kuva ja liitä se
-  keskusteluun.
+- **Lemu-kuvake** syöttökentässä: Napauta sitä valitaksesi tiedoston, kuvan
+  tai videon galleriastasi tai tiedostojärjestelmästäsi.
+- **Vedä ja pudota** (työpöytä): Vedä tiedosto yksinkertaisesti
+  keskusteluikkunaan.
+- **Liitä leikepöydältä** (työpöytä): Kopioi kuva ja liitä se
+  keskustelussa.
 
-Pienet tiedostot (alle 256 KB) lähetetään suoraan mukana. Suuremmat tiedostot
-siirretään kaksivaiheisessa menettelyssä: ensin tiedosto ilmoitetaan, sitten
-se lähetetään osissa.
+Pienet tiedostot (alle 256 KB) matkaavat suoraan viestin mukana. Suuremmat
+tiedostot pilkotaan osiin ja varustetaan virheenkorjauksella, jotta yksittäiset
+hukkuneet osat eivät haittaa. Jos olette molemmat online-tilassa, ne
+suoratoistetaan naapurin kautta; muussa tapauksessa ne tallennetaan laitteille,
+jotka ovat jatkuvasti tavoitettavissa, kunnes keskustelukumppanisi noutaa ne.
+
+Jos tiedosto on vähintään 256 KB, Cleona kysyy sinulta jokaisen tiedoston
+kohdalla ennen lähettämistä:
+Suuri tiedosto ei voi kulkea viestiesi reittiä. Sen sisältö pysyy salattuna,
+eikä keskustelukumppanisi saa tietää internet-osoitettasi. Siirto näkyy
+ulkoapäin kuitenkin tapahtumana, ja vieras laite, joka välittää tai säilyttää
+sitä, näkee, kuka lataa ylös ja kuka noutaa. Suostumuksesi koskee vain
+tätä yhtä tiedostoa.
 
 ### Ääniviestit
 
-1. Pidä mikrofoni-painiketta painettuna syöttökentässä.
+1. Pidä mikrofonipainiketta syöttökentässä painettuna.
 2. Puhu viestisi.
-3. Vapauta painike lähettääksesi viestin.
+3. Päästä irti painikkeesta lähettääksesi viestin.
 
-Jos puheentunnistus on aktivoitu laitteellasi (katso asetukset), ääniviestisi
-muunnetaan automaattisesti tekstiksi. Vastaanottajasi näkee sekä äänitteen
-että muunnetun tekstin.
+Jos laitteellasi on puheentunnistus käytössä (katso asetukset),
+ääniviestisi transkriboidaan automaattisesti tekstiksi. Keskustelukumppanisi
+näkee sitten sekä tallenteen että transkriboidun tekstin.
 
-### Viesteihin vastaaminen (lainaaminen)
+### Viesteihin vastaaminen (lainaus)
 
 Vastataksesi tiettyyn viestiin:
 
-1. Avaa kolmen pisteen valikko viestin vieressä.
+1. Avaa viestin vieressä oleva kolmen pisteen valikko.
 2. Valitse "Vastaa".
 3. Syöttökentän yläpuolelle ilmestyy banneri lainatun viestin kanssa.
 4. Kirjoita vastauksesi ja lähetä se.
 
-Lainattu viesti näytetään vastauksessasi, jotta yhteys on selvä.
+Lainattu viesti näytetään vastauksessasi, jotta viittaus on
+selkeä.
 
 ### Viestien muokkaaminen ja poistaminen
 
-- **Muokkaaminen:** viestin kolmen pisteen valikko, sitten "Muokkaa".
-  Muuta tekstiä ja lähetä se uudelleen. Vastaanottajasi näkee, että viestiä
-  on muokattu. Muokkaaminen on mahdollista 15 minuutin kuluessa lähettämisestä.
-- **Poistaminen:** viestin kolmen pisteen valikko, sitten "Poista". Viesti
-  poistetaan sekä sinulta että vastaanottajaltasi. Voit poistaa omat viestisi
-  milloin tahansa -- poistamiselle ei ole aikarajaa.
+- **Muokkaa:** Viestin kolmen pisteen valikko, sitten "Muokkaa".
+  Muuta tekstiä ja lähetä se uudelleen. Keskustelukumppanisi näkee, että
+  viestiä on muokattu. Muokkaaminen on mahdollista 15 minuutin kuluessa
+  lähettämisestä.
+- **Poista:** Viestin kolmen pisteen valikko, sitten "Poista". Viesti
+  poistetaan sinulta ja keskustelukumppaniltasi. Voit poistaa
+  omat viestisi milloin tahansa -- poistamiselle ei ole aikarajaa.
 
 ### Emoji-reaktiot
 
-Sen sijaan, että kirjoittaisit vastauksen, voit reagoida viestiin emojilla:
+Kirjoitetun vastauksen sijaan voit reagoida viestiin emojilla:
 
-1. Avaa kolmen pisteen valikko tai paina viestiä pitkään.
-2. Valitse emoji pikavalikoimasta tai avaa emoji-valitsin koko valikoimalle.
-3. Reaktiosi näkyy viestin alla.
+1. Avaa kolmen pisteen valikko tai pidä viestiä pitkään painettuna.
+2. Valitse emoji pikavalinnasta tai avaa emoji-valitsin
+   koko valikoimaa varten.
+3. Reaktiosi ilmestyy viestin alle.
 
-### Tekstin kopioiminen
+### Tekstin kopiointi
 
-Viestin kolmen pisteen valikon kautta voit kopioida viestin tekstin
+Viestin kolmen pisteen valikon kautta voit kopioida viestitekstin
 leikepöydälle.
 
-### Viestien hakeminen
+### Viestien haku
 
-Keskusteluikkunan yläreunasta löydät hakutoiminnon. Syötä hakusana, ja Cleona
-näyttää kaikki osumat nykyisessä keskustelussa. Nuolinäppäimillä voit
-hypätä osumien välillä.
+Keskusteluikkunan yläreunasta löydät hakutoiminnon. Syötä hakusana, ja
+Cleona näyttää sinulle kaikki osumat nykyisessä keskustelussa. Nuolinäppäimillä
+voit hypähdellä osumien välillä.
 
-Aloitusnäytöllä on lisäksi välilehtien yli toimiva hakusuodatin, jolla voit
-hakea kaikista keskusteluista.
+Aloitussivulla on lisäksi välilehtien yläpuolella toimiva hakusuodatin,
+jolla voit selata kaikkia keskusteluja termin perusteella.
 
 ### Linkin esikatselu
 
 Kun lähetät linkin, Cleona luo automaattisesti esikatselun (otsikko,
-kuvaus, esikatselukuva). Tämä esikatselu luodaan laitteellasi ja lähetetään
-mukana -- vastaanottajasi ei tarvitse muodostaa yhteyttä linkitettyyn
-verkkosivustoon.
+kuvaus, esikatselukuva). Tämä esikatselu luodaan laitteellasi ja
+lähetetään sen mukana -- keskustelukumppanisi ei tarvitse varten
+yhteyttä linkitettyyn verkkosivustoon.
 
-Kun napautat vastaanotettua linkkiä, sinulta kysytään, haluatko avata sen
-normaalissa selaimessa, incognito-tilassa vai et ollenkaan.
+Sen, mitä napautus vastaanotettuun linkkiin tekee, säädät asetuksista
+kohdasta "Linkkien avaaminen": "Normaalisti", "Suosi yksityistä ikkunaa"
+(missä laite ei voi avata yksityistä ikkunaa, linkki avautuu normaalisti)
+tai "Kysy joka kerta".
 
 ---
 
@@ -301,40 +419,59 @@ normaalissa selaimessa, incognito-tilassa vai et ollenkaan.
 
 ### Ryhmän luominen
 
-1. Vaihda "Ryhmät"-välilehdelle.
+1. Vaihda välilehdelle "Ryhmät".
 2. Napauta plus-painiketta.
 3. Anna ryhmälle nimi.
-4. Valitse yhteyshenkilöt, jotka haluat kutsua.
+4. Valitse yhteystiedot, jotka haluat kutsua.
 5. Napauta "Luo".
 
-Kutsutut yhteyshenkilöt saavat ilmoituksen ja voivat liittyä ryhmään.
+Kutsutut yhteystiedot saavat ilmoituksen ja voivat liittyä ryhmään.
+
+### Miten ryhmäviestit on suojattu
+
+Ryhmässä, jossa on enintään 16 jäsentä, Cleona lähettää jokaisen viestin
+jokaiselle jäsenelle erikseen -- kullakin vain tätä jäsentä varten salattuna,
+ikään kuin olisit kirjoittanut jokaiselle oman viestin. Ryhmäviestin
+ruksit näyttävät sen jäsenen tilan, jolla se on vähiten edistynyt.
+
+Kasvaessa ryhmä yli 16 jäsenen, se käyttää yhteistä avainta. Avain vaihtuu
+joka päivä ja arvotaan uudelleen, kun jäsen lähtee tai poistetaan; uusi
+jäsen lukee vasta liittymisestään alkaen. Siellä ruksit eivät enää näytä
+jokaisen jäsenen tilaa, vaan sen, että viesti on talletettu verkkoon.
+Pudotessa ryhmä 12 jäseneen tai vähemmän, se palaa yksittäislähetykseen.
+
+### Kuvat ryhmissä ja kanavissa
+
+Ryhmän tai kanavan asetuksissa säädät kohdalla "Lataa kuvat aina",
+ladataanko kuvat heti vai vasta, kun napautat yhtä.
 
 ### Jäsenten kutsuminen
 
-Voit kutsua lisää yhteyshenkilöitä myös luomisen jälkeen:
+Myös luomisen jälkeen voit kutsua lisää yhteystietoja:
 
-1. Avaa ryhmätiedot (kolmen pisteen valikko ryhmänäkymässä tai yläpalkki
-   ryhmäkeskustelussa).
+1. Avaa ryhmän tiedot (kolmen pisteen valikko ryhmäluettelossa tai
+   yläpalkki ryhmäkeskustelussa).
 2. Napauta "Kutsu".
-3. Valitse yhteyshenkilöt, jotka haluat lisätä.
+3. Valitse yhteystiedot, jotka haluat lisätä.
 
 ### Roolit
 
 Jokaisessa ryhmässä on kolme roolia:
 
-- **Omistaja (Owner):** Täysi hallinta. Voi lisätä ja poistaa jäseniä,
-  nimittää ylläpitäjiä ja hallita ryhmää. Omistaja voi myös siirtää
-  asemansa toiselle jäsenelle.
-- **Ylläpitäjä (Admin):** Voi poistaa jäseniä ja auttaa hallinnassa.
+- **Omistaja (Owner):** Täysi valta. Voi lisätä ja poistaa jäseniä,
+  nimetä ylläpitäjiä ja hallita ryhmää. Omistaja voi siirtää
+  asemansa myös toiselle jäsenelle.
+- **Ylläpitäjä:** Voi poistaa jäseniä ja auttaa hallinnoinnissa.
 - **Jäsen:** Voi lukea ja kirjoittaa viestejä.
 
 ### Ryhmästä poistuminen
 
-1. Avaa kolmen pisteen valikko ryhmänäkymässä.
+1. Avaa kolmen pisteen valikko ryhmäluettelossa.
 2. Valitse "Poistu".
 3. Vahvista päätöksesi.
 
-Kun poistut ryhmästä, aiemmat viestisi jäävät näkyviin muille jäsenille.
+Kun poistut ryhmästä, aiemmat viestisi pysyvät muiden
+jäsenien nähtävillä.
 
 ---
 
@@ -342,244 +479,284 @@ Kun poistut ryhmästä, aiemmat viestisi jäävät näkyviin muille jäsenille.
 
 ### Mitä kanavat ovat?
 
-Kanavat ovat julkisia keskustelufoorumeja Cleona-verkossa. Toisin kuin
-ryhmissä, kuka tahansa voi lukea niitä ilman kutsua. Vain omistaja ja
-ylläpitäjät voivat julkaista sisältöä -- tilaajat lukevat mukana.
+Kanavat ovat julkisia keskustelufoorumeita Cleona-verkon sisällä.
+Toisin kuin ryhmissä, täällä jokainen voi lukea mukana ilman, että häntä
+tarvitsee kutsua. Vain omistaja ja ylläpitäjät voivat julkaista viestejä --
+tilaajat lukevat mukana.
 
-### Kanavien löytäminen ja liittyminen
+### Kanavien löytäminen ja niihin liittyminen
 
-1. Vaihda "Kanavat"-välilehdelle.
-2. Avaa "Haku"-välilehti.
-3. Selaa saatavilla olevia kanavia nimen tai aiheen mukaan.
+1. Vaihda välilehdelle "Kanavat".
+2. Avaa välilehti "Haku".
+3. Selaa saatavilla olevia kanavia nimen tai aiheen perusteella.
 4. Napauta kanavaa ja sitten "Tilaa".
 
-Kanavia voi suodattaa kielen mukaan. Jotkut kanavat on merkitty "Ei
-alaikäisille" -- nämä näkyvät vain, jos olet vahvistanut profiilissasi
-olevasi yli 18-vuotias.
+Kanavia voi suodattaa kielen perusteella. Jotkin kanavat on merkitty
+"Ei nuorille" -- ne näkyvät vain, jos olet profiilissasi vahvistanut,
+että olet yli 18-vuotias.
 
 ### Oman kanavan luominen
 
-1. Vaihda "Kanavat"-välilehdelle.
+1. Vaihda välilehdelle "Kanavat".
 2. Napauta plus-painiketta.
-3. Anna kanavan nimi (sen on oltava yksilöllinen koko verkossa).
+3. Syötä kanavan nimi (sen on oltava yksilöllinen koko verkossa).
 4. Valitse kieli ja onko kanava julkinen vai yksityinen.
-5. Valinnainen: lisää kuvaus ja kuva.
+5. Valinnainen: Lisää kuvaus ja kuva.
 6. Napauta "Luo".
 
-Julkisissa kanavissa voit määrittää, luokitellaanko sisältö
-"Ei alaikäisille" -sisällöksi.
+Julkisissa kanavissa voit määrittää, luokitellaanko sisältö kohdassa
+"Ei nuorille".
 
-### Sisällön ilmiantaminen
+### Sisällön ilmoittaminen
 
-Jos huomaat julkisessa kanavassa sopimatonta sisältöä, voit ilmiantaa sen.
-Cleona käyttää hajautettua moderointijärjestelmää: ilmiannot arvioidaan
-satunnaisesti valittujen verkon jäsenten toimesta (eräänlainen
-"valamiehistö"). Jos rikkomus todetaan, kanava saa varoituksen. Toistuvien
-rikkomusten yhteydessä kanava alennetaan hakuindeksissä tai estetään.
+Jos huomaat julkisessa kanavassa sopimattomia sisältöjä, voit
+ilmoittaa niistä. Cleona käyttää hajautettua moderointijärjestelmää: ilmoitukset
+arvioivat verkon satunnaisesti valitut jäsenet (eräänlainen
+"valamiesoikeus"). Jos rikkomus todetaan, kanava saa
+varoituksen. Toistuvien rikkomusten yhteydessä se alennetaan
+hakuindeksissä tai se estetään.
 
 ### Järjestelmäkanavat
 
 Cleonassa on kaksi sisäänrakennettua järjestelmäkanavaa:
 
-- **Bug Log:** Kun Cleona havaitsee virheen, se kysyy sinulta, haluatko
-  lähettää anonymisoidun virheraportin. Nämä raportit päätyvät
-  Bug Log -kanavalle, jossa yhteisö voi tarkastella niitä. Henkilökohtaisia
-  tietoja ei siirretä -- vain teknisiä virhekuvauksia. Voit myös lähettää
-  lokiraportin manuaalisesti (esikatseludialogi ja nimenomainen suostumus).
-- **Feature Requests:** Täällä käyttäjät voivat esittää toiveita
-  ominaisuuksista ja äänestää olemassa olevia ehdotuksia. Ehdotukset
-  lajitellaan äänten mukaan.
+- **Bug Log:** Kun Cleona tunnistaa virheen, se kysyy, haluatko lähettää
+  virheraportin; sitä ennen näet tarkalleen, mitä julkaistaan. Nämä
+  raportit päätyvät Bug-Log-kanavaan, jossa yhteisö voi tarkastella niitä.
+  Raportissa ei ole nimeä eikä keskustelujesi sisältöä, vaan pseudonyymi.
+  Betassa se mainitsee lisäksi tunnuksesi (User-ID), jotta kehittäjät
+  voivat kysellä jälkikäteen. Voit myös lähettää manuaalisesti
+  lokiraportin (esikatseluikkunan ja nimenomaisen suostumuksen kera).
+- **Feature Requests:** Täällä käyttäjät voivat jättää
+  toimintatoiveita ja äänestää olemassa olevien ehdotusten puolesta. Ehdotukset
+  lajitellaan äänten perusteella.
 
-Molemmilla järjestelmäkanavilla on 25 MB:n kokorajoitus, ja niitä
-valvotaan valamiehistömoderaatiojärjestelmällä.
+Jokainen tietokone pitää enintään 25 MB kutakin järjestelmäkanavaa, jokainen
+puhelin enintään 5 MB; kun tila on täynnä, vanhin menee ensin -- ei koskaan
+mitään, mitä olet itse jo nähnyt.
 
 ---
-
 ## 7. Puhelut
 
 ### Äänipuhelun aloittaminen
 
-1. Avaa keskustelu yhteyshenkilön kanssa, jolle haluat soittaa.
+1. Avaa keskustelu yhteystiedon kanssa, jota haluat soittaa.
 2. Napauta puhelinkuvaketta yläpalkissa.
-3. Odota, kunnes vastaanottajasi vastaa puheluun.
+3. Odota, kunnes keskustelukumppanisi vastaa puheluun.
 
-Puhelun aikana näet aikajanan, puhelun keston ja sinulla on pääsy
-mykistys- ja kaiutintoimintoihin.
+Keskustelun aikana näet aikajanan, puhelun keston ja
+sinulla on käyttöoikeus mykistykseen ja kaiuttimeen.
 
-Lopettaaksesi paina punaista lopetuspainiketta.
+Luurin asettamiseksi napauta punaista lopeta-painiketta.
+
+Jos näet "Ei tavoitettavissa", keskustelukumppanisi laitteeseen ei juuri
+nyt saada yhteyttä, esimerkiksi iPhoneen, jonka sovellus ei ole auki.
+Lähetä sen sijaan viesti.
 
 ### Videopuhelun aloittaminen
 
-1. Avaa keskustelu yhteyshenkilön kanssa.
+1. Avaa keskustelu yhteystiedon kanssa.
 2. Napauta kamerakuvaketta yläpalkissa.
-3. Videokuvasi näkyy pienessä ikkunassa, vastaanottajasi kuva suuressa
-   alueessa.
+3. Kuvasi ilmestyy pieneen ikkunaan, keskustelukumppanisi
+   kuva suureen alueeseen.
 
-Voit vaihtaa etu- ja takakameran välillä puhelun aikana.
+Voit keskustelun aikana vaihtaa etu- ja takakameran välillä.
 
 ### Saapuvat puhelut
 
-Kun joku soittaa sinulle, näkyviin tulee ilmoitusikkuna soittajan nimellä.
-Voit:
+Kun joku soittaa sinulle, ilmestyy ilmoitusikkuna soittajan
+nimen kanssa. Voit:
 
-- **Vastata** -- puhelu alkaa.
+- **Vastata** -- keskustelu alkaa.
 - **Hylätä** -- soittajalle ilmoitetaan.
 
-Jos olet jo puhelussa, uusi puhelu hylätään automaattisesti.
+Jos olet juuri keskustelussa, uusi puhelu ei soi; saat sen sijaan viestin
+"Vastaamaton puhelu". Sama koskee ryhmäpuhelua, johon et ole vastannut --
+viesti on silloin ryhmäkeskustelussa.
+
+Jos joku soittaa identiteetillesi, jota juuri ei näytetä, se soi silti;
+puheluruutu kertoo, mihin identiteetteihisi soitetaan.
+
+iPhonessa puhelin soi vain silloin, kun sovellus on auki. Se, joka soittaa
+sinulle, kun sovellus ei ole auki, näkee 10 sekunnin jälkeen "Ei
+tavoitettavissa". Heti kun avaat sovelluksen, löydät viestin
+vastaamattomasta puhelusta.
 
 ### Ryhmäpuhelut
 
-Voit myös käydä ryhmäpuheluita, joihin useat henkilöt osallistuvat
-samanaikaisesti. Puhelu järjestetään älykkään välityspuun kautta, joten
-jokaisen osallistujan ei tarvitse olla suoraan yhteydessä jokaiseen toiseen.
-Kaikki puhelut ovat päästä päähän salattuja.
+Voit myös käydä ryhmäpuheluita, joissa useampi henkilö osallistuu
+samaan aikaan. Puhelu organisoidaan älykkään välityspuun
+avulla, joten jokaisen osallistujan ei tarvitse olla suoraan yhteydessä
+jokaiseen toiseen. Kaikki keskustelut ovat alusta loppuun salattuja.
+
+Jokainen ryhmän jäsen voi aloittaa ryhmäpuhelun. Kaksi osallistujaa, jotka
+eivät ole toistensa kontaktia, eivät koskaan näe toistensa internet-osoitetta:
+heidän äänensä ja kuvansa kulkee osallistujan kautta, joka on kummankin
+kontakti. Jos sellaista ei ole, nämä kaksi eivät ole yhteydessä toisiinsa,
+ja laatta sanoo "Ei yhteistä kontaktia puhelussa". Jos välitys on
+varattu, ääni pysyy ja video jää pois tältä parilta.
 
 ### Salaus puheluissa
 
 Kaikki puhelut salataan kertakäyttöisillä avaimilla, jotka ovat olemassa vain
-puhelun ajan. Puhelun päätyttyä avaimet poistetaan välittömästi. Kukaan ei
-voi jälkikäteen purkaa aiemman puhelun salausta.
+keskustelun ajan. Luurin asettamisen jälkeen nämä avaimet
+poistetaan välittömästi. Kukaan ei voi purkaa mennyttä keskustelua
+jälkikäteen.
+
+Rehellisesti sanottuna: puhelut kulkevat, aina kun mahdollista, suoraan
+laitteiden välillä, sillä jo pieni viive häiritsee puhumista. Toisin
+kuin viesteissä, internetin tarjoajasi voi siksi puhelun yhteydessä nähdä,
+mihin internet-osoitteeseen olet yhteydessä. Mitä sanotte, hän ei näe.
+
+Puhelun yhteydessä myös kontaktisi näkee internet-osoitteesi. Jos et halua
+sitä erään kontaktin kohdalla, sammuta hänen valikostaan "Salli puhelut"
+(oletus: päällä). Jos sammutat sen myöhemmin, hänelle jää tunnettuna osoite,
+jonka hän on jo nähnyt.
 
 ---
 
 ## 8. Kalenteri
 
-Cleona sisältää sisäänrakennetun kalenterin, joka on salattu ja toimii täysin
+Cleonassa on sisäänrakennettu kalenteri, joka toimii salattuna ja täysin
 hajautetusti -- ilman pilvipalvelua.
 
 ### Näkymät
 
-Kalenteri tarjoaa viisi näkymää: päivä, viikko, kuukausi, vuosi ja
-tehtävänäkymä. Vaihda niiden välillä kalenterinäytön yläreunassa olevien
+Kalenterissa on viisi näkymää: päivä, viikko, kuukausi, vuosi ja
+tehtävä-näkymä. Vaihda niiden välillä kalenterinäkymän yläreunan
 välilehtien kautta.
 
 ### Tapahtumien luominen
 
-Napauta aikaväliä tai käytä lisäyspainiketta luodaksesi uuden tapahtuman.
-Voit syöttää otsikon, päivämäärän, kellonajan, paikan ja muistiinpanoja.
-Tapahtumat tallennetaan salattuina laitteellesi.
+Napauta aikaväliä tai käytä lisää-painiketta luodaksesi uuden
+tapahtuman. Voit syöttää otsikon, päivämäärän, kellonajan, paikan ja
+muistiinpanot. Tapahtumat tallennetaan salattuna laitteellesi.
 
 ### Toistuvat tapahtumat
 
 Tapahtumat voivat toistua päivittäin, viikoittain, kuukausittain tai
-vuosittain. Voit mukauttaa kaavaa (esim. joka toinen tiistai, joka kuukauden
-ensimmäinen päivä) ja asettaa päättymispäivän tai toistojen määrän.
+vuosittain. Voit mukauttaa kaavaa (esim. joka toinen tiistai,
+joka kuun ensimmäinen) ja asettaa päättymispäivän tai
+toistojen määrän.
 
-### Yhteyshenkilöiden kutsuminen
+### Yhteystietojen kutsuminen
 
-Tapahtumaa luodessasi tai muokatessasi voit kutsua Cleona-yhteyshenkilöitäsi.
-He saavat salatun kalenterikutsun ja voivat vastata hyväksymällä, hylkäämällä
-tai ehkä-vastauksella. Tapahtuman muutokset lähetetään automaattisesti
-kaikille kutsutuille.
+Tapahtumaa luodessasi tai muokatessasi voit kutsua Cleona-yhteystietojasi.
+He saavat salatun kalenterikutsun ja voivat vastata
+kyllä, ei tai ehkä. Tapahtuman muutokset
+lähetetään automaattisesti kaikille kutsutuille.
 
 ### Vapaa/varattu-näyttö
 
-Voit jakaa saatavuutesi yhteyshenkilöiden kanssa paljastamatta
-tapahtumatietoja. Yksityisyystasoja on kolme: täydet tiedot, vain aikablokit
-tai piilotettu. Voit asettaa oletusasetuksen ja ohittaa sen yhteyshenkilökohtaisesti.
+Voit jakaa saatavuutesi yhteystietojesi kanssa paljastamatta
+tapahtuman tietoja. Yksityisyyssuojan tasoja on kolme: kaikki tiedot, vain
+aikajaksot tai piilotettu. Voit asettaa oletuksen ja ohittaa sen
+yhteystiedoittain.
 
 ### Muistutukset
 
-Tapahtumiin voi liittää muistutuksia, jotka laukaisevat
-järjestelmäilmoituksen ennen tapahtuman alkua. Voit torkuttaa muistutuksia
-tarvittaessa.
+Tapahtumilla voi olla muistutuksia, jotka laukaisevat
+järjestelmäilmoituksen ennen tapahtuman alkua. Voit tarvittaessa
+torkuttaa muistutuksia.
 
 ### Ulkoinen kalenterisynkronointi
 
 Cleona voi synkronoida ulkoisten kalenteripalveluiden kanssa:
 
-- **CalDAV** -- yhdistä mihin tahansa CalDAV-yhteensopivaan palvelimeen
-  (Nextcloud, Radicale jne.).
-- **Google-kalenteri** -- synkronointi Google Calendar API:n kautta
+- **CalDAV** -- Yhdistä mihin tahansa CalDAV-yhteensopivaan palvelimeen (Nextcloud,
+  Radicale jne.).
+- **Google Kalenteri** -- Synkronointi Google Calendar API:n kautta
   turvallisella OAuth2-todennuksella.
 - **Paikallinen CalDAV-palvelin** -- Cleona voi käynnistää paikallisen
   CalDAV-palvelimen laitteellasi, jotta työpöydän kalenterisovellukset
-  (Thunderbird, Outlook, Apple-kalenteri, Evolution) voivat synkronoida
+  (Thunderbird, Outlook, Apple Kalenteri, Evolution) voivat synkronoida
   Cleona-kalenterisi kanssa.
 - **Androidin järjestelmäkalenteri** -- Cleonan tapahtumat voidaan siirtää
   Android-laitteesi sisäänrakennettuun kalenterisovellukseen.
-- **ICS-tiedostot** -- tuo ja vie tapahtumia standardi-iCalendar-muodossa.
+- **ICS-tiedostot** -- Tuo ja vie tapahtumia
+  standardi-iCalendar-muodossa.
 
 ### PDF-vienti
 
 Voit tulostaa tai viedä minkä tahansa kalenterinäkymän (päivä, viikko,
-kuukausi, vuosi) PDF-dokumenttina.
+kuukausi, vuosi) PDF-asiakirjana.
 
 ---
 
 ## 9. Kyselyt
 
-Voit luoda kyselyitä missä tahansa keskustelussa tai ryhmässä kerätäksesi
-mielipiteitä tai suunnitellaksesi aikatauluja.
+Voit luoda kyselyitä jokaisessa keskustelussa tai ryhmässä kerätäksesi
+ mielipiteitä tai suunnitellaksesi aikoja.
 
 ### Kyselytyypit
 
-Cleona tukee viittä kyselytyyppiä:
+Cleona tukee viittälaista kyselyitä:
 
-- **Yksittäisvalinta** -- osallistujat valitsevat yhden vaihtoehdon.
-- **Monivalinta** -- osallistujat voivat valita useita vaihtoehtoja.
-- **Ajankohtakysely** -- löydä kaikille sopiva ajankohta. Jokainen
-  osallistuja merkitsee ajankohdat sopivaksi, ehkä tai ei sovi.
-- **Asteikko** -- arvioi jotain numeerisella asteikolla (esim. 1-5).
-- **Vapaa teksti** -- osallistujat kirjoittavat oman vastauksensa.
+- **Yksittäisvalinta** -- Osallistujat valitsevat yhden vaihtoehdon.
+- **Monivalinta** -- Osallistujat voivat valita useita vaihtoehtoja.
+- **Aikakysely** -- Etsi aika, joka sopii kaikille. Jokainen
+  osallistuja merkitsee ajat saatavilla, ehkä tai ei
+  saatavilla.
+- **Asteikko** -- Arvioi jotain numeerisella asteikolla (esim. 1–5).
+- **Vapaa teksti** -- Osallistujat kirjoittavat oman vastauksensa.
 
 ### Kyselyn luominen
 
-Avaa keskustelu ja napauta kyselykuvaketta (tai käytä liitevalikkoa). Valitse
-kyselytyyppi, muotoile kysymyksesi ja vaihtoehdot ja lähetä kysely. Se
-näkyy viestinä keskustelussa.
+Avaa keskustelu ja napauta kyselykuvaketta (tai käytä
+liitevalikkoa). Valitse kyselytyyppi, muotoile kysymyksesi ja
+vaihtoehdot, ja lähetä kysely. Se ilmestyy viestinä keskusteluun.
 
 ### Äänestäminen
 
-Napauta kyselyä antaaksesi äänesi. Voit muuttaa tai perua äänesi
-milloin tahansa.
+Napauta kyselyä antaaksesi äänesi. Voit milloin tahansa
+muuttaa ääntäsi tai peruuttaa sen.
 
 ### Anonyymi äänestys
 
-Kyselyt voidaan määrittää anonyymiksi äänestykseksi. Kun se on aktivoitu,
-äänet ovat kryptografisesti anonyymeja -- kukaan, ei edes kyselyn luoja, ei
-voi nähdä kuka äänesti mitäkin. Äänten lukumäärä pysyy silti näkyvissä.
+Kyselyt voidaan määrittää anonyymiä äänestystä varten. Kun se on käytössä,
+äänet ovat kryptografisesti anonyymejä -- kukaan, edes
+kyselyn luoja, ei näe, kuka äänesti mitä. Äänimäärä
+pysyy silti näkyvissä.
 
-### Ajankohtakyselystä kalenteriin
+### Aikakysely kalenteriin
 
-Kun ajankohtakysely on valmis, voittanut ajankohta voidaan muuntaa suoraan
-kalenterimerkinnäksi yhdellä napautuksella.
+Kun aikakysely on päättynyt, voittaneenajan voi yhdellä napautuksella
+muuttaa suoraan kalenterimerkinnäksi.
 
 ---
-
 ## 10. Useita identiteettejä
 
 ### Miksi useita identiteettejä?
 
-Kuvittele, että haluat pitää työ- ja yksityiselämäsi erillään -- samaan
-tapaan kuin kahdella eri puhelinnumerolla, mutta ilman toista puhelinta.
-Cleonassa voit käyttää useita identiteettejä yhdellä laitteella. Jokaisella
-identiteetillä on oma nimi, oma profiilikuva, omat yhteyshenkilöt ja omat
-keskustelut.
+Kuvittele, että haluat erottaa työelämäsi ja yksityiselämäsi --
+samaan tapaan kuin kahdella eri puhelinnumerolla, mutta ilman toista
+puhelinta. Cleonassa voit käyttää useita identiteettejä yhdellä laitteella.
+Jokaisella identiteetillä on oma nimi, oma profiilikuva, omat yhteystiedot ja
+omat keskustelut.
 
 ### Uuden identiteetin luominen
 
 1. Yläpalkissa näet nykyisen identiteettisi välilehtenä.
 2. Napauta plus-merkkiä (+) identiteettivälilehtien oikealla puolella.
-3. Anna uudelle identiteetille nimi.
+3. Syötä nimi uudelle identiteetille.
 4. Valmis -- uusi identiteetti on heti aktiivinen.
 
 ### Identiteettien välillä vaihtaminen
 
-Napauta yksinkertaisesti identiteettivälilehteä yläpalkissa. Vaihto on
-välitön -- ei odotusaikaa, ei uudelleenlatausta.
+Napauta yksinkertaisesti identiteettivälilehteä yläpalkissa. Vaihto
+on välitön -- ei odotusta, ei uudelleenlatausta.
 
-### Kaikki toimivat samanaikaisesti
+### Kaikki pyörivät samanaikaisesti
 
-Tärkeä seikka: kaikki identiteettisi ovat samanaikaisesti aktiivisia. Vaikka
-sinulla olisi "Työ"-identiteetti näkyvissä, "Yksityinen"-identiteettisi
-vastaanottaa edelleen viestejä. Et menetä mitään riippumatta siitä, mikä
-identiteetti on valittuna.
+Tärkeä seikka: Kaikki identiteettisi ovat yhtä aikaa aktiivisia. Vaikka
+näytät juuri "Työ"-identiteettiä, "Yksityinen"-
+identiteettisi vastaanottaa edelleen viestejä. Et missaa mitään, riippumatta
+siitä, minkä identiteetin olet juuri valinnut.
 
 ### Identiteetin tietosivu
 
-Kun napautat aktiivisen identiteettisi välilehteä, tietosivu avautuu. Täällä
-voit:
+Kun napautat juuri aktiivisen identiteettisi välilehteä, avautuu
+tietosivu. Täällä voit:
 
 - Näyttää QR-koodisi yhteystietoja varten.
 - Vaihtaa tai poistaa profiilikuvasi.
@@ -590,255 +767,405 @@ voit:
 
 ### Identiteetin poistaminen
 
-Kun poistat identiteetin, yhteyshenkilöillesi ilmoitetaan asiasta.
-Identiteetti ja kaikki siihen liittyvät tiedot poistetaan laitteestasi. Tätä
-toimintoa ei voi peruuttaa.
+Kun poistat identiteetin, yhteystietojasi ilmoitetaan siitä.
+Identiteetti ja kaikki siihen liittyvät tiedot poistetaan
+laitteeltasi. Tätä toimenpidettä ei voi peruuttaa.
 
 ---
 
-## 11. Multi-Device
+## 11. Useita laitteita
 
-### Cleonan käyttäminen useilla laitteilla
+### Yksi identiteetti, yksi laite -- toistaiseksi
 
-Voit käyttää samaa identiteettiä jopa 5 laitteella samanaikaisesti. Yksi
-laite on ensisijainen (se pitää seed-lauseen), ja lisälaitteet linkitetään
-siihen.
+Identiteetti toimii tänään yhdellä laitteella. Toinen laite samalle
+identiteetille tulee myöhemmässä versiossa; asetuksissa kohdassa
+"Laitteet" -> "Hallinnoi laitteita" lukee "Kytke lisälaite" siksi
+vielä "Ei vielä saatavilla".
 
-### Uuden laitteen linkittäminen
+Kun se tulee, pätee: Kaikki laitteet ovat tasavertaisia, päälaitetta ei
+ole. Lisälaitteen asennat 24 sanallasi, ja yksi tähänastisista
+laitteistasi suostuu siihen. Enintään 5 laitetta.
 
-1. Avaa asetukset ensisijaisella laitteellasi.
-2. Siirry kohtaan "Linkitetyt laitteet".
-3. Valitse "Linkitä uusi laite".
-4. Asenna Cleona uudelle laitteelle ja valitse käynnistyksen yhteydessä
-   "Linkitä olemassa olevaan laitteeseen".
-5. Skannaa paritus-QR-koodi, joka näkyy ensisijaisella laitteellasi, tai
-   käytä parituslinkkiä.
+Jos syötät tänään 24 sanaasi uudella laitteella, siirrät identiteettiä:
+Identiteetti palautetaan uudelle laitteelle, ja tähänastinen laitteesi
+poistaa sen jälkeen identiteetin luotaan (katso luku 12).
 
-Linkitetty laite saa delegointisertifikaatin ensisijaiselta laitteelta.
-Linkitetyltä laitteelta lähetetyt viestit on kryptografisesti allekirjoitettu
-delegoidulla avaimella, joten yhteyshenkilöt voivat varmistaa, että viesti
-todella tulee sinun identiteetiltäsi.
+Usealla laitteella voit tänään käyttää eri identiteettejä (luku 10).
 
-### Miten se toimii
+### Identiteetin avainten vaihto
 
-- Ensisijainen laite pitää seed-lauseesi ja pääavaimet.
-- Linkitetyt laitteet saavat johdetut allekirjoitusavaimet ja
-  delegointisertifikaatin -- ne eivät koskaan saa itse seed-lausetta.
-- Kaikki laitteet jakavat saman identiteetin ja yhteyshenkilöt. Viestit
-  saapuvat kaikille laitteille.
-- Delegointisertifikaatit uusitaan automaattisesti ennen voimassaolon
-  päättymistä.
-
-### Laitteiden hallinta
-
-Avaa asetukset ja siirry kohtaan "Linkitetyt laitteet" nähdäksesi kaikki
-linkitetyt laitteesi, niiden tilan ja viimeisimmän aktiviteetin. Voit
-peruuttaa linkitetyn laitteen milloin tahansa, jos se katoaa tai varastetaan.
-
-### Hätäavainten vaihto
-
-Jos epäilet laitteen joutuneen vaarannetuksi, voit käynnistää
-hätäavainten vaihdon. Tällöin luodaan uudet avaimet, ja vaihdon on saatava
-vahvistus enemmistöltä muista laitteistasi. Tämä estää yksittäisen
-varastetun laitteen itsenäisen avainten vaihtamisen.
+Jos epäilet, että joku on päässyt käsiksi avaimiisi, voit luoda kohdasta
+"Hallinnoi laitteita" -> "Vaihda avaimet" uudet avaimet.
+Yhteystietosi saavat ilmoituksen, avoimet kutsusi peruutetaan. Tärkeää:
+Sen jälkeen 24 sanaa tuottavat yksin vain enää vanhat avaimet. Tee siksi
+heti sen jälkeen uusi palautuspaketti; palauttaa voit sen jälkeen vain
+yhdessä tämän paketin kanssa.
 
 ---
 
-## 12. Palautus
+## 12. Palauttaminen
 
-### Seed-lauseen käyttäminen
+### Siemenfraasin käyttäminen
 
-Jos menetät laitteesi tai otat käyttöön uuden:
+Kun menetät laitteesi tai perustat uuden:
 
 1. Asenna Cleona uudelle laitteelle.
 2. Valitse käynnistyksen yhteydessä "Palauta".
 3. Syötä 24 sanaasi.
-4. Cleona palauttaa identiteettisi ja ottaa automaattisesti yhteyttä aiempiin
-   yhteyshenkilöihisi.
-5. Yhteyshenkilösi vastaavat yhteystiedoillasi, ryhmäjäsenyyksillä ja
-   viestihistorialla.
+4. Cleona luo niistä kaikki identiteettisi uudelleen -- samoilla
+   avaimilla kuin ennenkin. Yhteystiedoillesi olet sama ihminen.
 
-Palautus tapahtuu kolmessa vaiheessa:
-- Ensin palaavat yhteyshenkilöt ja ryhmät.
-- Sitten viimeiset 50 viestiä jokaisesta keskustelusta.
-- Lopuksi täydellinen viestihistoria.
+### Mitä palautuu -- ja mitä ei
 
-Riittää, että yksi ainoa yhteyshenkilöistäsi on verkossa, jotta palautus
-onnistuu.
+Identiteettisi on 24 sanassa, yhteystietosi ja keskusteluhistoriasi
+eivät. Palautuu verkkopääsysi **palautuspaketin** kautta: Laitteesi
+tallentaa pienen, salatun paketin verkkoon. Vain sinun 24 sanaasi voivat
+löytää ja avata sen. Siinä lukee, mitä uusi laitteesi tarvitsee
+tavoittaakseen yhteystietosi uudelleen, ja mitä välillä sinulle lojui
+verkossa. Sen vuoksi yksikään yhteystieto ei tarvitse olla
+online-tilassa.
 
-### Guardian Recovery (luottohenkilöt)
+Aikaisempaa keskusteluhistoriaa palautus ei tuo takaisin.
 
-Voit nimetä jopa viisi luottohenkilöä "Guardianeiksi". Tällöin
-palautusavaimesi jaetaan viiteen osaan, joista jokainen Guardian saa yhden.
-Identiteettisi palauttamiseen riittää kolme viidestä osasta.
+Palautuspaketti elää 7 päivää, ja laitteesi uusii sen, niin kauan kuin se
+on käynnissä; asetuksissa näet, mihin asti se on voimassa. Jos yksikään
+laitteistasi ei ollut käynnissä yli 7 päivään, se on vanhentunut.
+Silloin 24 sanaa palauttavat identiteettisi silti, mutta yhteystiedot
+sinun on kutsuttava uudelleen; se, mitä välillä sinulle lojui verkossa,
+on menetetty.
 
-Tämä tarkoittaa: vaikka olisit menettänyt seed-lauseesi, kolme Guardianiasi
-voivat yhdessä palauttaa tilisi. Yksikään Guardian ei voi yksin päästä
-tietoihisi käsiksi -- aina tarvitaan vähintään kolme.
+### Palauttaminen on muutto
 
-Näin määrität Guardianit:
-1. Avaa asetukset.
-2. Siirry kohtaan "Turvallisuus".
-3. Valitse "Guardian Recovery".
-4. Valitse viisi luotettavaa yhteyshenkilöä.
+Jos aiempi laitteesi havaitsee myöhemmin, että identiteetti on palautettu
+muualle, se poistaa sen luotaan -- keskusteluhistoriansa kanssa. Siksi:
+se, jolla on sinun 24 sanaasi, voi tällä tavalla hakea identiteettisi
+laitteeltasi. Kunnes kaikki yhteystiedot ovat taas olemassa, sovellus
+muistuttaa sinua; kohdalla "Viimeistele ja uudista avaimet" lopetat
+palautuksen itse.
 
-### Miksi yhteyshenkilöt ovat varmuuskopiosi
+### Mitä kukaan ei voi palauttaa
 
-Perinteisissä viestisovelluksissa tietosi sijaitsevat palveluntarjoajan
-palvelimilla. Cleonassa ei ole palvelinta -- mutta yhteyshenkilösi ottavat
-tämän roolin. Kun lähetät viestin, yhteiset yhteyshenkilöt tallentavat
-salatun kopion siltä varalta, että vastaanottaja on juuri silloin offline.
-Palautuksen yhteydessä yhteyshenkilösi toimittavat tietosi takaisin.
+Tämä on tärkeää, ja siksi sanomme sen selkeästi:
 
-Tämä tarkoittaa: mitä enemmän aktiivisia yhteyshenkilöitä sinulla on, sitä
-luotettavampi varmuuskopiosi on. Yksi yhteyshenkilö, joka on säännöllisesti
-verkossa, riittää onnistuneeseen palautukseen.
+- **Kukaan muu kuin sinä ei voi palauttaa identiteettiäsi.** Ei
+  kehittäjä, ei tuki, eivätkä myöskään yhteystietosi -- kuinka
+  monta tahansa. Ei ole pääavainta eikä osaa avaimestasi, joka olisi
+  talletettu muille.
+- **Jos olet menettänyt 24 sanaa etkä enää ole yhtäkään laitetta,
+    identiteettisi on menetetty.** Silloin ei auta muu kuin luoda
+    uusi ja kutsua yhteystietosi uudelleen.
+
+Paras suoja: Kirjoita 24 sanaa paperille ja säilytä ne turvassa.
 
 ---
-
 ## 13. Asetukset
 
-Asetuksiin pääset hammasrataskuvakkeesta oikeassa yläkulmassa.
+Pääset asetuksiin rataskuvakkeen kautta oikeassa yläkulmassa.
 
 ### Ilmoitukset ja soittoäänet
 
 - Valitse kuudesta eri soittoäänestä saapuville puheluille.
-- Aseta viesti-ilmoitusääni.
-- Android-laitteilla voit lisäksi ottaa värinän käyttöön tai poistaa
-  sen käytöstä.
+- Aseta viestiääni.
+- Android-laitteilla voit lisäksi aktivoida tai
+  deaktivoida värinän.
+- **"Mykistä kaikki"** ei päästä tällä laitteella enää yhtäkään viestiä
+  soimaan, värisemään tai ilmoittamaan itsestään -- koskien kaikkia
+  identiteettejä. Puhelut soivat edelleen.
+- **"Hiljaiset tunnit"** asetat identiteettikohtaisesti alkaen-/asti-
+  aikajoilla. Tuona aikana yksikään tämän identiteetin viesti ei soi,
+  värisi tai ilmoita itsestään; viestit saapuvat silti.
+- **"Ilmoitukset ilman sisältöä"** (oletus: pois) näyttää vain, että
+  viesti, kutsu tai muistutus on saapunut -- ilman lähettäjää, nimeä
+  ja tekstiä. Puhelut näyttävät edelleen nimen.
+- Se, mitä käynnistyksen jälkeen saapuu kerralla, Cleona ilmoittaa
+  kootussa ilmoituksessa ("5 uutta viestiä 2 keskustelussa"); kaikki
+  myöhempi erikseen. Napautus viesti-ilmoitusta avaa keskustelun,
+  myös toisessa identiteetissä.
 
-### Ulkoasut (Skins)
+### Ulkoasut (skinit)
 
 Cleona tarjoaa kymmenen eri ulkoasua: Teal, Ocean, Sunset, Forest,
 Amethyst, Fire, Storm, Slate, Gold ja Contrast. Contrast-ulkoasu täyttää
-korkeimman saavutettavuustason (WCAG AAA) ja on erityisen hyvin luettavissa
-heikkonäköisille.
+korkeimman saavutettavuustason (WCAG AAA) ja on rajoittuneen
+näön kanssa erityisen helposti luettava.
 
-Jokaisella identiteetillä voi olla oma ulkoasunsa. Vaihdat ulkoasua
+Jokaisella identiteetillä voi olla oma ulkoasunsa. Vaihdat ulkoasun
 identiteetin tietosivulla (napauta aktiivista identiteettivälilehteä).
 
-Lisäksi voit asetuksista kohdasta "Ulkoasu" vaihtaa vaalean, tumman ja
-järjestelmäteeman välillä.
+Lisäksi voit asetuksissa kohdassa "Ulkoasu" vaihtaa vaalean,
+tumman ja järjestelmän teeman välillä.
 
 ### Kielen vaihtaminen
 
-Cleona on saatavilla 33 kielellä, mukaan lukien oikealta vasemmalle
-kirjoitettavat kielet (esim. arabia, heprea). Vaihda kieli asetuksista
-kohdasta "Kieli".
+Cleona on saatavilla 34 kielellä, mukaan lukien oikealta vasemmalle
+-kirjoitettavat kielet (esim. arabia, heprea). Vaihda kieli
+asetuksissa kohdassa "Kieli".
 
-### Tallennusraja
+### Medioiden arkistointi
 
-Voit määrittää, kuinka paljon tallennustilaa Cleona saa käyttää laitteellasi
-(100 MB - 2 GB). Kun raja saavutetaan, vanhemmat mediatiedostot arkistoidaan
-tai poistetaan automaattisesti -- tekstiviestit säilyvät aina.
+Jos sinulla on kotona verkkolevy (NAS) tai jaettu kansio,
+Cleona voi arkistoida mediasi automaattisesti sinne. Tukevat
+ovat SMB, SFTP, FTPS ja WebDAV.
 
-### Median arkistointi
-
-Jos sinulla on kotona verkkolevyasema (NAS) tai jaettu kansio, Cleona voi
-arkistoida mediasi automaattisesti sinne. Tuettuja ovat SMB, SFTP, FTPS ja
-WebDAV.
-
-Näin porrastettu tallennus toimii:
-- Ensimmäiset 30 päivää: kaikki pysyy laitteellasi.
-- 30 päivän jälkeen: esikatselukuva pysyy laitteella, alkuperäinen
-  arkistoidaan.
-- 90 päivän jälkeen: vain pieni esikatselukuva pysyy laitteella.
-- Vuoden jälkeen: vain paikkamerkki jää, alkuperäinen on turvallisesti
+Nin portaittainen tallennus toimii:
+- Ensimmäiset 30 päivää: Kaikki pysyy laitteellasi.
+- 30 päivän jälkeen: Esikatselukuva pysyy laitteella, alkuperäinen arkistoidaan.
+- 90 päivän jälkeen: Vain pieni esikatselukuva pysyy laitteella.
+- Vuoden jälkeen: Vain paikanvaraus pysyy, alkuperäinen on turvallisesti
   arkistossa.
 
-Voit milloin tahansa napauttaa arkistoitua mediaa hakeaksesi sen takaisin --
-edellyttäen, että olet yhteydessä kotiverkkoosi. Erityisen tärkeitä
-mediatiedostoja voi kiinnittää, jotta niitä ei koskaan arkistoida.
+Voit milloin tahansa napauttaa arkistoitua mediaa noutaaksesi sen
+takaisin -- edellyttäen, että olet yhteydessä kotiverkkoosi. Erityisen
+tärkeät mediat voidaan kiinnittää, jotta niitä ei koskaan siirretä
+syrjään.
 
-### Ääniviestien transkriptio
+Kohdassa "Tallennusbudjetti" määrität, kuinka monta megatavua medialle
+jää laitteelle (oletus: 100 MB puhelimessa, 2 GB tietokoneella). Kun se
+on täynnä, vanhin kiinnittämätön media arkistoidaan ensin. Alkuperäinen
+poistetaan vain, kun se on turvallisesti arkistossa -- tekstiviestit
+säilyvät aina.
 
-Kun aktivoitu, ääniviestisi muunnetaan paikallisesti laitteellasi tekstiksi
-(avoimen lähdekoodin Whisper-mallilla). Muunnettu teksti lähetetään
-äänitteen mukana vastaanottajallesi. Transkriptio tapahtuu kokonaan
-laitteellasi -- mitään tietoja ei lähetetä ulkoisille palveluille.
+### Transkriptio ääniviesteille
+
+Kun se on käytössä, ääniviestisi muutetaan tekstiksi paikallisesti
+laitteellasi (avoimen lähdekoden mallilla Whisper). Transkriboitu teksti
+lähetetään tallenteen mukana keskustelukumppanillesi. Transkriptio
+tapahtuu kokonaan laitteellasi -- mikään data ei mene ulkoisiin palveluihin.
+
+Mallin (tiny, base, small), joka ladataan, säädät kerran koko laitteelle;
+kielen (automaattinen tai kiinteä) identiteettikohtaisesti.
 
 ### Automaattinen lataus
 
-Voit asettaa, minkä kokoiset mediatiedostot ladataan automaattisesti. Näin
-voit esimerkiksi antaa kuvien latautua automaattisesti, mutta päättää
-suurista videoista manuaalisesti.
+Voit asettaa, mistä koosta alkaen mediat ladataan
+automaattisesti. Voit esimerkiksi antaa kuvien latautua
+automaattisesti, mutta päättää suurista videoista manuaalisesti.
 
-### Linkitetyt laitteet
+### Laitteet
 
-Hallitse linkitettyjä laitteitasi tässä asetusten osiossa. Katso
-Multi-Device-luku lisätietoja varten.
+Kohdasta "Laitteet" -> "Hallinnoi laitteita" näet tämän laitteen. Lisälaitteen
+kytkeminen tulee myöhemmässä versiossa (luku 11).
+
+### Verkko
+
+Cleona ei tarvitse verkkoasetuksia toimiakseen. Siellä on
+kolme verkkokytkintä:
+
+- **Portin välitys reitittimellä** (oletus: päällä). Cleona pyytää omaa
+  reititintäsi avaamaan Cleonalle oven. Jos se onnistuu, laiteesi on
+  muille paremmin tavoitettavissa ja auttaa verkkoa. Cleona puhuu
+  siinä vain reitittimellesi, ei internetiin.
+- **Julkiset osoitemerkinnät** (oletus: päällä). Jos laitteellasi on vielä
+  liian vähän naapureita, se etsii julkisesta hakemistosta (Nostr)
+  lisää sisäänpääsykohtia, ja jos se on itse hyvin tavoitettavissa, se
+  merkitsee itsensä sinne. Merkintä sisältää osoitteen, ei nimeä eikä
+  yhteystietoa. Sammutitpa sen, laitteesi löytää naapureita enää vain
+  kutsujen, paikallisen verkon ja tuntemiensa naapureiden kautta.
+- **Vähemmän häivytyspaketteja Wi-Fi-verkossa** (oletus: pois). Wi-Fi-verkossa
+  tai kaapelissa voit sammuttaa tyhjät häivytyspaketit. Silloin kuitenkin
+  näkyy taas, milloin kirjoitat. Mobiiliverkossa tätä kytkintä ei ole --
+  siellä Cleona lähettää joka tapauksessa vain yhden häivytyspaketin
+  minuutissa.
+
+Häivitysliikennettä kokonaisuutena ei voi sammuttaa. Se on tahallaan:
+vain jos se pyörii aina, laitteesi aktiivisuus ei kerro mitään siitä,
+kirjoitatko juuri nyt.
+
+Kolmen kytkimen yläpuolella on **Datansäästötila**: Mobiiliverkossa Cleona
+ehdottaa sitä, mutta ei koskaan kytke sitä itse päälle. Se säästää dataa,
+sen hintana laitteesi on ulkoapäin helpompi tunnistaa.
+
+Sen alapuolella säädät **"Välimuisti muiden medialle"**: Laitteesi pitää
+salattuja osia muiden medioista enintään 7 päivää, jotta ne tavoittavat
+vastaanottajansa (oletus: 100 MB puhelimessa, 1 GB tietokoneella).
+Pienempi koko vapauttaa tilan heti -- vanhimmat osat ensin.
 
 ---
 
-## 14. Turvallisuus
+## 14. Tietoturva
 
-### Mitä Post-Quantum-salaus tarkoittaa?
+### Mitä post-kvanttisalaus tarkoittaa?
 
-Nykyinen salaus perustuu matemaattisiin ongelmiin, joita tavallisten
-tietokoneiden on äärimmäisen vaikea ratkaista. Kvanttitietokoneet voisivat
-tulevaisuudessa ratkaista joitakin näistä ongelmista nopeasti.
-Post-Quantum-salaus käyttää lisämenetelmiä, jotka kestävät myös
-kvanttitietokoneet.
+Nykyinen salaus perustuu matemaattisiin ongelmiin, jotka ovat tavallisille
+koneille äärimmäisen vaikeita ratkaista. Kvanttikoneet voisivat ratkaista
+jotkin näistä ongelmista tulevaisuudessa nopeasti. Post-kvanttisalaus
+käyttää lisämenetelmiä, jotka kestävät myös kvanttikoneet.
 
 Cleona yhdistää molemmat lähestymistavat: klassisen salauksen
-luotettavuuden vuoksi ja Post-Quantum-menetelmät tulevaisuudenkestävyyden
-vuoksi. Näin olet suojattu sekä nykyisiä että tulevia uhkia vastaan.
+luotettavuuteen ja post-kvanttimenetelmät tulevaisuusvarmuuteen. Näin olet
+samaan aikaan suojattu nykyisiä ja tulevia uhkia vastaan.
 
-Jokaiselle yksittäiselle viestille luodaan oma avain. Vaikka hyökkääjä
-murtaisi yhden viestin avaimen, hän ei voisi lukea sillä mitään muuta
-viestiä.
+Jokaista yksittäistä viestiä varten luodaan oma avain. Vaikka
+hyökkääjä murtaisi yhden viestin avaimen, hän ei voisi
+sillä lukea mitään muuta viestiä.
 
-### Miksi palvelimettomuus on turvallisempaa
+### Miksi ei-palvelin on turvallisempi
 
-Perinteisissä viestisovelluksissa viestisi kulkevat palveluntarjoajan
-palvelinten kautta. Vaikka ne olisivatkin siellä salattuja: palveluntarjoajalla
-on pääsy metatietoihin (kuka kommunikoi kenen kanssa milloin, kuinka usein,
-mistä) ja sen on mahdollisesti luovutettava ne tuomioistuimen määräyksestä.
+Tavanomaisissa viestiohjelmissa viestisi kulkevat tarjoajan
+palvelimien kautta. Vaikka ne olisivat siellä salattuja:
+tarjoajalla on pääsy metatietoihin (kuka viestii milloin kenen kanssa,
+kuinka usein, mistä) ja hänen on ehkä annettava ne
+tuomioistuimen määräyksen nojalla.
 
-Cleonassa ei ole tällaista keskitettyä pistettä. Viestisi kulkevat suoraan
-laitteelta laitteelle. Ei ole paikkaa, johon kaikki metatiedot koottaisiin.
-Kukaan ei voi yksittäisen tietopisteen perusteella rekonstruoida
-viestintäkäyttäytymistäsi.
+Cleonassa ei ole sellaista keskitettyä pistettä. Ei ole paikkaa, johon
+kaikki metatiedot kertyvät, eikä hakemistoa, josta voisi
+tarkistaa, kuka olet tai ketkä tunnet.
 
-### Mitä tapahtuu kun olet offline?
+### Kuka näkee, että kirjoitat jonkun kanssa?
 
-Kun lähetät viestin ja vastaanottaja on offline:
+Salaus suojaa, **mitä** kirjoitat. Yhtä tärkeää on, ettei
+yksikään yksittäinen tarkkailija saa tietää, **kenen kanssa** ja **milloin**
+kirjoitat. Tähän Cleona huolehtii nin:
 
-1. Cleona yrittää ensin toimittaa viestin suoraan.
-2. Jos se ei onnistu, viesti välitetään yhteisten yhteyshenkilöiden kautta.
-3. Samalla viesti jaetaan salattuina paloina useille verkon solmuille
-   (samaan tapaan kuin palapeli, joka koostuu 10 palasta, joista 7 riittää
-   kuvan kokoamiseen).
-4. Viesti säilytetään jopa 7 päivää.
+- **Internetissä ei koskaan suoraan.** Jos laitteesi lähettäisi viestin
+  suoraan keskustelukumppanisi internet-osoitteeseen, tarjoajasi voisi nähdä,
+  kenen kanssa kirjoitat. Siksi viesti menee internetissä aina kiinteiden
+  naapuriesi kautta: sinun ja keskustelukumppanisi.
+- **Naapurit, joille luotat.** Kiinteät naapurisi ovat, aina kun mahdollista,
+  omien yhteystietojesi laitteita -- enintään kolme, jotka ovat juuri ulkoapäin
+  tavoitettavissa. Jos yksi putoaa pois, toinen yhteystieto astuu tilalle.
+  Yhteystietoa ei voi ostaa palvelimilla; mielivaltaisen solmun
+  verkossa kyllä. Jos sinulla ei ole vielä yhtään tavoitettavaa yhteystietoa,
+  Cleona ottaa toisen naapurin. Kutsusi ei nimeä koskaan ketään
+  yhteystiedoistasi, jotta kukaan ei saa niiden kautta tietoonsa ystäväsi
+  osoitetta.
+- **Koodeja nimien sijaan.** Naapurit eivät näe nimiä eikä tunnisteita,
+  vaan vain koodin. Se on voimassa juuri teille kahdelle, yhteen suuntaan,
+  yhden päivän -- seuraavana päivänä se on eri. Naapurisi tietää,
+  mistä paketti tulee, mutta ei minne se lopulta mene. Keskustelukumppanisi
+  naapuri tietää, minne se menee, mutta ei mistä se tuli. Normaalitilanteessa
+  kukaan matkalla ei näe molempia päätepisteitä.
+- **Häivitysliikenne.** Laitteesi lähettää jatkuvasti, epäsäännöllisin
+  välein, häivytyspaketteja naapureilleen. Ne ovat yhtä suuria kuin
+  todelliset paketit, menevät saman portin kautta eivätkä ole ulkoapäin
+  niistä erotettavissa. Kirjoittaako juuri ihminen vai pyöriikö vain laite,
+  ei näy siitä. Viestisi eivät koskaan odota häivitysliikennettä --
+  ne lähtevät heti, se vain pyörii vieressä.
 
-Kun vastaanottaja tulee takaisin verkkoon, viestit toimitetaan. Saat
-vahvistuksen, kun viestisi on saapunut perille.
+**Mitä häivitysliikenne maksaa:** Wi-Fi-verkossa noin 13 MB päivässä.
+Mobiiliverkossa Cleona lähettää vain yhden häivytyspaketin minuutissa,
+se on noin 1,7 MB päivässä. Syy mobiiliverkon rajoittamiseen
+ei ole datamäärä, vaan akku:
+jokainen paketti herättää radiomoduulin.
 
-### Sensuurin esto
+**Mitä Cleona ei voi piilottaa** -- rehellisesti sanottuna:
 
-Jos verkossasi estetään tavallinen yhteysmenetelmä (UDP), Cleona vaihtaa
-automaattisesti vaihtoehtoiseen siirtotapaan (TLS), jota on vaikeampi
-havaita ja estää. Tämä tapahtuu läpinäkyvästi -- sinun ei tarvitse
-määrittää mitään.
+- Yksikään **yksittäinen** tarkkaaja ei näe, kuka kirjoittaa kenen kanssa --
+  ei tarjoajasi eivätkä matkan solmut. Mutta ken, joka **tarkkailee molempia
+  päätepisteitä yhtä aikaa**, esimerkiksi valtio, joka tarkkailee liittymääsi
+  ja keskustelukumppanisi liittymää tai asettaa molemmat naapurit, voi ajan
+  myötä yhdistää: paketti lähtee sinulta, pian sen jälkeen paketti saapuu
+  keskustelukumppanillesi. Tarpeeksi usein toistettuna se antaa yhteyden.
+- Häivitysliikenne vaikeuttaa tätä yhdistämistä, mutta ei estä sitä. Se
+  piilottaa yksittäiset viestit, ei määrää: kuka lähettää paljon,
+  nostaa laitensa kokonaisliikennettä.
+- Yhteystieto, joka on kiinteä naapurisi, saa tietää, **milloin** ja **kuinka
+  paljon** lähetät ja vastaanotat -- ei kenen kanssa eikä mitä. Jos uhka
+  tulee omasta piiristäsi, voit jättää minkä tahansa yhteystiedon tästä
+  ulkopuolelle (katso luku 3, "Älä koskaan käytä kiinteänä naapurina").
+- Jos kahdella uudella käyttäjällä on vain sama yksi naapuri, heidän
+  viestinsä kulkee juuri tämän solmun kautta, ja hän näkee molemmat
+  päätepisteet. Heti kun kummallakin on lisää naapureita, se päättyy.
+- Kutsusi sisältää internet-osoitteesi. Ken, jolla on tekstirivi,
+  näkee, missä olet online-tilassa -- anna se vain ihmisille,
+  joihin luotat sen kanssa.
+- Naapuri, joka välittää eteenpäin, näkee, että kaksi koodia vaihtaa
+  paketteja -- ei kuka on takana eikä mitä sisällä on.
+- Käynnissä olevan puhelun signaali voi, jos ensimmäinen naapuri ei juuri
+  vastaa, kulkea solmun kautta, joka näkee molemmat päät; hän saa tietää,
+  että puhutte yhdessä.
+- Suuren tiedoston, johon olet suostunut, näkee kone, joka välittää tai
+  säilyttää sitä, molemmista päistä (katso luku 4).
+- Puheluissa tarjoajalta suoja ei päde, ja kontaktisi näkee
+  internet-osoitteesi (katso luku 7).
 
-### Turvallinen avainten säilytys
+### Mitä tapahtuu, kun keskustelukumppanisi on offline-tilassa?
 
-Tuetuilla alustoilla Cleona tallentaa salausavaimesi käyttöjärjestelmän
-turvalliseen avainvarastoon (Android Keystore, iOS Keychain, macOS Keychain).
-Saatavilla ollessaan tämä tarjoaa laitteistopohjaista suojaa avaimillesi.
+1. Cleona käynnistää kaikki sopivat reitit samanaikaisesti: samassa
+   Wi-Fi-verkossa suoraan, internetissä kahden naapurin kautta -- ja lisäksi
+   postilaatikon.
+2. Postilaatikkoa varten Cleona tallentaa salatun viestin kolmen
+   naapurin luo. Heti kun kaksi on vahvistanut vastaanoton, sitä
+   pidetään talletettuna.
+3. Cleona valitsee siihen ensisijaisesti naapureita, joiden luona
+   keskustelukumppanisi myös katsoo -- ensin naapurin, jonka hänen
+   kutsunsa nimeää.
+4. Viesti odottaa siellä enintään 7 päivää. Kun keskustelukumppanisi
+   palaa, hän noutaa sen ja vahvistaa sinulle vastaanoton. Vasta silloin
+   näet kaksi ruksia.
+
+Postilaatikon voi tyhjentää vain keskustelukumppanisi: noutaminen ja
+poistaminen onnistuvat vain avaimella, joka on vain hänellä, ja
+poistetaan vasta kun hän on vahvistanut vastaanoton. Naapurit näkevät vain
+salattuja paketteja arvon alla, joka vaihtuu joka päivä.
+
+### Tuntemattomat eivät pääse läpi
+
+Joltakin, joka ei ole yhteystietosi eikä yhteisen ryhmän jäsen, Cleona
+hyväksyy tarkalleen kaksi asiaa:
+kysymyksen julkisista avaimistasi, kunhan jokin kutsuistasi on
+avoin, ja yhteystietopyynnön. Pyynnössä on oltava
+kelvollinen kutsusi, ja lähettäjän on ensin ratkaistava laskentatehtävä.
+Kaikki muu -- viestit, puhelut, tiedostot -- hylätään,
+ennen kuin se yletää sovellukseen asti. Joku, jolla on vain
+painettu käyntikorttisi, ei siis voi vain soittaa sinulle. Yhteisen
+ryhmän jäsen tavoittaa sinut vain tässä ryhmässä -- ryhmäviesteillä ja
+ryhmäpuheluilla, ei koskaan yksitellen.
+
+### Sensuurin vastustus
+
+Cleona on rakennettu niin, että sitä on vaikea estää:
+
+- **Ei palvelinta, ei kiinteää osoitetta.** Sovelluksessa ei ole osoitetta,
+  jonka voisi estää, eikä verkko riipu mistään yksittäisestä solmusta.
+- **Ei kiinteää porttia.** Jokainen laite valitsee ensimmäisen käynnistyksen
+  yhteydessä satunnaisen portin. Ei ole tunnettua porttinumeroa, josta
+  voisi tunnistaa Cleona-liikenteen.
+- **Kuten satunnaisdataa.** Kahden laitteen välisen yhteyden muodostaminen
+  on koodattu niin, ettei se ole erotettavissa satunnaisdatasta.
+- **Monia sisäänpääsyjä.** Jokainen kutsu, jokainen naapuri ja jokainen laite
+  samassa Wi-Fi-verkossa on mahdollinen tie takaisin verkkoon.
+
+### Turvallinen avainten tallennus
+
+Tuetuilla alustoilla Cleona tallentaa
+salausavaimesi käyttöjärjestelmän turvalliseen avainrenkaaseen (Android
+Keystore, iOS Keychain, macOS Keychain). Missä se on saatavilla, se tarjoaa
+laitteistotuetun suojan avaimillesi.
 
 ### Tietokannan salaus
 
-Kaikki viestisi, yhteyshenkilösi ja asetuksesi on salattuina laitteellasi.
-Vaikka joku pääsisi käsiksi tiedostojärjestelmääsi, hän ei voisi lukea
-mitään ilman kryptografista avaintasi. Tämä avain johdetaan identiteetistäsi
-ja on olemassa vain laitteellasi.
+Viestisi ja keskustelusi ovat salatussa tietokannassa -- oma
+kutakin identiteettiä kohden, kullakin oma avain.
+Salattua ei ole vain itse tietokanta, vaan myös sen
+väliaikaistiedostot; mitään ei kirjoiteta salauksetta levylle,
+ei edes tilapäisesti. Asetukset, yhteystiedot ja mediat ovat myös
+salattuna tallennettuja.
 
-### Suljettu verkko
+Avaimet johdetaan 24 sanastasi ja ovat olemassa vain
+laitteellasi. Vaikka joku saisi laitteesi käsiinsä ja lukisi
+tiedot, hän löytää ilman näitä avaimia vain lukukelvotonta dataa.
 
-Cleona toimii suljettuna verkkona. Jokainen verkkopaketti on todennettu,
-joten vain aidot Cleona-laitteet voivat osallistua. Tämä estää ulkopuolisia
-syöttämästä väärennettyjä viestejä tai salakuuntelemasta verkkoliikennettä.
+Salaamatonta se on vain siellä, missä annat itse sisältöjä ulos Cleonasta:
+- kun tallennat tiedoston keskustelusta laitteellesi,
+- kun laitat kuvakaappauksen painikkeella kuvan kuviisi,
+- kun jaat jotain toiselle sovellukselle,
+- kun perustat media-arkistoinnin (luku 13): Arkistoidut alkuperäiset
+  ovat salauksettomina kotiverkkolevylläsi, jotta voit avata ne siellä
+  myös ilman Cleonaa,
+- kun peilaat tapahtumat Androidin järjestelmäkalenteriin: Siellä
+  muut kalenteripääsyn omaavat sovellukset voivat lukea ne.
+
+Mitä näin on ulos mennyt, ei poisteta viestin mukana eikä se vanhene sen
+mukana.
+
+### Suoja näytöllä
+
+Androidissa, Windowsissa ja macOS:ssa Cleona ei anna muiden sovellusten
+ottaa kuvakaappauksia. Jos tarvitset kuvaa, käytä kuvakaappauspainiketta
+yläpalkissa: Se laittaa kuvan kuviisi -- salaamattomana. Keskustelussa,
+jossa viestien edelleen välittäminen ei ole sallittua, kuvakaappausta
+ei ole.
 
 ---
 
@@ -846,143 +1173,177 @@ syöttämästä väärennettyjä viestejä tai salakuuntelemasta verkkoliikennet
 
 ### Miten saan päivityksiä?
 
-Cleona voidaan päivittää eri tavoin. Tavoitteena on, että voit saada
-päivityksiä myös silloin, kun yksittäiset jakelukanavat eivät ole
-saatavilla tai ne on estetty:
+Cleona voidaan päivittää eri tavoilla. Tavoitteena on, että
+voit saada päivityksiä silloinkin, kun yksittäiset jakelutiet pätkivät
+tai estetään:
 
-1. **App Store / Play Store:** Jos olet asentanut Cleonan sovelluskaupasta,
-   saat päivitykset tavalliseen tapaan kaupan kautta.
-2. **GitHub Releases:** Projektin GitHub-sivulta löydät allekirjoitetut
-   asennuspaketit kaikille alustoille.
-3. **Verkon sisäiset päivitykset:** Jos toinen Cleona-käyttäjä verkossasi
-   on jo päivittänyt uusimpaan versioon, Cleona voi hakea päivityksen
-   suoraan P2P-verkon kautta -- ilman ulkoista palvelinta. Uusi versio
-   jaetaan virheenkorjauspalasina useiden solmujen kautta. Laitteesi
-   kerää tarpeeksi palasia ja kokoaa päivityksen. Aitous varmistetaan
-   kehittäjän Ed25519-allekirjoituksella.
-4. **Kutsulinkit:** Voit luoda kutsulinkkejä, jotka sisältävät kaiken
-   mitä uusi käyttäjä tarvitsee Cleonan asentamiseen ja verkkoon
-   liittymiseen.
-5. **Fyysinen siirto:** Ilman internetiä olevissa ympäristöissä voit
-   jakaa Cleonan USB-tikulta tai lähiverkon kautta muille.
+1. **App Store / Play Store:** Kun Cleona ilmestyy sinne ja olet asentanut
+   sen kaupasta, saat päivitykset kuten totuttua kaupan kautta.
+   iPhonessa päivitykset tulevat TestFlightin kautta.
+2. **GitHub Releases:** Projektin GitHub-sivulta löydät
+   allekirjoitetut asennuspaketit kaikille alustoille.
+3. **Päivitykset verkon kautta:** Cleona voi hakea päivityksen suoraan
+   verkon kautta -- ilman latauspalvelinta. Uusi versio on
+   pilkottu virheenkorjattuihin osiin, jotka leviävät verkossa; osa
+   niistä matkaavat jopa häivitysliikenteen mukana. Laitteesi kerää
+   tarpeeksi osia ja kokoaa päivityksen. Siirretään yleensä vain
+   muutos -- muutama megatavu koko sovelluksen sijaan. Tämä pätee
+   Linuxiin, Windowsiin ja Androidiin; macOS:ssa lataat uudet versiot
+   verkkosivustolta tai GitHubista.
+4. **Kutsulinkit:** Voit luoda kutsulinkkejä, jotka sisältävät
+   kaiken, mitä uusi käyttäjä tarvitsee asentaakseen Cleonan ja
+   yhdistääkseen verkkoon.
+5. **Fyysinen siirto:** Ympäristöissä ilman internetiä voit antaa Cleonan
+   toisille USB-tikutlla tai paikallisessa verkossa.
 
-### Päivitysilmoitus
+### Miten päivitys etenee
 
-Kun uusi päivitys on saatavilla, Cleona näyttää ilmoituksen
-aloitusnäytöllä. Jos päivitys on saatavilla myös verkon kautta
-(verkon sisäinen päivitys), voit valita sen lataamisen suoraan verkosta.
+1. Cleona kerää uuden päivityksen osat automaattisesti taustalla
+   ja kokoaa ne.
+2. Vasta kun päivitys on **täydellinen** ja sen **allekirjoitus
+   on tarkistettu**, Cleona tarjoaa sitä sinulle. Et siis saa koskaan
+   puoliakaan tai tarkistamatonta päivitystä.
+3. Kun napautat "Asenna", asennus alkaa ilman
+   jatkokysymystä. Androidissa järjestelmä näyttää lisäksi
+   asennusikkunan.
 
-### Binäärien jakelu
-
-Oletuksena laitteesi auttaa jakamaan päivityksiä muille verkon käyttäjille.
-Jos et halua tätä, voit poistaa toiminnon käytöstä asetuksista kohdasta
-"Verkko". Päivityspalojen tallennustila on rajattu (5 MB mobiililaitteilla,
-20 MB työpöytälaitteilla) ja sitä siivotaan säännöllisesti.
+Vanhempia versioita ei tarjota -- päivitys menee aina vain
+eteenpäin. Jos versio on niin vanha, ettei se enää osaa
+toimia yhdessä verkon kanssa, Cleona näyttää sen selkeästi ja pyytää
+sinua päivittämään.
 
 ### Allekirjoituksen tarkistus
 
-Jokainen päivitys on kryptografisesti allekirjoitettu. Cleona tarkistaa
-allekirjoituksen automaattisesti ennen päivityksen asentamista. Näin
-varmistetaan, että vain virallisen kehittäjän päivitykset hyväksytään --
-vaikka päivitys olisi haettu P2P-verkon kautta.
+Jokainen päivitys on kaksoisallekirjoitettu: klassisella ja
+post-kvanttimenetelmällä. Cleona tarkistaa molemmat allekirjoitukset
+automaattisesti. Näin
+varmistetaan, että vain virallisen kehittäjän päivitykset hyväksytään
+-- vaikka päivitys tulisi verkon kautta vieraista laitteista.
+Päivitys ei synny koskaan automaattisesti kehityksestä, vaan
+vasta kun kehittäjä allekirjoittaa sen käsin.
 
 ---
-
 ## 16. Usein kysytyt kysymykset
 
 ### "Voinko käyttää Cleonaa ilman internetiä?"
 
-Et, Cleona tarvitsee verkkoyhteyden viestien lähettämiseen ja
-vastaanottamiseen. Sinun ei kuitenkaan tarvitse olla samanaikaisesti verkossa
-vastaanottajasi kanssa: viestit, jotka lähetetään vastaanottajan ollessa
-offline, tallennetaan välimuistiin ja toimitetaan automaattisesti, kun
-molemmat osapuolet ovat taas yhteydessä. Lähiverkossa (esim. samassa
-WLAN-verkossa) voitte kommunikoida myös täysin ilman internet-yhteyttä.
+Cleona tarvitsee verkkoyhteyden, mutta ei välttämättä internetiä:
+Samassa Wi-Fi-verkossa Cleona-laitteet löytävät toisensa ja voivat
+kirjoittaa toisilleen täysin ilman internet-yhteyttä. Sinun ei tarvitse olla
+samaan aikaan online-tilassa keskustelukumppanisi kanssa: Jos hän on
+offline-tilassa, viesti odottaa enintään 7 päivää
+postilaatikossa kolmen naapurin luona, kunnes hän noutaa sen.
 
-### "Entä jos menetän seed-lauseeni?"
+### "Mitä jos menetän siemenfraasini?"
 
-Jos olet määrittänyt Guardianit, kolme viidestä luottohenkilöstä voi yhdessä
-palauttaa pääsysi. Ilman Guardianeita ja ilman seed-lausetta ei valitettavasti
-ole tapaa saada identiteettiäsi takaisin. Siksi on niin tärkeää säilyttää 24
-sanaa turvallisesti.
+Niin kauan kuin yksi laite, jossa on identiteettisi, pyörii, mikään ei ole
+hukassa -- siellä kirjoitat vain eteenpäin. Laitteella, jolla loit
+identiteetin, voit yleensä lukea 24 sanaa uudelleen (katso
+luku 2). Älä nojaa siihen: Uudelleenasennus raivaa tämän kopion pois,
+ja Androidissa myös näyttölukituksen poistaminen tai muuttaminen tuhoaa
+sen. Jos sinulla ei ole
+sanoja etkä
+yhtäkään laitetta, ei ole paluutietoa -- ei edes yhteystitojesi,
+kehittäjän tai kenen tahansa muun kautta. Siksi on niin tärkeää
+säilyttää 24 sanaa turvassa.
 
-### "Voiko joku lukea viestejäni?"
+### "Voiko joku lukea viestejäni mukanani?"
 
-Ei. Jokainen viesti salataan kertakäyttöisellä avaimella, joka on voimassa
-vain tälle yhdelle viestille. Vain sinä ja vastaanottajasi voitte purkaa
-viestin salauksen. Ei ole keskitettyä palvelinta, ei yleisavainta eikä
-pääsyä kehittäjälle. Vaikka laite välittäisi viestin kuljetusreitillä, se
-näkee vain salattua dataa.
+Ei. Jokainen viesti salataan kertakäyttöisellä avaimella, joka
+kelpaa vain tähän yhteen viestiin. Vain sinä ja keskustelukumppanisi voitte
+purkaa viestin. Ei ole keskitettyä palvelinta, ei pääavainta
+eikä pääsyä kehittäjälle. Vaikka jokin laite matkalla
+välittäisi viestin eteenpäin, se näkee vain salattua datasotaa
+ja koodin. Naapurisi tietää, että paketti tulee sinulta, mutta ei kenelle
+se menee; keskustelukumppanisi naapuri tietää, kenelle se menee, mutta ei
+keneltä.
 
 ### "Miksi en tarvitse puhelinnumeroa?"
 
 Koska identiteettisi on puhtaasti kryptografinen. Puhelinnumeron tai
-sähköpostiosoitteen sijaan, joka on yhdistetty oikeaan nimeesi, sinut
-tunnistaa avainpari, joka luotiin laitteellasi. Yhteyshenkilöt lisäät
-QR-koodin, NFC:n tai linkin kautta -- ei puhelinmuistion kautta. Tämä
-tarkoittaa enemmän yksityisyyttä, koska viestintätilisi ei ole sidottu
+sähköpostiosoitteen sijaan, joka on sidottu oikeaan nimeesi, sinut tunnistaa
+avainpari, joka on luotu laitteellasi. Yhteystietoja lisäät
+QR-koodin, NFC:n tai kutsusi tekstirivin kautta -- et
+puheluhakemiston kautta. Tämä tarkoittaa
+enemmän yksityisyyttä, koska viestitilisi ei ole sidottu
 todelliseen identiteettiisi.
 
 ### "Miten löydän ihmisiä Cleonasta?"
 
-Cleonassa ei ole tarkoituksella yhteystietohakua puhelinnumeron tai nimen
-perusteella -- se olisi yksityisyysongelma. Sen sijaan vaihdat yhteystietoja
-suoraan: QR-koodilla, NFC:llä, cleona://-linkillä tai julkisissa kanavissa.
-Se on kuin käyntikorttien vaihtamista puhelinluettelon selaamisen sijaan.
+Cleonassa ei tahallisesti ole yhteystietohakua puhelinnumeron tai nimen
+perusteella -- se olisi
+yksityisyysongelma. Sen sijaan vaihdatte kutsut suoraan: QR-koodilla,
+NFC:llä tai tekstirivinä toista reittiä. Se on kuin
+vaihtaisitte käyntikortteja sen sijaan, että katsoisitte puhelinluettelosta.
 
 ### "Toimiiko Cleona myös ulkomailla?"
 
-Kyllä. Kunhan sinulla on internet-yhteys, Cleona toimii kaikkialla
-maailmassa. Koska keskitettyä palvelinta ei ole, palvelua ei voi myöskään
-estää tietyissä maissa. Cleonassa on lisäksi sensuurin eston varajärjestelmä:
-jos normaali yhteys (UDP) estetään, Cleona vaihtaa automaattisesti
-vaihtoehtoiseen siirtotapaan (TLS), jota on vaikeampi havaita ja estää.
+Kyllä. Niin kauan kuin sinulla on internet-yhteys, Cleona toimii kaikkialla
+maailmassa. Koska ei ole keskitettyä palvelinta eikä kiinteää osoitetta,
+palvelua ei voi yksinkertaisesti katkaista tietyille maille. Miten Cleona
+vaikeuttaa estoja, lue luvusta "Tietoturva" kohdasta "Sensuurin vastustus".
+Maa, joka
+estää jokaisen tuntemattoman liikenteen rajalla, voi kuitenkin myös
+pysäyttää Cleonan.
 
 ### "Onko Cleona ilmainen?"
 
-Kyllä. Cleona on ilmainen ja mainokseton. Koska keskitettyä palvelinta ei
-ole, palvelinkustannuksiakaan ei synny. Sovelluksesta löydät kohdasta
-"Lahjoitus" mahdollisuuden tukea kehitystä vapaaehtoisesti.
+Kyllä. Cleona on ilmainen ja käytettävissä ilman mainoksia. Koska ei ole
+keskitettyä
+palvelinta, palvelinkuluja ei myöskään synny käytön vuoksi. Asetuksissa
+kohdasta "Tue Cleonaa" -> "Lahjoita" voit tukea
+kehitystä vapaaehtoisesti.
 
-### "Viestissäni on kellokuvake -- mitä se tarkoittaa?"
+### "Viestilläni on vain yksi ruks -- mitä se tarkoittaa?"
 
-Se tarkoittaa, että viestiä ei ole vielä toimitettu. Vastaanottajasi on
-todennäköisesti juuri silloin offline. Kun viesti on toimitettu, kuvake
-muuttuu. Viestejä säilytetään toimitusta varten jopa 7 päivää.
+Viesti on matkalla, mutta keskustelukumppanisi ei ole vielä vahvistanut
+vastaanottoa -- useimmiten koska hän on juuri offline-tilassa. Se ei ole
+virhe: Viesti odottaa enintään 7 päivää postilaatikossa. Heti kun hän
+noutaa sen, näet kaksi ruksia. Kello tarkoittaa, että yksikään reitti ei
+ole vielä kantanut viestiä -- se lähtee itsestään, kunhan sellainen on;
+varoitustermerkki, ettei viesti 14 päivän aikana löytänyt reittiä ja
+voit lähettää sen uudelleen.
+
+### "Miksi viestit saapuvat iPhonellani myöhässä?"
+
+iOS ei anna sovellusten pyöriä taustalla jatkuvasti. Cleona herätetään vain
+ajoittain lyhyeksi aikaa; milloin, iOS päättää. Se noutaa tällöin kaiken.
+Heti kun avaat sovelluksen, Cleona noutaa sinulle säilytetyn.
 
 ### "Voinko vaihtaa WhatsAppista Cleonaan?"
 
-Kyllä, mutta et voi siirtää WhatsApp-keskustelujasi. Cleona ja WhatsApp ovat
-täysin erilaisia järjestelmiä. Sinun täytyy lisätä yhteyshenkilösi yksitellen
-Cleonaan. Helpoiten se onnistuu, kun lähetät cleona://-linkkisi WhatsApp-
-ryhmään ja pyydät muita lisäämään sinut.
+Kyllä, mutta et voi siirtää WhatsApp-keskustelujasi. Cleona ja WhatsApp
+ovat täysin erilaisia järjestelmiä. Sinun on lisättävä yhteystietosi
+yksitellen Cleonaan. Helpointa se on, kun lähetät
+kutsusi tekstirivin yhteystiedoillesi. Jokaisen näin saapuvan pyynnön
+vahvistat itse kohdassa "Pyynnöt".
 
-### "Voinko käyttää Cleonaa useilla laitteilla samanaikaisesti?"
+### "Voinko käyttää Cleonaa usealla laitteella yhtä aikaa?"
 
-Kyllä. Voit linkittää jopa 5 laitetta samaan identiteettiin. Yksi laite on
-ensisijainen (se pitää seed-lauseen), ja lisälaitteet linkitetään turvallisen
-paritusprosessin kautta. Kaikki laitteet jakavat saman identiteetin,
-yhteyshenkilöt ja keskustelut. Katso Multi-Device-luku lisätietoja varten.
+Ei vielä. Toinen laite samalle identiteetille tulee myöhemmässä
+versiossa (luku 11). Usealla laitteella voit tänään käyttää eri
+identiteettejä.
 
-### "Miten saan päivityksiä, jos sovelluskauppa on estetty?"
+### "Miten saan päivityksiä kun App Store on estetty?"
 
-Cleona voi hakea päivityksiä suoraan P2P-verkon kautta ilman
-sovelluskauppaa, verkkosivustoa tai latauspalvelinta. Jos toinen
-verkossa oleva käyttäjä on jo päivittänyt uusimpaan versioon, laitteesi
-voi ladata päivityksen sieltä. Aitous varmistetaan kehittäjän
-digitaalisella allekirjoituksella. Vaihtoehtoisesti yhteyshenkilö voi
-lähettää sovelluksen kutsulinkin tai USB-tikun kautta. Lisätietoja
+Cleona voi hakea päivityksiä suoraan verkon kautta, ilman
+App Storea, verkkosivustoa tai latauspalvelinta. Jos
+jokin muu laite verkossa on uusin versio, laitteesi voi ladata
+päivityksen sieltä. Echttiyys tarkistetaan kehittäjän
+digitaalisen allekirjoituksen avulla. Vaihtoehtoisesti yhteystieto voi
+antaa sinulle sovelluksen kutsulinkin tai USB-tikut kautta. Lisää aiheesta
 luvussa "Ohjelmistopäivitykset".
 
 ---
 
-## Ohje ja yhteystiedot
+## Apu ja yhteystiedot
 
-Jos sinulla on kysymyksiä tai kohtaat ongelman, löydät ajankohtaista tietoa
-Cleonan verkkosivuilta ja GitHubista. Koska Cleona on hajautettu projekti,
-perinteistä asiakastukea ei ole -- mutta aktiivinen yhteisö auttaa mielellään.
+Jos sinulla on kysymyksiä tai kohtaat ongelman, löydät ajankohtaiset
+tiedot Cleona-sivustolta ja GitHubista. Koska Cleona on hajautettu
+projekti, ei ole klassista asiakastukea -- mutta aktiivinen
+yhteisö, joka auttaa mielellään.
 
 ---
 
-*Tämä opas kuvaa Cleona Chat -versiota 3.1.125. Yksittäiset toiminnot
+*Tämä ohje kuvaa Cleona Chat versio 4.2. Yksittäiset toiminnot
 voivat muuttua tai laajentua uudemmissa versioissa.*

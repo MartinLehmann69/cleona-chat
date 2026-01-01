@@ -60,7 +60,13 @@ fi
 # `KeyringService.init` (`Platform.isMacOS`); iOS keeps its keychain in
 # `ios/Runner/KeyringHandler.swift`. Its symbols are not Cleona's own
 # exports and cannot be dead-stripped from a system framework.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|gobject_signal\.dart|native_send_path\.dart|dpapi_ffi\.dart|process_hardening\.dart|libsecret_ffi\.dart|keychain_ffi\.dart"
+#
+# ADDED S423 (14.11.2026): `windows_tray_thread.dart` binds cleona_tray.dll,
+# the owner thread of the WINDOWS tray icon (windows/cleona_tray/, B-5). It is
+# built for Windows only and reached only from `native_tray_windows.dart`,
+# which is excluded above for the same reason. Its symbols cannot exist in
+# the iOS image.
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|windows_tray_thread\.dart|gobject_signal\.dart|native_send_path\.dart|dpapi_ffi\.dart|process_hardening\.dart|libsecret_ffi\.dart|keychain_ffi\.dart"
 
 # Symbols this gate deliberately does NOT require in the exports file.
 # Currently empty, and the bar for adding one is high.

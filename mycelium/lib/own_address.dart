@@ -165,6 +165,23 @@ bool usableIpv6Present(List<NetworkInterface> interfaces) {
   return false;
 }
 
+/// Whether this host has an IPv4 address it can be addressed under — the
+/// twin of [usableIpv6Present] (S427, owner 18.11.2026: an address that is
+/// present is used; where none is present, socket and protocol stay off).
+/// Private and carrier-grade (RFC 6598, 100.64/10) addresses count — owner:
+/// a machine behind CGNAT has an IPv4 address on its socket and is
+/// addressable through it. Loopback, 0/8, link-local 169.254/16 (RFC 3927)
+/// and multicast do not.
+bool usableIpv4Present(List<NetworkInterface> interfaces) =>
+    interfaces.any((s) => s.addresses.any(_ipv4Usable));
+
+bool _ipv4Usable(InternetAddress a) {
+  final b = a.rawAddress;
+  if (b.length != 4 || a.isLoopback) return false;
+  if (b[0] == 0 || b[0] >= 224) return false;
+  return !(b[0] == 169 && b[1] == 254);
+}
+
 /// What an interface hangs on — the question that §10, §22.6 and §23.1
 /// have long answered normatively and that nobody asked until S390.
 ///

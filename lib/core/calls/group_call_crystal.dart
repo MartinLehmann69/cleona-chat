@@ -266,6 +266,7 @@ class GroupCallCrystal {
         final o = readTreeOffer(r, list);
         if (o == null) return _drop(fromHex, r);
         _answer(fromHex, kTreeOfferSeen, offerTag(r));
+        _log('offer from ${_s(fromHex)}: ${_offerText(o)}');
         _offers[fromHex] = o;
         _refusedBy.remove(fromHex);
       case ControlRecordType.treeJoin:
@@ -348,6 +349,8 @@ class GroupCallCrystal {
     if (best == ownHex) {
       _joining = null;
       if (_parent != null) {
+        _log('own rank ${ownRank()} beats every offer — root, leaving '
+            '${_s(_parent!)}');
         _sendJoin(_parent!, kTreeLeave);
         _parent = null;
         _sentBelow = null;
@@ -381,6 +384,7 @@ class GroupCallCrystal {
     _parent = null;
     _joining = null;
     _sentBelow = null;
+    _loggedView = null;
   }
 
   // ── choices ────────────────────────────────────────────────────────
@@ -468,23 +472,29 @@ class GroupCallCrystal {
   void _tell(Set<String> pairs) {
     final list = roster();
     final rootHex = root;
+    _viewLog(rootHex);
     final path = _pathOf(_parent);
     if (!list.contains(rootHex) || !path.every(list.contains)) return;
-    final rec = buildTreeOffer(list, (
+    final offer = (
       root: rootHex,
       rootRank: _offers[_parent]?.rootRank ?? ownRank(),
       free: fanOut() - _children.length,
       path: path,
-    ));
+    );
+    final rec = buildTreeOffer(list, offer);
     final key = rec.value.join(',');
     final tag = offerTag(rec);
     for (final p in pairs) {
       if (_sentOffer[p] == key) continue;
       _sentOffer[p] = key;
+      _log('offer to ${_s(p)}: ${_offerText(offer)}');
       request(p, rec, (a) {
         final r = readTreeAccept(a);
         return r != null && r.$1 == kTreeOfferSeen && r.$2 == tag;
-      }, () {});
+      },
+          // Measurement only (S424 M-6): the offer is not sent again.
+          () => _log('offer to ${_s(p)} unanswered after its repeats '
+          '(§11.3a) — given up'));
     }
     _sentOffer.removeWhere((p, _) => !pairs.contains(p));
     final parent = _parent;
@@ -501,6 +511,24 @@ class GroupCallCrystal {
           'for another participant list');
 
   void _log(String line) => log?.call(line);
+
+  /// The last own rank and root written by [_viewLog].
+  String? _loggedView;
+
+  /// One line when the own rank or the root this node believes in changed
+  /// (S424 M-6) — never per packet.
+  void _viewLog(String rootHex) {
+    final rank = ownRank();
+    final view = '$rootHex|$rank';
+    if (view == _loggedView) return;
+    _loggedView = view;
+    _log('own rank $rank, root ${_s(rootHex)}'
+        '${_parent == null ? '' : ' via parent ${_s(_parent!)}'}');
+  }
+
+  String _offerText(CrystalOffer o) =>
+      'root ${_s(o.root)} rank ${o.rootRank} free ${o.free} '
+      'path ${o.path.isEmpty ? '-' : o.path.map(_s).join('>')}';
 
   static String _s(String hex) => hex.length > 8 ? hex.substring(0, 8) : hex;
 }

@@ -15,7 +15,8 @@ import 'package:mycelium/node_helpers.dart';
 /// segment, over there the own parts.
 ///
 /// It gets by with the public side of [Node]: [Node
-/// .outsideRoute], [Node.report] and [Node.publicAddress].
+/// .outsideRoute], [Node.report] and [Node.publicAddress]; the router's
+/// mapping it learns from the host network ([NodeOutside.mappedAddressFrom]).
 extension NodeOutside on Node {
 
   /// Asks [neighbour] how the own address looks from there, and remembers
@@ -41,6 +42,19 @@ extension NodeOutside on Node {
       report('seen from $neighbour: ${asAddress.address}:'
           '${seen.port} — private, not remembered as public address');
       return null;
+    }
+    // §11.9, §7.3 (S424 F-15): a granted router mapping is reachable from
+    // every counterpart; the seen port behind the same outer address is only
+    // the translator's outgoing port, reachable only for whom it asked.
+    final mapped = mappedAddress;
+    if (mapped != null &&
+        _sameIp(mapped, seen) &&
+        mapped.port != seen.port) {
+      if (!(publicAddress?.equal(mapped) ?? false)) publicAddress = mapped;
+      report('seen from $neighbour: ${asAddress.address}:${seen.port} — the '
+          'granted mapping (port ${mapped.port}) stays the public address '
+          '(§11.9)');
+      return mapped;
     }
     publicAddress = seen;
     report('own public address: ${asAddress.address}:'
@@ -74,7 +88,19 @@ extension NodeOutside on Node {
   /// Wired by the host network (`host_network.dart`) at its construction.
   void reachabilityEvidenceFrom(bool Function() source) =>
       _evidence[this] = source;
+
+  /// The outer IPv4 endpoint of a granted, unexpired router mapping (§7.3),
+  /// or `null`. The host network answers it ([mappedAddressFrom]).
+  CardAddress? get mappedAddress => _mapped[this]?.call();
+
+  /// Wired by the host network (`host_network.dart`) at its construction.
+  void mappedAddressFrom(CardAddress? Function() source) =>
+      _mapped[this] = source;
 }
+
+bool _sameIp(CardAddress a, CardAddress b) =>
+    a.equal(CardAddress(b.address, a.port));
 
 final Expando<Uint8List? Function()> _publisher = Expando('publisher key');
 final Expando<bool Function()> _evidence = Expando('own reachability evidence');
+final Expando<CardAddress? Function()> _mapped = Expando('granted mapping');

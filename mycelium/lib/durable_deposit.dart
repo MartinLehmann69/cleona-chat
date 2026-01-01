@@ -39,6 +39,10 @@ const int kDepositHolders = 3;
 /// Acknowledgements that make a report "published" (§16.7).
 const int kDepositPublished = 2;
 
+/// At most this many open neighbours are asked for the stock at one edge
+/// (§16.0, S426 V3) — the open set has four places (§11.8.8).
+const int kStockAskOpenAtMost = 4;
+
 /// The candidates of [order] (§9.4 lane 3 order) for a deposit: non-contacts
 /// before contacts; within each, [capable] ones first; [failed] ones out.
 List<CardAddress> durableHolderOrder(List<CardAddress> order,
@@ -59,6 +63,9 @@ class DurableDeposit {
   final Uint8List object;
   final Uint8List hash;
   final List<CardAddress> _candidates;
+
+  /// The holders this deposit may ask (D73B-2, `durable_node.dart`).
+  List<CardAddress> get candidates => _candidates;
   final bool Function(String node) _isContact;
   final DurableSend _send;
 
@@ -131,7 +138,14 @@ class DurableDeposit {
           report, hash, channel, from, _acked.length, kDepositPublished);
       _events.add(DepositEvent(_acked.length,
           holder: k, contactHolder: _isContact(k)));
-      if (_acked.length >= kDepositPublished) _close();
+      if (_acked.length >= kDepositPublished) {
+        _close();
+      } else if (_next >= _candidates.length && _asks.isEmpty) {
+        // S425 N4-2: the last open answer was a receipt and no candidate is
+        // left — the run ends here as it does after a refusal or a silence,
+        // otherwise it stays open forever and no edge deposits again (§16.7).
+        _end('no holder left after ${_acked.length} receipt(s)');
+      }
       return;
     }
     final no = notHeldRead(p);
@@ -145,6 +159,8 @@ class DurableDeposit {
   }
 
   void _failed(CardAddress holder, String why, {required bool reached}) {
+    durableTraceDepositGone(report, hash, channel, holder, why,
+        reached: reached);
     if (reached) onHolder(holder, false);
     _gone(nodeKey(holder), why);
   }

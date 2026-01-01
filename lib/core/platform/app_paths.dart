@@ -54,6 +54,14 @@ String resolveWindowsHome({String? userProfile, String? appData}) {
   return chosen;
 }
 
+/// The default download directory below [home] (v4_2 §21.5.4): `Downloads`
+/// on a desktop (the system's standard folder), `Download` inside the app
+/// container on a mobile device. A pure function so the rule can be checked
+/// without the platform (smoke_windows_profile_path_guard).
+String downloadDirUnder(String home,
+        {required bool mobile, required String separator}) =>
+    '$home$separator${mobile ? 'Download' : 'Downloads'}';
+
 class AppPaths {
   static String? _cachedHome;
   static String? _cachedDataDir;
@@ -110,6 +118,18 @@ class AppPaths {
     }
     return _cachedHome!;
   }
+
+  /// The default target of "Speichern" on a received file when the identity
+  /// has no own download directory (v4_2 §21.5.4). Desktop: the system's
+  /// standard `Downloads` below the user's home — on Windows that home comes
+  /// from USERPROFILE ([home]), because `HOME` is not set for a GUI the task
+  /// scheduler started (S423 B-4: the file landed in `C:\tmp\Downloads`).
+  /// Mobile: an app-internal directory below [home] (Android
+  /// `/data/data/<package>/files`, iOS Application Support), so no storage
+  /// permission is needed (S423 A-2: it was `/storage/emulated/0/Download`).
+  static String get defaultDownloadDir => downloadDirUnder(home,
+      mobile: Platform.isAndroid || Platform.isIOS,
+      separator: Platform.pathSeparator);
 
   /// Override the home directory (useful for tests or when path_provider is available).
   static void setHome(String path) {

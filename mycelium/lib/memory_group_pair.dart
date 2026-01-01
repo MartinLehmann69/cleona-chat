@@ -71,6 +71,8 @@ const int kGroupsPerPairAtMost = 255;
 /// match. So each group's seed is kept, and the pair's `s_AB` is the seed
 /// of the group with the SMALLEST identifier ([pairRandom]): as soon as both
 /// sides carry the same groups, they agree, without a message between them.
+/// A side moves to a newly shared smaller group only once it has heard the
+/// co-member under it ([heard], S431 D-131).
 class GroupPair {
   /// Its address as it signed it on joining — later the newer copy an
   /// envelope of it carried (the adoption rule, [Address.adopt]).
@@ -90,6 +92,12 @@ class GroupPair {
   /// When the own day keys last went to it — `null`: never.
   DateTime? dayKeySent;
 
+  /// The groups (identifier hex) under whose seed the co-member has been
+  /// heard since this start (§4.3, D-131): a packet under a group's seed
+  /// shows that the co-member carries that group. Not stored — the store
+  /// keeps its format ([kVersionGroupPairs]).
+  final Set<String> heard = {};
+
   GroupPair({
     required this.address,
     required Map<String, Uint8List> groupSeeds,
@@ -103,9 +111,16 @@ class GroupPair {
   /// The groups that carry this pair (their identifiers, hex).
   Iterable<String> get groups => groupSeeds.keys;
 
-  /// `s_AB` of the pair: the seed of the smallest group identifier.
-  Uint8List get pairRandom =>
-      groupSeeds[(groupSeeds.keys.toList()..sort()).first]!;
+  /// `s_AB` the pair SENDS under (§4.3, D-131): the seed of the smallest
+  /// group it carries under which the co-member has been heard; without
+  /// any, the smallest it carries. A new shared group with a smaller
+  /// identifier is taken only once the co-member has been heard under it,
+  /// so that nothing goes out under a seed the co-member cannot hold yet.
+  Uint8List get pairRandom {
+    final sorted = groupSeeds.keys.toList()..sort();
+    final shown = sorted.where(heard.contains);
+    return groupSeeds[shown.isEmpty ? sorted.first : shown.first]!;
+  }
 }
 
 class GroupPairStore {

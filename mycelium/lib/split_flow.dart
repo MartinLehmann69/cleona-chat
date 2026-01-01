@@ -172,6 +172,7 @@ class SplitFlow {
   /// Hops whose last ended transmission is still held in memory (D-90) —
   /// for probes, read only.
   int get kept => _rows.values.where((r) => r.kept != null).length;
+  Iterable<String> get hops => _rows.keys; // `split_same_link.dart` (S426 N6-2)
 
   /// Whether others' transmission of [bytes] to [target]:[port] is beyond
   /// the bound (§20.2): it would wait, and the row of others is full. The

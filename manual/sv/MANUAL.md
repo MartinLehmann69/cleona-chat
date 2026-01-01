@@ -1,301 +1,416 @@
 # Cleona Chat -- Användarhandbok
 
-Version 3.1.125 | juli 2026
+Version 4.2 | Per november 2026
 
 ---
 
 ## Innehållsförteckning
 
-1. [Vad är Cleona Chat?](#1-vad-ar-cleona-chat)
-2. [Komma igång](#2-komma-igang)
+1. [Vad är Cleona Chat?](#1-vad-är-cleona-chat)
+2. [Kom igång](#2-kom-igång)
 3. [Kontakter](#3-kontakter)
 4. [Meddelanden](#4-meddelanden)
 5. [Grupper](#5-grupper)
 6. [Offentliga kanaler](#6-offentliga-kanaler)
 7. [Samtal](#7-samtal)
 8. [Kalender](#8-kalender)
-9. [Omröstningar](#9-omrostningar)
+9. [Omröstningar](#9-omröstningar)
 10. [Flera identiteter](#10-flera-identiteter)
-11. [Multi-Device](#11-multi-device)
-12. [Återställning](#12-aterstallning)
-13. [Inställningar](#13-installningar)
-14. [Säkerhet](#14-sakerhet)
-15. [Programvaruuppdateringar](#15-programvaruuppdateringar)
-16. [Vanliga frågor](#16-vanliga-fragor)
+11. [Flera enheter](#11-flera-enheter)
+12. [Återställning](#12-återställning)
+13. [Inställningar](#13-inställningar)
+14. [Säkerhet](#14-säkerhet)
+15. [Programuppdateringar](#15-programuppdateringar)
+16. [Vanliga frågor](#16-vanliga-frågor)
 
 ---
-
 ## 1. Vad är Cleona Chat?
 
-### Din messenger, dina data
+### Din meddelandetjänst, din data
 
 Cleona Chat är en meddelandetjänst som fungerar helt utan central server.
-Dina meddelanden går direkt från din enhet till din motparts enhet -- utan
-omväg via ett företags huvudkontor, utan moln, utan datacenter. Inget
-företag kan läsa, lagra eller vidarebefordra dina meddelanden, eftersom det
-helt enkelt inte finns något företag emellan.
+Dina meddelanden färdas från din enhet till din motparts enhet -- utan
+omväg via ett företags högkvarter, utan moln, utan datacenter. När en
+annan enhet hjälper till på vägen, skickar den vidare bara krypterade
+paket. Inget företag kan läsa, lagra eller vidarebefordra dina meddelanden,
+för att det enkelt inte finns något företag emellan.
 
 ### Inget konto, inget telefonnummer
 
-Med Cleona behöver du varken telefonnummer eller e-postadress för att logga
-in. Din identitet består av ett kryptografiskt nyckelpar som skapas
-automatiskt på din enhet vid första starten. Det betyder: ingen kan hitta
-dig via ditt telefonnummer eller din e-postadress, om du inte själv delar
-dina kontaktuppgifter.
+Med Cleona behöver du varken ett telefonnummer eller en e-postadress för
+att logga in. Din identitet består av ett kryptografiskt nyckelpar som
+skapas automatiskt på din enhet vid första starten. Det betyder: Ingen
+kan spåra dig via ditt telefonnummer eller din e-postadress, om du inte
+själv ger ut dina kontaktuppgifter.
 
 ### Framtidssäker kryptering
 
-Cleona använder så kallad post-kvantkryptering. Det betyder att inte ens
-framtida kvantdatorer skulle kunna knäcka dina meddelanden. Du behöver inte
-förstå detaljerna -- det viktiga är att din kommunikation skyddas så bra som
-möjligt enligt dagens teknik.
+Cleona använder så kallad postkvantumkryptering. Det innebär: Inte ens
+framtida kvantdatorer skulle kunna knäcka dina meddelanden. Du behöver
+inte förstå detaljerna -- det enda som är viktigt är att din kommunikation
+är så väl skyddad som det är tekniskt möjligt idag.
 
 ### Hur fungerar det utan server?
 
-Föreställ dig att du och dina kontakter tillsammans bildar ett nätverk.
-Varje enhet hjälper till att vidarebefordra meddelanden. Är din motpart
-online just nu går meddelandet direkt dit. Är din motpart offline lagrar
-gemensamma kontakter meddelandet tillfälligt och levererar det så snart
-mottagaren är tillbaka. Dina kontakter är alltså samtidigt ditt nätverk.
+Cleonas nätverk består bara av sina användares enheter. Varje enhet är
+en nod, ingen nod är viktigare än en annan, och varje nod känner bara
+sina grannar. Fyra saker gör detta nätverk speciellt:
+
+- **Ingen fast punkt.** I appen står ingen serveradress, och nätverket
+  beror inte av någon enskild nod. Det finns inget man kunde stänga av
+  för att stänga av Cleona.
+- **Direkt.** Ditt meddelande ger sig iväg i samma ögonblick som du
+  skickar det. Det väntar varken på någon takt eller på något annat.
+- **Döljning vid sidan av.** Din enhet skickar hela tiden små
+  döljningspaket, så att man utifrån inte kan se när du verkligen
+  skriver. Inget meddelande beror på det -- döljningen löper bara vid
+  sidan.
+- **Koder istället för namn.** Den som skickar ett meddelande vidare ser
+  bara en kod som byts varje dag. Normalt känner ingen av dem både
+  avsändare och mottagare samtidigt; undantagen står i kapitel 14.
+
+**Tre vägar, alla samtidigt.** När du skickar ett meddelande, provar inte
+Cleona en väg i taget, utan alla lämpliga på en gång. Så fort din motpart
+bekräftar mottagandet, avbryts de övriga.
+
+1. **I samma nätverk:** Är ni i samma Wi-Fi, går meddelandet direkt
+   över.
+2. **Via de fasta grannarna:** På internet lämnar din enhet över
+   meddelandet till sin fasta granne. Den skickar det vidare till din
+   motparts fasta grannar (upp till tre på en gång), och en av dem
+   levererar det.
+3. **Brevlåda:** Är din motpart offline, lägger Cleona det krypterade
+   meddelandet hos tre grannar. Där ligger det i upp till 7 dagar. När
+   din motpart kommer online igen, hämtar hen det.
+
+**Hur kommer du in i nätverket?** I appen står ingen serveradress. Din
+ingång får du från din första kontakt: Dens inbjudan innehåller de
+adresser via vilka din enhet hittar sina första grannar. I samma Wi-Fi
+hittar Cleona-enheter också varandra själva. Från och med då lär din
+enhet känna fler för varje granne.
 
 ### Plattformar
 
-Cleona finns tillgängligt för Android, iOS, macOS, Linux och Windows.
+Cleona är tillgänglig för Android, iOS, macOS, Linux och Windows. På datorer och
+på Android kommer meddelanden och samtal inom sekunder. På iPhone gäller det så
+länge appen är öppen. När den inte är öppen väcker iOS den bara kort då och då;
+iOS avgör när. Cleona hämtar då allt som har sparats åt dig och visar en
+avisering med en siffra på appikonen. Samtal når inte en iPhone vars app inte är
+öppen. Det är en regel från Apple, inte ett fel i Cleona.
 
 ---
 
-## 2. Komma igång
+## 2. Kom igång
 
 ### Installera appen
 
 **Android:**
 1. Ladda ner APK-filen från Cleonas webbplats eller från GitHub Releases.
-2. Öppna filen på din telefon. Tillåt vid behov installation från okända
-   källor (Android frågar dig automatiskt).
+2. Öppna filen på din telefon. Vid behov, tillåt installation från
+   okända källor (Android frågar dig automatiskt).
 3. Tryck på "Installera" och vänta tills installationen är klar.
 
 **iOS:**
 1. Öppna TestFlight-inbjudningslänken på din iPhone.
-2. Tryck på "Installera". TestFlight är Apples officiella sätt att
+2. Tryck på "Installera". TestFlight är Apples officiella väg för att
    distribuera beta-appar.
 3. Efter installationen hittar du Cleona på din hemskärm.
 
 **macOS:**
 1. Ladda ner DMG-filen från Cleonas webbplats eller från GitHub Releases.
-2. Öppna DMG-filen och dra Cleona till din Program-mapp.
-3. Vid första starten kan macOS fråga om du vill öppna appen från en
+2. Öppna DMG-filen och dra Cleona till mappen Program.
+3. Vid första starten kan macOS fråga om du vill öppna en app från en
    identifierad utvecklare -- bekräfta detta.
 
 **Linux (Ubuntu/Debian):**
 1. Ladda ner .deb-filen från Cleonas webbplats eller från GitHub Releases.
-2. Installera med dubbelklick eller i terminalen: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Starta Cleona via programmenyn eller i terminalen med `cleona-chat`.
+2. Installera med dubbelklick eller i terminalen: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Starta Cleona via programmenyn eller i terminalen med `cleona-chat-beta`.
 
 **Linux (Fedora/openSUSE):**
 1. Ladda ner .rpm-filen från Cleonas webbplats eller från GitHub Releases.
-2. Installera med: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Starta Cleona via programmenyn eller i terminalen med `cleona-chat`.
+2. Installera med: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Starta Cleona via programmenyn eller i terminalen med `cleona-chat-beta`.
 
 **Linux (alla distributioner -- AppImage):**
 1. Ladda ner .AppImage-filen från Cleonas webbplats eller från GitHub Releases.
-2. Gör filen körbar: högerklick, Egenskaper, Körbar, eller i terminalen: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Starta med dubbelklick eller i terminalen: `./cleona-chat-VERSION-x86_64.AppImage`
+2. Gör filen körbar: Högerklick, egenskaper, körbar, eller i terminalen: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Starta med dubbelklick eller i terminalen: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+Paketnamnen gäller betan, som för närvarande är den enda publicerade
+versionen; den heter `cleona-chat-beta`.
 
 **Windows:**
-1. Ladda ner installationsprogrammet från Cleonas webbplats eller från
-   GitHub Releases.
-2. Kör installationsfilen och följ instruktionerna.
-3. Starta Cleona via Startmenyn eller genvägen på skrivbordet.
+1. Ladda ner installationsprogrammet från Cleonas webbplats eller från GitHub Releases.
+2. Kör installationsfilen och följ anvisningarna.
+3. Starta Cleona via startmenyn eller skrivbordsgenvägen.
 
 ### Skapa identitet
 
-Vid första starten skapar Cleona automatiskt en ny identitet åt dig. Du kan
-ge dig själv ett visningsnamn -- det är namnet som dina kontakter ser.
-Namnet kan ändras när som helst.
+Vid första starten skapar Cleona automatiskt en ny identitet åt dig.
+Du kan ge dig själv ett visningsnamn -- det är namnet dina kontakter
+ser. Detta namn kan ändras när som helst.
 
-### Skriv ner seed-phrasen -- det allra viktigaste
+### Skriv ner seed-frasen -- det allra viktigaste
 
-Efter att du skapat din identitet visar Cleona 24 ord. Det är din
-**seed-phrase** -- din personliga återställningsnyckel.
+När din identitet har skapats visar Cleona 24 ord åt dig. Det är din
+**seed-fras** -- din personliga återställningsnyckel.
 
 **Skriv ner dessa 24 ord på papper och förvara dem säkert.**
 
 Varför är detta så viktigt?
 
-- Om din telefon går sönder, försvinner eller blir stulen kan du med dessa
-  24 ord återställa hela din identitet på en ny enhet.
-- Utan seed-phrasen finns det ingen väg tillbaka. Det finns ingen "glömt
-  lösenord"-knapp och ingen support som kan ge dig tillbaka ditt konto --
-  för det finns inget konto på någon server överhuvudtaget.
-- Dela aldrig din seed-phrase med andra. Den som känner till dessa ord kan
+- Om din telefon går sönder, tappas bort eller blir stulen, kan du med
+  dessa 24 ord återställa hela din identitet på en ny enhet.
+- Utan seed-frasen finns det ingen väg tillbaka. Det finns ingen knapp
+  för "glömt lösenord" och ingen support som skulle kunna ge tillbaka
+  ditt konto -- för det finns inget konto på en server överhuvudtaget.
+  Inte ens dina kontakter kan återställa din identitet, oavsett hur
+  många de är. En andra enhet med samma identitet kommer i en senare
+  version (se kapitel 11).
+- Ge aldrig seed-frasen till andra. Den som känner dessa ord kan
   utge sig för att vara du.
 
-Du hittar seed-phrasen senare även i inställningarna under "Säkerhet", om du
-vill läsa den igen.
+Du hittar de 24 orden senare i inställningarna under
+"Säkerhetskopiering" -> "Visa återställningsfras", om du vill läsa av dem
+en gång till. På Android bekräftar du det med ditt skärmlås.
 
-### Lägg till din första kontakt
+### Lägg till första kontakten
 
 För att chatta med någon måste du först lägga till personen som kontakt.
-Det finns flera sätt att göra detta -- alla förklaras i nästa avsnitt.
+Det finns flera sätt till det -- alla förklaras i nästa avsnitt.
 
 ---
 
 ## 3. Kontakter
 
+### Din inbjudan
+
+Kontakter uppstår i Cleona bara via en inbjudan. Din inbjudan finns där
+från första starten -- även utan internet och innan din enhet överhuvudtaget
+har hittat en granne. Du hittar den på din identitets-detaljsida
+(tryck på ditt eget namn i den övre listen).
+
+Inbjudan finns i två former, som innehåller exakt detsamma:
+
+- som **QR-kod**, när din motpart står bredvid dig, och
+- som **textrad**, som du skickar via e-post, SMS eller via en annan
+  meddelandetjänst.
+
+Inbjudan innehåller varken telefonnummer eller ett namn ur en katalog.
+Den innehåller dina offentliga nycklar och de adresser via vilka din
+motpart når dig och dina grannar. För någon som nyss har installerat
+Cleona är din inbjudan därför också ingången till nätverket.
+
 ### Skanna QR-kod (rekommenderas)
 
-Det enklaste sättet att lägga till en kontakt:
+När ni träffas personligen:
 
-1. Din motpart öppnar sin identitetsdetaljsida (tryck på sitt eget namn i
-   det övre fältet) och visar dig sin QR-kod.
-2. Du trycker på plus-knappen och väljer "Skanna QR-kod".
-3. Håll din telefon framför din motparts QR-kod.
-4. Kontaktförfrågan skickas automatiskt. Så snart din motpart accepterar
-   den kan ni skriva till varandra.
+1. Du visar din motpart QR-koden från din inbjudan.
+2. Din motpart trycker på plus-knappen, väljer "Skanna QR-kod" och
+   håller kameran mot din skärm. Det fungerar även med en dators
+   webbkamera.
+3. Förfrågan går till dig och **automatiskt antas** -- för du har ju
+   nyss visat koden själv.
 
-Om ni träffas personligen är QR-koden den säkraste metoden, eftersom du då
-vet exakt med vem du utbyter kontakten.
+En QR-kod gäller bara en gång: Den första giltiga förfrågan antas,
+därefter är inbjudan förbrukad. QR-koden är den säkraste metoden,
+eftersom ni då vet exakt med vem ni utbyter kontakten.
 
 ### NFC (håll telefonerna mot varandra)
 
-Om båda enheterna stödjer NFC:
+Om båda enheterna stöder NFC:
 
-1. Öppna kontakt-läggtill-funktionen på båda enheterna.
+1. Öppna funktionen för att lägga till kontakt på båda.
 2. Håll era telefoner rygg mot rygg mot varandra.
-3. Kontaktuppgifterna utbyts automatiskt.
+3. Inbjudan överförs och antas automatiskt.
 
-NFC erbjuder, precis som QR-koden, hög säkerhet eftersom utbytet bara
-fungerar om ni fysiskt står bredvid varandra.
+NFC erbjuder liksom QR-koden hög säkerhet, eftersom utbytet bara
+fungerar när ni står fysiskt bredvid varandra.
 
-### Dela länk (cleona://-URI)
+### Skicka textrad
 
-Du kan även skicka din kontaktlänk via e-post, SMS eller en annan
-messenger:
+När ni inte kan träffas:
 
-1. Öppna din identitetsdetaljsida.
-2. Kopiera din cleona://-länk.
-3. Skicka länken till personen som ska lägga till dig.
-4. Den andra personen öppnar länken, eller klistrar in den i dialogrutan
-   för att lägga till kontakt.
-
-Observera: med denna metod litar du på att länken inte har ändrats under
-överföringen. För särskilt känsliga kontakter rekommenderar vi QR-kod eller
-NFC.
+1. Öppna din inbjudan och kopiera textraden.
+2. Skicka den till personen som ska lägga till dig -- via mejl, SMS
+   eller via en annan meddelandetjänst.
+3. Personen klistrar in raden i Cleona i dialogen för att lägga till
+   kontakt.
+4. Förfrågan dyker upp hos dig under **"Förfrågningar"**. Här **antas
+   inte** automatiskt: Du bestämmer själv, för du kan inte veta vem som
+   har läst raden på vägen.
 
 ### Acceptera kontaktförfrågningar
 
-När någon skickar dig en kontaktförfrågan visas den i din inkorg (den
-sista fliken i det nedre fältet). Där kan du:
+En inkommande förfrågan skapar ännu ingen kontakt. Den ställer en fråga
+till dig och dyker upp i fliken **"Förfrågningar"**. Där ser du namnet
+och verifikationsnivån och kan välja:
 
-- **Acceptera** -- personen läggs till bland dina kontakter.
-- **Avvisa** -- förfrågan förkastas.
+- **Acceptera** -- först nu blir personen din kontakt.
+- **Avvisa** -- förfrågan kasseras.
 - **Blockera** -- personen kan inte skicka fler förfrågningar till dig.
 
-### Verifieringsnivåer
+### Använd aldrig som fast granne
 
-Cleona visar hur säkert en kontakts identitet är bekräftad:
+I menyn för en kontakt hittar du reglaget **"Använd aldrig som fast
+granne"** (standard: av). Är det på, skickar denna kontakt inga
+meddelanden vidare för dig och får därför heller inte veta när du
+skickar eller tar emot meddelanden. Det är tänkt för fallet att ett hot
+mot dig kommer från din egen omgivning.
+
+Från främlingar (varken kontakt eller medlem i en gemensam grupp)
+släpper Cleona -- utöver en sådan förfrågan -- inget
+igenom: inget meddelande, inget samtal, ingen fil. Och även förfrågan
+kommer bara fram om avsändaren först har löst en liten beräkningsuppgift.
+Det gör masspam dyrt.
+
+### Verifikationsnivåer
+
+Cleona visar dig hur säkert en kontakts identitet är bekräftad:
 
 | Nivå | Betydelse |
 |-------|-----------|
-| Okänd | Du har bara fått Node-ID:t eller en länk. |
+| Inte verifierad | Ni är anslutna, men ingenting bekräftar att rätt person verkligen står bakom. |
 | Sedd | Nyckelutbytet lyckades, ni kan kommunicera krypterat. |
-| Verifierad | Ni har träffats personligen och verifierat via QR-kod eller NFC. |
-| Betrodd | Du har uttryckligen markerat denna kontakt som betrodd. |
+| Verifierad | Ni har träffats personligen och kopplats via kameraskanning eller NFC. |
+| Betrodd | Du har uttryckligen markerat denna kontakt som pålitlig. |
 
-Ju högre nivå, desto säkrare kan du vara på att du verkligen pratar med
-rätt person.
+"Verifierad" finns bara för det personliga utbytet. En inbjudan
+som kom via en chatt eller via mejl når aldrig denna nivå -- även om
+den innehåller samma data.
+
+Ändras en kontakts nycklar utan förvarning, återställer Cleona
+den till "Inte verifierad". Det skyddar dig mot att någon obemärkt
+utger sig för att vara din kontakt.
 
 ---
-
 ## 4. Meddelanden
 
 ### Skicka och ta emot text
 
-Skriv helt enkelt ditt meddelande i inmatningsfältet nedtill och tryck på
-Enter eller skicka-knappen. Ditt meddelande krypteras automatiskt innan det
-lämnar din enhet.
+Skriv bara ditt meddelande i inmatningsfältet nedan och tryck på Enter eller
+skicka-knappen. Ditt meddelande krypteras automatiskt innan det lämnar din
+enhet.
 
-Inkommande meddelanden visas i chatthistoriken. En bock visar om ditt
-meddelande har levererats.
+Inkommande meddelanden dyker upp i chattloggen.
 
-### Skicka bilder, videor och filer
+### Vad tecknen vid ditt meddelande betyder
+
+| Tecken | Betydelse |
+|---------|-----------|
+| Klocka | Meddelandet är skapat, men ännu har ingen väg burit det. |
+| En bock | Meddelandet är på väg. Det gäller också när det väntar i brevlådan på din motpart. |
+| Två bockar | Levererat: Din motparts enhet har bekräftat mottagandet. |
+| Varningsikon | I 14 dagar har ingen väg burit meddelandet. Tryck på det för att skicka det igen. |
+
+**Offline är inget fel.** Går din motpart inte att nå, stannar meddelandet
+vid en bock tills det hämtas -- det är inte förlorat. Har din egen enhet
+ingen anslutning, stannar meddelandet vid klockan och ger sig iväg av
+sig själv så fort det finns en väg igen. Varningsikonen dyker upp först
+när det inte har hittat någon väg på 14 dagar; då kan du skicka det
+igen.
+
+Det gäller också en iPhone vars app inte är öppen: meddelandet väntar i brevlådan
+tills iOS väcker appen kort eller tills din motpart öppnar den. Det kan ta längre
+tid än på andra enheter.
+
+Två bockar finns bara när mottagaren själv bekräftar mottagandet.
+Detta kvitto är krypterat och signerat -- ingen på vägen kan förfalska
+det för att låtsas om en leverans till dig.
+
+### Skicka bilder, videos och filer
 
 Du har flera möjligheter:
 
-- **Gemikonen** i inmatningsfältet: tryck på den för att välja en fil, en
-  bild eller en video från ditt galleri eller filsystem.
-- **Dra och släpp** (dator): dra en fil direkt in i chattfönstret.
-- **Klistra in från urklipp** (dator): kopiera en bild och klistra in den
-  i chatten.
+- **Gem-ikonen** i inmatningsfältet: Tryck på den för att välja en fil,
+  en bild eller en video från ditt galleri eller ditt filsystem.
+- **Drag and Drop** (skrivbord): Dra en fil till chattfönstret.
+- **Klistra in från urklipp** (skrivbord): Kopiera en bild och klistra
+  in den i chatten.
 
-Små filer (under 256 KB) skickas med direkt. Större filer överförs i en
-tvåstegsprocess: först aviseras filen, sedan överförs den i delar.
+Små filer (under 256 KB) färdas direkt i meddelandet. Större filer
+delas upp i bitar och förses med felkorrigering, så att enskilda
+förlorade bitar inte spelar någon roll. Är ni båda online strömmas de
+via en granne; annars läggs de hos enheter som är ständigt nåbara,
+tills din motpart hämtar dem.
+
+Från 256 KB frågar Cleona dig per fil innan den skickas: En stor fil
+kan inte ta dina meddelandens väg. Filens innehåll förblir krypterat,
+och din motpart får inte veta din internetadress. Men överföringen är
+utifrån synlig som en händelse, och en främmande enhet som
+vidarebefordrar eller förvarar den ser vem som laddar upp och vem som
+hämtar. Ditt samtycke gäller bara för just denna fil.
 
 ### Röstmeddelanden
 
-1. Håll ner mikrofonknappen i inmatningsfältet.
+1. Håll mikrofonknappen i inmatningsfältet intryckt.
 2. Tala in ditt meddelande.
 3. Släpp knappen för att skicka meddelandet.
 
-Om taligenkänning är aktiverad på din enhet (se inställningar)
-transkriberas ditt röstmeddelande automatiskt till text. Din motpart ser då
-både inspelningen och den transkriberade texten.
+Om taligenkänning är aktiverad på din enhet (se inställningar),
+transkriberas ditt röstmeddelande automatiskt till text. Din motpart
+ser då både inspelningen och den transkriberade texten.
 
 ### Svara på meddelanden (citera)
 
-För att svara på ett specifikt meddelande:
+För att svara på ett visst meddelande:
 
-1. Öppna menyn med tre punkter bredvid meddelandet.
+1. Öppna tre-punktsmenyn bredvid meddelandet.
 2. Välj "Svara".
-3. Ovanför inmatningsfältet visas en banner med det citerade meddelandet.
+3. Ovanför inmatningsfältet dyker en banner upp med det citerade
+   meddelandet.
 4. Skriv ditt svar och skicka det.
 
-Det citerade meddelandet visas i ditt svar så att sambandet blir tydligt.
+Det citerade meddelandet visas i ditt svar, så att sammanhanget
+är tydligt.
 
-### Redigera och radera meddelanden
+### Redigera och ta bort meddelanden
 
-- **Redigera:** Menyn med tre punkter på meddelandet, sedan "Redigera".
-  Ändra texten och skicka den igen. Din motpart ser att meddelandet har
-  redigerats. Redigering är möjlig inom 15 minuter efter att meddelandet
-  skickades.
-- **Radera:** Menyn med tre punkter på meddelandet, sedan "Radera".
-  Meddelandet tas bort hos både dig och din motpart. Du kan radera dina
+- **Redigera:** Tre-punktsmenyn för meddelandet, sedan "Redigera".
+  Ändra texten och skicka den på nytt. Din motpart ser att meddelandet
+  har redigerats. Redigering är möjlig inom 15 minuter efter
+  skickandet.
+- **Ta bort:** Tre-punktsmenyn för meddelandet, sedan "Ta bort". Det
+  meddelandet tas bort hos dig och din motpart. Du kan ta bort dina
   egna meddelanden när som helst -- det finns inget tidsfönster för
-  radering.
+  borttagning.
 
 ### Emoji-reaktioner
 
-Istället för att skriva ett svar kan du reagera på ett meddelande med en
-emoji:
+I stället för att skriva ett svar kan du reagera på ett meddelande med
+ett emoji:
 
-1. Öppna menyn med tre punkter eller håll meddelandet nedtryckt en stund.
-2. Välj en emoji från snabbvalet eller öppna emoji-väljaren för hela
-   urvalet.
-3. Din reaktion visas under meddelandet.
+1. Öppna tre-punktsmenyn eller håll meddelandet intryckt länge.
+2. Välj ett emoji från snabbvallet eller öppna emoji-väljaren för
+   hela urvalet.
+3. Din reaktion dyker upp under meddelandet.
 
 ### Kopiera text
 
-Via menyn med tre punkter på ett meddelande kan du kopiera
-meddelandetexten till urklipp.
+Via tre-punktsmenyn för ett meddelande kan du kopiera meddelandetexten
+till urklipp.
 
-### Sök meddelanden
+### Söka meddelanden
 
-Överst i chattfönstret hittar du sökfunktionen. Skriv in en sökterm så
-visar Cleona alla träffar i den aktuella chatten. Med piltangenterna kan du
-hoppa fram och tillbaka mellan träffarna.
+Längst upp i chattfönstret hittar du sökfunktionen. Skriv in ett
+sökord, och Cleona visar alla träffar i den aktuella chatten. Med
+piltangenterna kan du hoppa fram och tillbaka mellan träffarna.
 
-På startsidan finns dessutom ett flik-övergripande sökfilter som du kan
-använda för att söka igenom alla konversationer efter en term.
+På startsidan finns dessutom ett fliköverskridande sökfilter,
+med vilket du kan söka igenom alla konversationer efter ett ord.
 
 ### Länkförhandsvisning
 
-När du skickar en länk skapar Cleona automatiskt en förhandsvisning
-(titel, beskrivning, förhandsgranskningsbild). Denna förhandsvisning
-skapas av din enhet och skickas med -- din motpart behöver inte upprätta
-någon anslutning till den länkade webbplatsen för detta.
+När du skickar en länk skapar Cleona automatiskt en förhandsvisning (titel,
+beskrivning, miniatyrbild). Denna förhandsvisning skapas på din enhet
+och skickas med -- din motpart behöver ingen anslutning till den
+länkade webbplatsen för det.
 
-Om du trycker på en mottagen länk blir du tillfrågad om du vill öppna den
-i vanlig webbläsare, i inkognitoläge, eller inte alls.
+Vad ett tryck på en mottagen länk gör ställer du in i inställningarna
+under "Öppna länkar": "Normalt", "Föredra ett privat fönster" (där
+enheten inte kan öppna ett privat fönster öppnas länken normalt) eller
+"Fråga varje gång".
 
 ---
 
@@ -311,12 +426,33 @@ i vanlig webbläsare, i inkognitoläge, eller inte alls.
 
 De inbjudna kontakterna får en avisering och kan gå med i gruppen.
 
+### Hur gruppmeddelanden skyddas
+
+I en grupp med upp till 16 medlemmar skickar Cleona varje meddelande till
+varje medlem enskilt -- var och ett krypterat bara för den medlemmen, som
+om du hade skrivit ett eget meddelande till var och en. Bockarna på ett
+gruppmeddelande visar statusen hos den medlem där det har kommit
+minst långt.
+
+Växer gruppen över 16 medlemmar använder den en gemensam nyckel. Den
+byts varje dag och dras på nytt när en medlem lämnar gruppen eller tas
+bort; en ny medlem kan läsa från och med sitt inträde. Där visar
+bockarna inte längre statusen hos varje medlem, utan att meddelandet har
+lagts i nätverket. Sjunker gruppen till 12 eller färre medlemmar, går
+den tillbaka till enskild sändning.
+
+### Bilder i grupper och kanaler
+
+I inställningarna för en grupp eller en kanal ställer du in med "Ladda
+alltid bilder" om bilder ska laddas direkt eller först när du trycker
+på en.
+
 ### Bjud in medlemmar
 
-Även efter att gruppen skapats kan du bjuda in fler kontakter:
+Även efter skapandet kan du bjuda in fler kontakter:
 
-1. Öppna gruppinformationen (menyn med tre punkter i gruppöversikten eller
-   det övre fältet i gruppchatten).
+1. Öppna gruppinfon (tre-punktsmenyn i gruppöversikten eller
+   övre listen i gruppchatten).
 2. Tryck på "Bjud in".
 3. Välj de kontakter du vill lägga till.
 
@@ -325,20 +461,19 @@ De inbjudna kontakterna får en avisering och kan gå med i gruppen.
 Varje grupp har tre roller:
 
 - **Ägare (Owner):** Har full kontroll. Kan lägga till och ta bort
-  medlemmar, utse administratörer och hantera gruppen. Ägaren kan även
-  överföra sin status till en annan medlem.
-- **Administratör (Admin):** Kan ta bort medlemmar och hjälpa till med
-  administrationen.
+  medlemmar, utse administratörer och hantera gruppen. Ägaren kan
+  också överföra sin status till en annan medlem.
+- **Admin:** Kan ta bort medlemmar och hjälpa till med hanteringen.
 - **Medlem:** Kan läsa och skriva meddelanden.
 
 ### Lämna grupp
 
-1. Öppna menyn med tre punkter i gruppöversikten.
+1. Öppna tre-punktsmenyn i gruppöversikten.
 2. Välj "Lämna".
-3. Bekräfta ditt beslut.
+3. Bekräfta ditt val.
 
-Om du lämnar en grupp förblir dina tidigare meddelanden synliga för de
-andra medlemmarna.
+När du lämnar en grupp förblir dina tidigare meddelanden synliga för
+de övriga medlemmarna.
 
 ---
 
@@ -346,241 +481,281 @@ andra medlemmarna.
 
 ### Vad är kanaler?
 
-Kanaler är offentliga diskussionsforum inom Cleona-nätverket. Till
-skillnad från grupper kan vem som helst läsa med här utan att behöva bli
-inbjuden. Endast ägaren och administratörerna kan publicera inlägg --
-prenumeranter läser med.
+Kanaler är offentliga diskussionsforum inom Cleonas nätverk.
+Till skillnad från grupper kan alla här läsa med, utan att behöva
+bli inbjuden. Bara ägaren och administratörerna kan publicera inlägg --
+prenumeranterna läser med.
 
 ### Hitta och gå med i kanaler
 
 1. Växla till fliken "Kanaler".
 2. Öppna fliken "Sök".
-3. Sök bland tillgängliga kanaler efter namn eller ämne.
+3. Sök bland de tillgängliga kanalerna efter namn eller ämne.
 4. Tryck på en kanal och sedan på "Prenumerera".
 
-Kanaler kan filtreras efter språk. Vissa kanaler är märkta som "Ej lämplig
-för minderåriga" -- dessa syns bara om du i din profil har bekräftat att du
-är över 18 år.
+Kanaler kan filtreras efter språk. Vissa kanaler är märkta som "Ej
+för unga" -- dessa syns bara om du i din profil har bekräftat att
+du är över 18.
 
 ### Skapa egen kanal
 
 1. Växla till fliken "Kanaler".
 2. Tryck på plus-knappen.
-3. Ange ett kanalnamn (måste vara unikt i hela nätverket).
+3. Skriv in ett kanalnamn (måste vara unikt i hela nätverket).
 4. Välj språk och om kanalen ska vara offentlig eller privat.
-5. Valfritt: lägg till en beskrivning och en bild.
+5. Frivilligt: Lägg till en beskrivning och en bild.
 6. Tryck på "Skapa".
 
-För offentliga kanaler kan du ange om innehållet ska klassas som "Ej
-lämplig för minderåriga".
+För offentliga kanaler kan du bestämma om innehållet klassas som
+"Ej för unga".
 
-### Anmäla innehåll
+### Rapportera innehåll
 
-Om du upptäcker olämpligt innehåll i en offentlig kanal kan du anmäla det.
-Cleona använder ett decentraliserat moderationssystem: anmälningar bedöms
-av slumpmässigt utvalda medlemmar av nätverket (en slags "jury"). Om ett
-brott mot reglerna konstateras får kanalen en varning. Vid upprepade
-överträdelser nedgraderas den i sökindexet eller spärras.
+Om du lägger märke till olämpligt innehåll i en offentlig kanal kan du
+rapportera det. Cleona använder ett decentraliserat moderingssystem:
+rapporter bedöms av slumpmässigt utvalda medlemmar i nätverket (en sorts
+"jury"). Konstateras en överträdelse får kanalen en varning. Vid
+upprepade överträdelser nedgraderas den i sökindexet eller
+spärras.
 
 ### Systemkanaler
 
 Cleona har två inbyggda systemkanaler:
 
-- **Bug Log:** När Cleona upptäcker ett fel frågar det dig om du vill
-  skicka en anonymiserad felrapport. Dessa rapporter hamnar i Bug
-  Log-kanalen, där de kan granskas av communityn. Inga personuppgifter
-  överförs -- endast tekniska felbeskrivningar. Du kan även manuellt
-  skicka en loggrapport (med förhandsgranskningsdialog och uttryckligt
-  samtycke).
-- **Feature Requests:** Här kan användare lämna in funktionsönskemål och
-  rösta på befintliga förslag. Förslagen sorteras efter antal röster.
+- **Bug Log:** När Cleona känner igen ett fel frågar den dig om du vill
+  skicka en felrapport; innan dess ser du exakt vad som publiceras.
+  Dessa rapporter hamnar i Bug Log-kanalen, där de kan granskas av
+  gemenskapen. En rapport bär inget namn och inget innehåll från dina
+  konversationer, utan ett pseudonym. I betan anger den dessutom din
+  identifierare (User-ID), så att utvecklarna kan fråga dig. Du kan
+  också manuellt skicka en loggrapport (med
+  förhandsgranskningsdialog och uttryckligt samtycke).
+- **Feature Requests:** Här kan användare lämna in funktionsönskemål
+  och rösta på befintliga förslag. Förslagen sorteras efter
+  röster.
 
-Båda systemkanalerna har en storleksgräns på 25 MB och övervakas av juryns
-moderationssystem.
+Varje dator håller upp till 25 MB per systemkanal, varje mobil upp till
+5 MB; är det fullt, går det äldsta ut först -- aldrig det du själv
+redan har sett.
 
 ---
-
 ## 7. Samtal
 
 ### Starta röstsamtal
 
 1. Öppna chatten med kontakten du vill ringa.
-2. Tryck på telefonsymbolen i det övre fältet.
-3. Vänta tills din motpart svarar på samtalet.
+2. Tryck på telefonikonen i den övre listen.
+3. Vänta tills din motpart besvarar samtalet.
 
-Under samtalet ser du en tidslinje som visar samtalslängden, och du har
-tillgång till att stänga av mikrofonen och slå på högtalare.
+Under samtalet ser du en tidslinje, samtalslängden och har
+tillgång till att stänga av mikrofonen och högtalare.
 
-Tryck på den röda lägg-på-knappen för att avsluta samtalet.
+För att lägga på trycker du på den röda lägg på-knappen.
+
+Om du ser "Inte nåbar" kan motpartens enhet inte nås just nu, till exempel en
+iPhone vars app inte är öppen. Skicka ett meddelande i stället.
 
 ### Starta videosamtal
 
 1. Öppna chatten med kontakten.
-2. Tryck på kamerasymbolen i det övre fältet.
-3. Din videobild visas i ett litet fönster, din motparts bild i det stora
-   området.
+2. Tryck på kameraikonen i den övre listen.
+3. Din videobild dyker upp i ett litet fönster, din motparts bild i
+   den stora ytan.
 
-Du kan växla mellan fram- och bakkamera under samtalet.
+Du kan under samtalet växla mellan fram- och bakkamera.
 
 ### Inkommande samtal
 
-När någon ringer dig visas ett aviseringsfönster med den uppringandes
+När någon ringer dig dyker ett meddelandefönster upp med uppringarens
 namn. Du kan:
 
-- **Svara** -- samtalet börjar.
-- **Avvisa** -- den som ringer aviseras.
+- **Acceptera** -- samtalet börjar.
+- **Avvisa** -- uppringaren aviseras.
 
-Om du redan är i ett samtal avvisas ett nytt samtal automatiskt.
+Befinner du dig just nu i ett samtal ringer det inte vid ett nytt
+samtal; du får i stället ett meddelande "Missat samtal". Detsamma
+gäller ett gruppsamtal som du inte har accepterat -- meddelandet står
+då i gruppchatten.
+
+Ringer någon en av dina identiteter som just nu inte visas, ringer det
+ändå; samtalsskärmen namnger vilken av dina identiteter som rings upp.
+
+På iPhone ringer det bara medan appen är öppen. Den som ringer dig medan appen
+inte är öppen ser "Inte nåbar" efter 10 sekunder. Så fort du öppnar appen hittar
+du ett meddelande om det missade samtalet.
 
 ### Gruppsamtal
 
-Du kan även genomföra gruppsamtal där flera personer deltar samtidigt.
-Samtalet organiseras via ett intelligent vidarebefordringsträd, så att
-inte alla deltagare behöver vara direkt anslutna till varandra. Alla
-samtal är helt krypterade.
+Du kan också föra gruppsamtal där flera personer deltar samtidigt.
+Samtalet organiseras via ett intelligent vidarebefordringsträd,
+så att inte varje deltagare behöver vara direkt ansluten till varje
+annan. Alla samtal är krypterade hela tiden.
+
+Varje gruppmedlem kan starta ett gruppsamtal. Två deltagare som inte
+är kontakter med varandra ser aldrig den andras internetadress: Deras
+ljud och bild går via en deltagare som är kontakt med båda. Finns det
+ingen sådan är de två inte anslutna, och rutan säger "Ingen gemensam
+kontakt i samtalet". Är en vidarebefordring överbelastad, finns ljudet
+kvar, och videon faller bort för det paret.
 
 ### Kryptering vid samtal
 
-Alla samtal krypteras med engångsnycklar som endast existerar under
-samtalets längd. Efter att samtalet avslutats raderas dessa nycklar
-omedelbart. Ingen kan i efterhand dekryptera ett tidigare samtal.
+Alla samtal krypteras med engångsnycklar som bara existerar under
+samtalets längd. Efter påläggning raderas dessa nycklar omedelbart.
+Ingen kan i efterhand avkryptera ett tidigare samtal.
+
+Ärligt talat: Samtal går, i den mån det är möjligt, direkt mellan
+enheterna, för redan en liten fördröjning stör när man talar. Till
+skillnad från meddelanden kan din internetleverantör därför vid ett
+samtal se med vilken internetadress du är ansluten. Vad ni säger ser
+den inte.
+
+Vid ett samtal ser också din kontakt din internetadress. Vill du inte
+det hos en kontakt, stäng av "Tillåt samtal" i dennes meny (standard:
+på). Stänger du av senare, vet kontakten fortfarande en adress som den
+redan har sett.
 
 ---
 
 ## 8. Kalender
 
-Cleona innehåller en inbyggd kalender som är krypterad och fungerar helt
+Cleona innehåller en inbyggd kalender som fungerar krypterat och helt
 decentraliserat -- utan molntjänst.
 
 ### Vyer
 
-Kalendern erbjuder fem vyer: dag, vecka, månad, år och en uppgiftsvy.
-Växla mellan dem via flikarna högst upp på kalenderskärmen.
+Kalendern erbjuder fem vyer: Dag, Vecka, Månad, År och en
+uppgiftsvy. Växla mellan dem via flikarna längst upp på
+kalenderskärmen.
 
-### Skapa möten
+### Skapa händelser
 
-Tryck på en tidslucka eller använd lägg till-knappen för att skapa ett
-nytt möte. Du kan ange titel, datum, tid, plats och anteckningar. Möten
-lagras krypterat på din enhet.
+Tryck på en tidslucka eller använd lägg till-knappen för att skapa en ny
+händelse. Du kan mata in titel, datum, tid, plats och anteckningar.
+Händelser sparas krypterade på din enhet.
 
-### Återkommande möten
+### Återkommande händelser
 
-Möten kan upprepas dagligen, veckovis, månadsvis eller årligen. Du kan
-anpassa mönstret (t.ex. varannan tisdag, den första i varje månad) och
-ange ett slutdatum eller antal upprepningar.
+Händelser kan upprepas dagligen, veckovis, månadsvis eller årsvis.
+Du kan anpassa mönstret (t.ex. varannan tisdag,
+första dagen varje månad) och ange ett slutdatum eller ett antal
+upprepningar.
 
-### Bjuda in kontakter
+### Bjud in kontakter
 
-När du skapar eller redigerar ett möte kan du bjuda in dina
-Cleona-kontakter. De får en krypterad kalenderinbjudan och kan svara med
-Ja, Nej eller Kanske. Ändringar av mötet skickas automatiskt till alla
-inbjudna.
+När du skapar eller redigerar en händelse kan du bjuda in dina
+Cleona-kontakter. De får en krypterad kalenderinbjudan och kan svara
+med Ja, Nej eller Kanske. Ändringar i händelsen skickas
+automatiskt till alla inbjudna.
 
-### Ledig/upptagen-visning
+### Ledig/Upptagen-visning
 
-Du kan dela din tillgänglighet med kontakter utan att avslöja
-mötesdetaljer. Det finns tre sekretessnivåer: fullständiga detaljer,
-endast tidsblock, eller dold. Du kan ange en standard och åsidosätta den
-per kontakt.
+Du kan dela din tillgänglighet med kontakter utan att röja
+händelseinformation. Det finns tre integritetsnivåer: fullständiga
+detaljer, bara tidsblock eller dold. Du kan ställa in en standard och
+åsidosätta den per kontakt.
 
 ### Påminnelser
 
-Möten kan ha påminnelser som utlöser en systemavisering innan mötet
-börjar. Du kan snooza påminnelser vid behov.
+Händelser kan ha påminnelser som utlöser en
+systemavisering innan händelsen börjar. Du kan snooza påminnelser vid
+behov.
 
-### Extern kalendersynkronisering
+### Extern kalendersynk
 
 Cleona kan synkronisera med externa kalendertjänster:
 
-- **CalDAV** -- anslut till vilken CalDAV-kompatibel server som helst
+- **CalDAV** -- Anslut till vilken CalDAV-kompatibel server som helst
   (Nextcloud, Radicale osv.).
-- **Google Kalender** -- synkronisering via Google Calendar API med säker
-  OAuth2-autentisering.
+- **Google Kalender** -- Synkronisering via Google Calendar API med
+  säker OAuth2-autentisering.
 - **Lokal CalDAV-server** -- Cleona kan starta en lokal CalDAV-server på
-  din enhet, så att kalenderprogram på datorn (Thunderbird, Outlook, Apple
-  Kalender, Evolution) kan synkronisera med din Cleona-kalender.
-- **Androids systemkalender** -- möten från Cleona kan överföras till den
-  inbyggda kalenderappen på din Android-enhet.
-- **ICS-filer** -- importera och exportera möten i standardformatet
-  iCalendar.
+  din enhet, så att skrivbordskalenderappar (Thunderbird, Outlook,
+  Apple Kalender, Evolution) kan synkronisera med din Cleona-kalender.
+- **Android-systemkalender** -- Händelser från Cleona kan överföras till
+  den inbyggda kalenderappen på din Android-enhet.
+- **ICS-filer** -- Importera och exportera händelser i
+  iCalendar-standardformat.
 
 ### PDF-export
 
-Du kan skriva ut eller exportera valfri kalendervy (dag, vecka, månad, år)
+Du kan skriva ut eller exportera varje kalendervy (Dag, Vecka, Månad, År)
 som ett PDF-dokument.
 
 ---
 
 ## 9. Omröstningar
 
-Du kan skapa omröstningar i vilken chatt eller grupp som helst för att
-samla in åsikter eller planera möten.
+Du kan skapa omröstningar i varje chatt eller grupp för att samla
+åsikter eller planera möten.
 
 ### Omröstningstyper
 
-Cleona stödjer fem typer av omröstningar:
+Cleona stöder fem typer av omröstningar:
 
-- **Enkelval** -- deltagarna väljer ett alternativ.
-- **Flerval** -- deltagarna kan välja flera alternativ.
-- **Datumomröstning** -- hitta ett datum som passar alla. Varje deltagare
-  markerar datum som tillgängliga, kanske, eller inte tillgängliga.
-- **Skala** -- betygsätt något på en numerisk skala (t.ex. 1 till 5).
-- **Fritext** -- deltagarna skriver sitt eget svar.
+- **Enkelval** -- Deltagarna väljer ett alternativ.
+- **Flerval** -- Deltagarna kan välja flera alternativ.
+- **Mötesomröstning** -- Hitta en tid som passar alla. Varje
+  deltagare markerar tider som tillgängliga, kanske eller inte
+  tillgängliga.
+- **Skala** -- Betygsätt något på en numerisk skala (t.ex. 1 till 5).
+- **Fritext** -- Deltagarna skriver sitt eget svar.
 
 ### Skapa omröstning
 
-Öppna en chatt och tryck på omröstningssymbolen (eller använd
-bilagemenyn). Välj omröstningstyp, formulera din fråga och alternativen,
-och skicka omröstningen. Den visas som ett meddelande i chatten.
+Öppna en chatt och tryck på omröstningsikonen (eller använd
+bilagsmenyn). Välj omröstningstyp, formulera din fråga och
+alternativen, och skicka omröstningen. Den dyker upp som ett meddelande
+i chatten.
 
 ### Rösta
 
-Tryck på en omröstning för att avge din röst. Du kan ändra eller dra
-tillbaka din röst när som helst.
+Tryck på en omröstning för att lägga din röst. Du kan när som helst
+ändra eller dra tillbaka din röst.
 
-### Anonym omröstning
+### Anonym röstning
 
-Omröstningar kan konfigureras för anonym röstning. Om aktiverat är
-rösterna kryptografiskt anonyma -- ingen, inte ens den som skapade
-omröstningen, kan se vem som röstat på vad. Antalet röster förblir ändå
-synligt.
+Omröstningar kan ställas in för anonym röstning. Om det är aktiverat
+är rösterna kryptografiskt anonyma -- ingen, inte ens
+omröstningsskaparen, kan se vem som röstade för vad. Röstantalet
+förblir ändå synligt.
 
-### Datumomröstning till kalender
+### Mötesomröstning till kalendern
 
-När en datumomröstning är avslutad kan det vinnande datumet med ett tryck
+När en mötesomröstning är avslutad kan vinnartiden med ett tryck
 omvandlas direkt till en kalenderpost.
 
 ---
-
 ## 10. Flera identiteter
 
 ### Varför flera identiteter?
 
-Föreställ dig att du vill separera ditt yrkesliv från ditt privatliv --
-ungefär som med två olika telefonnummer, men utan en andra telefon. I
-Cleona kan du använda flera identiteter på en enhet. Varje identitet har
-ett eget namn, en egen profilbild, egna kontakter och egna konversationer.
+Tänk dig att du vill hålla isär arbetsliv och privatliv --
+likt två olika telefonnummer, men utan en andra telefon.
+I Cleona kan du använda flera identiteter på en enhet. Varje
+identitet har ett eget namn, en egen profilbild, egna kontakter och
+egna konversationer.
 
 ### Skapa ny identitet
 
-1. I det övre fältet ser du din aktuella identitet som en flik.
-2. Tryck på plustecknet (+) till höger om dina identitetsflikar.
-3. Ange ett namn för den nya identiteten.
+1. I den övre listen ser du din aktuella identitet som en flik.
+2. Tryck på plus-tecknet (+) till höger om dina identitetsflikar.
+3. Skriv in ett namn för den nya identiteten.
 4. Klart -- den nya identiteten är omedelbart aktiv.
 
 ### Växla mellan identiteter
 
-Tryck helt enkelt på identitetsfliken i det övre fältet. Växlingen sker
-omedelbart -- ingen väntetid, ingen omladdning.
+Tryck bara på identitetsfliken i den övre listen. Växlingen
+är omedelbar -- ingen väntetid, ingen omladdning.
 
-### Alla körs samtidigt
+### Alla är aktiva samtidigt
 
-En viktig poäng: alla dina identiteter är aktiva samtidigt. Även om du för
-tillfället visas som "Jobb" fortsätter din "Privat"-identitet att ta emot
-meddelanden. Du missar ingenting, oavsett vilken identitet du för
-tillfället har valt.
+En viktig punkt: Alla dina identiteter är aktiva samtidigt. Även
+om du just nu visas som "Arbete", tar din "Privat"-
+identitet emot meddelanden likadant hela tiden. Du missar inget, oavsett
+vilken identitet du just har valt.
 
-### Identitetsdetaljsida
+### Identitets-detaljsida
 
 När du trycker på fliken för din just nu aktiva identitet öppnas
 detaljsidan. Här kan du:
@@ -589,408 +764,576 @@ detaljsidan. Här kan du:
 - Ändra eller ta bort din profilbild.
 - Lägga till en profilbeskrivning.
 - Ändra ditt visningsnamn.
-- Välja ett tema (skin) för denna identitet.
-- Radera identiteten, om du inte längre behöver den.
+- Välja en design (skal) för denna identitet.
+- Ta bort identiteten, om du inte längre behöver den.
 
-### Radera identitet
+### Ta bort identitet
 
-Om du raderar en identitet meddelas dina kontakter om detta. Identiteten
-och all tillhörande data tas bort från din enhet. Denna åtgärd kan inte
-ångras.
+När du tar bort en identitet aviseras dina kontakter om
+det. Identiteten och all tillhörande data tas bort från din
+enhet. Detta förfarande går inte att ångra.
 
 ---
 
-## 11. Multi-Device
+## 11. Flera enheter
 
-### Använda Cleona på flera enheter
+### En identitet, en enhet -- tills vidare
 
-Du kan använda samma identitet på upp till 5 enheter samtidigt. En enhet
-är den primära (den håller seed-phrasen), och ytterligare enheter länkas
-till den.
+En identitet körs idag på en enhet. En andra enhet för samma identitet
+kommer i en senare version; i inställningarna under "Enheter" ->
+"Hantera enheter" står "Koppla ytterligare enhet" därför fortfarande som
+"Inte tillgängligt än".
 
-### Länka ny enhet
+När det kommer gäller: Alla enheter är likvärdiga, det finns ingen
+huvudenhet. En ytterligare enhet ställer du in med dina 24 ord, och en
+av dina hittillsvarande enheter samtycker. Högst 5 enheter.
 
-1. Öppna inställningarna på din primära enhet.
-2. Gå till "Länkade enheter".
-3. Välj "Länka ny enhet".
-4. Installera Cleona på den nya enheten och välj vid start "Länka med
-   befintlig enhet".
-5. Skanna QR-koden för parkoppling som visas på din primära enhet, eller
-   använd parkopplingslänken.
+Matar du in dina 24 ord på en ny enhet idag, flyttar du: Identiteten
+återställs på den nya enheten, och din hittillsvarande enhet tar
+efteråt bort den hos sig (se kapitel 12).
 
-Den länkade enheten får ett delegeringscertifikat från den primära
-enheten. Meddelanden som skickas från en länkad enhet signeras
-kryptografiskt med en delegerad nyckel, så att kontakter kan verifiera att
-meddelandet verkligen kommer från din identitet.
+På flera enheter kan du idag använda olika identiteter (kapitel 10).
 
-### Så fungerar det
+### Rotera identitetsnycklar
 
-- Den primära enheten håller din seed-phrase och huvudnycklarna.
-- Länkade enheter får härledda signeringsnycklar och ett
-  delegeringscertifikat -- de får aldrig själva seed-phrasen.
-- Alla enheter delar samma identitet och kontakter. Meddelanden anländer
-  på alla enheter.
-- Delegeringscertifikat förnyas automatiskt innan de går ut.
-
-### Enhetshantering
-
-Öppna inställningarna och gå till "Länkade enheter" för att se alla dina
-länkade enheter, deras status och senaste aktivitet. Du kan när som helst
-återkalla en länkad enhet, om den går förlorad eller blir stulen.
-
-### Nödrotation av nycklar
-
-Om du misstänker att en enhet har komprometterats kan du utlösa en
-nödrotation av nycklar. Nya nycklar genereras då, och rotationen måste
-bekräftas av en majoritet av dina andra enheter. Det förhindrar att en
-enda stulen enhet på egen hand kan rotera nycklar.
+Misstänker du att någon har fått tag i dina nycklar, kan du under
+"Hantera enheter" -> "Rotera identitetsnycklar" skapa nya nycklar.
+Dina kontakter aviseras, dina öppna inbjudningar återkallas. Viktigt:
+Därefter skapar de 24 orden ensamma bara de gamla nycklarna. Skapa
+därför direkt efteråt ett nytt återställningspaket; återställa kan du
+därefter bara tillsammans med detta paket.
 
 ---
 
 ## 12. Återställning
 
-### Använda seed-phrasen
+### Använd seed-frasen
 
-Om du förlorar din enhet eller sätter upp en ny:
+Om du tappar din enhet eller ställer in en ny:
 
 1. Installera Cleona på den nya enheten.
-2. Välj "Återställ" vid start.
-3. Ange dina 24 ord.
-4. Cleona återställer din identitet och kontaktar automatiskt dina
-   tidigare kontakter.
-5. Dina kontakter svarar med dina kontaktuppgifter, gruppmedlemskap och
-   meddelandehistorik.
+2. Välj "Återställ" vid starten.
+3. Skriv in dina 24 ord.
+4. Cleona återskapar därifrån alla dina identiteter -- med samma
+   nycklar som förut. För dina kontakter är du samma person.
 
-Återställningen sker i tre steg:
-- Först kommer dina kontakter och grupper tillbaka.
-- Sedan de senaste 50 meddelandena från varje konversation.
-- Till sist den fullständiga meddelandehistoriken.
+### Vad som kommer tillbaka -- och vad som inte
 
-Det räcker att en enda av dina kontakter är online för att återställningen
-ska fungera.
+Din identitet ligger i de 24 orden, dina kontakter och din historik
+inte. Tillbaka kommer din nätåtkomst via **återställningspaketet**: Din
+enhet lägger ett litet, krypterat paket i nätverket. Bara dina 24 ord
+kan hitta och öppna det. Där står vad din nya enhet behöver för att nå
+dina kontakter igen, och vad som under tiden låg för dig i nätverket.
+För det behöver ingen kontakt vara online.
 
-### Guardian Recovery (betrodda personer)
+Den tidigare chathistoriken för en återställning inte tillbaka.
 
-Du kan utse upp till fem betrodda personer som "guardians". Din
-återställningsnyckel delas då upp i fem delar, varav varje guardian får
-en. För att återställa din identitet räcker det med tre av de fem delarna.
+Återställningspaketet lever i 7 dagar och förnyas av din enhet så länge
+den är igång; i inställningarna ser du hur länge det gäller. Har ingen av
+dina enheter varit igång på mer än 7 dagar, har det löpt ut. Då
+återställer de 24 orden din identitet ändå, men dina kontakter måste du
+bjuda in på nytt; det som under tiden låg för dig i nätverket är
+förlorat.
 
-Det betyder: även om du har förlorat din seed-phrase kan tre av dina
-guardians tillsammans återställa ditt konto. Ingen enskild guardian kan på
-egen hand komma åt dina data -- det behövs alltid minst tre.
+### Återställning är att flytta
 
-Så här ställer du in guardians:
-1. Öppna inställningarna.
-2. Gå till "Säkerhet".
-3. Välj "Guardian Recovery".
-4. Välj fem betrodda kontakter.
+Upptäcker din hittillsvarande enhet senare att identiteten har
+återställts någon annanstans, tar den bort den hos sig -- med dess
+historik. Därför: Den som har dina 24 ord kan på detta sätt hämta din
+identitet från din enhet. Tills alla kontakter är tillbaka påminner
+appen dig; med "Slutför och förnya nycklar" avslutar du
+återställningen själv.
 
-### Varför kontakter är din backup
+### Vad ingen kan återställa
 
-I traditionella messengers ligger dina data på leverantörens servrar. Hos
-Cleona finns ingen server -- men dina kontakter tar över den rollen. När
-du skickar ett meddelande lagrar gemensamma kontakter en krypterad kopia
-för det fall att mottagaren just då är offline. Vid en återställning
-levererar dina kontakter tillbaka dina data till dig.
+Detta är viktigt, och vi säger det därför tydligt:
 
-Det betyder: ju fler aktiva kontakter du har, desto pålitligare är din
-backup. En kontakt som regelbundet är online räcker för en lyckad
-återställning.
+- **Ingen utom du kan återställa din identitet.** Inte utvecklaren,
+  inte en support, och inte heller dina kontakter -- oavsett hur
+  många de är. Det finns ingen masternyckel och ingen del av din
+  nyckel som är deponerad hos andra.
+- **Har du tappat de 24 orden och inte har någon enhet kvar, är din identitet
+  förlorad.** Då återstår bara att skapa en ny och bjuda in dina kontakter
+  på nytt.
+
+Det bästa skyddet: Skriv de 24 orden på papper och förvara dem
+säkert.
 
 ---
-
 ## 13. Inställningar
 
-Du når inställningarna via kugghjulssymbolen i övre högra hörnet.
+Inställningarna når du via kugghjulsikonen i det övre högra
+hörnet.
 
 ### Aviseringar och ringsignaler
 
-- Välj bland sex olika ringsignaler för inkommande samtal.
-- Ställ in en meddelandeton.
-- På Android-enheter kan du dessutom aktivera eller inaktivera vibration.
+- Välj mellan sex olika ringsignaler för inkommande samtal.
+- Ställ in ett meddelandeljud.
+- På Android-enheter kan du dessutom aktivera eller
+  avaktivera vibration.
+- **"Stäng av ljud för allt"** låter inget meddelande på denna enhet
+  längre ringa, vibrera eller göra sig påmind -- för alla identiteter.
+  Samtal ringer vidare.
+- **"Tysta timmar"** ställer du in per identitet med Från/Till. Under
+  denna tid ringer eller vibrerar inget meddelande från denna
+  identitet, och ingen avisering visas; meddelandena kommer ändå fram.
+- **"Aviseringar utan innehåll"** (standard: av) visar bara att ett
+  meddelande, en inbjudan eller en påminnelse har kommit -- utan
+  avsändare, namn och text. Samtal visar fortsatt namnet.
+- Det som efter starten kommer på en gång rapporterar Cleona i en
+  samlingsavisering ("5 nya meddelanden i 2 konversationer"); allt
+  senare enskilt. Ett tryck på en meddelandeavisering öppnar
+  konversationen, även i en annan identitet.
 
-### Teman (Skins)
+### Designer (skal)
 
-Cleona erbjuder tio olika teman: Teal, Ocean, Sunset, Forest, Amethyst,
-Fire, Storm, Slate, Gold och Contrast. Contrast-temat uppfyller den
-högsta tillgänglighetsnivån (WCAG AAA) och är särskilt lättläst vid
-nedsatt syn.
+Cleona erbjuder tio olika designer: Teal, Ocean, Sunset, Forest,
+Amethyst, Fire, Storm, Slate, Gold och Contrast. Contrast-designen uppfyller
+den högsta tillgänglighetsnivån (WCAG AAA) och är särskilt
+lättläst vid nedsatt syn.
 
-Varje identitet kan ha sitt eget tema. Du ändrar temat på
-identitetsdetaljsidan (tryck på den aktiva identitetsfliken).
+Varje identitet kan ha sin egen design. Du ändrar designen i
+identitets-detaljsidan (tryck på den aktiva identitetsfliken).
 
-Dessutom kan du i inställningarna under "Utseende" växla mellan ljust,
-mörkt och systemtema.
+Dessutom kan du i inställningarna under "Utseende" växla mellan
+ljust, mörkt och systemtema.
 
 ### Ändra språk
 
-Cleona finns tillgängligt på 33 språk, inklusive språk med skrift från
-höger till vänster (t.ex. arabiska, hebreiska). Ändra språk i
+Cleona är tillgängligt på 34 språk, däribland språk med
+höger-till-vänster-skrift (t.ex. arabiska, hebreiska). Ändra språk i
 inställningarna under "Språk".
-
-### Lagringsgräns
-
-Du kan ange hur mycket lagringsutrymme Cleona får använda på din enhet
-(mellan 100 MB och 2 GB). När gränsen nås flyttas äldre media automatiskt
-ut eller raderas -- textmeddelanden bevaras alltid.
 
 ### Mediearkivering
 
-Om du har en nätverksenhet (NAS) eller en delad mapp hemma kan Cleona
-automatiskt flytta ut dina media dit. SMB, SFTP, FTPS och WebDAV stöds.
+Om du har en nätverkslagring (NAS) eller en delad mapp
+hemma, kan Cleona automatiskt flytta ut din media dit. Stöds
+gör SMB, SFTP, FTPS och WebDAV.
 
-Så fungerar den stegvisa lagringen:
-- De första 30 dagarna: allt förblir på din enhet.
-- Efter 30 dagar: en förhandsgranskningsbild förblir på enheten, originalet
+Så här fungerar den stegvisa lagringen:
+- De första 30 dagarna: Allt ligger kvar på din enhet.
+- Efter 30 dagar: En miniatyrbild ligger kvar på enheten, originalet
   arkiveras.
-- Efter 90 dagar: endast en liten förhandsgranskningsbild förblir på
-  enheten.
-- Efter ett år: endast en platshållare förblir, originalet ligger säkert i
-  arkivet.
+- Efter 90 dagar: Bara en liten miniatyrbild ligger kvar på enheten.
+- Efter ett år: Bara en platshållare ligger kvar, originalet ligger
+  säkert i arkivet.
 
 Du kan när som helst trycka på ett arkiverat media för att hämta tillbaka
-det -- förutsatt att du är ansluten till ditt hemnätverk. Särskilt viktiga
-media kan fästas så att de aldrig flyttas ut.
+det -- förutsatt att du är ansluten till ditt hemnätverk. Särskilt
+viktig media kan fästas, så att den aldrig flyttas ut.
+
+Under "Lagringsbudget" ställer du in hur många MB media som får bli
+kvar på enheten (standard: 100 MB på mobilen, 2 GB på datorn). Är den
+full, arkiveras det äldsta mediet som inte är fäst först. Ett original
+raderas bara om det ligger säkert i arkivet -- textmeddelanden bevaras
+alltid.
 
 ### Transkription för röstmeddelanden
 
-Om aktiverat omvandlas dina röstmeddelanden lokalt på din enhet till text
-(med den öppen källkods-modellen Whisper). Den transkriberade texten
-skickas tillsammans med inspelningen till din motpart. Transkriptionen
-sker helt på din enhet -- ingen data skickas till externa tjänster.
+Om det är aktiverat transkriberas dina röstmeddelanden lokalt på din
+enhet till text (med open-source-modellen Whisper). Den transkriberade
+texten skickas tillsammans med inspelningen till din motpart. Transkriptionen
+sker helt på din enhet -- ingen data går till externa tjänster.
 
-### Auto-nedladdning
+Vilken modell (tiny, base, small) som laddas ner ställer du in en gång
+för enheten; språket (automatiskt eller fast) per identitet.
 
-Du kan ställa in från vilken storlek media ska laddas ner automatiskt. På
-så sätt kan du till exempel låta bilder laddas ner automatiskt, men
-bestämma manuellt vid stora videor.
+### Automatisk hämtning
 
-### Länkade enheter
+Du kan ställa in från vilken storlek media ska hämtas
+automatiskt. Så kan du till exempel låta bilder laddas automatiskt, men
+själv bestämma vid stora videos.
 
-Hantera dina länkade enheter i detta avsnitt av inställningarna. Se
-kapitlet om Multi-Device för detaljer.
+### Enheter
+
+Under "Enheter" -> "Hantera enheter" ser du denna enhet. Att koppla en
+ytterligare enhet kommer med en senare version (kapitel 11).
+
+### Nätverk
+
+Cleona behöver inga nätverksinställningar för att fungera. Det finns
+tre nätverksreglage:
+
+- **Portöppning i routern** (standard: på). Cleona ber din egna
+  router att öppna en dörr för Cleona. Fungerar det, är din enhet
+  bättre nåbar för andra och hjälper nätverket. Cleona talar då bara med
+  din router, inte med internet.
+- **Offentliga adressposter** (standard: på). Har din enhet för
+  få grannar, slår den upp ytterligare ingångspunkter i en offentlig
+  katalog (Nostr), och är den själv väl nåbar, registerar den sig
+  där. Posten innehåller en adress, inget namn och ingen kontakt.
+  Stänger du av den, hittar din enhet grannar bara via inbjudningar,
+  det lokala nätet och de grannar den redan känner.
+- **Färre döljningspaket i Wi-Fi** (standard: av). I Wi-Fi eller på
+  kabel kan du stänga av de tomma döljningspaketen. Då är det där
+  igen att se när du skriver. I mobildata finns inte detta reglage -- där
+  skickar Cleona ändå bara ett döljningspaket per minut.
+
+Döljningstrafiken i sin helhet kan man inte stänga av. Det är
+medvetet: Bara om den alltid löper säger din enhets aktivitet ingenting
+om huruvida du just skriver.
+
+Ovanför de tre reglagen står **databesparingsläget**: I mobildata
+föreslår Cleona det, men slår aldrig på det själv. Det sparar data, men
+din enhet blir lättare att känna igen utifrån.
+
+Därunder ställer du in **"Cache för andras media"**: Din enhet håller
+krypterade delar av andras media i upp till 7 dagar, så att de når sina
+mottagare (standard: 100 MB på mobilen, 1 GB på datorn). En mindre
+storlek frigör utrymmet omedelbart -- de äldsta delarna först.
 
 ---
 
 ## 14. Säkerhet
 
-### Vad betyder post-kvantkryptering?
+### Vad betyder postkvantumkryptering?
 
-Dagens kryptering bygger på matematiska problem som är extremt svåra för
-vanliga datorer att lösa. Kvantdatorer skulle i framtiden kunna lösa några
-av dessa problem snabbt. Post-kvantkryptering använder ytterligare metoder
-som även står emot kvantdatorer.
+Dagens kryptering bygger på matematiska problem som är extremt svåra
+att lösa för vanliga datorer. Kvantdatorer skulle i framtiden kunna
+lösa några av dessa problem snabbt. Postkvantumkryptering använder
+ytterligare metoder som också motstår kvantdatorer.
 
-Cleona kombinerar båda tillvägagångssätten: klassisk kryptering för
-tillförlitlighet och post-kvantmetoder för framtidssäkerhet. På så sätt är
-du skyddad mot både dagens och framtidens hot samtidigt.
+Cleona kombinerar båda ansatserna: klassisk kryptering för
+tillförlitlighet och postkvantummetoder för framtidssäkerhet. Så är
+du skyddad mot dagens och framtidens hot samtidigt.
 
-För varje enskilt meddelande skapas en egen nyckel. Även om en angripare
-skulle knäcka nyckeln för ett meddelande kunde denne inte läsa något annat
-meddelande med den.
+För varje enskilt meddelande skapas en egen nyckel. Även om
+en angripare skulle knäcka nyckeln för ett meddelande, kunde den
+inte läsa något annat meddelande med den.
 
 ### Varför ingen server är säkrare
 
-I traditionella messengers går dina meddelanden via leverantörens
-servrar. Även om de må vara krypterade där har leverantören tillgång till
-metadata (vem kommunicerar när med vem, hur ofta, varifrån) och måste
-under vissa omständigheter lämna ut dessa på domstolsbeslut.
+Vid konventionella meddelandetjänster går dina meddelanden via
+leverantörens servrar. Även om de där kunde vara krypterade: Leverantören
+har tillgång till metadata (vem kommunicerar med vem, när, hur ofta, varifrån) och
+måste under omständigheter lämna ut dem på domstolsbeslut.
 
-Hos Cleona finns ingen sådan central punkt. Dina meddelanden reser direkt
-från enhet till enhet. Det finns ingen plats där all metadata samlas.
-Ingen kan utifrån en enda datapunkt rekonstruera ditt kommunikationsmönster.
+Vid Cleona finns ingen sådan central punkt. Det finns ingen plats där
+all metadata samlas, och ingen katalog i vilken man kunde
+slå upp vem du är eller vem du känner.
 
-### Vad händer om du är offline?
+### Vem ser att du skriver med någon?
 
-När du skickar ett meddelande och mottagaren är offline:
+Kryptering skyddar **vad** du skriver. Lika viktigt är att
+ingen enskild observatör får veta **med vem** och **när** du skriver.
+För det ser Cleona till så:
 
-1. Cleona försöker först leverera meddelandet direkt.
-2. Om det inte fungerar vidarebefordras det via gemensamma kontakter.
-3. Samtidigt fördelas meddelandet som krypterade bitar över flera noder i
-   nätverket (ungefär som ett pussel med 10 bitar, av vilka 7 räcker för
-   att sätta ihop bilden).
-4. Meddelandet sparas i upp till 7 dagar.
+- **På internet aldrig direkt.** Skickade din enhet ett meddelande direkt till
+  din motparts internetadress, kunde din leverantör se med
+  vem du skriver. Därför går ett meddelande på internet alltid via era
+  fasta grannar: din och din motparts.
+- **Grannar du litar på.** Dina fasta grannar är, i den mån det är
+  möjligt, enheter som tillhör dina egna kontakter -- upp till tre som
+  just är nåbara utifrån. Faller en bort, träder en annan kontakt in.
+  En kontakt går inte att köpa med servrar; en godtycklig nod i
+  nätverket däremot. Har du ännu ingen nåbar kontakt, tar Cleona en
+  annan granne. Din inbjudan namnger aldrig någon av dina kontakter, så
+  att ingen via dem får veta en väns adress.
+- **Koder istället för namn.** Grannarna ser inga namn och inga
+  identifierare, utan bara en kod. Den gäller för just er två, i en
+  riktning, för en dag -- nästa dag är det en annan. Din granne vet
+  varifrån paketet kommer, men inte varthän det till slut går. Din
+  motparts granne vet varthän det går, men inte varifrån det kom. Normalt
+  ser ingen på vägen båda ändarna.
+- **Döljningstrafiken.** Din enhet skickar hela tiden, i
+  oregelbundna intervall, döljningspaket till sina grannar. De är
+  lika stora som äkta paket, går via samma port och går inte att
+  skilja från dem utifrån. Om en människa skriver just nu eller
+  enheten bara löper går inte att se med det. Dina meddelanden
+  väntar aldrig på döljningstrafiken --
+  de ger sig iväg omedelbart, den löper bara vid sidan.
 
-Så snart mottagaren kommer online igen levereras meddelandena. Du får en
-bekräftelse när ditt meddelande har anlänt.
+**Vad döljningstrafiken kostar:** I Wi-Fi cirka 13 MB per dag. I mobildata skickar
+Cleona bara ett döljningspaket per minut, det är cirka 1,7 MB per dag. Orsaken
+till begränsningen i mobildata är inte datamängden, utan batteriet:
+Varje paket väcker radiomodemet.
 
-### Anti-censur
+**Vad Cleona inte kan dölja** -- ärligt talat:
 
-Om ditt nätverk blockerar standardanslutningsmetoden (UDP) växlar Cleona
-automatiskt till en alternativ överföring (TLS) som är svårare att
-upptäcka och blockera. Detta sker transparent -- du behöver inte
-konfigurera något.
+- Ingen **enskild** observatör ser vem som skriver med vem -- varken din
+  leverantör eller noderna längs vägen. Den som däremot **övervakar båda
+  ändarna samtidigt**, till exempel en stat som övervakar din anslutning
+  och din motparts, eller ställer båda grannarna, kan med tiden
+  koppla: Paket ut från dig, strax därpå paket in till din motpart.
+  Upprepas det tillräckligt ofta, ger det ett samband.
+- Döljningstrafiken försvårar denna koppling, men förhindrar den inte. Den
+  döljer enskilda meddelanden, inte mängden: Den som skickar mycket,
+  ökar den totala trafiken från sin enhet.
+- En kontakt som är din fasta granne får veta **när** och **hur mycket**
+  du skickar och tar emot -- inte med vem och inte vad. Kommer hotet
+  från din egen omgivning, kan du undanta varje kontakt (se
+  kapitel 3, "Använd aldrig som fast granne").
+- Har två nya användare bara samma enda granne, går deras meddelande
+  via just denna nod, och den ser båda ändarna. Så fort en av
+  de båda har fler grannar, är det över.
+- Din inbjudan innehåller dina internetadresser. Den som har textraden,
+  ser var du är online -- ge den bara till människor du litar på med det.
+- En granne som vidarebefordrar ser att två koder utbyter paket --
+  inte vem som står bakom, och inte vad som ligger i.
+- En signal från ett pågående samtal kan, om den första grannen just
+  inte svarar, gå via en nod som ser båda ändarna; den får veta att ni
+  ringer tillsammans.
+- En stor fil som du har samtyckt till ser datorn som vidarebefordrar
+  eller förvarar den, i båda ändarna (se kapitel 4).
+- Vid samtal gäller inte skyddet mot leverantören, och din kontakt ser
+  din internetadress (se kapitel 7).
+
+### Vad händer när din motpart är offline?
+
+1. Cleona startar alla lämpliga vägar samtidigt: i samma Wi-Fi direkt,
+   på internet via två grannar -- och dessutom brevlådan.
+2. För brevlådan lägger Cleona det krypterade meddelandet hos tre
+   grannar. Så fort två har bekräftat mottagande, gäller det som
+   deponerat.
+3. Cleona väljer då företrädesvis grannar där din motpart också
+   letar -- först grannen som dess inbjudan namnger.
+4. Meddelandet väntar där i upp till 7 dagar. När din motpart kommer
+   tillbaka, hämtar den det och bekräftar mottagandet åt dig. Först då ser du
+   två bockar.
+
+Brevlådan kan bara din motpart tömma: Hämtning och radering går
+bara med en nyckel som bara den personen har, och raderas gör först när
+den har bekräftat mottagandet. Grannarna ser bara krypterade
+paket under ett värde som byts varje dag.
+
+### Främlingar kommer inte igenom
+
+Från någon som varken är din kontakt eller medlem i en gemensam grupp
+tar Cleona emot exakt två saker:
+frågan efter dina offentliga nycklar, så länge en av dina
+inbjudningar är öppna, och en kontaktförfrågan. Förfrågan måste bära en giltig
+inbjudan från dig, och avsändaren måste först ha löst en beräkningsuppgift.
+Allt annat -- meddelanden, samtal, filer -- kasseras,
+innan det överhuvudtaget når appen. Den som bara har ditt tryckta visitkort
+kan alltså inte bara ringa dig. En medlem i en gemensam grupp når dig bara
+i denna grupp -- med gruppmeddelanden och gruppsamtal, aldrig enskilt.
+
+### Anticensur
+
+Cleona är byggt så att det är svårt att blockera:
+
+- **Ingen server, ingen fast adress.** I appen står ingen adress som
+  man kunde spärra, och nätverket beror inte av någon enskild nod.
+- **Ingen fast port.** Varje enhet väljer en
+  slumpmässig port vid första starten. Det finns ingen känd portnummer
+  vid vilken man kunde
+  känna igen Cleona-trafik.
+- **Som slumpdata.** Etableringen av anslutningen mellan två enheter är
+  så kodad att den inte går att skilja från slumpdata.
+- **Många ingångar.** Varje inbjudan, varje granne och varje enhet i
+  samma Wi-Fi är en möjlig väg tillbaka in i nätverket.
 
 ### Säker nyckellagring
 
-På plattformar som stödjer det lagrar Cleona dina krypteringsnycklar i
-operativsystemets säkra nyckelring (Android Keystore, iOS Keychain, macOS
-Keychain). Där det är tillgängligt ger detta hårdvarustött skydd för dina
-nycklar.
+På plattformar som stöds lagrar Cleona dina krypterings-
+nycklar i operativsystemets säkra nyckelring (Android Keystore,
+iOS Keychain, macOS Keychain). Där det är tillgängligt erbjuder det
+hårdvarubaserat skydd för dina nycklar.
 
 ### Databaskryptering
 
-Alla dina meddelanden, kontakter och inställningar lagras krypterade på
-din enhet. Även om någon skulle få tillgång till ditt filsystem kunde de
-inte läsa något utan din kryptografiska nyckel. Denna nyckel härleds från
-din identitet och existerar bara på din enhet.
+Dina meddelanden och konversationer ligger i en krypterad
+databas -- en egen för varje identitet, var och en med egen nyckel.
+Krypterad är inte bara själva databasen, utan även dess
+tillfälliga filer; ingenting skrivs okrypterat till disken,
+inte ens tillfälligt. Inställningar, kontakter och media är också
+krypterat lagrade.
 
-### Slutet nätverk
+Nycklarna härleds från dina 24 ord och existerar bara
+på din enhet. Även den som får din enhet i sina händer och
+läser ut data, hittar utan dessa nycklar bara oläsbara data.
 
-Cleona fungerar som ett slutet nätverk. Varje nätverkspaket är
-autentiserat, så att endast legitima Cleona-enheter kan delta. Det
-förhindrar att utomstående kan smyga in förfalskade meddelanden eller
-avlyssna nätverkstrafiken.
+Okrypterat blir det bara där du själv tar innehåll ut ur Cleona:
+- när du sparar en fil från en chatt på din enhet,
+- när du lägger en bild i dina bilder med skärmdump-knappen,
+- när du delar något till en annan app,
+- när du ställer in mediearkivering (kapitel 13): De arkiverade
+  originalen ligger okrypterade på din nätverkslagring hemma, så att du
+  kan öppna dem där även utan Cleona,
+- när du speglar händelser i Android-systemkalendern: Där kan andra
+  appar med kalenderåtkomst läsa dem.
+
+Det som har gått ut på det sättet raderas inte med meddelandet och
+löper inte ut med det.
+
+### Skydd på skärmen
+
+På Android, Windows och macOS tillåter Cleona ingen skärminspelning
+genom andra appar. Behöver du en bild, använd skärmdump-knappen i den
+övre listen: Den lägger bilden i dina bilder -- okrypterat. I en
+konversation där vidarebefordran inte är tillåten finns ingen
+skärmdump.
 
 ---
 
-## 15. Programvaruuppdateringar
+## 15. Programuppdateringar
 
 ### Hur får jag uppdateringar?
 
-Cleona kan uppdateras på flera olika sätt. Målet är att du ska kunna få
-uppdateringar även om enskilda distributionsvägar slutar fungera eller
-blockeras:
+Cleona kan uppdateras på olika vägar. Målet är att du
+ska kunna få uppdateringar även när enskilda distributionsvägar faller ut
+eller spärras:
 
-1. **App Store / Play Store:** Om du har installerat Cleona via en app
-   store får du uppdateringar som vanligt via butiken.
-2. **GitHub Releases:** På projektets GitHub-sida hittar du signerade
-   installationspaket för alla plattformar.
-3. **Uppdateringar inom nätverket (In-Network-Updates):** Om en annan
-   Cleona-användare i ditt nätverk redan har den senaste versionen kan
-   Cleona hämta uppdateringen direkt via P2P-nätverket -- utan extern
-   server. Den nya versionen delas då upp i felkorrigerade fragment och
-   fördelas över flera noder. Din enhet samlar tillräckligt med fragment
-   och sätter ihop uppdateringen. Äktheten kontrolleras genom
-   utvecklarens Ed25519-signatur.
-4. **Inbjudningslänkar:** Du kan skapa inbjudningslänkar som innehåller
-   allt en ny användare behöver för att installera Cleona och ansluta
-   till nätverket.
-5. **Fysisk överföring:** I miljöer utan internet kan du vidarebefordra
-   Cleona till andra via ett USB-minne eller i det lokala nätverket.
+1. **App Store / Play Store:** Så snart Cleona finns där och du har
+   installerat det via en butik, får du uppdateringar som vanligt via
+   butiken. På iPhone kommer uppdateringar via TestFlight.
+2. **GitHub Releases:** På projektets GitHub-sida hittar du
+   signerade installationspaket för alla plattformar.
+3. **Uppdateringar via nätverket:** Cleona kan hämta en uppdatering direkt
+   via nätverket -- utan nedladdningsserver. Den nya versionen är
+   uppdelad i felkorrigerande bitar som sprids i nätverket; en del
+   av dem färdas till och med med i döljningstrafiken. Din enhet
+   samlar tillräckligt många bitar och
+   sammanställer uppdateringen. Oftast överförs bara ändringen --
+   några få MB i stället för hela appen. Det gäller Linux, Windows och
+   Android; under macOS laddar du ner nya versioner från webbplatsen
+   eller från GitHub.
+4. **Inbjudningslänkar:** Du kan skapa inbjudningslänkar som
+   innehåller allt en ny användare behöver för att installera Cleona och
+   ansluta till nätverket.
+5. **Fysisk överföring:** I miljöer utan internet kan du vidarebefordra Cleona
+   via USB-minne eller i det lokala nätverket.
 
-### Uppdateringsavisering
+### Så här går en uppdatering till
 
-När en ny uppdatering är tillgänglig visar Cleona en avisering på
-startskärmen. Om uppdateringen även är tillgänglig via nätverket
-(In-Network-Update) kan du välja att ladda ner den direkt från nätverket.
+1. Cleona samlar bitarna av en ny uppdatering automatiskt i bakgrunden
+   och sammanställer dem.
+2. Först när uppdateringen är **komplett** och dess **signatur har verifierats**
+   erbjuder Cleona den åt dig. Du får alltså aldrig en ofullständig eller
+   overifierad uppdatering erbjuden.
+3. Trycker du på "Installera", startar installationen utan ytterligare
+   frågor. På Android visar dessutom systemet sin
+   installationsdialog.
 
-### Binärdistribution
+Äldre versioner erbjuds inte -- en uppdatering går alltid bara
+framåt. Är en version så gammal att den inte längre kan samarbeta
+med nätverket, visar Cleona det tydligt och ber dig att
+uppdatera.
 
-Som standard hjälper din enhet till att vidarebefordra uppdateringar till
-andra användare i nätverket. Om du inte vill det kan du inaktivera denna
-funktion i inställningarna under "Nätverk". Lagringsutrymmet för
-uppdateringsfragment är begränsat (5 MB på mobila enheter, 20 MB på
-datorer) och rensas regelbundet.
+### Signaturverifiering
 
-### Signaturkontroll
-
-Varje uppdatering signeras kryptografiskt. Cleona kontrollerar signaturen
-automatiskt innan en uppdatering installeras. På så sätt säkerställs att
-endast uppdateringar från den officiella utvecklaren accepteras -- även om
-uppdateringen hämtades via P2P-nätverket.
+Varje uppdatering är dubbelt signerad: med en klassisk och en
+postkvantummetod. Cleona verifierar båda signaturerna automatiskt. Så
+är säkerställt att bara uppdateringar från den officiella utvecklaren accepteras
+-- även när uppdateringen kom via nätverket från främmande enheter. En
+uppdatering uppstår aldrig automatiskt från utvecklingen, utan bara när
+utvecklaren signerar den manuellt.
 
 ---
-
 ## 16. Vanliga frågor
 
 ### "Kan jag använda Cleona utan internet?"
 
-Nej, Cleona behöver en nätverksanslutning för att skicka och ta emot
-meddelanden. Du behöver dock inte vara online samtidigt som din motpart:
-meddelanden som skickas medan mottagaren är offline sparas tillfälligt och
-levereras automatiskt så snart båda sidor är anslutna igen. I ett lokalt
-nätverk (t.ex. samma Wi-Fi) kan ni kommunicera med varandra helt utan
-internetuppkoppling.
+Cleona behöver en nätverksanslutning, men inte nödvändigtvis internet:
+I samma Wi-Fi hittar Cleona-enheter varandra själva och kan skriva
+helt utan internetåtkomst. Att vara online samtidigt behöver du inte
+med din motpart: Är hen offline, väntar meddelandet i upp till 7 dagar
+i brevlådan hos tre grannar, tills hen hämtar det.
 
-### "Vad händer om jag förlorar min seed-phrase?"
+### "Vad händer om jag tappar min seed-fras?"
 
-Om du har ställt in guardians kan tre av fem betrodda personer tillsammans
-återställa din åtkomst. Utan guardians och utan seed-phrase finns tyvärr
-ingen väg att få tillbaka din identitet. Därför är det så viktigt att
-förvara de 24 orden säkert.
+Så länge en enhet med din identitet fortfarande löper, är ingenting förlorat --
+där skriver du bara vidare. På den enhet där du skapade
+identiteten kan du oftast läsa av de 24 orden på nytt (se
+kapitel 2). Lita inte på det: En nyinstallation tar bort denna kopia,
+och på Android förstör även borttagning eller ändring av skärmlåset
+den. Har du varken orden eller
+en enhet, finns det ingen väg tillbaka -- inte heller via dina kontakter,
+utvecklaren eller någon annan. Därför är det så viktigt att förvara de 24
+orden säkert.
 
 ### "Kan någon läsa mina meddelanden?"
 
-Nej. Varje meddelande krypteras med en engångsnyckel som endast gäller för
-just det meddelandet. Bara du och din motpart kan dekryptera meddelandet.
-Det finns ingen central server, ingen huvudnyckel och ingen åtkomst för
-utvecklaren. Även om en enhet vidarebefordrar meddelandet på vägen ser den
-bara krypterad datagröt.
+Nej. Varje meddelande krypteras med en engångsnyckel som
+bara gäller för just det meddelandet. Bara du och din motpart kan
+avkryptera meddelandet. Det finns ingen central server, ingen masternyckel
+och ingen tillgång för utvecklaren. Även om en enhet på
+transportvägen vidarebefordrar meddelandet, ser den bara krypterat datagytter
+och en kod. Din granne vet att paketet kommer från dig, men inte till
+vem det går; din motparts granne vet till vem det går, men inte från
+vem.
 
 ### "Varför behöver jag inget telefonnummer?"
 
-Eftersom din identitet är rent kryptografisk. Istället för ett
-telefonnummer eller en e-postadress som är kopplad till ditt riktiga namn
-identifieras du av ett nyckelpar som skapats på din enhet. Du lägger till
-kontakter via QR-kod, NFC eller länk -- inte via en telefonbok. Det
-innebär mer integritet, eftersom ditt messenger-konto inte är bundet till
-din verkliga identitet.
+För att din identitet är helt kryptografisk. I stället för ett telefonnummer
+eller en e-postadress som är kopplad till ditt riktiga namn, identifierar dig
+ett nyckelpar som har skapats på din enhet. Kontakter lägger du till
+via QR-kod, NFC eller textraden i din inbjudan -- inte via en
+telefonkatalog. Det betyder
+mer integritet, eftersom ditt meddelandekonto inte är kopplat
+till din verkliga identitet.
 
-### "Hur hittar jag folk på Cleona?"
+### "Hur hittar jag personer på Cleona?"
 
-Cleona har medvetet ingen kontaktsökning via telefonnummer eller namn --
-det skulle vara ett integritetsproblem. Istället utbyter du
-kontaktuppgifter direkt: via QR-kod, NFC, cleona://-länk eller i
-offentliga kanaler. Det är som att byta visitkort istället för att slå
-upp i telefonboken.
+Cleona har medvetet ingen kontaktsökning efter telefonnummer eller namn -- det vore
+ett integritetsproblem. I stället utbyter du inbjudningar direkt: via
+QR-kod, NFC eller som textrad via en annan väg. Det är som
+att byta visitkort i stället för att slå upp i telefonkatalogen.
 
 ### "Fungerar Cleona även utomlands?"
 
 Ja. Så länge du har en internetanslutning fungerar Cleona överallt i
-världen. Eftersom det inte finns någon central server kan tjänsten inte
-heller spärras för vissa länder. Cleona har dessutom en anti-censur-
-fallback: om den normala anslutningen (UDP) blockeras växlar Cleona
-automatiskt till en alternativ överföring (TLS) som är svårare att
-upptäcka och blockera.
+världen. Eftersom det inte finns en central server och ingen fast adress, låter
+sig tjänsten inte enkelt stängas av för vissa länder. Hur Cleona
+försvårar blockering står i kapitlet "Säkerhet" under "Anticensur". Ett land
+som blockerar all okänd trafik vid gränsen kan dock också
+stoppa Cleona.
 
 ### "Är Cleona gratis?"
 
-Ja. Cleona kan användas gratis och utan reklam. Eftersom det inte finns
-någon central server uppstår heller inga serverkostnader för driften. I
-appen hittar du under "Donera" möjligheten att frivilligt stödja
-utvecklingen.
+Ja. Cleona är gratis och utan reklam att använda. Eftersom det inte finns en central
+server, uppstår heller inga serverkostnader för driften. I inställningarna
+under "Stöd Cleona" -> "Donera" kan du stödja utvecklingen frivilligt.
 
-### "Mitt meddelande har en klocksymbol -- vad betyder det?"
+### "Mitt meddelande har bara en bock -- vad betyder det?"
 
-Det betyder att meddelandet ännu inte har levererats. Din motpart är
-förmodligen offline just nu. Så snart meddelandet har levererats ändras
-symbolen. Meddelanden sparas i upp till 7 dagar för leverans.
+Meddelandet är på väg, men din motpart har ännu inte bekräftat
+mottagandet -- oftast för att hen just nu är offline. Det är inget fel:
+Meddelandet väntar i upp till 7 dagar i brevlådan. Så fort hen hämtar det, ser du
+två bockar. En klocka betyder att ingen väg ännu har burit meddelandet
+-- det ger sig iväg av sig själv så fort det finns en; en varningsikon
+att det inte har hittat någon väg på 14 dagar och att du kan skicka
+det igen.
+
+### "Varför kommer meddelanden sent på min iPhone?"
+
+iOS låter inte appar köras permanent i bakgrunden. Cleona väcks bara kort då och
+då; iOS avgör när. Den hämtar då allt. Så fort du öppnar appen hämtar Cleona det
+som har sparats åt dig.
 
 ### "Kan jag byta från WhatsApp till Cleona?"
 
-Ja, men du kan inte överföra dina WhatsApp-chattar. Cleona och WhatsApp är
-helt olika system. Du måste lägga till dina kontakter en och en i Cleona.
-Det enklaste sättet är att posta din cleona://-länk i en WhatsApp-grupp
-och be de andra att lägga till dig där.
+Ja, men du kan inte överföra dina WhatsApp-chattar. Cleona och WhatsApp
+är helt olika system. Du måste lägga till dina kontakter en och en i Cleona.
+Enklast går det om du skickar textraden i din inbjudan
+till dina kontakter. Varje förfrågan som kommer på det sättet bekräftar du
+själv under "Förfrågningar".
 
 ### "Kan jag använda Cleona på flera enheter samtidigt?"
 
-Ja. Du kan länka upp till 5 enheter med samma identitet. En enhet är den
-primära (den håller seed-phrasen), och ytterligare enheter länkas via en
-säker parkopplingsprocess. Alla enheter delar samma identitet, kontakter
-och konversationer. Se kapitlet om Multi-Device för detaljer.
+Inte än. En andra enhet för samma identitet kommer i en senare version
+(kapitel 11). På flera enheter kan du idag använda olika identiteter.
 
-### "Hur får jag uppdateringar om App Store är blockerad?"
+### "Hur får jag uppdateringar om App Store är spärrad?"
 
-Cleona kan hämta uppdateringar direkt via P2P-nätverket, utan att vara
-beroende av en app store, en webbplats eller en nedladdningsserver. Om en
-annan användare i nätverket har den senaste versionen kan din enhet ladda
-uppdateringen därifrån. Äktheten kontrolleras genom utvecklarens digitala
-signatur. Alternativt kan en kontakt vidarebefordra appen till dig via
-inbjudningslänk eller USB-minne. Mer om detta i kapitlet
-"Programvaruuppdateringar".
+Cleona kan hämta uppdateringar direkt via nätverket, utan att vara
+beroende av en App Store, en webbplats eller en nedladdningsserver. Om
+en annan enhet i nätverket har den senaste versionen, kan din enhet hämta
+uppdateringen därifrån. Äktheten verifieras genom en digital signatur av
+utvecklaren. Alternativt kan en kontakt vidarebefordra appen till dig via
+inbjudningslänk eller USB-minne. Mer om det i kapitlet
+"Programuppdateringar".
 
 ---
 
 ## Hjälp och kontakt
 
-Om du har frågor eller stöter på ett problem hittar du aktuell information
-på Cleonas webbplats och på GitHub. Eftersom Cleona är ett decentraliserat
-projekt finns ingen traditionell kundsupport -- men en aktiv gemenskap som
-gärna hjälper till.
+Om du har frågor eller stöter på ett problem, hittar du aktuell
+information på Cleonas webbplats och på GitHub. Eftersom Cleona är ett decentraliserat
+projekt, finns ingen klassisk kundsupport -- men en aktiv
+gemenskap som hjälper gärna.
 
 ---
 
-*Denna handbok beskriver Cleona Chat version 3.1.125. Enskilda funktioner
+*Denna handbok beskriver Cleona Chat version 4.2. Enskilda funktioner
 kan ändras eller utökas i nyare versioner.*

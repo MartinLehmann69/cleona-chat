@@ -30,6 +30,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/screens/performance_screen.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/form_group.dart';
+import 'package:cleona/ui/components/leaves_protection_notice.dart';
 import 'package:cleona/ui/components/section_card.dart';
 import 'package:cleona/ui/components/connection_sheet.dart';
 
@@ -836,6 +837,13 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   /// E10): the field stays empty and shows that one is there.
   bool _hasPassword = false;
 
+  /// The `authorized_keys` line of the identity's own SSH key, or `null`
+  /// (none created yet). Shown on Android/iOS, where there is no account
+  /// key to log in with (S423 A-1, `ArchiveTransport.forProtocol`); the
+  /// desktop logs in with its account's keys and/or the password.
+  String? _sftpPublicKey;
+  static final bool _sftpOwnKey = Platform.isAndroid || Platform.isIOS;
+
   // ── WHERE THE SETTING LIES (S410 E10) ─────────────────────────────────
   //
   // In the service, per identity, in its encrypted store (S366, S407-E9).
@@ -854,6 +862,63 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     _config = ArchiveConfig.production();
     unawaited(_load());
     unawaited(_refreshShareStatus());
+    if (_sftpOwnKey) unawaited(_loadSftpKey());
+  }
+
+  /// Reads the public line of the identity's SSH key; with [create] the
+  /// key is created first (the user asked for it).
+  Future<void> _loadSftpKey({bool create = false}) async {
+    String? line;
+    try {
+      line = await widget.service.archiveSftpPublicKey(create: create);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _sftpPublicKey = line);
+  }
+
+  /// The identity's SSH key for key login at an SFTP share: the line for
+  /// the server's `authorized_keys`, copyable; or the button that creates
+  /// the key. The password field above stays the other way to log in.
+  Widget _buildSftpKey(AppLocale locale) {
+    final line = _sftpPublicKey;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.key),
+          title: Text(locale.get('archive_sftp_key_title')),
+          subtitle: Text(locale.get('archive_sftp_key_hint')),
+        ),
+        if (line == null)
+          OutlinedButton.icon(
+            onPressed: () => _loadSftpKey(create: true),
+            icon: const Icon(Icons.add),
+            label: Text(locale.get('archive_sftp_key_create')),
+          )
+        else
+          Row(
+            children: [
+              Expanded(
+                child: SelectableText(
+                  line,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: locale.get('copy'),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: line));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+                  );
+                },
+              ),
+            ],
+          ),
+      ],
+    );
   }
 
   void _fillFields() {
@@ -1164,7 +1229,17 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                 secondary: const Icon(Icons.archive),
                 title: Text(locale.get('archive_enabled')),
                 value: _config.enabledByDefault,
-                onChanged: (v) => _updateConfig((_) => _copyConfig(enabledByDefault: v)),
+                // §21.4.2 / D-49 (S432): archived originals lie unencrypted
+                // on the share — said once per device, when the archive is
+                // first turned on (never when turning it off).
+                onChanged: (v) async {
+                  if (v) {
+                    await LeavesProtectionNotice.showOnce(
+                        context, LeavesProtectionKind.archive);
+                    if (!mounted) return;
+                  }
+                  _updateConfig((_) => _copyConfig(enabledByDefault: v));
+                },
               ),
             ],
           ),
@@ -1241,6 +1316,11 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                 onSubmitted: (v) =>
                     _updateConfig((c) => c, password: v.trim()),
               ),
+              if (_sftpOwnKey &&
+                  _config.defaultProtocol == ArchiveProtocol.sftp) ...[
+                const SizedBox(height: 8),
+                _buildSftpKey(locale),
+              ],
               const SizedBox(height: 8),
               TextField(
                 controller: _portController,
@@ -1745,6 +1825,13 @@ class MediaSettingsScreen extends StatefulWidget {
 class _MediaSettingsScreenState extends State<MediaSettingsScreen> {
   late MediaSettings _settings;
 
+  /// The default download directory per v4_2 §21.5.4 is app-internal on a
+  /// mobile device (AppPaths.defaultDownloadDir, S423 A-2) — the label must
+  /// not claim `~/Downloads` there.
+  static String get _downloadDirDefaultKey => (Platform.isAndroid || Platform.isIOS)
+      ? 'media_download_dir_default_mobile'
+      : 'media_download_dir_default';
+
   @override
   void initState() {
     super.initState();
@@ -1812,7 +1899,7 @@ class _MediaSettingsScreenState extends State<MediaSettingsScreen> {
               ListTile(
                 leading: const Icon(Icons.folder),
                 title: Text(locale.get('media_download_dir')),
-                subtitle: Text(_settings.downloadDirectory ?? locale.get('media_download_dir_default')),
+                subtitle: Text(_settings.downloadDirectory ?? locale.get(_downloadDirDefaultKey)),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -1832,7 +1919,7 @@ class _MediaSettingsScreenState extends State<MediaSettingsScreen> {
                       title: Text(locale.get('media_download_dir')),
                       content: TextField(
                         controller: controller,
-                        decoration: InputDecoration(hintText: locale.get('media_download_dir_default')),
+                        decoration: InputDecoration(hintText: locale.get(_downloadDirDefaultKey)),
                       ),
                       actions: [
                         TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
@@ -2189,10 +2276,6 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
 ///    suggestion is a banner with a button. There is in
 ///    this file no path that calls [ICleonaService.setDataSaver] without
 ///    a press.
-/// 4. If a chat is on high-secure, the switch is DEAD
-///    (`onChanged: null`) and names the reason. The greying out is
-///    only the courtesy — the effective bolt sits in the service
-///    (`CoverSaver.request`) and holds even if this row lies.
 class _DataSaverTile extends StatefulWidget {
   final ICleonaService service;
 
@@ -2219,30 +2302,20 @@ class _DataSaverTileState extends State<_DataSaverTile> {
     final locale = AppLocale.read(context);
     final scheme = Theme.of(context).colorScheme;
     final service = widget.service;
-    final locked = service.dataSaverLockedBySecure;
     final active = service.dataSaverActive;
 
     final line = SwitchListTile(
-      secondary: Icon(
-        locked ? Icons.lock_outline : Icons.data_saver_on,
-        color: locked ? scheme.outline : null,
-      ),
+      secondary: const Icon(Icons.data_saver_on),
       title: Text(
         '${locale.get('datasaver_title')} — '
         '${locale.get(active ? 'datasaver_state_on' : 'datasaver_state_off')}',
       ),
-      subtitle: Text(
-        locked
-            ? locale.get('datasaver_locked_secure')
-            : locale.get('datasaver_consequence'),
-        style: TextStyle(color: locked ? scheme.error : null),
-      ),
+      subtitle: Text(locale.get('datasaver_consequence')),
       value: active,
-      // DEAD as long as secure is running. The reason stands in the subtitle.
-      onChanged: locked ? null : (v) => _set(v),
+      onChanged: (v) => _set(v),
     );
 
-    if (!widget.metered || active || locked || _dismissed) return line;
+    if (!widget.metered || active || _dismissed) return line;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2299,16 +2372,9 @@ class _DataSaverTileState extends State<_DataSaverTile> {
   /// The ONLY way to set the mode from this file — and it
   /// depends on a user action (switch or button).
   void _set(bool to) {
-    final reason = widget.service.setDataSaver(to);
+    widget.service.setDataSaver(to);
     if (!mounted) return;
     setState(() => _dismissed = true);
-    if (reason == kDataSaverLockedBySecure) {
-      // The service has refused. The reason is SHOWN, not
-      // swallowed — §24.4.2: "locked with its reason named".
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(AppLocale.read(context).get('datasaver_locked_secure')),
-      ));
-    }
   }
 }
 

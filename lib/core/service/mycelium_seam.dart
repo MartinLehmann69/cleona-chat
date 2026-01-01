@@ -67,7 +67,7 @@ import 'package:mycelium/update_cover_route.dart' show updateCoverRouteAttach;
 import 'package:mycelium/host.dart';
 import 'package:cleona/core/service/system_channel_seam.dart';
 import 'package:mycelium/host_stream.dart' show HostStreamOn;
-import 'package:mycelium/trace.dart' show kTraceLinePrefix;
+import 'package:mycelium/trace.dart' show kErrorLinePrefix, kTraceLinePrefix;
 
 /// The contact does not carry all three keys — then there is no address,
 /// and a fallback would be worse than the error: it would seal against the
@@ -357,6 +357,7 @@ Future<Host> hostStart({
   bool askRouter = false,
   void Function(String)? report,
   void Function(String)? traceReport,
+  void Function(String)? errorReport,
 }) async {
   // S420 measurement (IB-2): which host instance of this process takes an
   // inbound link. The shell's callee line (`shell.dart` `_setUp`, §11.8.6)
@@ -367,13 +368,20 @@ Future<Host> hostStart({
   String tagged(String line) => line.contains(_calleeLine)
       ? '$line (host instance $instance)'
       : line;
-  final hostReport = report == null
+  final plainReport = report == null
       ? null
       : traceReport == null
           ? (String line) => report(tagged(line))
           : (String line) => line.startsWith(kTraceLinePrefix)
               ? traceReport(tagged(line))
               : report(line);
+  // S427 (§11.1): a line the delivery layer marks as an error goes to the
+  // ERROR level — e.g. a node without any IP address of any kind.
+  final hostReport = plainReport == null || errorReport == null
+      ? plainReport
+      : (String line) => line.startsWith(kErrorLinePrefix)
+          ? errorReport(line)
+          : plainReport(line);
   if (services.isEmpty) {
     throw StateError('a host needs at least one service — without a '
         'mailbox the node would start up mute');
@@ -855,6 +863,40 @@ Future<bool> portMappingSet(Host host, bool on,
   portMappingConfigure(at.baseDir, at.key, on);
   await host.network.router.switched(); // the host lays down and asks anew
   return true;
+}
+
+/// The data port's state for the head of a log report (D-122 (3), S422):
+/// read from the node HERE, at the seam (§22.4.6, S423 H-2) — the report
+/// never holds the node. [publicAddress] is `ip:port` unredacted (the
+/// caller redacts), `null` when none is known. `null` without a host.
+({
+  int port,
+  bool ipv6Socket,
+  int packetsSent,
+  int packetsReceived,
+  int sendFailures4,
+  int sendFailures6,
+  String? publicAddress,
+  ({DateTime at, String reason})? lastEdge,
+  List<String> lastAddresses,
+})? hostWireState(Host? host) {
+  if (host == null) return null;
+  final node = host.node;
+  final c = node.wireCounters;
+  final pub = node.publicAddress;
+  return (
+    port: node.port,
+    ipv6Socket: node.speaks(InternetAddress.loopbackIPv6),
+    packetsSent: c.packetsSent,
+    packetsReceived: c.packetsReceived,
+    sendFailures4: c.sendFailures4,
+    sendFailures6: c.sendFailures6,
+    publicAddress: pub == null
+        ? null
+        : '${InternetAddress.fromRawAddress(Uint8List.fromList(pub.address)).address}:${pub.port}',
+    lastEdge: host.network.watch.lastEdge,
+    lastAddresses: host.network.watch.last,
+  );
 }
 
 /// §12.7 "fewer empty cover packets on W/LAN": the stored wish (default off).

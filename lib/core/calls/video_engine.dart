@@ -58,6 +58,7 @@ export 'package:cleona/core/calls/video_pipeline.dart'
         VideoOpenOutcome,
         VideoOpenAccepted,
         VideoOpenRateUnachievable,
+        VideoOpenBelowDeviceMinimum,
         VideoLibraryNotAvailable,
         VideoPipelineException;
 export 'package:cleona/core/calls/video_rate_control.dart'
@@ -66,6 +67,16 @@ export 'package:cleona/core/calls/video_rate_control.dart'
         VideoRateControlShutdown,
         VideoOpenShutdown,
         videoOpenShutdownFor;
+
+/// The rungs [VideoEngine] opens with, in order: medium first; a higher one
+/// only when the device answered the one before with
+/// `CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM` (Erratum 8, owner S431 E-15
+/// answer 16 a).
+const List<(VideoQuality, VideoPreset)> _kOpenRungs = [
+  (VideoQuality.medium, VideoPreset.medium),
+  (VideoQuality.high, VideoPreset.high),
+  (VideoQuality.full, VideoPreset.full),
+];
 
 class VideoEngine {
   /// A-5: [profileDir] is the reason why this module ends up in a
@@ -99,6 +110,27 @@ class VideoEngine {
 
   bool _hasSeenKeyframe = false;
   int _consecutiveDecodeFailures = 0;
+
+  // Measurement (S423 U-1, gui-33 33.G14): which check rejects a received
+  // frame with ERR_DECODE. The report only counts `decode_failures`; the
+  // Android backend raises it from three synchronous checks (no Annex-B
+  // start code, keyframe flag vs. bitstream, input queue full) and two
+  // asynchronous ones in its decode thread. The frame is classified here by
+  // the same rule the Android backend applies (VideoSession.kt
+  // `annexBFirstNalType`: NAL type after the LAST 4-byte start code); what
+  // passes both checks is "other" (on Android: the input queue was full).
+  // Only NAL types, flag and size are logged — no content.
+  final Map<String, int> _rejectsByClass = {};
+  int _rejectsLogged = 0;
+  static const int _kRejectsLogged = 10;
+
+  // Measurement M-1 (S431, 33.G14 L5-33-3, S431-RCA-33G14-CODE.md): which
+  // frames the receiver's decoder takes first — the sender's size from
+  // `VideoFrame.width/height` against our own negotiated size, and the NAL
+  // types. The first 10 accepted frames per session; only size, flag and NAL
+  // types, no content. Read only, removed once the cause is proven.
+  int _acceptsLogged = 0;
+  static const int _kAcceptsLogged = 10;
 
   // ── Callbacks — same names call_service.dart sets via dynamic dispatch ──
 
@@ -176,40 +208,69 @@ class VideoEngine {
     }
 
     const ceiling = kLiveMediaMaxFrameBytes;
-    final config = VideoConfig(
-      width: VideoPreset.medium.width,
-      height: VideoPreset.medium.height,
-      fps: VideoPreset.medium.fps,
-      targetBitrateKbps: VideoPreset.medium.bitrateKbps,
-      maxFrameBytes: ceiling,
-    );
 
-    final VideoOpenOutcome outcome;
-    try {
-      outcome = VideoPipeline.open(config);
-    } on VideoLibraryNotAvailable catch (e) {
-      _log.warn('No video backend: $e');
-      startFailure = VideoStartFailure.of(e);
-      return false;
-    } on VideoPipelineException catch (e) {
-      _log.warn('Video pipeline open failed: $e');
-      startFailure = VideoStartFailure.of(e);
-      return false;
-    }
+    // Opened at medium. A camera whose smallest geometry lies above it answers
+    // ERR_BELOW_DEVICE_MINIMUM (Erratum 8); then open one rung higher, up to
+    // full, instead of going without own video (owner S431 E-15, answer 16 a).
+    VideoQuality? openedQuality;
+    for (final (quality, preset) in _kOpenRungs) {
+      final config = VideoConfig(
+        width: preset.width,
+        height: preset.height,
+        fps: preset.fps,
+        targetBitrateKbps: preset.bitrateKbps,
+        maxFrameBytes: ceiling,
+      );
 
-    switch (outcome) {
-      case VideoOpenAccepted(:final pipeline):
-        _pipeline = pipeline;
-      case VideoOpenRateUnachievable():
-        final shutdown = videoOpenShutdownFor(outcome);
-        if (shutdown != null) {
-          onVideoShutdown?.call(shutdown.reason, shutdown.detail);
-        }
-        _log.info('Video open: rate unachievable at ceiling=$ceiling');
+      final VideoOpenOutcome outcome;
+      try {
+        outcome = VideoPipeline.open(config);
+      } on VideoLibraryNotAvailable catch (e) {
+        _log.warn('No video backend: $e');
+        startFailure = VideoStartFailure.of(e);
         return false;
+      } on VideoPipelineException catch (e) {
+        _log.warn('Video pipeline open failed: $e');
+        startFailure = VideoStartFailure.of(e);
+        return false;
+      }
+
+      switch (outcome) {
+        case VideoOpenAccepted(:final pipeline):
+          _pipeline = pipeline;
+          openedQuality = quality;
+        case VideoOpenBelowDeviceMinimum():
+          _log.info('Video open: ${preset.width}x${preset.height} lies below the '
+              'smallest geometry of this device (ERR_BELOW_DEVICE_MINIMUM), '
+              'trying the next rung');
+          continue;
+        case VideoOpenRateUnachievable():
+          final shutdown = videoOpenShutdownFor(outcome);
+          if (shutdown != null) {
+            onVideoShutdown?.call(shutdown.reason, shutdown.detail);
+          }
+          _log.info('Video open: rate unachievable at ceiling=$ceiling');
+          return false;
+      }
+      break;
     }
 
-    _rateController = VideoRateController(pipeline: _pipeline!);
+    if (openedQuality == null) {
+      // Even the largest rung lies below what this device can produce: no
+      // own video on this device (reason NOT_SUPPORTED at the peer).
+      _log.warn('Video open: every rung up to full lies below the smallest '
+          'geometry of this device — no own video');
+      startFailure = VideoStartFailure.unsupported;
+      return false;
+    }
+
+    _rateController = VideoRateController(
+      pipeline: _pipeline!,
+      onWarning: _log.warn,
+      initialQuality: openedQuality,
+      deviceFloorQuality:
+          openedQuality == VideoQuality.medium ? null : openedQuality,
+    );
 
     try {
       _pipeline!.start();
@@ -252,6 +313,17 @@ class VideoEngine {
     // size, backends and counters; no peer, no content.
     final sessionReport = report;
     if (sessionReport != null) _log.event(sessionReport.toLogLine());
+    // S423 U-1: the refused frames of this session by check. Their sum is
+    // what came back synchronously as ERR_DECODE; `decode_failures` above
+    // minus this sum is what the backend's decode thread counted.
+    if (_rejectsByClass.isNotEmpty) {
+      final sum = _rejectsByClass.values.fold<int>(0, (a, b) => a + b);
+      _log.info('video_rejects sync=$sum no_start_code=${_rejectsByClass['no_start_code'] ?? 0} '
+          'flag_mismatch=${_rejectsByClass['flag_mismatch'] ?? 0} other=${_rejectsByClass['other'] ?? 0}');
+    }
+    _rejectsByClass.clear();
+    _rejectsLogged = 0;
+    _acceptsLogged = 0;
 
     try {
       _pipeline?.stop();
@@ -335,17 +407,65 @@ class VideoEngine {
           _pipeline!.submitEncoded(decrypted, isKeyframe: isKeyframe);
       switch (result) {
         case VideoSubmitResult.accepted:
+          if (_acceptsLogged < _kAcceptsLogged) {
+            _acceptsLogged++;
+            _log.info('video_accept #$_acceptsLogged key=$isKeyframe size=${decrypted.length} '
+                'sender=${videoFrame.width}x${videoFrame.height} '
+                'nal_types=${_annexBNalTypes(decrypted, max: 8).join(',')} '
+                'own=${_pipeline!.negotiated.width}x${_pipeline!.negotiated.height}');
+          }
           _hasSeenKeyframe = true;
           _consecutiveDecodeFailures = 0;
           _rateController?.estimator.recordReceived();
         case VideoSubmitResult.awaitingKeyframe:
           onKeyframeNeeded?.call();
         case VideoSubmitResult.decodeError:
+          _noteRejectedFrame(decrypted, isKeyframe);
           _registerDecodeFailure();
       }
     } catch (e) {
       _registerDecodeFailure();
       _log.debug('Video frame processing error: $e');
+    }
+  }
+
+  /// NAL unit types after each 4-byte Annex-B start code of [data], in order
+  /// (at most [max]); a start code at the very end yields none.
+  static List<int> _annexBNalTypes(Uint8List data, {int max = 16}) {
+    final types = <int>[];
+    for (var i = 0; i + 4 < data.length && types.length < max; i++) {
+      if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) {
+        types.add(data[i + 4] & 0x1F);
+      }
+    }
+    return types;
+  }
+
+  /// Class of a frame the decoder refused, by the Android backend's rule:
+  /// `no_start_code`, `flag_mismatch` or `other`.
+  static String _rejectClass(Uint8List data, {required bool isKeyframe}) {
+    // NAL type after the LAST 4-byte start code (VideoSession.kt
+    // `annexBFirstNalType`), -1 without one.
+    var last = -1;
+    for (var i = 0; i + 4 <= data.length; i++) {
+      if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) {
+        last = i + 4 < data.length ? data[i + 4] & 0x1F : -1;
+      }
+    }
+    if (last < 0) return 'no_start_code';
+    final bitstreamIsIdr = last == 5 || last == 7;
+    if (isKeyframe != bitstreamIsIdr) return 'flag_mismatch';
+    return 'other';
+  }
+
+  void _noteRejectedFrame(Uint8List data, bool isKeyframe) {
+    final cls = _rejectClass(data, isKeyframe: isKeyframe);
+    _rejectsByClass[cls] = (_rejectsByClass[cls] ?? 0) + 1;
+    if (_rejectsLogged < _kRejectsLogged) {
+      _rejectsLogged++;
+      _log.info('video_reject #$_rejectsLogged class=$cls key=$isKeyframe '
+          'size=${data.length} nal_types=${_annexBNalTypes(data, max: 8).join(',')} '
+          'seen_keyframe=$_hasSeenKeyframe');
     }
   }
 
@@ -363,7 +483,14 @@ class VideoEngine {
   void _startRateControlLoop() {
     _rateControlTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_running) return;
-      _tickRateControl();
+      // Nothing from rate control may leave this timer: an uncaught error
+      // reaches PlatformDispatcher.onError and the crash dialog covers the
+      // running call (S431 33.G14). Log it and keep ticking.
+      try {
+        _tickRateControl();
+      } catch (e, st) {
+        _log.warn('Video rate control tick failed, call continues: $e\n$st');
+      }
     });
   }
 
@@ -399,7 +526,10 @@ class VideoEngine {
 
   Future<bool> switchCamera() async {
     try {
-      return _pipeline?.switchCamera() ?? false;
+      final switched = _pipeline?.switchCamera() ?? false;
+      // The other camera may reach rungs this one could not (S431 E-14).
+      if (switched) _rateController?.forgetUnreachableRungs();
+      return switched;
     } catch (e) {
       _log.warn('switchCamera failed: $e');
       return false;

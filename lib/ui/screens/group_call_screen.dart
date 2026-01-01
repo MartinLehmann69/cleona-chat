@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/components/called_identity_label.dart';
@@ -64,8 +66,18 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     }
   }
 
+  int _lastTick = 0;
+
   void _startDurationTimer() {
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _lastTick = 0;
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      // S426 W-3 measurement (34a.W04): missed ticks mean the UI isolate
+      // stood still (Timer.tick counts the periods passed, not callbacks).
+      if (t.tick - _lastTick > 1) {
+        CLogger.get('gui-input', profileDir: AppPaths.dataDir).info(
+            'group call: UI isolate missed ${t.tick - _lastTick - 1} clock tick(s)');
+      }
+      _lastTick = t.tick;
       if (!mounted) return;
       setState(() {
         _duration += const Duration(seconds: 1);
@@ -339,7 +351,16 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     final crossAxisCount = count <= 4 ? 2 : 3;
     return Padding(
       padding: const EdgeInsets.all(4),
-      child: GridView.builder(
+      // S426 W-3 measurement (34a.W04): whether and when each scroll of the
+      // grid arrives in the app.
+      child: NotificationListener<ScrollEndNotification>(
+        onNotification: (n) {
+          CLogger.get('gui-input', profileDir: AppPaths.dataDir).info(
+              'group call grid scrolled to ${n.metrics.pixels.round()} '
+              'of ${n.metrics.maxScrollExtent.round()}');
+          return false;
+        },
+        child: GridView.builder(
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: crossAxisCount,
           crossAxisSpacing: 4,
@@ -352,6 +373,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           return _buildParticipantVideo(context, p,
               isActiveSpeaker: activeSpeaker == p.nodeIdHex);
         },
+      ),
       ),
     );
   }

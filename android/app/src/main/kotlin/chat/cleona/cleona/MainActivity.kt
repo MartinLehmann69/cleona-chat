@@ -111,10 +111,17 @@ class MainActivity : FlutterActivity() {
     // the Dart side can await a single bool answer.
     private var pendingAudioPermissionResult: MethodChannel.Result? = null
 
+    // CAMERA runtime-permission flow (v4_2 §23.2: "first capture … video
+    // calls"), same pattern as RECORD_AUDIO above, own slot and request code.
+    // The former request lived in CameraXHandler.kt and went away without a
+    // replacement in c6c55a6a1; VideoSession.kt only checks the permission.
+    private var pendingCameraPermissionResult: MethodChannel.Result? = null
+
     companion object {
         private const val REQUEST_AUDIO_PERMISSION = 1002
         private const val REQUEST_INSTALL_PERMISSION = 1003
         private const val REQUEST_CONFIRM_CREDENTIAL = 1004
+        private const val REQUEST_CAMERA_PERMISSION = 1005
         private const val PREFS_PLATFORM = "cleona_platform"
         private const val KEY_BATTERY_EXEMPTION_ASKED = "battery_exemption_asked"
         // Extras of a message notification's tap intent (§22.8).
@@ -611,7 +618,8 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler(KeyringHandler(applicationContext))
 
         // Audio-permissions bridge (Bug #U10b) — RECORD_AUDIO runtime
-        // permission for calls. has* returns the cached state, request*
+        // permission for calls, and CAMERA for video calls (§23.2).
+        // has* returns the cached state, request*
         // shows the system dialog and resolves once onRequestPermissionsResult
         // fires. Concurrent requests are not supported (single result slot).
         MethodChannel(
@@ -639,6 +647,23 @@ class MainActivity : FlutterActivity() {
                             this,
                             arrayOf(Manifest.permission.RECORD_AUDIO),
                             REQUEST_AUDIO_PERMISSION
+                        )
+                    }
+                }
+                "requestCameraPermission" -> {
+                    if (ContextCompat.checkSelfPermission(
+                            this, Manifest.permission.CAMERA
+                        ) == PackageManager.PERMISSION_GRANTED) {
+                        result.success(true)
+                    } else {
+                        // Same single-slot rule as RECORD_AUDIO: a request
+                        // still pending is answered `false` first.
+                        pendingCameraPermissionResult?.success(false)
+                        pendingCameraPermissionResult = result
+                        ActivityCompat.requestPermissions(
+                            this,
+                            arrayOf(Manifest.permission.CAMERA),
+                            REQUEST_CAMERA_PERMISSION
                         )
                     }
                 }
@@ -807,6 +832,12 @@ class MainActivity : FlutterActivity() {
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
             pendingAudioPermissionResult?.success(granted)
             pendingAudioPermissionResult = null
+        }
+        if (requestCode == REQUEST_CAMERA_PERMISSION) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            pendingCameraPermissionResult?.success(granted)
+            pendingCameraPermissionResult = null
         }
     }
 

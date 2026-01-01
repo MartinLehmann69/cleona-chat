@@ -168,6 +168,12 @@ class HostNetwork {
         bulkFamilyOpen(this, f) || (_k.passiveProof?.provenFor(f) ?? false);
     // D-113 (§8.1): the evidence byte of every `0x25` this node answers with.
     _k.reachabilityEvidenceFrom(() => reachableEvidenced(_k, (f) => bulkFamilyOpen(this, f)));
+    // §11.9 (S424 F-15): a granted mapping outranks a seen port.
+    _k.mappedAddressFrom(() => switch (ownMapped) {
+          final m? when m.address.type == InternetAddressType.IPv4 =>
+            CardAddress(Uint8List.fromList(m.address.rawAddress), m.port),
+          _ => null,
+        });
     _k.passiveProof?.onFamily = (_) => _run(_outside.write());
     _k.coverStream.onKeepAlive = echo.keepAlive;
     echo.onMoved = keepAlive.moved;

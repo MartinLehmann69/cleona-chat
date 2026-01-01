@@ -42,4 +42,19 @@ class AudioPermissions {
       return false;
     }
   }
+
+  /// Requests CAMERA (v4_2 §23.2: "first capture … video calls"). If already
+  /// granted, returns true immediately; otherwise the system dialog appears
+  /// and this future resolves with the user's answer. Same single-slot rule
+  /// as [requestRecordAudio]. On non-Android platforms always true.
+  static Future<bool> requestCamera() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      final result =
+          await _channel.invokeMethod<bool>('requestCameraPermission');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 }

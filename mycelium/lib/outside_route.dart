@@ -30,6 +30,7 @@ import 'package:mycelium/wire.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/silence.dart';
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/shell_counterpart.dart' show SameCounterpart, askedOf;
 
 const int kKindWhatIsMyAddress = kinds.kWhatIsMyAddress;
 const int kKindYourAddressIs = kinds.kYourAddressIs;
@@ -115,6 +116,10 @@ class OutsideRoute {
   /// 0x48-0x4A, the open check (§8.1) — `open_check_answer.dart`.
   void Function(Uint8List packet, InternetAddress from, int fromPort)?
       onOpenCheck;
+
+  /// Whether two addresses stand under one link (`Shell.sameCounterpart`,
+  /// D73B-2) — set where a shell exists; `null` keeps the strict comparison.
+  SameCounterpart? sameCounterpart;
 
   /// 0x4B-0x4C, "who are you" (§11.8, D-87) — `who_question.dart`.
   void Function(Uint8List packet, InternetAddress from, int fromPort)? onWho;
@@ -238,9 +243,10 @@ class OutsideRoute {
     final key = _identifierKey(identifier);
     final waiting = _waitingRequests[key];
     if (waiting == null) return; // never asked (or already answered) -> gone
-    if (waiting.neighbour.address != from.address ||
-        waiting.neighbourPort != fromPort) {
-      return; // identifier matches, but not from the asked neighbour -> gone
+    if (askedOf(sameCounterpart, (waiting.neighbour, waiting.neighbourPort),
+            from, fromPort) ==
+        null) {
+      return; // neither from the asked address nor under its link -> gone
     }
     if (waiting.completed.isCompleted) return;
     var spot = 1 + kIdentifierLength;
@@ -263,7 +269,8 @@ class OutsideRoute {
     waiting.completed.complete(where);
     // An answer to a packet that expected an answer: the neighbour
     // is confirmed under this address (§11.8, W8).
-    onAnswerReceived?.call(from, fromPort);
+    // §11.8.4: the stamp goes to the address the request went to.
+    onAnswerReceived?.call(waiting.neighbour, waiting.neighbourPort);
   }
 
   /// (3) Knock simultaneously. Sends 0x42 to [target]:[targetPort],

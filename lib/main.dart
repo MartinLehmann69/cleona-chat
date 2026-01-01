@@ -131,6 +131,7 @@ const List<(String, String)> kThirdPartyLicenseEntries = [
   ('SQLite3 Multiple Ciphers', 'assets/licenses/sqlite3mc.txt'),
   ('SQLite', 'assets/licenses/sqlite3.txt'),
   ('Monocypher', 'assets/licenses/monocypher.txt'),
+  ('BearSSL', 'assets/licenses/bearssl.txt'),
   ('libogg', 'assets/licenses/libogg.txt'),
   ('libvorbis', 'assets/licenses/libvorbis.txt'),
   ('webrtc-audio-processing', 'assets/licenses/webrtc_audio_processing.txt'),
@@ -427,6 +428,11 @@ void main() async {
   if (Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
     final guiInputLog = CLogger.get('gui-input', profileDir: AppPaths.dataDir);
     FocusTrace(guiInputLog.info).install();
+    // S425 N4-3 measurement: key presses reaching the window (kind and focus,
+    // never a key or character) — beta only.
+    if (activeNetworkChannel == NetworkChannel.beta) {
+      KeyTrace(guiInputLog.info).install();
+    }
     guiInputNote = budgetedNote(guiInputLog.warn);
   }
 
@@ -941,17 +947,27 @@ class RotationRejectionNotice {
 /// macOS answer the question as well — on both, a working backend is
 /// chosen by [KeyringService.init] and only the failure path lands here.
 bool _keyringFileVariantWarningDue() {
+  // S427 measurement (gui-00d 00d.11, run 20261118-151542): the warning did
+  // not appear and no line said which exit was taken — one line per exit.
+  void say(String why) => debugPrint('[main] keyring file warning: $why');
   if (!Platform.isLinux && !Platform.isWindows && !Platform.isMacOS) {
+    say('not due — no desktop platform');
     return false;
   }
   if (!KeyringService.isInitialized ||
       KeyringService.instance.isHardwareProtected) {
+    say('not due — keyring ${KeyringService.isInitialized ? "hardware-protected" : "not initialised"}');
     return false;
   }
   final seed = IdentityManager().loadMasterSeed();
-  if (seed == null) return false;
-  return !keyringFileWarningShown(
+  if (seed == null) {
+    say('not due — no master seed readable');
+    return false;
+  }
+  final shown = keyringFileWarningShown(
       AppPaths.dataDir, HdWallet.deriveSharedFileEncKey(seed));
+  say(shown ? 'not due — already shown on this device' : 'DUE — file variant, not shown yet');
+  return !shown;
 }
 
 class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
@@ -2454,7 +2470,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final buf = StringBuffer()
         ..writeln('=== Daemon crash detected at $ts ===');
       final String exitLine;
-      if (_daemonExit == null) {
+      if (_daemonExit == null && Platform.isWindows) {
+        // S430 WT-3: under Windows the window starts the daemon detached via
+        // cmd.exe and never holds its exit status — the old line "daemon not
+        // started by this GUI" was wrong for every daemon this window started
+        // (field report 18.11.2026, PID 6692 started with --port 23384).
+        exitLine = 'Exit status: not measured on Windows '
+            '(the daemon runs detached via cmd.exe)';
+      } else if (_daemonExit == null) {
         exitLine = 'Exit status: unknown (daemon not started by this GUI)';
       } else if (exitCode == null) {
         exitLine = 'Exit status: not yet available after 2 s';
@@ -2515,6 +2538,26 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           }
         } catch (e) {
           buf.writeln('dmesg: $e');
+        }
+      }
+      // S430 WT-3: under Windows the system keeps what killed the daemon in
+      // the application event log (EventID 1000, "Application Error": faulting
+      // module, offset, exception code) — also for a daemon started by the
+      // autostart entry, whose stderr goes nowhere. Read only, no rights
+      // needed for the application log; stays local in crash-daemon.log.
+      if (Platform.isWindows) {
+        try {
+          final r = Process.runSync('wevtutil', [
+            'qe', 'Application', '/c:5', '/rd:true', '/f:text',
+            "/q:*[System[Provider[@Name='Application Error'] and (EventID=1000)]]",
+          ]);
+          final text = '${r.stdout}';
+          buf.writeln(text.contains('cleona-daemon.exe')
+              ? 'Windows application errors (newest 5 of EventID 1000):\n$text'
+              : 'Windows application errors: none for cleona-daemon.exe '
+                  'among the newest 5 (exit ${r.exitCode})');
+        } catch (e) {
+          buf.writeln('Windows application errors: wevtutil failed: $e');
         }
       }
       // S416 W-1: on every platform. Under Windows the GUI never holds the
@@ -3538,6 +3581,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           askRouter: true, // §7.3: the host asks the router at its edges
           report: hostLog.info,
           traceReport: hostLog.trace, // beta diagnosis: log file only (S406)
+          errorReport: hostLog.error, // S427: e.g. no IP address of any kind (§11.1)
         );
         break;
       } on SocketException catch (e) {

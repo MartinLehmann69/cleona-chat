@@ -103,7 +103,8 @@ extension MailboxGroupPair on Mailbox {
   /// carries it and every seed waiting for its co-member. The two sides of
   /// a pair learn of a new shared group one after the other — the joining
   /// side at its own join, the other with the joiner's entry (§16.2.2) —
-  /// and in between each sends under the smallest group IT carries. The
+  /// and in between each may send under another seed (a 4.2.8 side under
+  /// the smallest group IT carries; D-131: a side after its start). The
   /// receiver holds both seeds, so nothing sent in between is refused with
   /// a `0x21` and left to the next collection (S407 B-12).
   Map<String, Uint8List> _groupPairInboundSeeds(GroupPair p) {
@@ -125,6 +126,29 @@ extension MailboxGroupPair on Mailbox {
           ],
         _ => const [],
       };
+
+  /// A tagged envelope from the group pair [id] (hex) held under [kAB]
+  /// (`mailbox_envelope_tag.dart`): the group whose seed formed it is one the
+  /// co-member carries — the pair may send under it now (§4.3, S431 D-131,
+  /// [GroupPair.pairRandom]). Only groups not heard yet are tried. No edge:
+  /// the inbound codes hang on every seed it may arrive under, not on the
+  /// one it sends under, and the sending code is formed per leg.
+  void groupPairHeard(String id, Uint8List kAB) {
+    final p = _store?.pairs[id];
+    if (p == null || p.address.foundingEd25519Pk == null) return;
+    final before = _hex(p.pairRandom);
+    for (final e in p.groupSeeds.entries) {
+      if (p.heard.contains(e.key)) continue;
+      // Both values are own secrets — no foreign input is compared here.
+      if (_hex(pairSecret(identity.postBox, p.address, e.value)) != _hex(kAB)) continue;
+      p.heard.add(e.key);
+      if (_hex(p.pairRandom) != before) {
+        report?.call('group pair ${id.substring(0, 8)} sends under group '
+            '${e.key.substring(0, 8)} now — heard under it (§4.3)');
+      }
+      return;
+    }
+  }
 
   /// The seeds [id] arrives under, sorted — compared before and after a
   /// change to know whether the codes changed.
@@ -232,6 +256,7 @@ extension MailboxGroupPair on Mailbox {
       if (keep != null && keep.contains(e.key)) continue;
       if (!e.value.groupSeeds.containsKey(g)) continue;
       e.value.groupSeeds.remove(g);
+      e.value.heard.remove(g); // D-131: no longer a group it may send under
       changed = true;
       if (e.value.groupSeeds.isEmpty) ended.add(e.key);
     }

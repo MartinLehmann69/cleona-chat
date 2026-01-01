@@ -129,24 +129,31 @@
  *      would give different answers about the same configuration —
  *      reconfigure() already fixes it so (the conformance test asserts it as
  *      V15), and one ABI may not hold two opinions.
- *   2. CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE  cfg is well-formed, and no supported
+ *   2. CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM  cfg is well-formed, but its width
+ *      or height lies below the smallest geometry this device can produce
+ *      (Erratum 8). Not the link and not "no video": open again with a larger
+ *      geometry. Decided before case 3, because a ceiling can only fit or not
+ *      fit a geometry the device can produce.
+ *   3. CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE  cfg is well-formed, and no supported
  *      step — not the lowest resolution, not the lowest bitrate — produces
  *      frames that fit under cfg->max_frame_bytes. THIS is the one that carries
  *      a text to the user (Erratum 1), and separating it from case 1 is the
  *      entire purpose of this erratum.
- *   3. CLEONA_VIDEO_ERR_UNSUPPORTED        this device has no capture or encode
+ *   4. CLEONA_VIDEO_ERR_UNSUPPORTED        this device has no capture or encode
  *      path at all. A property of the device, not of the call and not of the
  *      link: degrade to audio-only and do not retry on a better connection.
  *      For a DECODE_ONLY request (Erratum 7) this means no DECODE path — a
  *      missing camera or encoder is then not a reason to fail — or a backend
  *      that does not implement DECODE_ONLY yet.
- *   4. CLEONA_VIDEO_ERR_BACKEND            the configuration was fine and the
+ *   5. CLEONA_VIDEO_ERR_BACKEND            the configuration was fine and the
  *      device is capable, but this attempt failed (allocation, camera busy,
  *      codec init refused). Retryable in principle.
  *
- * The conformance test asserts 1 and 2 (check V1b) because only those two are
- * reproducible without hardware. 3 and 4 are fixed here anyway so that four
- * platform packages do not invent four different answers for them.
+ * The conformance test asserts 1 and 3 (check V1b) because only those two are
+ * reproducible without hardware; 2 is asserted as V35 against every backend
+ * with a request below any real camera (Erratum 8). 4 and 5 are fixed here
+ * anyway so that four platform packages do not invent four different answers
+ * for them.
  *
  * ---------------------------------------------------------------------------
  * ERRATUM 7 (project owner, 2026-07-31) — A SESSION MAY BE DECODE-ONLY
@@ -216,6 +223,65 @@
  * legal intermediate state, not an acceptance-ready one: a backend is
  * acceptance-ready only once it opens a decode-only session on a device with
  * no camera.
+ *
+ * ---------------------------------------------------------------------------
+ * ERRATUM 8 (project owner, 2026-11-20) — "THE DEVICE CANNOT GO THIS SMALL"
+ * IS AN ANSWER OF ITS OWN
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS. The geometry rule says a backend negotiates DOWN and never
+ * up. It did not say what a backend answers when the request lies below the
+ * smallest geometry the device can produce at all — a camera whose smallest
+ * size is 320x240, asked for 192x144. Both available answers were wrong:
+ * ERR_RATE_UNACHIEVABLE means "this link cannot carry video" and makes the
+ * caller switch video off (Erratum 1); accepting with a larger geometry is
+ * negotiating up. The Android backend did the latter, the Windows backend did
+ * it at open() and hid it at reconfigure(), and the Dart rate control rightly
+ * treated the result as a contract violation (S431, case 33.G14).
+ *
+ * The answer is one new code:
+ *
+ *     CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM (-8)
+ *
+ * cfg is well-formed, but its width or height lies below the smallest geometry
+ * this device's capture/codec path can produce, so it cannot be met without
+ * negotiating up. It says nothing about the link.
+ *
+ *   reconfigure()  returns it. The session is UNCHANGED and keeps sending with
+ *                  its previous configuration, as after every failed
+ *                  reconfigure. The caller stays on the lowest step it has
+ *                  reached; it does not switch video off and shows nothing.
+ *                  This is not a third branch of Erratum 1: the picture keeps
+ *                  running, only the step below is not available here.
+ *   open()         writes it in-band into out_negotiated->max_frame_bytes
+ *                  (Erratum 6b). It is not "no video on this device": the
+ *                  caller may open again with a larger geometry.
+ *   order          decided after ERR_INVALID (validity first, Erratum 6b
+ *                  case 1) and BEFORE ERR_RATE_UNACHIEVABLE: whether a ceiling
+ *                  fits is only meaningful for a geometry the device can
+ *                  produce.
+ *   bitrate        a lower limit of the backend on the BITRATE is not this
+ *                  code. This erratum is about geometry only.
+ *   DECODE_ONLY    without a camera there is no camera floor; a backend
+ *                  returns the code there only if its decode path has a
+ *                  geometry floor of its own (Linux: one macroblock, 16 px).
+ *
+ * A backend that scales below its camera before the encoder (Linux) has no
+ * camera floor and returns the code only below its codec floor.
+ *
+ * AND THE REPORTED GEOMETRY IS THE ENCODED ONE. out_negotiated and the report
+ * carry the width/height/fps the encoder actually produces — never the request
+ * when the encoder runs at something else (I11). Without that, "never up"
+ * cannot be checked by the caller at all.
+ *
+ * KNOWN EXCEPTION — WINDOWS. The Windows backend
+ * (windows/cleona_video_windows.c) is NOT changed by this erratum: it still
+ * picks the nearest camera mode, which can be larger than the request, at
+ * open() and at reconfigure(), and at reconfigure() it still reports the
+ * request instead of the encoded geometry. It never returns
+ * ERR_BELOW_DEVICE_MINIMUM. Bringing it under this erratum is a proposal of
+ * its own after 4.2.9 (project owner, S431 E-15, answer 17 b). Until then the
+ * Dart rate control's "never up" check is the guard there, and it cannot see
+ * the hidden case.
  *
  * ---------------------------------------------------------------------------
  * OWN VIDEO ON/OFF (I12)
@@ -364,6 +430,17 @@ typedef struct cleona_video_session cleona_video_session_t;
  * on: the caller stops video and states the reason, locally and at the peer.
  * Treating it as a generic failure re-creates the silent black picture. */
 #define CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE -7
+/* cleona_video_reconfigure and cleona_video_open (Erratum 8): cfg is
+ * well-formed, but its width or height lies below the smallest geometry this
+ * device's capture/codec path can produce, so meeting it would mean
+ * negotiating up. From reconfigure it is a return value and the session is
+ * left untouched, still sending with its previous configuration; from open it
+ * arrives in-band in out_negotiated->max_frame_bytes (Erratum 6b).
+ *
+ * NOT a link condition and NOT a reason to switch video off: the caller stays
+ * on (or opens with) a step the device can produce. Decided after
+ * ERR_INVALID and before ERR_RATE_UNACHIEVABLE. */
+#define CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM -8
 
 /* cleona_video_read_encoded outcomes. */
 #define CLEONA_VIDEO_READ_FRAME    1   /* a frame was written to buf         */
@@ -439,7 +516,11 @@ typedef struct {
 
     /* Requested capture geometry and frame rate. The backend may negotiate
      * these DOWN (to what the camera and encoder actually support) and never
-     * up: the caller's values are upper bounds. Must all be > 0 on input. */
+     * up: the caller's values are upper bounds. Must all be > 0 on input.
+     * When the request lies below the smallest geometry the device can
+     * produce, the answer is CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM, never a
+     * larger geometry (Erratum 8). On output: the geometry and frame rate the
+     * encoder actually produces, not the request (Erratum 8, I11). */
     int32_t width, height, fps;
 
     /* Target bitrate handed to the hardware rate controller. Cleona's
@@ -597,6 +678,9 @@ typedef struct {
  *   ERR_INVALID            cfg NULL or a field out of range. Caller bug.
  *                          Decided BEFORE anything else, so max_frame_bytes <= 0
  *                          is this and never ERR_RATE_UNACHIEVABLE.
+ *   ERR_BELOW_DEVICE_MINIMUM  width or height below the smallest geometry the
+ *                          device can produce (Erratum 8). Not the link: open
+ *                          again with a larger geometry.
  *   ERR_RATE_UNACHIEVABLE  the config is well-formed but no supported step fits
  *                          cfg->max_frame_bytes. The link, not the caller —
  *                          this is the branch that shows the user a reason.
@@ -636,6 +720,13 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(const cleona_video_co
  *
  * Returns:
  *   CLEONA_VIDEO_OK                     accepted; out_negotiated is written
+ *   CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM  width or height lies below the
+ *                                       smallest geometry this device can
+ *                                       produce (Erratum 8). The session is
+ *                                       UNCHANGED and keeps sending with its
+ *                                       previous configuration. The caller
+ *                                       stays on its current step; it does NOT
+ *                                       stop own video and shows nothing.
  *   CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE  no supported step fits under
  *                                       cfg->max_frame_bytes. The session is
  *                                       UNCHANGED and still running with its
@@ -657,14 +748,17 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(const cleona_video_co
  *    does not force one.
  *  - The negotiation rules of open() continue to apply unchanged: the backend
  *    may settle every field DOWNWARDS and never upwards, and it may lower
- *    max_frame_bytes but never raise it above what the caller asked for.
+ *    max_frame_bytes but never raise it above what the caller asked for. A
+ *    request below the device's smallest geometry is answered with
+ *    ERR_BELOW_DEVICE_MINIMUM, never with a larger geometry (Erratum 8), and
+ *    out_negotiated carries the geometry actually encoded.
  *  - Counters are NOT reset. A session's report describes the session, across
  *    every reconfiguration it lived through.
  *  - Presentation timestamps stay strictly increasing across the change. A
  *    backend that derives pts as frame_index * 1e6 / fps breaks this the
  *    moment fps goes back up; accumulate the per-frame step instead.
- *  - Failure is side-effect free. After ERR_RATE_UNACHIEVABLE or ERR_INVALID
- *    the session is exactly as it was.
+ *  - Failure is side-effect free. After ERR_BELOW_DEVICE_MINIMUM,
+ *    ERR_RATE_UNACHIEVABLE or ERR_INVALID the session is exactly as it was.
  *  - I12 is untouched: this is a statement about what WE send. Nothing here
  *    reaches the peer's encoder, and no counterpart may be added.
  *

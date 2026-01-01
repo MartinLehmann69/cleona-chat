@@ -75,6 +75,26 @@ Future<bool> nodePathAnswered(Node k, InternetAddress a, int p) {
   return asked['${a.address}:$p'] ?? _request(k, asked, a, p, adopt: false);
 }
 
+/// §11.8.3 "the neighbour whose newest stamp is oldest gives way to a fresher
+/// one": a hint that fell over a full list carries no stamp, so it could
+/// never become fresher — nothing of this node ever asked it, and the list
+/// stayed shut while its entries were long gone (S424 NL-1, field VM .74).
+/// It gets the one request of this edge (`0x40` beside "who are you", D-87,
+/// repeated as §11.3a says); its answer stamps it and the oldest-stamped
+/// unseated neighbour gives way (`Neighbourhood.confirm`). Silence removes
+/// nothing: the hint is not in the list. Asked in the next microtask, so a
+/// caller that confirms the address itself right after (the answer to the
+/// own call, `neighbourFound`) sends nothing extra.
+void nodeAskOverCap(Node k, InternetAddress a, int p) {
+  scheduleMicrotask(() {
+    if (k.neighbourhood.holding(a, p) != null) return;
+    if (_pathCheck(k, a, p)) {
+      k.report('Neighbour hint ${a.address}:$p — list full, asked once '
+          '(§11.8.3)');
+    }
+  });
+}
+
 /// `false` if [a]:[p] was asked in this edge already.
 bool _pathCheck(Node k, InternetAddress a, int p,
     {bool adopt = true,

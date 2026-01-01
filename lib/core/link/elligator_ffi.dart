@@ -127,7 +127,7 @@ class ElligatorFFI {
   late final _ElligatorKeyPairDart _keyPair;
 
   ElligatorFFI._internal() {
-    final lib = _openLibrary();
+    final lib = openLibrary();
     _map = lib.lookupFunction<_ElligatorMapNative, _ElligatorMapDart>(
         'cleona_link_elligator_map');
     _rev = lib.lookupFunction<_ElligatorRevNative, _ElligatorRevDart>(
@@ -140,8 +140,13 @@ class ElligatorFFI {
   /// Candidate list per platform — byte for byte the same convention as
   /// `native_udp_sender.dart` and `proof_of_work.dart`, so that the bundle
   /// build needs no second special case.
-  static ffi.DynamicLibrary _openLibrary() {
-    // iOS links statically; the three symbols stand in
+  ///
+  /// Public since S430 (v4_2 §4.2, D-130): the same library carries the
+  /// AES-256-GCM software way, and `SodiumFFI` opens it through THIS
+  /// candidate list instead of a second copy of it. Opening is cheap to
+  /// repeat — the platform loader hands back the already loaded library.
+  static ffi.DynamicLibrary openLibrary() {
+    // iOS links statically; the exported symbols stand in
     // ios/CleonaNative/cleona_exported_symbols.txt, otherwise the linker
     // strips them and this lookup would fail at runtime.
     if (Platform.isIOS) {

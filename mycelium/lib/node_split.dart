@@ -32,6 +32,9 @@ import 'package:mycelium/who_question.dart';
 Splitter nodeSplitter(Node k, Shell shell) {
   k.postBoxDeposit.beforeRequest = (n) => shell.renewIfSilent(n.$1, n.$2);
   k.outsideRoute.silence = k.silence; // §11.3a: the 0x40 declares a failed address
+  // D73B-2, §11.8.4: an answer under the link of the asked address is its answer.
+  k.outsideRoute.sameCounterpart = shell.sameCounterpart;
+  k.postBoxDeposit.sameCounterpart = shell.sameCounterpart;
   k.outsideRoute.onWho = k.who.receive; // §11.8, D-87
   k.readiness.onFirstAnswer = k.who.ask; // §11.8.2: first answer of an address
   // §11.8.6: an address first heard through a new handshake.

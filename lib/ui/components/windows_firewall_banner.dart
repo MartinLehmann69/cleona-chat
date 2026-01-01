@@ -16,6 +16,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/windows_firewall.dart';
 
@@ -57,9 +58,15 @@ class _WindowsFirewallBannerState extends State<WindowsFirewallBanner> {
     setState(() => _busy = true);
     final helper =
         '${AppPaths.bundleDir}${Platform.pathSeparator}${WindowsFirewall.helperFileName}';
+    final started = DateTime.now();
     final code = File(helper).existsSync()
         ? await WindowsFirewall.allow(helper: helper, exe: exe)
         : -1;
+    // S425 N4-2 measurement (53.F01): the recheck read "missing" while the
+    // elevated helper still ran — exit code and duration of allow().
+    CLogger.get('gui-input', profileDir: AppPaths.dataDir).info(
+        'firewall allow(): exit $code after '
+        '${DateTime.now().difference(started).inMilliseconds} ms');
     await _load(recheck: true);
     if (!mounted) return;
     setState(() => _busy = false);

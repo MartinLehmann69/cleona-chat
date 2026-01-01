@@ -66,10 +66,10 @@ class PostBoxCollector {
   /// has gone to that holder. At most [kLateAtMost]; the oldest drops (§20.2).
   final List<Conversation> _late = [];
 
-  /// The holders declared failed (§11.3a) — ONE per holder and edge, not per
-  /// question; emptied by [edge], and a holder leaves when it answers.
+  /// The holders declared failed (§11.3a) — ONE per holder and edge, not per question; emptied by [edge], and a holder leaves when it answers.
   final Set<String> _silent = {};
   void edge() => _silent.clear();
+  Iterable<Neighbour> get askedHolders => [for (final r in _rows.values) if (r.isNotEmpty) r.first.holder, for (final c in _late) c.holder]; // D73B-2
 
   /// After [close]: nothing is sent, nothing is taken, no timer runs.
   bool _closed = false;

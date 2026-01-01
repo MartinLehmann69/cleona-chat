@@ -133,8 +133,7 @@ const Duration kSlotInterval = Duration(seconds: 2);
 /// "a reduced cover share is visible from outside". Whoever sends less
 /// than everyone else looks different. Moreover, every transmission stretches with the
 /// clock: a Secure message costs `m x R` = 60 cells
-/// (§9.2), i.e. 480 s at 8 s per slot and 1920 s at 32 s. That is the
-/// reason why Secure is exempt from the mode — see [CoverSaver].
+/// (§9.2), i.e. 480 s at 8 s per slot and 1920 s at 32 s.
 /// **CHANGED 11.09.2026 FROM 4 TO 16 (S381), together with
 /// [kSlotInterval].** The purpose is unchanged: tier 4 is to lie in the
 /// band "2-5 MB/day" from §31.3. With the new clock it is
@@ -151,14 +150,11 @@ enum CoverSaverOutcome {
 
   /// The mode is now off.
   disabled,
-
-  /// **Refused** because at least one chat is set to Secure (§24.4.2).
-  refusedSecureActive,
 }
 
 /// The data saver mode — a state, node-wide.
 ///
-/// ── THE FOUR CONSTRAINTS FROM §24.4.2, AND WHERE THEY ARE HERE ──────
+/// ── THE THREE CONSTRAINTS FROM §24.4.2, AND WHERE THEY ARE HERE ─────
 ///
 /// 1. "a visible state, not a setting buried in a submenu" — carried by the
 ///    UI (`settings_screen`, `network_stats_screen` §25.4).
@@ -170,37 +166,14 @@ enum CoverSaverOutcome {
 ///    in leads via `ICleonaService.setDataSaver`, and the only
 ///    caller of that is a user press. `smoke_data_saver.dart` checks
 ///    this mechanically on the source text.
-/// 4. **Secure is exempt without exception** (owner, 2026-08-30).
 ///
-/// ── ON 4: WHY THE LATCH SITS AT THE SETTER AND NOT AT THE DISPLAY ───
-///
-/// §24.4.2: "The cover stream is a node-wide stream, not per chat — so a
-/// node holding even one Secure chat keeps it in full, and the switch is
-/// then locked with its reason named." A greyed-out switch is
-/// too little for that: it holds exactly as long as nobody sets it
-/// past the UI. Therefore the latch lies HERE, at the
-/// only place that knows the clock.
-///
-/// It acts twice, and both are needed:
-///
-///   • [request] REFUSES as long as a Secure chat exists. The wish
-///     is not remembered — a remembered wish that later strikes by
-///     itself would be the automatic activation from constraint 3.
-///   • [slotFactor] asks again on EVERY draw. If Secure is
-///     switched on while saver mode runs, the stream returns to full rate
-///     at the same moment — without anyone having to call a
-///     setter. Without this second half there would be a
-///     time window in which a Secure chat lay in thinned cover,
-///     and that is exactly the silent mode switch that §12 excludes:
-///     "Speed may fall back to Secure, Secure NEVER silently to Speed."
+/// No delivery depends on the cover stream (§3.1), so the mode has no
+/// latch: the user's choice is the state (S432, owner E-21).
 ///
 /// ── WHY NODE-WIDE AND NOT PER SERVICE ──────────────────────────────
 ///
 /// Because the cover stream is. A process can carry several identities
-/// (multi-identity), they share the egress — so the
-/// Secure question must be asked over ALL of them. [bindSecureProbe] therefore collects
-/// probes instead of replacing one: a single identity with
-/// one Secure chat keeps the stream full for the whole node.
+/// (multi-identity), they share the egress — one choice for the node.
 ///
 /// ── WHY A PROCESS-WIDE OBJECT AND NOT A CONSTRUCTOR ARGUMENT ────────
 ///
@@ -229,46 +202,8 @@ final class CoverSaver {
 
   bool _wanted = false;
 
-  final Map<Object, bool Function()> _secureProbes =
-      <Object, bool Function()>{};
-
   /// Probes for the consented LAN switch-off (S373).
-  ///
-  /// SEPARATE from [_secureProbes] and deliberately not mixed into them:
-  /// the two answer opposite questions. A Secure probe
-  /// says "keep the stream FULL", a LAN probe says "here it may be off".
-  /// Merged, one answer would run into the other, and the latch
-  /// that carries the hard rule would hang on the same loop as its
-  /// exception.
   final Map<Object, bool Function()> _lanProbes = <Object, bool Function()>{};
-
-  /// Registers a probe that says whether [owner] currently has a
-  /// Secure chat. A second call with the same [owner]
-  /// replaces the probe.
-  void bindSecureProbe(Object owner, bool Function() probe) {
-    _secureProbes[owner] = probe;
-  }
-
-  /// Unregisters the probe again (identity deleted, service ended).
-  void unbindSecureProbe(Object owner) {
-    _secureProbes.remove(owner);
-  }
-
-  /// Whether anywhere on this node a chat is set to Secure.
-  ///
-  /// If a probe throws, that counts as "yes". Fail-closed is the
-  /// only defensible direction here: the opposite direction would thin
-  /// the stream of a Secure chat in the error case.
-  bool get lockedBySecure {
-    for (final probe in _secureProbes.values) {
-      try {
-        if (probe()) return true;
-      } catch (_) {
-        return true;
-      }
-    }
-    return false;
-  }
 
   /// Registers a probe that says whether [owner] currently is EXCLUSIVELY
   /// in a consented segment (S373).
@@ -280,11 +215,9 @@ final class CoverSaver {
 
   /// Is the whole node in a consented segment?
   ///
-  /// ── FAIL-CLOSED, THREEFOLD — AND THE OTHER WAY ROUND FROM [lockedBySecure] ──
+  /// ── FAIL-CLOSED, THREEFOLD ──────────────────────────────────────────
   ///
-  /// [lockedBySecure] falls to "yes, lock" in doubt. Here the
-  /// safe answer is the opposite, so doubt falls to
-  /// "no, do not switch off":
+  /// Doubt falls to "no, do not switch off":
   ///
   ///  * **NO probe registered -> `false`.** Whoever says nothing has
   ///    not consented. A `true` for an empty set would be a
@@ -294,8 +227,7 @@ final class CoverSaver {
   ///    as the consequence instead of an outage.
   ///  * **ONE probe with no suffices.** The egress is node-wide; a
   ///    single identity with an outside partner keeps the stream
-  ///    full for all. The same reasoning as for [bindSecureProbe],
-  ///    only with the opposite sign.
+  ///    full for all.
   ///  * **A probe that THROWS -> `false`.** An error must never
   ///    lead to a switch-off.
   bool get lanConfined {
@@ -310,34 +242,14 @@ final class CoverSaver {
     return true;
   }
 
-  /// Is the LAN switch-off in effect NOW?
-  ///
-  /// ── SECURE OVERRIDES IT, WITHOUT EXCEPTION ─────────────────────────
-  ///
-  /// The same latch as in saver mode and for the same reason (§24.4.2,
-  /// owner 2026-08-30): the cover stream is node-wide, so a
-  /// single Secure chat keeps it full. And as there, it is asked anew on EVERY
-  /// draw instead of being cached once — if a
-  /// Secure chat arises while the switch-off runs, the stream returns to full rate in the
-  /// same slot, without anyone having to call a setter.
-  /// Without this second half there would be a window in
-  /// which a Secure chat ran uncovered, and that is the silent
-  /// mode switch from §12: "Speed may fall back to Secure, Secure
-  /// NEVER silently to Speed."
-  ///
-  /// The consent itself stays in place ([lanConfined] still says
-  /// "yes") — it is not revoked, but overridden. The
-  /// difference between "the user has withdrawn it" and "the
-  /// situation does not allow it right now" must stay readable, otherwise
-  /// the UI shows a revocation that nobody has explained.
-  bool get lanShapingActive => lanConfined && !lockedBySecure;
+  /// Is the LAN switch-off in effect NOW? Asked anew on every draw.
+  bool get lanShapingActive => lanConfined;
 
-  /// Whether the user has chosen the mode. **Not** the same as
-  /// [active]: the latch can override it.
+  /// Whether the user has chosen the mode.
   bool get requested => _wanted;
 
-  /// Whether the mode is IN EFFECT.
-  bool get active => _wanted && !lockedBySecure;
+  /// Whether the mode is IN EFFECT — the user's choice (S432: no latch).
+  bool get active => _wanted;
 
   /// The factor by which the slot distance is stretched — 1 means
   /// "full rate". Asked anew on every draw.
@@ -347,13 +259,9 @@ final class CoverSaver {
   /// (constraint 3, §24.4.2).
   CoverSaverOutcome request(bool on) {
     if (on) {
-      if (lockedBySecure) return CoverSaverOutcome.refusedSecureActive;
       _wanted = true;
       return CoverSaverOutcome.enabled;
     }
-    // SWITCHING OFF ALWAYS WORKS. The latch protects the cover stream, not
-    // the switch: switching it off leads to MORE cover, never to
-    // less.
     _wanted = false;
     return CoverSaverOutcome.disabled;
   }
@@ -362,7 +270,6 @@ final class CoverSaver {
   /// case does not colour the next.
   void resetForTest() {
     _wanted = false;
-    _secureProbes.clear();
     _lanProbes.clear();
   }
 }
@@ -453,16 +360,8 @@ const int kMaxControlBacklog = 1024;
 ///   * 480 frames at 1200 B are **576 KB** of queue, and a frame
 ///     could get up to 4.3 h old before it leaves — it would then
 ///     possibly have been built for an epoch that is over.
-///   * The case does not occur at all where it would hurt. Saver mode is
-///     **exempt** for Secure (§24.4.2, `CoverSaver.lockedBySecure`),
-///     and only Secure queues `m x R` = 60 frames at once. Speed
-///     queues **one** per message; the cap is never
-///     reached there.
-///
-/// The decision thus reads: saver mode applies to pure
-/// Speed operation, and there the cap suffices. Whoever runs Secure has
-/// the full clock and the full 16 min — not as a makeshift, but as an
-/// intended state.
+///   * One frame is queued per message; the cap is not reached in
+///     regular operation.
 
 /// A piece of payload that is to go on its way.
 final class Outgoing {
@@ -717,9 +616,8 @@ final class CoverStream {
   /// reference point. This way the SEQUENCE stays the same, only its scale
   /// changes.
   ///
-  /// The factor is asked anew on EVERY draw, not cached
-  /// once: only thus does the stream fall back to full rate at the moment
-  /// a Secure chat arises anywhere.
+  /// The factor is asked anew on EVERY draw, not cached once: a change of
+  /// the user's choice takes effect at the next slot.
   Duration drawInterval() {
     final ms = meanInterval.inMilliseconds;
     final spread = (ms * 0.5).round();

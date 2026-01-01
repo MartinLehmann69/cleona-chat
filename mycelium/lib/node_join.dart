@@ -85,16 +85,14 @@ extension NodeJoin on Node {
     codeRoute.codesChanged();
     final seat = cardSeatForStrangers(neighbourhood);
     if (seat == null) {
-      b.start();
-      joinStartedMark(b);
+      joinStartProven(b, () => joinStartedMark(b)); // proof off the event loop (S427-NT-1)
     } else {
       final t0 = DateTime.now();
       codeRoute.registration.whenRegistered(seat, b.answerCode, (at) {
         report('Join: answer code ${shortFrom(hexFrom(b.answerCode))} '
             '${at == null ? "not confirmed by the fixed neighbour" : "registered at $at"} '
             'after ${DateTime.now().difference(t0).inMilliseconds} ms — request leaves');
-        b.start();
-        joinStartedMark(b);
+        joinStartProven(b, () => joinStartedMark(b));
       });
     }
     return b;

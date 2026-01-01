@@ -1792,9 +1792,39 @@ class IdentityManager {
       // S405 A-5: the logger must not recreate the directory afterwards.
       CLogger.retireProfile(removed.profileDir);
       if (dir.existsSync()) {
-        dir.deleteSync(recursive: true);
+        try {
+          dir.deleteSync(recursive: true);
+        } on FileSystemException {
+          _deleteFailedMeasure(dir);
+          rethrow;
+        }
       }
     }
+  }
+
+  /// S427-NT-2 measurement: the recursive deletion of [dir] failed (Windows
+  /// errno 32, run 20261118-083834: "used by another process", the message
+  /// names only the directory). Each file still there is tried on its own
+  /// and listed with its error — relative to [dir], never its content —
+  /// so the log says which file was held. It deletes only what the
+  /// recursive call was to delete anyway, and the caller rethrows.
+  void _deleteFailedMeasure(Directory dir) {
+    final log = CLogger.get('identity', profileDir: baseDir);
+    final held = <String>[];
+    try {
+      for (final e in dir.listSync(recursive: true).whereType<File>()) {
+        final rel = e.path.substring(dir.path.length);
+        try {
+          e.deleteSync();
+        } on FileSystemException catch (x) {
+          held.add('$rel (errno ${x.osError?.errorCode})');
+        }
+      }
+    } on FileSystemException catch (x) {
+      held.add('listing failed (errno ${x.osError?.errorCode})');
+    }
+    log.warn('Identity directory not deleted — ${held.length} file(s) held: '
+        '${held.isEmpty ? "none (only directories)" : held.join(', ')}');
   }
 
   /// Rename an identity.

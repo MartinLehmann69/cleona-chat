@@ -13,8 +13,9 @@
 /// is exactly "an identifier and the current fixed neighbours" — sealed to
 /// the sender like every acknowledgement. A `0x23` carries no message, so
 /// there is no identifier to acknowledge: the identifier is eight zero
-/// bytes, which names no message. The sender reads the list before it looks
-/// the identifier up (`message.dart` `_cut`), keeps it (§9.2 "a contact
+/// bytes, which names no message. The sender reads the list — under eight zero
+/// bytes always, not only for a first copy (`message.dart` `_heard`, S423)
+/// —, keeps it (§9.2 "a contact
 /// keeps the latest list it heard") and discards the rest as an
 /// acknowledgement for an unknown identifier ("discarded, not raised as an
 /// error"). A v4.2.3 sender does the same (`398a6e40:mycelium/lib/
@@ -28,7 +29,7 @@
 /// "…its acknowledgement carries its current fixed neighbours (§9.2), and
 /// what rests for it goes again (§9.3)" — as in the case "placing ended
 /// unplaced → look up → the message goes again". The list is adopted first
-/// (`message.dart` `_cut`), then [WhereAreYouAnswer.whereAreYouAnswered]
+/// (`message.dart` `_heard`), then [WhereAreYouAnswer.whereAreYouAnswered]
 /// takes the one way of an edge for that peer (`mailbox_edge.dart`). Bound:
 /// the `0x23` itself — one re-dispatch per own `0x23` sent within the hour
 /// ([CodeRoute.searched]); an answer to no own `0x23`, or a second answer to

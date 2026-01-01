@@ -39,6 +39,7 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/node_call.dart';
 import 'package:mycelium/node_helpers.dart' show hexFrom;
 import 'package:mycelium/node_silence.dart';
+import 'package:mycelium/shell_counterpart.dart' show askedOf;
 
 /// The random bytes that bind an answer to its question.
 const int kWhoRandomLength = 16;
@@ -145,16 +146,20 @@ class WhoQuestion {
     final key = packet.sublist(1, 1 + kWhoRandomLength).join(',');
     final open = _open[key];
     if (open == null || open.done.isCompleted) return; // never asked
-    if (open.address.address != from.address || open.port != fromPort) {
-      return; // the right bytes from another address: discarded
+    // D73B-2: an answer under the link of the asked address is its answer;
+    // learning and lifting apply to the address that was asked (§11.8.4).
+    final asked = askedOf(_k.outsideRoute.sameCounterpart,
+        (open.address, open.port), from, fromPort);
+    if (asked == null) {
+      return; // the right bytes from another address and another link: discarded
     }
     final node = hexFrom(packet.sublist(1 + kWhoRandomLength));
     if (node == hexFrom(_k.nodeIdentifier)) {
       open.done.complete();
       return; // an own former address: no neighbour
     }
-    _k.readiness.dropped.forget(from, fromPort); // its answer lifts a removal
-    _k.readiness.nodeLearn(from, fromPort, node);
+    _k.readiness.dropped.forget(asked.$1, asked.$2); // its answer lifts a removal
+    _k.readiness.nodeLearn(asked.$1, asked.$2, node);
     open.done.complete();
   }
 }

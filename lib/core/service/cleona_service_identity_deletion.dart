@@ -187,7 +187,11 @@ extension IdentityDeletionOps on CleonaService {
     //     behind and on Windows holds the file itself locked.
     //     `closeStore()` closes both handles (that of the service and that
     //     of the identity).
-    closeStore();
+    //     S427-NT-2: closed FOR GOOD — a later reach for [store] (e.g.
+    //     `stop()` saving) reopened it and held the directory on Windows.
+    _storeCached?.close();
+    _storeCached = null;
+    identity.retireStore();
     for (final name in const [
       'messages.db',
       'messages.db-wal',

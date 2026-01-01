@@ -191,6 +191,7 @@ extension CleonaServiceGroupList on CleonaService {
     if (sender == null || (sender.role != 'owner' && sender.role != 'admin')) {
       _log.warn('GM-1: GROUP_MEMBERS_CHANGE from non-admin '
           '${senderHex.substring(0, 8)} for "${g.name}" — rejected');
+      _groupAuthorityRefused(gid);
       return;
     }
     final meHex = identity.userIdHex;
@@ -303,12 +304,18 @@ extension CleonaServiceGroupList on CleonaService {
         !constantTimeEquals(Uint8List.fromList(ch.stateHash), expect)) {
       _log.warn('GROUP_MEMBERS_CHANGE for "${g.name}": the state after it '
           'differs from the sender\'s — resync asked (§16.2.2)');
-      _sendResyncRequest(g, localEpoch: 0);
+      // D-129 (a): the same epoch with another hash — once per (epoch,
+      // hash), and the owner's answer of this epoch is taken.
+      _askSameEpochResync(
+          g, epoch, bytesToHex(Uint8List.fromList(ch.stateHash)));
     }
     _log.info('GROUP_MEMBERS_CHANGE for "${g.name}" from '
         '${senderHex.substring(0, 8)}: +${ch.upserted.length} '
         '-${ch.removed.length}, epoch $epoch');
     onStateChanged?.call();
+    // D-129 (b): a newer member state — what the authority gate refused
+    // against the older one is tried again.
+    _groupWaitingApply(gid);
   }
 
   /// Takes the self-signed entry in [w] into [m] if it proves itself.

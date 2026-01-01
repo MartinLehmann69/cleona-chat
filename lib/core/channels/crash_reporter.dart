@@ -8,6 +8,7 @@ import 'package:mycelium/own_address.dart' show linkKindFrom;
 import '../log/clogger.dart';
 import '../log/log_redaction.dart';
 import '../service/cleona_service.dart';
+import '../service/mycelium_seam.dart' show hostWireState;
 import 'crash_report_builder.dart';
 import 'system_channels.dart';
 
@@ -59,34 +60,33 @@ class CrashReporter {
   /// equal lines pushes out of the tail, read from the node instead of the
   /// log. Every address goes through [LogRedaction.apply] — the same markers
   /// as in the tail; an interface is named by its kind and index, never by
-  /// its name (on Windows the name is the user's own text).
+  /// its name (on Windows the name is the user's own text). The node is read
+  /// at the seam ([hostWireState], §22.4.6), never here.
   List<String> _stateLines() {
-    final host = _service.myceliumMailbox?.host;
-    if (host == null) return const ['== node: not running'];
     try {
-      final node = host.node;
-      final c = node.wireCounters;
+      final s = hostWireState(_service.myceliumMailbox?.host);
+      if (s == null) return const ['== node: not running'];
       final ifs = [
-        for (final s in interfaces)
-          '${linkKindFrom(s.name).name}#${s.index} '
-              '${s.addresses.map((a) => a.address).join(',')}',
+        for (final i in interfaces)
+          '${linkKindFrom(i.name).name}#${i.index} '
+              '${i.addresses.map((a) => a.address).join(',')}',
       ].join('; ');
-      final pub = node.publicAddress;
-      final edge = host.network.watch.lastEdge;
+      final pub = s.publicAddress;
+      final edge = s.lastEdge;
       String cap(String s) => s.length > 1024 ? '${s.substring(0, 1024)}…' : s;
       return [
-        '== wire: port ${node.port}, IPv6 socket '
-            '${node.speaks(InternetAddress.loopbackIPv6) ? 'yes' : 'no'}; '
-            'packets sent ${c.packetsSent}, received ${c.packetsReceived}; '
-            'send failures IPv4 ${c.sendFailures4}, IPv6 ${c.sendFailures6}',
+        '== wire: port ${s.port}, IPv6 socket '
+            '${s.ipv6Socket ? 'yes' : 'no'}; '
+            'packets sent ${s.packetsSent}, received ${s.packetsReceived}; '
+            'send failures IPv4 ${s.sendFailures4}, IPv6 ${s.sendFailures6}',
         cap('== interfaces at the last edge: ${LogRedaction.apply(ifs)}'),
-        '== own public address: ${pub == null ? 'none' : LogRedaction.apply(
-            '${InternetAddress.fromRawAddress(pub.address).address}:${pub.port}')}',
+        '== own public address: '
+            '${pub == null ? 'none' : LogRedaction.apply(pub)}',
         edge == null
             ? '== last network change: none since start'
             : cap('== last network change ${edge.at.toIso8601String()} '
                 '(${edge.reason}): ${LogRedaction.apply(
-                    host.network.watch.last.join(','))}'),
+                    s.lastAddresses.join(','))}'),
       ];
     } catch (e) {
       return ['== node state not readable: ${e.runtimeType}'];

@@ -3,7 +3,7 @@ import 'package:cleona/core/service/typing_tracker.dart';
 import 'package:cleona/core/service/delivery_routing.dart';
 import 'package:cleona/core/service/local_outbox.dart';
 import 'package:cleona/core/sync/cover_stream.dart'
-    show CoverSaver, CoverSaverOutcome;
+    show CoverSaver;
 import 'package:cleona/core/util/local_addresses.dart'
     show dialableFrom;
 import 'dart:async';
@@ -84,6 +84,7 @@ import 'package:cleona/core/archive/archive_types.dart'
     show ArchiveRetrievalStart;
 import 'package:cleona/core/archive/archive_network.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
+import 'package:cleona/core/archive/sftp_client_key.dart';
 import 'package:cleona/core/archive/share_identity.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/update_binary_store.dart';
@@ -1160,6 +1161,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // GM-2 (§9.1.4): track per-group last epoch for which a RESYNC_REQUEST was sent
   // to avoid flooding the owner. Key = groupIdHex, value = epoch that triggered it.
   final Map<String, int> _resyncRequestedAtEpoch = {};
+  // D-129 (a) (§16.2.2): per group the epoch of the held state and the
+  // hashes (hex) a same-epoch resync was asked for — once per observed
+  // (epoch, hash). A newer epoch starts the set anew.
+  final Map<String, ({int epoch, Set<String> hashes})> _sameEpochAsked = {};
+  // D-129 (a): the group whose same-epoch answer of the owner is owed, and
+  // the epoch it was asked at. Only such an answer may replace a state of
+  // the same epoch; it is taken once.
+  final Map<String, int> _sameEpochAnswerOwed = {};
+  // D-129 (b) (§16.2.2): the group or channel whose waiting frames are being
+  // applied, whether the frame in hand was refused by the authority gate,
+  // and whether a newer member state was taken meanwhile.
+  String? _groupWaitingApplying;
+  bool _groupWaitingRefused = false;
+  bool _groupWaitingAgain = false;
   Timer? _keyRotationTimer;
   Timer? _expiryTimer;
   // Save throttle of the receipt-suppressed set (§8.1 finding 1): the
@@ -2085,7 +2100,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   Future<ArchiveTransport> _archiveTransportFor(ArchiveConfig config) async {
     final transport = ArchiveTransport.forProtocol(config.defaultProtocol,
-        profileDir: profileDir);
+        profileDir: profileDir,
+        sftpClientKey: _archiveSftpClientKey,
+        // A changed password rebuilds the transport (`sameShare`), so
+        // setting or removing it switches the desktop implementation.
+        sftpPassword: (config.archivePassword ?? '').isNotEmpty);
     await transport.connect(
       host: config.archiveHost,
       path: config.archivePath,
@@ -2286,7 +2305,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // here, in the service, and nowhere else.
     final config = ArchiveConfig.readFrom(store);
     if (config == null || config.archiveHost.isEmpty) return null;
-    return testArchiveConnection(config, profileDir: profileDir);
+    return testArchiveConnection(config,
+        profileDir: profileDir, sftpClientKey: _archiveSftpClientKey);
+  }
+
+  @override
+  Future<String?> archiveSftpPublicKey({bool create = false}) async {
+    try {
+      final pem = create
+          ? SftpClientKey.ensurePem(store)
+          : SftpClientKey.readPem(store);
+      return pem == null ? null : SftpClientKey.publicLine(pem);
+    } catch (e) {
+      _log.warn('Archive SSH key unavailable: $e');
+      return null;
+    }
+  }
+
+  /// The identity's own SSH key for an SFTP share, if one was created
+  /// (`SftpClientKey`, S423 A-1). Unreadable is logged and treated as none:
+  /// the password login still works without it.
+  String? _archiveSftpClientKey() {
+    try {
+      return SftpClientKey.readPem(store);
+    } catch (e) {
+      _log.warn('Archive SSH key could not be read: $e');
+      return null;
+    }
   }
 
   // ── Retrieval of an archived original (§21.6, S398-W4) ─────────────
@@ -7702,6 +7747,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   MessageStore get store {
     if (_storeCached != null) return _storeCached!;
     final s = identity.storeOrNull;
+    if (s == null && identity.storeRetired) {
+      throw StateError('MessageStore: identity ${identity.userIdHex} was wiped '
+          'on this device — its store is not opened again (S427-NT-2)');
+    }
     if (s == null) {
       throw StateError(
           'MessageStore: no master seed for identity ${identity.userIdHex} '
@@ -9997,7 +10046,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// The hub of this device — the same object for every identity on it.
   SystemChannelHub get systemChannelHub => SystemChannelHub.forDevice(
       identity.deviceStoreForWrite(),
-      holds: !(Platform.isAndroid || Platform.isIOS),
+      phone: Platform.isAndroid || Platform.isIOS,
       profileDir: profileDir);
 
   SystemChannelService _systemChannelsBuild() {
@@ -11774,10 +11823,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _physicalTransferHelper = null;
     _updateBinaryStore = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
-    _saveContacts();
-    _saveGroups();
-    _saveConversations();
-    _saveSuppressedReceiptIds();
+    // S427-NT-2: a wiped identity has nothing left to save — its store is
+    // closed for good, and `_saveContacts` with an empty list would have
+    // reached for it (`countArea`) and opened it again.
+    if (!identity.storeRetired) {
+      _saveContacts();
+      _saveGroups();
+      _saveConversations();
+      _saveSuppressedReceiptIds();
+    }
     mailboxStore.dispose();
     await _voiceTranscription?.stop();
     await _archiveManager?.stopScheduler();
@@ -12591,28 +12645,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // ── DATA SAVER MODE (§24.4.2, §23.1 point 5, §23.7 RL-8, §31.3 Tier 4) ─
   //
   // The state itself lives in `CoverSaver.instance` (lib/core/sync/
-  // cover_stream.dart), because the slot clock is decided there and a
-  // latch only holds at the place of the action. Here stands only what
-  // the service contributes: the PROBE that says whether this identity
-  // is currently running a secure chat.
-
-  // NO SECURE PROBE ANY MORE (S389). Here stood `hasSecureChat` and
-  // `_ensureCoverSaverProbe`: the probe with which the data saver mode
-  // was locked as long as any chat of this identity was set to
-  // high-secure. It read `Contact.secureMode`/`Group.secureMode`,
-  // and those no longer exist (§12.1 — no switch, no setting
-  // per chat).
-  //
-  // CONSEQUENCE, named instead of concealed: `CoverSaver.lockedBySecure`
-  // answers `false` without a registered probe (cover_stream.dart: the
-  // loop over an empty set falls through), so the latch never takes hold
-  // any more. That is the direction §3.1 leads — "The cover
-  // stream … can be switched off without affecting delivery": a latch
-  // that prevents switching off the cover presupposes that a delivery
-  // hangs on it. The chain below (`lockedBySecure`,
-  // `dataSaverLockedBySecure`, `kDataSaverLockedBySecure` and four
-  // display places) is thus unreachable and belongs in its own
-  // package — finding B-M3 in `mycelium/berichte/S389-BAU-MODUS.md`.
+  // cover_stream.dart), because the slot clock is decided there. No
+  // delivery depends on the cover stream (§3.1), so the mode has no latch:
+  // the user's choice is the state (S432, owner E-21).
 
   /// §24.4.2 — whether the saver mode TAKES EFFECT.
   @override
@@ -12620,25 +12655,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return CoverSaver.instance.active;
   }
 
-  /// §24.4.2 — whether the switch is locked because secure is running.
-  @override
-  bool get dataSaverLockedBySecure {
-    return CoverSaver.instance.lockedBySecure;
-  }
-
   /// §24.4.2 — the setter. Only the user calls it.
-  ///
-  /// Returns [kDataSaverLockedBySecure] if the latch takes hold; the wish
-  /// is then NOT remembered (a remembered wish that later strikes by
-  /// itself would be the automatic activation that §24.4.2 forbids).
   @override
   String setDataSaver(bool on) {
-    final result = CoverSaver.instance.request(on);
+    CoverSaver.instance.request(on);
     onStateChanged?.call();
-    return switch (result) {
-      CoverSaverOutcome.refusedSecureActive => kDataSaverLockedBySecure,
-      _ => kDataSaverOk,
-    };
+    return kDataSaverOk;
   }
 
   // ── SOURCE 4: EXTERNAL ADDRESS ENTRIES (V4.2 §11.9, S388) ────────────
@@ -13476,7 +13498,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         'local epoch=$localEpoch hash=${bytesToHex(localHash).substring(0, 16)}, '
         'wire epoch=$wireEpoch hash=${wireHash.hex.substring(0, 16)} '
         'from ${senderHex.substring(0, 8)}');
+    // D-129 (a): the SAME epoch is also answered with a resync request.
+    if (wireEpoch == localEpoch) {
+      _askSameEpochResync(group, localEpoch, wireHash.hex);
+    }
     return true;
+  }
+
+  /// D-129 (a) (§16.2.2, owner 19.11.2026): a state of [epoch] — the one
+  /// this device holds — whose hash [hashHex] differs from this device's is
+  /// "once per observed (epoch, hash), also answered with a resync request
+  /// to the owner". The owner's signed state of that same epoch, given in
+  /// answer, is then taken (`_handleGroupInvite`). `localEpoch: 0` asks the
+  /// state in full; a 4.2 owner of any build answers it.
+  void _askSameEpochResync(GroupInfo group, int epoch, String hashHex) {
+    final gid = group.groupIdHex;
+    if (group.ownerNodeIdHex == identity.userIdHex) return;
+    final asked = _sameEpochAsked[gid];
+    final hashes = asked != null && asked.epoch == epoch
+        ? asked.hashes
+        : <String>{};
+    if (!hashes.add(hashHex)) return; // this (epoch, hash) was asked once
+    _sameEpochAsked[gid] = (epoch: epoch, hashes: hashes);
+    _sameEpochAnswerOwed[gid] = epoch;
+    _log.info('GM-2: same epoch $epoch, other hash '
+        '${hashHex.length > 16 ? hashHex.substring(0, 16) : hashHex} in '
+        '"${group.name}" — resync asked once (D-129)');
+    _sendResyncRequest(group, localEpoch: 0);
   }
 
   /// [localEpoch] 0 asks the state in full whatever this device holds.
@@ -14335,12 +14383,31 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
         _log.warn('GM-1: GROUP_INVITE update from non-admin ${senderHex.substring(0, 8)} '
             'for "${oldGroup.name}" — rejected');
+        _groupAuthorityRefused(groupIdHex);
         return;
       }
 
       final wireEpoch = invite.membershipEpoch.toInt();
 
-      if (wireEpoch > 0 && wireEpoch <= oldGroup.membershipEpoch) {
+      // D-129 (a) (§16.2.2): "The owner's full signed member state of that
+      // same epoch, given in answer to this request, replaces the
+      // recipient's state — the only update of an equal epoch a recipient
+      // applies". Signed: the signature checks below run on it.
+      final sameEpochAnswer = wireEpoch > 0 &&
+          wireEpoch == oldGroup.membershipEpoch &&
+          senderHex == oldGroup.ownerNodeIdHex &&
+          _sameEpochAnswerOwed[groupIdHex] == wireEpoch &&
+          invite.membershipHash.isNotEmpty &&
+          invite.membershipSigEd25519.isNotEmpty;
+      if (sameEpochAnswer) {
+        _sameEpochAnswerOwed.remove(groupIdHex);
+        _log.info('GM-1: GROUP_INVITE epoch $wireEpoch from the owner '
+            '${senderHex.substring(0, 8)} answers the same-epoch resync — '
+            'taken after its signature checks (D-129)');
+      }
+
+      if (!sameEpochAnswer &&
+          wireEpoch > 0 && wireEpoch <= oldGroup.membershipEpoch) {
         _log.warn('GM-1: GROUP_INVITE epoch $wireEpoch <= ${oldGroup.membershipEpoch} '
             'from ${senderHex.substring(0, 8)} — rejected (replay/downgrade)');
         // V1 = A (owner 08.10.2026): the late state decides nothing, but the
@@ -14491,7 +14558,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // the identity's store — posts AND settings (§21.5.4), applied through
     // their own receive paths, so a post takes the deadline that applies
     // when it is applied.
-    if (!isUpdate) _groupWaitingApply(groupIdHex);
+    // D-129 (b): an update is a newer member state — what the authority gate
+    // refused against the older one is tried again.
+    _groupWaitingApply(groupIdHex);
     // §16.2.5 "Joining": the step the update reports after a joining.
     if (invite.hasSharedKeyStep()) _skStepHeard(groupIdHex, invite.sharedKeyStep);
     // §16.2.5: an owner or admin new to this device is owed the notice.
@@ -14573,6 +14642,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final senderMember = channel.members[senderHex];
     if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
       _log.warn('CHANNEL_POST from unauthorized sender $senderHex');
+      _groupAuthorityRefused(channelIdHex);
       return;
     }
 
@@ -14598,6 +14668,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             'local epoch=$localEpoch, wire epoch=$wireEpoch, hash mismatch '
             'from ${senderHex.substring(0, 8)}');
         isMembershipMismatch = true;
+        // D-129 (a): the same epoch is also answered with a resync request.
+        _askSameEpochChannelResync(channel, localEpoch, bytesToHex(
+            Uint8List.fromList(wireHash)));
       } else if (wireEpoch > localEpoch) {
         // Sender has newer membership — edge-triggered resync to owner
         final prevRequested = _resyncRequestedAtEpoch[channelIdHex] ?? 0;
@@ -14730,6 +14803,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           (senderOldMember.role != 'owner' && senderOldMember.role != 'admin')) {
         _log.warn('GM-4: CHANNEL_INVITE from non-admin ${senderHex.substring(0, 8)} '
             'in "${oldChannel.name}" — rejected');
+        _groupAuthorityRefused(channelIdHex);
         return;
       }
 
@@ -14738,9 +14812,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final localEpoch = oldChannel.roleView && shortList
           ? oldChannel.viewEpoch
           : oldChannel.membershipEpoch;
+      // D-129 (a) (§16.2.2): the owner's signed state of the SAME epoch,
+      // given in answer to the same-epoch resync, replaces this device's —
+      // the only update of an equal epoch it applies. Signed: the checks
+      // below run on it.
+      final sameEpochAnswer = wireEpoch > 0 &&
+          wireEpoch == localEpoch &&
+          senderHex == oldChannel.ownerNodeIdHex &&
+          _sameEpochAnswerOwed[channelIdHex] == wireEpoch &&
+          invite.membershipHash.isNotEmpty &&
+          invite.membershipSigEd25519.isNotEmpty;
+      if (sameEpochAnswer) {
+        _sameEpochAnswerOwed.remove(channelIdHex);
+        _log.info('GM-4: CHANNEL_INVITE epoch $wireEpoch from the owner '
+            '${senderHex.substring(0, 8)} answers the same-epoch resync — '
+            'taken after its signature checks (D-129)');
+      }
       if (wireEpoch > 0) {
         // Epoch must be strictly increasing
-        if (wireEpoch <= localEpoch) {
+        if (!sameEpochAnswer && wireEpoch <= localEpoch) {
           _log.warn('GM-4: CHANNEL_INVITE epoch $wireEpoch <= $localEpoch '
               'in "${oldChannel.name}" — rejected (replay/downgrade)');
           // A late update may be the only copy of a member's signed entry
@@ -14863,7 +14953,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // identity's store is applied now, through its own receive path — the
     // posts of a left channel were discarded at the gate, so what waited
     // came before the leaving or between the subscriptions.
-    if (!isUpdate) _groupWaitingApply(channelIdHex);
+    // D-129 (b): an update is a newer member state — what the authority gate
+    // refused against the older one is tried again.
+    _groupWaitingApply(channelIdHex);
     // §16.2.5 "Joining": the step the update reports after a joining.
     if (invite.hasSharedKeyStep()) {
       _skStepHeard(channelIdHex, invite.sharedKeyStep);
@@ -15064,9 +15156,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final channel = _channels[groupIdHex];
       if (group != null) {
         final senderMember = group.members[senderHex];
-        if (senderMember == null) return;
-        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
-          _log.warn('Group config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
+        if (senderMember == null ||
+            (senderMember.role != 'owner' && senderMember.role != 'admin')) {
+          _log.warn('Group config rejected: ${senderHex.substring(0, 8)} is '
+              '${senderMember?.role ?? 'no member'}');
+          _groupAuthorityRefused(groupIdHex);
           return;
         }
         // §16.2.2 (S407 group profile): a change of name, description or
@@ -15097,9 +15191,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       if (channel != null) {
         final senderMember = channel.members[senderHex];
-        if (senderMember == null) return;
-        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
-          _log.warn('Channel config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
+        if (senderMember == null ||
+            (senderMember.role != 'owner' && senderMember.role != 'admin')) {
+          _log.warn('Channel config rejected: ${senderHex.substring(0, 8)} is '
+              '${senderMember?.role ?? 'no member'}');
+          _groupAuthorityRefused(groupIdHex);
           return;
         }
         if (configMsg.hasProfile() && !channelReceiveAs423) {

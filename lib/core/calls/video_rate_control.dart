@@ -153,7 +153,7 @@ final class VideoRateControlStepped extends VideoRateControlOutcome {
 
   /// What the backend actually negotiated — **evaluated**, not merely
   /// fetched: [VideoRateController] checks it against the request before
-  /// handing it back (see `_evaluateNegotiated`) and every field here may be
+  /// handing it back (see `_checkCeiling` and `_exceedsRequest`) and every field here may be
   /// smaller than what was asked for, never larger.
   final VideoConfig negotiated;
 
@@ -185,11 +185,11 @@ final class VideoRateControlShutdown extends VideoRateControlOutcome {
   final String detail;
 }
 
-/// Thrown when the backend violates the ABI's own negotiation contract —
-/// negotiating a ceiling, resolution, frame rate or bitrate **above** what
-/// was requested (`cleona_video.h`: "may be negotiated down, never up").
-/// A caller bug in the backend, not a link condition — [VideoRateController]
-/// fails loudly rather than caching a value nothing downstream can trust.
+/// Thrown when the backend negotiates `maxFrameBytes` above the delivery
+/// ceiling (I9, `cleona_video.h`) — a hard limit, not a link condition.
+/// Resolution, frame rate or bitrate above the request are NOT thrown since
+/// S431 (33.G14): the rung counts as not reachable and the controller stays
+/// where it is (see `VideoRateController._applyRung`).
 class VideoRateControlException implements Exception {
   VideoRateControlException(this.message);
   final String message;
@@ -239,7 +239,10 @@ final class VideoOpenShutdown {
 /// tell the user why, instead of showing no picture or the wrong text
 /// (Erratum E6b's own rationale for giving `open()` a reason at all).
 ///
-/// Returns null for [VideoOpenAccepted] — nothing to shut down. The caller
+/// Returns null for [VideoOpenAccepted] — nothing to shut down — and for
+/// [VideoOpenBelowDeviceMinimum] (Erratum 8): the device cannot go this
+/// small, which is not the link; the caller opens again one rung higher
+/// (owner S431 E-15, answer 16 a) and switches nothing off. The caller
 /// (V2.3, which owns the [VideoPipeline] lifecycle and therefore calls
 /// [VideoPipeline.open] itself) is expected to call this once right after
 /// `open()`, before ever constructing a [VideoRateController]:
@@ -257,6 +260,7 @@ final class VideoOpenShutdown {
 VideoOpenShutdown? videoOpenShutdownFor(VideoOpenOutcome outcome) {
   return switch (outcome) {
     VideoOpenAccepted() => null,
+    VideoOpenBelowDeviceMinimum() => null,
     VideoOpenRateUnachievable(:final reason) => VideoOpenShutdown(
         reason: VideoRateShutdownReason.bandwidthInsufficient,
         detail: reason,
@@ -287,10 +291,20 @@ class VideoRateController {
     /// constant (242'352 B) never does on purpose; there is no production
     /// code path that sets it.
     int? maxFrameBytesOverrideForTests,
+    this.onWarning,
+
+    /// The lowest rung this device is known to reach, when [VideoPipeline.open]
+    /// already had to go above [VideoQuality.medium] because the camera cannot
+    /// go smaller (Erratum 8, owner S431 E-15 answer 16 a). Null = no floor
+    /// known yet.
+    VideoQuality? deviceFloorQuality,
   })  : estimator = estimator ?? BandwidthEstimator(initialQuality: initialQuality),
         _ladder = List<VideoPreset>.unmodifiable(ladder),
         _ceiling = maxFrameBytesOverrideForTests ?? kLiveMediaMaxFrameBytes,
-        _appliedRung = _rungForQuality(initialQuality, ladder.length) {
+        _appliedRung = _rungForQuality(initialQuality, ladder.length),
+        _deviceFloorRung = deviceFloorQuality == null
+            ? 0
+            : _rungForQuality(deviceFloorQuality, ladder.length) {
     if (_ladder.isEmpty) {
       throw ArgumentError.value(ladder, 'ladder', 'must not be empty');
     }
@@ -312,8 +326,34 @@ class VideoRateController {
   final List<VideoPreset> _ladder;
   final int _ceiling;
 
+  /// Receives a loggable line when the backend negotiates above a request
+  /// (see [_applyRung]). This class has no logger of its own; the engine
+  /// passes its own.
+  final void Function(String message)? onWarning;
+
   /// Index into [_ladder] of the rung currently pushed to [pipeline].
   int _appliedRung;
+
+  /// Rungs the backend answered above the request (ABI violation, S431
+  /// 33.G14). Not tried again until [forgetUnreachableRungs] (camera switch)
+  /// or the end of this controller.
+  final Set<int> _unreachableRungs = <int>{};
+
+  /// The lowest rung this device reaches: every rung below it was answered
+  /// with `CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM` (Erratum 8), or open() had
+  /// to start above it. The target rung never goes below it, so the
+  /// controller does not ask for an unreachable geometry every second, and
+  /// the emergency attempt goes to this rung instead of rung 0.
+  int _deviceFloorRung;
+
+  /// Another camera may reach smaller rungs than the previous one: a camera
+  /// switch clears the rungs found unreachable so far (owner S431 E-14) and
+  /// the device floor learned from `CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM`
+  /// (Erratum 8).
+  void forgetUnreachableRungs() {
+    _unreachableRungs.clear();
+    _deviceFloorRung = 0;
+  }
 
   VideoConfig? _lastNegotiated;
 
@@ -371,7 +411,10 @@ class VideoRateController {
   /// treatment climbing back up.
   VideoRateControlOutcome evaluateAndApply() {
     final estimate = estimator.evaluate();
-    final targetRung = _rungForQuality(estimate.quality, _ladder.length);
+    var targetRung = _rungForQuality(estimate.quality, _ladder.length);
+    // Erratum 8: a rung below the device's smallest geometry is not on this
+    // device's ladder; the estimate cannot ask for it.
+    if (targetRung < _deviceFloorRung) targetRung = _deviceFloorRung;
 
     var nextRung = _appliedRung;
     if (targetRung > _appliedRung) {
@@ -380,82 +423,199 @@ class VideoRateController {
       nextRung = _appliedRung - 1;
     }
 
-    if (nextRung == _appliedRung) {
+    // A rung the backend already answered above the request is not tried
+    // again: on such a camera every attempt would cost two encoder rebuilds.
+    if (nextRung == _appliedRung || _unreachableRungs.contains(nextRung)) {
       return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
     }
 
-    final stepped = _applyRung(nextRung);
-    if (stepped != null) {
-      _appliedRung = nextRung;
-      return VideoRateControlStepped(
-        estimate: estimate,
-        quality: appliedQuality,
-        negotiated: stepped,
-      );
+    switch (_applyRung(nextRung)) {
+      case _RungAccepted(:final negotiated):
+        _appliedRung = nextRung;
+        return VideoRateControlStepped(
+          estimate: estimate,
+          quality: appliedQuality,
+          negotiated: negotiated,
+        );
+      case _RungAboveRequest(:final restored):
+        if (restored) {
+          return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
+        }
+        return _shutdown(estimate);
+      case _RungBelowDeviceMinimum():
+        // Erratum 8: the session is unchanged and keeps sending on the
+        // applied rung; nothing is switched off.
+        return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
+      case _RungUnachievable():
+        break;
     }
 
     // The stepped rung did not fit. Erratum E1 / Abnahme 3: silence is not an
     // option, but neither is declaring defeat without having actually tried
-    // the lowest rung. Attempt it now, bypassing the one-rung-per-call limit
-    // — this is the emergency check, not a quality choice.
-    if (nextRung != 0) {
-      final lowest = _applyRung(0);
-      if (lowest != null) {
-        _appliedRung = 0;
-        return VideoRateControlStepped(
-          estimate: estimate,
-          quality: appliedQuality,
-          negotiated: lowest,
-          forcedToLowest: true,
-        );
+    // the lowest rung this device reaches. Attempt it now, bypassing the
+    // one-rung-per-call limit — this is the emergency check, not a quality
+    // choice. A lowest rung this device cannot reach is skipped; the applied
+    // rung is still running (`CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE` and
+    // `CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM` leave the session unchanged).
+    final lowest = _deviceFloorRung;
+    if (nextRung != lowest) {
+      if (_unreachableRungs.contains(lowest)) {
+        return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
+      }
+      switch (_applyRung(lowest)) {
+        case _RungAccepted(:final negotiated):
+          _appliedRung = lowest;
+          return VideoRateControlStepped(
+            estimate: estimate,
+            quality: appliedQuality,
+            negotiated: negotiated,
+            forcedToLowest: true,
+          );
+        case _RungAboveRequest(:final restored):
+          if (restored) {
+            return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
+          }
+        case _RungBelowDeviceMinimum():
+          return VideoRateControlUnchanged(estimate: estimate, quality: appliedQuality);
+        case _RungUnachievable():
+          break;
       }
     }
 
+    return _shutdown(estimate);
+  }
+
+  VideoRateControlShutdown _shutdown(BandwidthEstimate estimate) {
     return VideoRateControlShutdown(
       estimate: estimate,
       reason: VideoRateShutdownReason.bandwidthInsufficient,
       detail: 'no encoder step fits the delivery ceiling of $_ceiling B '
           '(kLiveMediaMaxFrameBytes, 204 parts x 1188 B, §11.2); '
-          '${_ladder[0]} was attempted and also rejected '
+          '${_ladder[_deviceFloorRung]} was attempted and also rejected '
           '(CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE)',
     );
   }
 
-  /// Pushes the configuration for [rung] and returns the negotiated result,
-  /// or null when the backend reported
+  /// Pushes the configuration for [rung] and returns [_RungAccepted] with the
+  /// negotiated result, or [_RungUnachievable] when the backend reported
   /// [VideoRateUnachievable]/`CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE`.
-  VideoConfig? _applyRung(int rung) {
+  ///
+  /// When the backend answers with a configuration ABOVE the request (S431
+  /// 33.G14: the Android camera's smallest size is 320x240, the tile rung asks
+  /// for 192x144), the rung is not reachable on this device: it is recorded in
+  /// [_unreachableRungs], the backend is put back on the applied rung and the
+  /// result is [_RungAboveRequest]. Never an exception — this runs inside the
+  /// engine's once-a-second timer, and an exception there reached the crash
+  /// dialog over the running call.
+  _RungResult _applyRung(int rung) {
     final requested = _configFor(rung);
     final outcome = pipeline.reconfigure(requested);
     switch (outcome) {
       case VideoReconfigureAccepted(:final negotiated):
-        _evaluateNegotiated(requested, negotiated);
+        _checkCeiling(requested, negotiated);
+        if (_exceedsRequest(requested, negotiated)) {
+          _unreachableRungs.add(rung);
+          onWarning?.call('video rate: backend negotiated above the request, '
+              'which the ABI forbids; rung ${_qualityForRung(rung)} is not '
+              'reachable on this device and will not be tried again, staying on '
+              '$appliedQuality (requested=$requested, negotiated=$negotiated)');
+          return _RungAboveRequest(restored: _restoreAppliedRung());
+        }
         _lastNegotiated = negotiated;
-        return negotiated;
+        return _RungAccepted(negotiated);
+      case VideoReconfigureBelowDeviceMinimum():
+        // Erratum 8: the backend says itself that this device cannot go this
+        // small. The session is unchanged, so no restore is needed; the rung
+        // above becomes the lowest one the target may name.
+        final floor = rung + 1 < _ladder.length ? rung + 1 : _ladder.length - 1;
+        if (floor > _deviceFloorRung) _deviceFloorRung = floor;
+        onWarning?.call('video rate: rung ${_qualityForRung(rung)} lies below the '
+            'smallest geometry of this device (ERR_BELOW_DEVICE_MINIMUM); lowest '
+            'reachable rung is now ${_qualityForRung(_deviceFloorRung)}, staying '
+            'on $appliedQuality (requested=$requested)');
+        return const _RungBelowDeviceMinimum();
       case VideoRateUnachievable():
-        return null;
+        return const _RungUnachievable();
     }
   }
 
-  /// Evaluates — not merely stores — [negotiated] against [requested] and
-  /// against the ABI's downward-only negotiation contract (I9,
-  /// `cleona_video.h`). Acceptance criterion 2 ("`out_negotiated` is
-  /// evaluated") is this method: every field is compared, not just read
-  /// into a struct nobody looks at again.
-  void _evaluateNegotiated(VideoConfig requested, VideoConfig negotiated) {
+  /// Puts the backend back on [_appliedRung] after a rung came back above the
+  /// request, so Dart and the backend agree again. Returns false when the
+  /// backend rejects the applied rung itself
+  /// (`CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE`).
+  bool _restoreAppliedRung() {
+    final requested = _configFor(_appliedRung);
+    final outcome = pipeline.reconfigure(requested);
+    switch (outcome) {
+      case VideoReconfigureAccepted(:final negotiated):
+        _checkCeiling(requested, negotiated);
+        if (_exceedsRequest(requested, negotiated)) {
+          onWarning?.call('video rate: backend negotiated above the request '
+              'when restoring $appliedQuality '
+              '(requested=$requested, negotiated=$negotiated)');
+        }
+        _lastNegotiated = negotiated;
+        return true;
+      case VideoReconfigureBelowDeviceMinimum():
+        // Erratum 8 forbids switching video off for this; the session keeps
+        // sending with what it has. Dart and the backend may disagree about
+        // the geometry until the next accepted step.
+        onWarning?.call('video rate: restoring $appliedQuality was answered '
+            'ERR_BELOW_DEVICE_MINIMUM (requested=$requested)');
+        return true;
+      case VideoRateUnachievable():
+        return false;
+    }
+  }
+
+  /// Evaluates — not merely stores — [negotiated] against the delivery
+  /// ceiling (I9, `cleona_video.h`). Acceptance criterion 2
+  /// ("`out_negotiated` is evaluated") is this method together with
+  /// [_exceedsRequest]: every field is compared, not just read into a struct
+  /// nobody looks at again. I9 is a hard limit and stays an exception.
+  void _checkCeiling(VideoConfig requested, VideoConfig negotiated) {
     if (negotiated.maxFrameBytes > _ceiling) {
       throw VideoRateControlException(
           'backend negotiated maxFrameBytes=${negotiated.maxFrameBytes} above '
           'the delivery ceiling of $_ceiling B — I9 violation '
           '(requested=$requested, negotiated=$negotiated)');
     }
-    if (negotiated.width > requested.width ||
-        negotiated.height > requested.height ||
-        negotiated.fps > requested.fps ||
-        negotiated.targetBitrateKbps > requested.targetBitrateKbps) {
-      throw VideoRateControlException(
-          'backend negotiated above the request, which the ABI forbids '
-          '(requested=$requested, negotiated=$negotiated)');
-    }
   }
+
+  /// True when [negotiated] is above [requested] in any field — a violation
+  /// of the ABI's downward-only negotiation contract (`cleona_video.h`).
+  static bool _exceedsRequest(VideoConfig requested, VideoConfig negotiated) =>
+      negotiated.width > requested.width ||
+      negotiated.height > requested.height ||
+      negotiated.fps > requested.fps ||
+      negotiated.targetBitrateKbps > requested.targetBitrateKbps;
+}
+
+/// Result of one [VideoRateController._applyRung] call.
+sealed class _RungResult {
+  const _RungResult();
+}
+
+/// The backend accepted the rung within the request.
+final class _RungAccepted extends _RungResult {
+  const _RungAccepted(this.negotiated);
+  final VideoConfig negotiated;
+}
+
+/// The backend answered above the request; the rung is marked unreachable.
+/// [restored] is false when the backend then rejected the applied rung.
+final class _RungAboveRequest extends _RungResult {
+  const _RungAboveRequest({required this.restored});
+  final bool restored;
+}
+
+/// `CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE`: the session is unchanged.
+final class _RungUnachievable extends _RungResult {
+  const _RungUnachievable();
+}
+
+/// `CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM` (Erratum 8): the session is
+/// unchanged and the device floor has moved above the rung.
+final class _RungBelowDeviceMinimum extends _RungResult {
+  const _RungBelowDeviceMinimum();
 }

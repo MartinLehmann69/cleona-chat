@@ -270,6 +270,7 @@ extension CleonaServiceSharedKeyKeys on CleonaService {
     if (role != 'owner' && role != 'admin') {
       _log.warn('shared key delivery for ${_skShort(gid)} from '
           '${_skShort(from)}, who is no owner or admin here — discarded');
+      _groupAuthorityRefused(gid);
       return;
     }
     final s = _skOrNew(gid);

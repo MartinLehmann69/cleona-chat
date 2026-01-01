@@ -3,7 +3,8 @@
 ///
 /// Every answer is an answer to exactly one request; nothing here sends on
 /// its own or keeps a clock. A node that holds a channel answers for it; a
-/// node that holds no channel ([DurableStock.heldChannels] empty — a phone)
+/// node that holds no channel ([DurableStock.heldChannels] empty — a 4.2
+/// phone before D-126; since then every device holds, §16.7)
 /// names nothing, holds nothing, and therefore answers a deposit with `0x94`
 /// and stays silent to the questions it is never asked (§16.0: only a node
 /// that named an identifier or answered such a question is asked).

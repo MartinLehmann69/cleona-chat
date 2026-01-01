@@ -106,6 +106,18 @@ CLEONA_VIDEO_MOCK_API void cleona_video_mock_set_camera_count(cleona_video_sessi
 CLEONA_VIDEO_MOCK_API void cleona_video_mock_set_min_bitrate_kbps(
     cleona_video_session_t* s, int32_t kbps);
 
+/* Smallest capture geometry the mock pretends its camera can produce.
+ * Default 0/0 = no floor, so every existing test behaves as before.
+ *
+ * THIS IS THE KNOB THAT PRODUCES CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM
+ * (Erratum 8): a cleona_video_reconfigure whose width is below w or whose
+ * height is below h returns the code and leaves the session untouched, never
+ * a larger geometry. Like the other knobs it acts on reconfigure only; open()
+ * always negotiates with 0/0 (it runs before the knob can be set). Values
+ * <= 0 clear the floor. */
+CLEONA_VIDEO_MOCK_API void cleona_video_mock_set_min_capture_size(
+    cleona_video_session_t* s, int32_t w, int32_t h);
+
 /* Force the values reported in report.hardware_encode / hardware_decode. The
  * mock defaults to CLEONA_VIDEO_HW_NO for both, which is the truth — it has no
  * hardware. Set CLEONA_VIDEO_HW_NOT_DETERMINABLE to exercise the I11

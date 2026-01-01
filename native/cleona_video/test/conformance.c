@@ -43,10 +43,16 @@
  *           because the peer's decoder has been starved.
  *   V22-V25 the decode direction and the texture handle — the only two things
  *           that may cross this ABI (I10). Pixels never do.
+ *   V25b    the texture id stays the same across a geometry-changing
+ *           reconfigure ("stable between start() and stop()").
  *   V26     camera switching.
  *   V27-V29 the verification report (I11): never a guess, never HW_YES without
  *           evidence, counters consistent.
  *   V30     teardown and leak surface.
+ *   V35     Erratum E8. A request below the device's smallest geometry (16x16)
+ *           is accepted without negotiating up, or refused with
+ *           ERR_BELOW_DEVICE_MINIMUM and no side effects — never answered
+ *           with a larger geometry and never with ERR_RATE_UNACHIEVABLE.
  *
  * ---------------------------------------------------------------------------
  * HOW TO RUN IT AGAINST YOUR OWN BACKEND (V1.13-V1.16)
@@ -850,6 +856,70 @@ int main(int argc, char** argv) {
              inv_cfg, inv_sess, inv_mfb, CLEONA_VIDEO_ERR_INVALID);
 
     /* ==================================================================== *
+     * V35 — Erratum 8: a request below the device's smallest geometry.
+     *
+     * 16x16 is valid (every field > 0) and lies below every real camera, and
+     * at one macroblock it is the smallest size an H.264 encoder can produce
+     * at all. Exactly two answers are conformant: OK without negotiating up
+     * (a backend that scales in software, the mock without a floor), or
+     * ERR_BELOW_DEVICE_MINIMUM with the session untouched and still sending.
+     * A larger geometry, or ERR_RATE_UNACHIEVABLE ("the link cannot carry
+     * video"), is the defect case 33.G14 was. After an OK the previous
+     * configuration is restored so the checks below run unchanged.
+     * ==================================================================== */
+    {
+        cleona_video_report_t floor_before;
+        memset(&floor_before, 0, sizeof(floor_before));
+        CVID.get_report(s, &floor_before);
+        cleona_video_config_t floor_rq =
+            make_cfg(neg.codec, 16, 16, neg.fps, neg.target_bitrate_kbps,
+                     neg.max_frame_bytes, KFI_LONG);
+        memset(&gt, 0, sizeof(gt));
+        int32_t frc = CVID.reconfigure(s, &floor_rq, &gt);
+        if (frc == CLEONA_VIDEO_OK) {
+            int up_ok = never_up(&floor_rq, &gt);
+            if (set_ceiling(gt.max_frame_bytes) != 0) return ch_abort("out of memory");
+            int32_t n35 = read_n(s, 1, &keys, &size);
+            rq = make_cfg(neg.codec, neg.width, neg.height, neg.fps,
+                          neg.target_bitrate_kbps, neg.max_frame_bytes, KFI_LONG);
+            cleona_video_config_t back;
+            memset(&back, 0, sizeof(back));
+            int32_t brc = CVID.reconfigure(s, &rq, &back);
+            if (brc == CLEONA_VIDEO_OK) {
+                if (set_ceiling(back.max_frame_bytes) != 0) return ch_abort("out of memory");
+                neg = back;
+            }
+            ch_check("V35", "below the device minimum: accepted without "
+                            "negotiating up",
+                     up_ok && n35 == 1 && brc == CLEONA_VIDEO_OK,
+                     "requested 16x16 -> OK %dx%d@%d %dkbps mfb=%d, %d/1 frame, "
+                     "restore rc=%d",
+                     gt.width, gt.height, gt.fps, gt.target_bitrate_kbps,
+                     gt.max_frame_bytes, n35, brc);
+        } else if (frc == CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM) {
+            cleona_video_report_t floor_after;
+            memset(&floor_after, 0, sizeof(floor_after));
+            CVID.get_report(s, &floor_after);
+            int32_t n35 = read_n(s, 3, &keys, &size);
+            ch_check("V35", "below the device minimum: "
+                            "ERR_BELOW_DEVICE_MINIMUM, side-effect free",
+                     floor_after.negotiated_width == floor_before.negotiated_width &&
+                     floor_after.negotiated_height == floor_before.negotiated_height &&
+                     floor_after.negotiated_fps == floor_before.negotiated_fps &&
+                     n35 == 3,
+                     "rc=%d, geometry %dx%d@%d unchanged, %d/3 frames after",
+                     frc, floor_after.negotiated_width,
+                     floor_after.negotiated_height,
+                     floor_after.negotiated_fps, n35);
+        } else {
+            ch_check("V35", "below the device minimum: OK without negotiating "
+                            "up, or ERR_BELOW_DEVICE_MINIMUM", 0,
+                     "reconfigure to 16x16 returned %d (expect %d or %d)",
+                     frc, CLEONA_VIDEO_OK, CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM);
+        }
+    }
+
+    /* ==================================================================== *
      * V17 — pts across an fps increase.
      *
      * "A backend that derives pts as frame_index * 1e6 / fps breaks this the
@@ -999,6 +1069,54 @@ int main(int argc, char** argv) {
     } else {
         ch_check("V25", "get_texture_id answers OK or ERR_UNSUPPORTED", 0,
                  "rc=%d", tex_rc);
+    }
+
+    /* ==================================================================== *
+     * V25b — the texture id survives a geometry change of OUR encoder.
+     *
+     * cleona_video.h: "The id is stable between start() and stop()". The
+     * caller asks for it once after start() and keeps drawing that id; a
+     * reconfigure that changes our own size is not a restart, so the texture
+     * the PEER's stream is rendered into must stay the same. (S424 V-1: a
+     * backend that rebuilt its decoder on such a reconfigure handed the UI a
+     * released texture and the remote picture vanished.) The size is
+     * requested downwards, because a backend never negotiates upwards; a
+     * backend without a texture path, one that keeps the size or one that
+     * refuses it is noted, not failed -- V12 already judges whether a
+     * geometry change is accepted.
+     * ==================================================================== */
+    if (tex_rc == CLEONA_VIDEO_OK) {
+        int64_t tex_before = tex;
+        rq = make_cfg(neg.codec, neg.width / 2, neg.height / 2, neg.fps,
+                      neg.target_bitrate_kbps, neg.max_frame_bytes, KFI_LONG);
+        memset(&gt, 0, sizeof(gt));
+        rrc = CVID.reconfigure(s, &rq, &gt);
+        if (rrc == CLEONA_VIDEO_OK) {
+            if (set_ceiling(gt.max_frame_bytes) != 0) return ch_abort("out of memory");
+            int geometry_changed = (gt.width != neg.width || gt.height != neg.height);
+            if (geometry_changed) {
+                int64_t tex_after = 0;
+                int32_t after_rc = CVID.get_texture_id(s, &tex_after);
+                ch_check("V25b", "texture id is stable across a geometry change",
+                         after_rc == CLEONA_VIDEO_OK && tex_after == tex_before,
+                         "%dx%d -> %dx%d, id 0x%llX -> 0x%llX (rc=%d)",
+                         neg.width, neg.height, gt.width, gt.height,
+                         (unsigned long long)tex_before,
+                         (unsigned long long)tex_after, after_rc);
+            } else {
+                ch_note("V25b", "backend kept the geometry; texture stability "
+                                "across a size change not testable",
+                        "requested %dx%d, still %dx%d", rq.width, rq.height,
+                        gt.width, gt.height);
+            }
+            neg = gt;
+        } else {
+            ch_note("V25b", "backend refused the smaller size; texture "
+                            "stability across a size change not testable",
+                    "reconfigure to %dx%d returned %d", rq.width, rq.height, rrc);
+        }
+    } else {
+        ch_note("V25b", "not evaluated", "no texture id (V25)");
     }
 
     /* ==================================================================== *

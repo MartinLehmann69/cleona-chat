@@ -1035,12 +1035,61 @@ extension CleonaServiceReconcile on CleonaService {
       ];
     }
     _reconcileTakeSave(t);
-    _sendTwinSync(
-        proto.TwinSyncType.RECONCILE,
+    _reconcileToSource(
+        t.fromHex,
         reconcileEncode(proto.ReconcileFrame()
           ..reconcileId = t.reconcileId
-          ..fetch = q),
-        targetDeviceId: hexToBytes(t.fromHex));
+          ..fetch = q));
+  }
+
+  /// §14.6.3 "Type 20 … directly on the LAN while both devices are present"
+  /// (S425 N6-00W09): a packet of the TAKING device (fetch, progress) to the
+  /// source [toHex] goes directly first, as the source's own packets do in
+  /// [_reconcilePlace]; without a known segment address or without an answer
+  /// on step 1 the same envelope (same `sync_id`, taken once) goes to the
+  /// post box. Before, these went only to the post box, and the source took
+  /// them at its next full collection — in 00w.09 after the new device had
+  /// been wiped.
+  void _reconcileToSource(String toHex, Uint8List payload) {
+    final syncId = SodiumFFI().randomBytes(16);
+    _processedSyncIds[bytesToHex(syncId)] =
+        DateTime.now().millisecondsSinceEpoch;
+    final envelope = buildTwinSyncEnvelope(
+      syncId: syncId,
+      deviceId: hexToBytes(_localDeviceId),
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      syncType: proto.TwinSyncType.RECONCILE,
+      payload: payload,
+      where: _ownWhereWires(), // §14.7, D-46
+    );
+    final to = hexToBytes(toHex);
+    _detachedSend('MT_TWIN_SYNC', () async {
+      final p = myceliumMailbox;
+      if (p != null) {
+        final frame = _innerFrame(
+          recipientUserId: identity.userId,
+          senderUserId: identity.userId,
+          messageId: SodiumFFI().randomBytes(16),
+          messageType: proto.MessageType.MT_TWIN_SYNC,
+          payload: envelope,
+        );
+        try {
+          if (await mycelium.MailboxOwnSignal(p)
+              .ownDirect(Uint8List.fromList(frame.writeToBuffer()), to)) {
+            return true;
+          }
+        } on Object catch (e) {
+          _log.warn('Type 20: direct step to the source failed ($e) — '
+              'the post box carries it');
+        }
+      }
+      return sendToUser(
+        recipientUserId: identity.nodeId,
+        messageType: proto.MessageType.MT_TWIN_SYNC,
+        payload: envelope,
+        targetDeviceId: to,
+      );
+    }());
   }
 
   /// The progress report for fetch [key] (hex, `''` = header): the
@@ -1049,14 +1098,13 @@ extension CleonaServiceReconcile on CleonaService {
     final got = t.gotBy[key] ?? 0;
     t.reportedBy[key] = got;
     _reconcileTakeSave(t);
-    _sendTwinSync(
-        proto.TwinSyncType.RECONCILE,
+    _reconcileToSource(
+        t.fromHex,
         reconcileEncode(proto.ReconcileFrame()
           ..reconcileId = t.reconcileId
           ..progress = (proto.ReconcileProgress()
             ..fetchId = key.isEmpty ? Uint8List(0) : hexToBytes(key)
-            ..received = got)),
-        targetDeviceId: hexToBytes(t.fromHex));
+            ..received = got)));
   }
 
   /// The packets the source holds at most per round, whatever was asked.

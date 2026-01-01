@@ -48,6 +48,7 @@ class Shell implements PacketRoute {
   final DateTime Function() _now;
 
   final Map<String, Link> _links = {};
+  late final UnopenedTrace _unopened = UnopenedTrace(_now); // S425 N5-1 trace
   final Map<String, Start> _running = {};
   final Map<String, List<Uint8List>> _waiting = {};
   final Map<String, Unclear> _unclear = {};
@@ -81,8 +82,8 @@ class Shell implements PacketRoute {
       roamLend(_links, shellWho(to, toPort), shellWho(old, oldPort));
   void roamEnd(InternetAddress to, int toPort, InternetAddress old, int oldPort) =>
       roamUnlend(_links, shellWho(to, toPort), shellWho(old, oldPort));
-  Iterable<String> _same(InternetAddress a, int p) =>
-      [for (final o in sameNode?.call(a, p) ?? const []) shellWho(o.$1, o.$2)];
+  Iterable<String> _same(InternetAddress a, int p) => [for (final o in sameNode?.call(a, p) ?? const []) shellWho(o.$1, o.$2)];
+  bool sameCounterpart(InternetAddress a, int ap, InternetAddress b, int bp) => oneLink(_links, shellWho(a, ap), shellWho(b, bp)); // D73B-2
 
   Shell(this._bottom,
       {void Function(String)? report, this.silence = kLinkSilence, DateTime Function()? clock})
@@ -132,7 +133,7 @@ class Shell implements PacketRoute {
       return false;
     }
     final w = shellWho(target, targetPort);
-    final l = nodeLink(_links, w, _same(target, targetPort)); // D-92 A.3
+    final l = nodeLink(_links, w, _same(target, targetPort), traceOn ? _report : null); // D-92 A.3
     if (l != null) {
       final now = _now();
       // Cover and keep-alive never renew (F29-A, V4.2 §11.6): towards a
@@ -208,7 +209,7 @@ class Shell implements PacketRoute {
     _attempt[w] = 1;
     handshakesStarted++;
     if (traceOn) _report('TRACE shell handshake to $w started${withRetry ? "" : " (one attempt)"}');
-    flight1(_bottom, b, target, targetPort);
+    flight1(_bottom, b, target, targetPort, _report);
     if (withRetry) {
       _deadline(w, target, targetPort);
       return;
@@ -232,7 +233,7 @@ class Shell implements PacketRoute {
       final n = (_attempt[w] ?? 1) + 1;
       if (n > kAttempts) return _fail(w, target, targetPort, 'does not answer');
       _attempt[w] = n;
-      flight1(_bottom, b, target, targetPort);
+      flight1(_bottom, b, target, targetPort, _report);
       _deadline(w, target, targetPort);
     });
   }
@@ -300,6 +301,7 @@ class Shell implements PacketRoute {
       }
       return;
     }
+    if (traceOn) { final t = _unopened.note(w, _links.length); if (t != null) _report(t); _unopened.keys.match(p, w, _report); }
     _assemble(w, p, from, fromPort);
   }
 
@@ -383,11 +385,11 @@ class Shell implements PacketRoute {
     final init = LinkKdf.deriveCellKeyInit(linkKey);
     final resp = LinkKdf.deriveCellKeyResp(linkKey);
     final n = Link(caller ? init : resp, caller ? resp : init, _now());
-    linkPut(_links, w, n); // under every address of the counterpart (D-92)
-    if (also != null && also != w) linkPut(_links, also, n);
+    final gave = !traceOn ? null : (Link o, List<String> at) => _report(_unopened.keys.replaced(o, at, caller ? 'caller' : 'callee', [for (final a in at) if (a != w && a != also && _running.containsKey(a)) a])); // S426 AVM-M1, S427 AVM-K1
+    linkPutAlso(_links, w, also, n, gave); // under every address of the counterpart (D-92)
     handshakesDone++;
-    if (traceOn) _report('TRACE shell link to $w set up as ${caller ? "caller" : "callee"}');
-    capLinks(_links, _answered.remove);
+    if (traceOn) _report(_unopened.keys.setUp(n, w, caller ? 'caller' : 'callee'));
+    capLinks(_links, _answered.remove, !traceOn ? null : (k, l, e) => _report(_unopened.keys.dropped(k, l, e)));
     final q = _waiting.remove(w);
     if (q == null) return;
     for (final n in q) {

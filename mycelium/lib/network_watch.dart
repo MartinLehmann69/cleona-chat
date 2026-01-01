@@ -38,9 +38,9 @@ import 'package:cleona/core/util/local_addresses.dart'
 /// the update moment).
 typedef EdgeSteps = Future<void> Function();
 
-/// Per family whether a fresh socket stands; no IPv6 side: `null`
-/// (`Wire.reopen`).
-typedef SocketsBound = ({bool ipv4, bool? ipv6});
+/// Per address kind whether a fresh socket stands; no side of a kind: `null`
+/// (`Wire.reopen`; S427: IPv4 may be absent too, §11.1).
+typedef SocketsBound = ({bool? ipv4, bool? ipv6});
 
 /// A burst of address events is one event: the second address of a new
 /// network comes a moment after the first (taken over from the daemon's and

@@ -148,6 +148,38 @@ extension IdentityDeviceOps on CleonaService {
       groupInfo.alwaysLoadImages = known?.alwaysLoadImages ?? true;
       groupInfo.withholdDeliveryStatus =
           known?.withholdDeliveryStatus ?? false;
+      // §16.2.2 "members, roles and epoch stay those of the newer state":
+      // this device holds the invitation at a NEWER epoch than the state of
+      // the own device that joined. The join is taken, the older member list
+      // is not (S429 D-2, smoke_twin_chat_config run 4: an older Type 6 turned
+      // an admin back into a member, and the admin's settings that had waited
+      // for the group were rejected).
+      if (known != null &&
+          groupInfo.joined &&
+          !known.joined &&
+          known.membershipEpoch > groupInfo.membershipEpoch) {
+        known.joined = true;
+        _saveGroups();
+        _ownLineGroupPairsTake(json, known);
+        final conv = conversations.putIfAbsent(
+            known.groupIdHex,
+            () => Conversation(
+                  id: known.groupIdHex,
+                  displayName: known.name,
+                  isGroup: true,
+                  profilePictureBase64: known.pictureBase64,
+                  notificationsEnabled:
+                      notificationSound.settings.defaultGroupNotify,
+                ));
+        conv.displayName = known.name;
+        _saveConversations();
+        _log.info('Twin-synced group joined: '
+            '${known.groupIdHex.substring(0, 8)} kept at epoch '
+            '${known.membershipEpoch} (the other device sent '
+            '${groupInfo.membershipEpoch})');
+        onStateChanged?.call();
+        return;
+      }
       if (known != null &&
           (!groupInfo.joined ||
               (known.joined &&
@@ -180,7 +212,9 @@ extension IdentityDeviceOps on CleonaService {
       conv.displayName = groupInfo.name;
       _saveConversations();
       // What waited here for the invitation into this group (§16.2.2).
-      if (known == null) _groupWaitingApply(groupInfo.groupIdHex);
+      // D-129 (b): a replaced state is a newer one — what the authority gate
+      // refused against the older one is tried again.
+      _groupWaitingApply(groupInfo.groupIdHex);
       _log.info('Twin-synced group created: ${groupInfo.name}');
       onStateChanged?.call();
     } catch (e) {

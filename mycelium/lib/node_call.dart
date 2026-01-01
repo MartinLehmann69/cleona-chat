@@ -10,6 +10,7 @@ import 'package:mycelium/neighbour_found_by.dart';
 export 'package:mycelium/neighbour_found_by.dart' show NeighbourSource;
 import 'package:mycelium/neighbours.dart' as nb;
 import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
+import 'package:mycelium/node_roam.dart' show nodeAskOverCap;
 import 'package:mycelium/own_former.dart' show ownFormer;
 
 /// Open the call in the segment and carry its finds into the node.
@@ -176,6 +177,9 @@ bool neighbourAdd(Node k, List<int> ip, int port,
     return false;
   }
   final fresh = k.neighbourhood.remember(a, port);
+  // §11.8.3: over a full list a hint is asked once, else it never gets in.
+  final overCap = !fresh && !known && k.speaks(a) && Neighbourhood.possible(a, port);
+  if (overCap) nodeAskOverCap(k, a, port);
   if (fresh) dropped.forget(a, port);
   if (fresh && source != null) {
     k.neighbourhood.noteFoundBy(k.neighbourhood.holding(a, port)!, source);

@@ -27,6 +27,8 @@
 /// * [SendEnd.unreachable] / [SendEnd.refused] — the shell's handshake
 ///   stayed unanswered or the hop refused: failed at once (§11.6).
 ///
+/// [SendEnd.unconfirmed] counts as not reached (§11.3, S426 N6-2).
+///
 /// The failure says whether the node was REACHED (S420, BL-2): only a node
 /// that took the request and stayed silent lacks the capability (§16.0
 /// "Older 4.2 versions … never asked twice"). A node the request never
@@ -46,9 +48,10 @@ const Duration kDurableAfterEndWait = Duration(milliseconds: 800);
 
 class DurableAsk {
   final Future<SendEnd> Function() _send;
-  /// [reached]: the request reached the node (it ended as sent, delivered or
-  /// unconfirmed) and no answer came; false when the transmission itself
-  /// failed (unreachable, refused, send error).
+  /// [reached]: the request reached the node — one part handed over, or the
+  /// recipient's end mark came — and no answer came; false when the
+  /// transmission itself failed (unreachable, refused, send error) or ended
+  /// without end mark (§11.3: "counts as that hop not answering", S426 N6-2).
   final void Function(String why, bool reached) _failed;
   final Duration answerWait;
   final Duration afterEndWait;
@@ -75,8 +78,16 @@ class DurableAsk {
       _fail('transmission ${end.name}', reached: false);
       return;
     }
-    _wait = Timer(end == SendEnd.sent ? answerWait : afterEndWait,
-        () => _fail('no answer', reached: true));
+    // §11.3: two or more parts without the recipient's end mark — under a
+    // standing link (own or borrowed, D-92 A.3) the only end of a
+    // transmission that never arrived (S426 N6-2). An older 4.2 version
+    // sends the end mark for every kind (4.2.3 `split.dart`), so it is still
+    // reached when it took the object and stays silent (§16.0).
+    final reached = end != SendEnd.unconfirmed;
+    _wait = Timer(
+        end == SendEnd.sent ? answerWait : afterEndWait,
+        () => _fail(reached ? 'no answer' : 'no answer, no end mark',
+            reached: reached));
   }
 
   /// The answer arrived.

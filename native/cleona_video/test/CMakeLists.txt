@@ -159,7 +159,8 @@ if(CLEONA_VIDEO_BUILD_MOCK)
       "pts_from_index|V8,V17"   # E1  pts walks backwards when fps rises again
       "capture_closed|V20"      # I12 own video off reported as session gone
       "no_h264|V2"              # H.264 is the mandatory interop level
-      "open_err_swap|V1b")      # E6b open() blames the caller for a slow link
+      "open_err_swap|V1b"       # E6b open() blames the caller for a slow link
+      "floor_up|V35")           # E8  below the camera floor, answers larger
 
   foreach(_entry IN LISTS _vnegctl)
     string(REPLACE "|" ";" _parts "${_entry}")

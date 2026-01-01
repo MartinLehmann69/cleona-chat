@@ -27,6 +27,7 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/node_collect_edge.dart';
 import 'package:mycelium/node_enrolment.dart';
 import 'package:mycelium/node_post_box.dart';
+import 'package:mycelium/post_box_log.dart' show holdersNamed;
 import 'package:mycelium/pair.dart' show dayValue, utcDay;
 import 'package:mycelium/post_box_deposit.dart'
     show DayPair, Neighbour, Question, kAtMostValues;
@@ -130,7 +131,15 @@ class EnrolWindow {
       onRequests([p], null);
       return true;
     });
-    _say('window asked ${q.length} value(s) at ${to.length} holder(s) — '
+    // S425-E1 part 2 measurement: which values at which holders — compared
+    // with the new device's line "deposit: … under <value> to …" (the same
+    // four bytes, node_deposit.dart).
+    final values = [
+      for (final x in q)
+        x.value.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()
+    ];
+    _say('window asked ${q.length} value(s) [${values.join(', ')}] at '
+        '${to.length} holder(s) [${holdersNamed(to)}] — '
         '${found == null ? "not asked" : "${found.length} request(s)"}');
     return found?.length ?? 0;
   }

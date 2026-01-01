@@ -263,7 +263,7 @@ void main(List<String> args) {
     // start on the same machine. The per-baseDir lock above is blind across
     // data roots — that was the V3.1.72 split-brain (~/.cleona vs
     // ~/.cleona/Cleona2 both started, inbound + GUI/IPC state diverged).
-    // Bypass only via --ignore-single-instance in BETA builds (lab/jury-swarm).
+    // Bypass only via --ignore-single-instance in BETA builds (lab multi-instance).
     if (config.ignoreSingleInstance &&
         activeNetworkChannel == NetworkChannel.beta) {
       log.info('--ignore-single-instance (beta): machine-global guard skipped.');
@@ -683,7 +683,8 @@ class _MultiServiceDaemon {
                   AppPaths.bundleDir, activeNetworkChannel),
               helperPath:
                   WindowsToastNotifier.helperPathFor(AppPaths.bundleDir),
-              warn: log.warn)
+              warn: log.warn,
+              trace: log.debug)
           : null;
 
   /// The product name the system notifications are shown under — the
@@ -1135,6 +1136,7 @@ class _MultiServiceDaemon {
       askRouter: true, // §7.3: the host asks the router at its edges
       report: log.info,
       traceReport: log.trace, // beta diagnosis: log file only (S406)
+      errorReport: log.error, // S427: e.g. no IP address of any kind (§11.1)
     );
     _host = host;
     // Plane D (§17, S398-W2): the call frames use this host's one data port
@@ -1198,9 +1200,24 @@ class _MultiServiceDaemon {
     if (Platform.isWindows) {
       ipcServer.onWindowsFirewall = ({required bool recheck}) async {
         final running = _windowsFirewallCheck;
-        final state = recheck
-            ? await _checkWindowsFirewallRule(primaryCtx.deviceStoreForWrite())
-            : (running != null ? await running : _windowsFirewall);
+        final WindowsFirewallState state;
+        if (recheck) {
+          // S426 W-2 (53.F01): a recheck asks for the rules as they are now.
+          // A check already running may have read them before the change
+          // that prompted the request (the elevated helper deletes, then
+          // adds) — joining it returned "missing" after the rule stood.
+          // Wait for it to end, then check again; requests that wait
+          // together still share the one new check.
+          if (running != null) {
+            try {
+              await running;
+            } catch (_) {}
+          }
+          state = await _checkWindowsFirewallRule(
+              primaryCtx.deviceStoreForWrite());
+        } else {
+          state = running != null ? await running : _windowsFirewall;
+        }
         return {'state': state.name, 'exe': Platform.resolvedExecutable};
       };
     }
@@ -2453,7 +2470,8 @@ class _DaemonConfig {
   final String? iconPath;
   final String? publicIp;
   /// Beta-only: skip the machine-global single-instance guard (§15.1).
-  /// Used by lab tooling (jury-swarm) to run N daemons on one host.
+  /// Used by lab tooling to run N daemons on one machine (never on the
+  /// workstation: the app does not run on the host, owner E-9).
   final bool ignoreSingleInstance;
   final bool exportContactSeed;
   final String? identitySelector;
@@ -2522,7 +2540,7 @@ _DaemonConfig _parseArgs(List<String> args) {
         break;
       case '--ignore-single-instance':
         // Beta-only bypass of the machine-global single-instance guard
-        // (lab/jury-swarm multi-instance). Honored only in beta builds.
+        // (lab multi-instance). Honored only in beta builds.
         ignoreSingleInstance = true;
         break;
       // `--bootstrap` stood here until S388 (V4.2 §11.7: no node has a

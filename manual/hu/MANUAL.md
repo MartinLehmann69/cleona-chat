@@ -1,1002 +1,1301 @@
-# Cleona Chat -- Felhasznaloi kezikonyv
+# Cleona Chat -- Felhasználói kézikönyv
 
-Verzio 3.1.125 | Kelt 2026. julius
+4.2-es verzió | 2026 novemberi állapot
 
 ---
 
-## Tartalomjegyzek
+## Tartalomjegyzék
 
 1. [Mi az a Cleona Chat?](#1-mi-az-a-cleona-chat)
-2. [Elso lepesek](#2-elso-lepesek)
-3. [Kontaktok](#3-kontaktok)
-4. [Uzenetek](#4-uzenetek)
+2. [Első lépések](#2-első-lépések)
+3. [Kapcsolatok](#3-kapcsolatok)
+4. [Üzenetek](#4-üzenetek)
 5. [Csoportok](#5-csoportok)
-6. [Nyilvanos csatornak](#6-nyilvanos-csatornak)
-7. [Hivasok](#7-hivasok)
-8. [Naptar](#8-naptar)
-9. [Szavazasok](#9-szavazasok)
-10. [Tobb identitas](#10-tobb-identitas)
-11. [Multi-Device](#11-multi-device)
-12. [Helyreallitas](#12-helyreallitas)
-13. [Beallitasok](#13-beallitasok)
-14. [Biztonsag](#14-biztonsag)
-15. [Szoftverfrissitesek](#15-szoftverfrissitesek)
-16. [Gyakran ismetelt kerdesek](#16-gyakran-ismetelt-kerdesek)
+6. [Nyilvános csatornák](#6-nyilvános-csatornák)
+7. [Hívások](#7-hívások)
+8. [Naptár](#8-naptár)
+9. [Szavazások](#9-szavazások)
+10. [Több identitás](#10-több-identitás)
+11. [Több eszköz](#11-több-eszköz)
+12. [Helyreállítás](#12-helyreállítás)
+13. [Beállítások](#13-beállítások)
+14. [Biztonság](#14-biztonság)
+15. [Szoftverfrissítések](#15-szoftverfrissítések)
+16. [Gyakori kérdések](#16-gyakori-kérdések)
 
 ---
 
 ## 1. Mi az a Cleona Chat?
 
-### A te uzenetoalkalmazasod, a te adataid
+### A te üzenetküldőd, a te adataid
 
-A Cleona Chat egy uzenetoalkalmazas, amely teljesen kozponti szerver nelkul
-mukodik. Az uzeneteid kozvetlenul a te keszulekedrol a masik fel keszulekere
-jutnak el -- ceges kozvetitok, felho vagy adatkozpont nelkul. Egyetlen
-vallalat sem tudja elolvasni, tarolni vagy tovabbitani az uzeneteidet,
-egyszeruen azert, mert nincs kozbeiktatva egyetlen vallalat sem.
+A Cleona Chat egy üzenetküldő, amely teljesen központi szerver nélkül működik.
+Az üzeneteid a te készülékedtől a partnered készülékéig utaznak -- egy
+cégszékhely, egy felhő és egy adatközpont megkerülése nélkül. Ahol útközben
+egy másik készülék segít, az csak titkosított csomagokat továbbít. Egyetlen
+cégnél sem tudja elolvasni, eltárolni vagy továbbadni az üzeneteidet, egyszerűen
+azért, mert egyetlen cég sem áll közben.
 
-### Nincs fiok, nincs telefonszam
+### Nincs fiók, nincs telefonszám
 
-A Cleonaban nem kell sem telefonszam, sem e-mail-cim a regisztraciohoz. Az
-identitasod egy kriptografiai kulcsparbol all, amelyet az elso indulaskor
-automatikusan letrehoz a keszuleked. Ez azt jelenti: senki sem tud megtalalni
-a telefonszamod vagy az e-mail-cimed alapjan, hacsak nem te adod meg onkent
-az elerhetesegidet.
+A Cleonánál nincs szükséged sem telefonszára, sem e-mail-címre a bejelentkezéshez.
+Az identitásod egy kriptográfiai kulcspárból áll, amely az első induláskor
+automatikusan a készülékeden jön létre. Ez azt jelenti: senki sem tud
+megkeresni a telefonszámod vagy az e-mail-címed alapján, hacsak te magad nem
+adod tovább a kapcsolattartási adataidat.
 
-### Jovobiztonsagos titkositas
+### Jövőbiztos titkosítás
 
-A Cleona ugynevezett Post-Quantum-titkositast hasznal. Ez azt jelenti: meg a
-jovobeli kvantumszamitogepek sem lennenek kepesek feltorni az uzeneteidet. Nem
-kell ertened a reszleteket -- a lenyeg az, hogy a kommunikaciod a technika
-jelenlegi allasa szerint a leheto legjobban vedett.
+A Cleona úgynevezett post-kvantum titkosítást használ. Ez azt jelenti: a
+jövőbeli kvantumszámítógépek sem tudnák feltörni az üzeneteidet. A részleteket
+nem kell értened -- csak az a fontos, hogy a kommunikációd a jelenlegi technikai
+állapot szerint a lehető legjobban védve legyen.
 
-### Hogyan mukodik szerver nelkul?
+### Hogyan működik ez szerver nélkül?
 
-Kepzeld el, hogy te es a kontaktjaid egyutt alkottok egy halozatot. Minden
-keszulek segit az uzenetek tovabbitasaban. Ha a masik fel eppen online, az
-uzenet kozvetlenul megerkezik. Ha a masik fel offline, kozos ismerosok
-kozvetitenek es kezbesitik, amint a cimzett ujra elerheto. A kontaktjaid
-tehat egyben a halozatodat is jelentik.
+A Cleona hálózata csak a felhasználók készülékeiből áll. Minden készülék egy
+csomópont, egyetlen csomópont sem fontosabb a másiknál, és mindegyik csak a
+saját szomszédjait ismeri. Négy dolog teszi különlegessé ezt a hálózatot:
+
+- **Nincs fix pont.** Az alkalmazásban nem szerepel szervercím, és a hálózat
+  nem függ egyetlen csomóponttól sem. Nincs semmi, amit lekapcsolhatnál, hogy
+  a Cleonát leállítsd.
+- **Azonnali.** Az üzeneted abban a pillanatban indul, amikor elküldöd. Nem
+  vár semmilyen ütemre és semmi másra.
+- **Álcaforgalom mellékesen.** A készüléked folyamatosan kis álcacsomagokat
+  küld, hogy kívülről ne lehessen látni, mikor írsz valójában. Egyetlen
+  üzenet sem függ tőle -- az álcaforgalom csak mellette fut.
+- **Kódok nevek helyett.** Aki továbbít egy üzenetet, csak egy olyan kódot
+  lát, amely minden nap változik. Rendszerint egyikük sem ismeri egyszerre a
+  feladót és a címzettet; a kivételeket a 14. fejezet írja le.
+
+**Három út, egyszerre.** Amikor elküldesz egy üzenetet, a Cleona nem sorban
+egyesével próbálja az utakat, hanem az összes megfelelőt egyszerre. Amint a
+partnered visszaigazolja a kézbesítést, a többi megszakad.
+
+1. **Ugyanabban a hálózatban:** Ha ugyanabban a Wi-Fi-ben vagytok, az üzenet
+   egyenesen átmegy.
+2. **Az állandó szomszédokon át:** Az interneten a készüléked átadja az
+   üzenetet az állandó szomszédjának. Az továbbítja a partnered állandó
+   szomszédainak (egyszerre legfeljebb háromnak), és az egyikük kézbesíti.
+3. **Postafiók:** Ha a partnered offline van, a Cleona titkosítva leteszi az
+   üzenetet három szomszédnál. Ott marad legfeljebb 7 napig. Ha a partnered
+   újra online lesz, ő felmenti.
+
+**Hogyan jutsz be a hálózatba?** Az alkalmazásban nem szerepel szervercím. A
+belépést az első kapcsolatodtól kapod: a meghívója tartalmazza azokat a
+címeket, amelyeken a készüléked az első szomszédjait megtalálja. Ugyanabban a
+Wi-Fi-ben a Cleona-készülékek önmaguk is megtalálják egymást. Onnan kezdve a
+készüléked minden szomszéddal megismer továbbiakat is.
 
 ### Platformok
 
-A Cleona elerheto Android, iOS, macOS, Linux es Windows rendszerekre.
+A Cleona elérhető Androidra, iOS-re, macOS-re, Linuxra és Windowsra.
+Számítógépeken és Androidon az üzenetek és a hívások másodperceken belül
+megérkeznek. Az iPhone-on ez addig áll fenn, amíg az alkalmazás nyitva van.
+Ha nincs nyitva, az iOS csak időnként ébreszti fel rövid időre; hogy mikor,
+azt az iOS dönti el. A Cleona ilyenkor lekéri mindazt, amit neked
+megőriztek, és egy számot megjelenítő értesítést mutat az alkalmazás
+ikonján. A hívások nem érik el azt az iPhone-t, amelyen az alkalmazás nincs
+nyitva. Ez az Apple szabálya, nem a Cleona hibája.
 
 ---
 
-## 2. Elso lepesek
+## 2. Első lépések
 
-### Az alkalmazas telepitese
+### Az alkalmazás telepítése
 
 **Android:**
-1. Toltsd le az APK-fajlt a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Nyisd meg a fajlt a telefonodon. Ha szukseges, engedelyezd az ismeretlen
-   forrasbol torteno telepitesest (az Android automatikusan rakerdez).
-3. Koppints a "Telepites"-re es vard meg, amig a telepites befejezodik.
+1. Töltsd le az APK-fájlt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Nyisd meg a fájlt a telefonodon. Szükség esetén engedélyezd az ismeretlen
+   forrásból történő telepítést (az Android automatikusan megkérdez).
+3. Koppints a „Telepítés" gombra, és várj, amíg a telepítés befejeződik.
 
 **iOS:**
-1. Nyisd meg a TestFlight-meghivolinket az iPhone-odon.
-2. Koppints a "Telepites"-re. A TestFlight az Apple hivatalos modja beta
-   alkalmazasok terjesztesere.
-3. A telepites utan a Cleonat megtalalodon a kezdokepernyodon.
+1. Nyisd meg a TestFlight-meghívó linket az iPhone-odon.
+2. Koppints a „Telepítés" gombra. A TestFlight az Apple hivatalos módja a
+   béta-alkalmazások terjesztésére.
+3. A telepítés után a Cleonát a kezdőképernyődön találod.
 
 **macOS:**
-1. Toltsd le a DMG-fajlt a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Nyisd meg a DMG-t es huzd a Cleonat a Programok mappaba.
-3. Az elso indulaskor a macOS megkerdezheti, hogy meg akarod-e nyitni egy
-   azonositott fejleszto alkalmazasat -- erositsd meg.
+1. Töltsd le a DMG-fájlt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Nyisd meg a DMG-t, és húzd a Cleonát a Programok mappádba.
+3. Az első indításkor a macOS esetleg megkérdezi, hogy meg akarod-e nyitni egy
+   azonosított fejlesztő alkalmazását -- erősítsd meg.
 
 **Linux (Ubuntu/Debian):**
-1. Toltsd le a .deb-fajlt a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Telepitsd dupla kattintassal vagy a terminalban: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Inditsd el a Cleonat az alkalmazasmenubol vagy a terminalban: `cleona-chat`
+1. Töltsd le a .deb-fájlt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Telepítsd dupla kattintással vagy a terminálban: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Indítsd a Cleonát az alkalmazásmenüből vagy a terminálban a `cleona-chat-beta` paranccsal.
 
 **Linux (Fedora/openSUSE):**
-1. Toltsd le a .rpm-fajlt a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Telepitsd: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Inditsd el a Cleonat az alkalmazasmenubol vagy a terminalban: `cleona-chat`
+1. Töltsd le a .rpm-fájlt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Telepítsd így: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Indítsd a Cleonát az alkalmazásmenüből vagy a terminálban a `cleona-chat-beta` paranccsal.
 
-**Linux (minden disztribucio -- AppImage):**
-1. Toltsd le az .AppImage-fajlt a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Tedd futtathatova a fajlt: jobb kattintas, Tulajdonsagok, Futtathato, vagy a terminalban: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Inditsd el dupla kattintassal vagy a terminalban: `./cleona-chat-VERSION-x86_64.AppImage`
+**Linux (minden disztribúció -- AppImage):**
+1. Töltsd le az .AppImage-fájlt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Tedd a fájlt futtathatóvá: jobb kattintás, Tulajdonságok, Futtatható, vagy a
+   terminálban: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Indítsd dupla kattintással vagy a terminálban: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+A csomagnevek a bétára vonatkoznak, amely jelenleg az egyetlen közzétett
+változat; így hívják: `cleona-chat-beta`.
 
 **Windows:**
-1. Toltsd le a telepitot a Cleona weboldalrol vagy a GitHub Releases oldalrol.
-2. Futtasd a telepitofajlt es kovesd az utasitasokat.
-3. Inditsd el a Cleonat a Start menubol vagy az asztali parancsikonrol.
+1. Töltsd le a telepítőt a Cleona-weboldalról vagy a GitHub Releasesből.
+2. Futtasd a telepítőfájlt, és kövesd az utasításokat.
+3. Indítsd a Cleonát a Start menüből vagy az asztali parancsikonról.
 
-### Identitas letrehozasa
+### Identitás létrehozása
 
-Az elso indulaskor a Cleona automatikusan letrehoz egy uj identitast szamodra.
-Megadhatsz egy megjelenesi nevet -- ez az a nev, amelyet a kontaktjaid latni
-fognak. Ezt a nevet barmikor modosithatod.
+Az első indításkor a Cleona automatikusan létrehoz neked egy új identitást.
+Adhatsz magadnak egy megjelenítendő nevet -- ez az a név, amelyet a kapcsolataid
+látnak. Ez a név bármikor módosítható.
 
-### Seed-Phrase felirasa -- a legfontosabb teendo
+### Seed-kifejezés leírása -- a legfontosabb egyáltalán
 
-Az identitasod letrehozasa utan a Cleona megmutat neked 24 szot. Ez a te
-**Seed-Phrase-ed** -- a szemelyes helyreallitasi kulcsod.
+Az identitásod létrehozása után a Cleona 24 szót mutat neked. Ez a te
+**seed-kifejezésed** -- a személyes helyreállítási kulcsod.
 
-**Ird fel ezt a 24 szot papirra es orizd biztonsagos helyen.**
+**Írd fel ezt a 24 szót papírra, és őrizd biztonságban.**
 
-Miert olyan fontos ez?
+Miért olyan fontos ez?
 
-- Ha a telefonod elromlik, elveszik vagy ellopjak, ezzel a 24 szoval a
-  teljes identitasodat helyreallithatod egy uj keszuleken.
-- A Seed-Phrase nelkul nincs visszaut. Nincs "Elfelejtett jelszo" gomb es
-  nincs ugyfelszolgalat, amely visszaadhatna a fiokod -- hiszen egyaltalan
-  nincs fiok egyetlen szerveren sem.
-- Soha ne add meg a Seed-Phrase-t masoknak. Aki ismeri ezeket a szavakat,
-  az a te nevedben lephet fel.
+- Ha a telefonod tönkremegy, elveszik vagy ellopják, ezzel a 24 szóval a
+  teljes identitásodat helyreállíthatod egy új készüléken.
+- A seed-kifejezés nélkül nincs visszaút. Nincs „elfelejtett jelszó" gomb és
+  nincs olyan ügyfélszolgálat, amely visszaadhatná a fiókodat -- mert
+  egyáltalán nincs fiók egy szerveren. A kapcsolataid sem tudják
+  helyreállítani az identitásodat, bármennyien is legyenek. Egy második
+  készülék ugyanazzal az identitással egy későbbi verzióval jön (lásd a 11.
+  fejezetet).
+- Soha ne add tovább a seed-kifejezést másnak. Aki ismeri ezeket a szavakat,
+  kiadhatja magát teként.
 
-A Seed-Phrase-t kesobb is megtekintheted a beallitasokban a "Biztonsag"
-pont alatt, ha meg egyszer el szeretned olvasni.
+A 24 szót később a beállítások „Biztonsági mentés" -> „Helyreállítási
+kifejezés megjelenítése" alatt találod meg, ha újra le akarod olvasni.
+Androidon ehhez a képernyőzáraddal erősíted meg.
 
-### Elso kontakt hozzaadasa
+### Első kapcsolat hozzáadása
 
-Ahhoz, hogy valakivel csevegj, eloszor kontaktkent kell hozzaadnod az illetot.
-Ehhez tobb lehetoseg is van -- mindet a kovetkezo fejezetben ismertetjuk.
-
----
-
-## 3. Kontaktok
-
-### QR-kod beolvasasa (ajanlott)
-
-A legegyszerubb mod kontakt hozzaadasara:
-
-1. A masik fel megnyitja az identitas-reszletek oldalt (koppintson a sajat
-   nevere a felso savban) es megmutatja a QR-kodjat.
-2. Te koppints a Plusz gombra es valaszd a "QR-kod beolvasasa" lehetoseget.
-3. Tartsd a telefonodat a masik fel QR-kodja ele.
-4. A kontaktkeres automatikusan elkuldesre kerul. Amint a masik fel elfogadja,
-   mar irhattok egymasnak.
-
-Ha szemelyesen talalkoztok, a QR-kod a legbiztonsagosabb modszer, mert
-pontosan tudod, kivel cserelsz kontaktadatot.
-
-### NFC (telefonok osszeertintese)
-
-Ha mindket keszulek tamogatja az NFC-t:
-
-1. Mindketten nyissatok meg a kontakt hozzaadasa funkciot.
-2. Tartsatok a telefonokat hattal egymasnak.
-3. A kontaktadatok automatikusan kicserelodnek.
-
-Az NFC a QR-kodhoz hasonloan magas biztonsagot nyujt, mert a csere csak
-akkor mukodik, ha fizikailag egymas mellett alltok.
-
-### Link megosztasa (cleona://-URI)
-
-A kontaktlinkedet e-mailben, SMS-ben vagy mas uzenetoalkalmazason keresztul
-is elkuldheted:
-
-1. Nyisd meg az identitas-reszletek oldalad.
-2. Masold ki a cleona://-linked.
-3. Kuldd el a linket annak a szemelynek, akinek hozza kell adnia teged.
-4. A masik szemely megnyitja a linket, vagy beilleszti a kontakt hozzaadasa
-   dialogusba.
-
-Fontos: ennel a modszernel abban bizol, hogy a linket az atviteli uton nem
-valtoztatta meg senki. Kulonosen erzekeny kontaktoknal a QR-kodot vagy az
-NFC-t ajanjuk.
-
-### Kontaktkelmek elfogadasa
-
-Ha valaki kontaktkerelmet kuld neked, az megjelenik a bejovo uzenetek kozott
-(az utolso ful az also savban). Itt a kovetkezoket teheted:
-
-- **Elfogadas** -- a szemely felkerul a kontaktjaid koze.
-- **Elutasitas** -- a keres elvetesre kerul.
-- **Tiltas** -- a szemely nem kuldhet tobb kerest neked.
-
-### Verifikacios szintek
-
-A Cleona megmutatja, mennyire biztonsagosan van igazolva egy kontaktod
-identitasa:
-
-| Szint | Jelentes |
-|-------|----------|
-| Ismeretlen | Csak a Node-ID-t vagy egy linket kaptal. |
-| Latott | A kulcscsere sikeres volt, titkositottan kommunikalhattok. |
-| Verifikalt | Szemelyesen talalkoztatok es QR-koddal vagy NFC-vel igazoltatok egymast. |
-| Megbizhato | Kifejezetten megbizhatokent jelolted meg ezt a kontaktot. |
-
-Minel magasabb a szint, annal biztosabb lehetsz benne, hogy tenyleg a
-megfelelo szemelylyel beszelsz.
+Ahhoz, hogy valakivel csevegj, először kapcsolatként kell hozzáadnod a személyt.
+Ehhez több út van -- mindegyiket a következő szakasz magyarázza el.
 
 ---
 
-## 4. Uzenetek
+## 3. Kapcsolatok
 
-### Szoveg kuldese es fogadasa
+### A te meghívód
 
-Egyszeruen gepeld be az uzenetedet az also beviteli mezobe es nyomd meg az
-Enter billentyut vagy a Kuldes gombot. Az uzeneted automatikusan
-titkositasra kerul, mielott elhagyna a keszulekedet.
+A Cleonánál kapcsolatok csak meghívón keresztül jönnek létre. A meghívód az
+első indítástól ott van -- internet nélkül is, még mielőtt a készüléked
+egyáltalán szomszédot talált volna. Az identitás-részletek oldalán találod
+(koppints a saját nevedre a felső sávban).
 
-A bejovo uzenetek a csevegesi elozmenyekben jelennek meg. Egy pipa jelzi,
-hogy az uzeneted kezbesitesre kerult-e.
+A meghívó két formában létezik, amely pontosan ugyanazt tartalmazza:
 
-### Kepek, videok es fajlok kuldese
+- **QR-kódként**, ha a partnered melletted áll, és
+- **szövegsorként**, amelyet e-mailben, SMS-ben vagy egy másik üzenetküldőn
+  keresztül küldesz el.
 
-Tobb lehetoseged is van:
+A meghívó nem tartalmaz telefonszámot és nem tartalmaz egy címtárból származó
+nevet. A nyilvános kulcsaidat és azokat a címeket tartalmazza, amelyeken a
+partnered elér téged és a szomszédjaidat. Olyasvalakinek, aki most telepíti a
+Cleonát, a meghívód ezért egyben a belépés is a hálózatba.
 
-- **Gembkapocs ikon** a beviteli mezoben: koppints ra, hogy fajlt, kepet
-  vagy videot valassz a galeriadbol vagy a fajlrendszeredbol.
-- **Drag and Drop** (asztali gepen): huzd a fajlt egyszeruen a csevegesi
-  ablakba.
-- **Beillesztes a vagolaprol** (asztali gepen): masolj egy kepet es
-  illeszd be a csevegben.
+### QR-kód beolvasása (ajánlott)
 
-Kis fajlok (256 KB alatt) kozvetlenul elkuldesre kerulnek. Nagyobb fajlok
-ketlepcsos eljarassal kerulnek atvitelre: eloszor a fajl bejelentese, majd
-reszenkent tortenik az atvitel.
+Ha személyesen találkoztok:
 
-### Hanguzenet
+1. Mutasd a partnerednek a meghívód QR-kódját.
+2. A partnered koppint a plusz gombra, választja a „QR-kód beolvasása"
+   lehetőséget, és a kamerát a képernyődre tartja. Ez a számítógép webkamerájával
+   is működik.
+3. A kérés hozzád érkezik, és **automatikusan elfogadásra kerül** -- hiszen
+   te magad mutattad az imént a kódot.
 
-1. Tartsd lenyomva a Mikrofon gombot a beviteli mezoben.
-2. Mond el az uzenetedet.
-3. Engedd el a gombot az uzenet elkuldesehez.
+Egy QR-kód csak egyszer érvényes: az első érvényes kérés elfogadásra kerül,
+utána a meghívó felhasználtnak minősül. A QR-kód a legbiztonságosabb módszer,
+mert közben pontosan tudjátok, kivel cserélitek a kapcsolatot.
 
-Ha a keszulemekeden be van kapcsolva a beszedfelmeres (lasd Beallitasok), a
-hanguzeneted automatikusan szovegge alakul. A masik fel igy a felvetelt es
-az atirt szoveget is latja.
+### NFC (telefonok összeérintése)
 
-### Uzenetek megvalaszolasa (idezes)
+Ha mindkét készülék támogatja az NFC-t:
 
-Egy adott uzenetre valo valaszolashoz:
+1. Mindketten nyissátok meg a kapcsolat-hozzáadás funkciót.
+2. Tartsátok össze a telefonjaitokat hátoldallal egymáshoz.
+3. A meghívó átkerül, és automatikusan elfogadásra kerül.
 
-1. Nyisd meg a harom pontos menut az uzenet mellett.
-2. Valaszd a "Valasz" lehetoseget.
-3. A beviteli mezo felett megjelenik egy banner az idezett uzenettel.
-4. Ird meg a valaszodat es kuldd el.
+Az NFC a QR-kódhoz hasonlóan magas biztonságot kínál, mert a csere csak akkor
+működik, ha fizikailag egymás mellett álltok.
 
-Az idezett uzenet megjelenik a valaszodban, igy egyertelmu az osszefugges.
+### Szövegsor elküldése
 
-### Uzenetek szerkesztese es torlese
+Ha nem tudtok találkozni:
 
-- **Szerkesztes:** az uzenet harom pontos menujebol, majd "Szerkesztes".
-  Modositsd a szoveget es kuldd el ujra. A masik fel latja, hogy az
-  uzenetet szerkesztettek. A szerkesztes a kuldes utani 15 percen belul
-  lehetseges.
-- **Torles:** az uzenet harom pontos menujebol, majd "Torles". Az uzenet
-  mind nalad, mind a masik felnel eltunik. A sajat uzeneteidet barmikor
-  toriheted -- nincs idokorlat a torlesre.
+1. Nyisd meg a meghívódat, és másold ki a szövegsort.
+2. Küldd el annak a személynek, aki hozzád akar adni -- e-mailben, SMS-ben
+   vagy egy másik üzenetküldőn keresztül.
+3. A másik személy illessze be a sort a Cleonában a kapcsolat-hozzáadás
+   ablakban.
+4. A kérés nálad a **„Kérések"** alatt jelenik meg. Itt **nem** történik
+   automatikus elfogadás: te magad döntesz, hiszen nem tudhatod, ki olvasta
+   még a sort útközben.
 
-### Emoji-reakciok
+### Kapcsolatkérések elfogadása
 
-Valasz irasa helyett egy emojiival is reagalhatsz egy uzenetre:
+Egy beérkező kérés még nem hoz létre kapcsolatot. Feltéz neked egy kérdést, és
+a **„Kérések"** fülön jelenik meg. Ott látod a nevet és az ellenőrzési
+szintet, és választhatsz:
 
-1. Nyisd meg a harom pontos menut, vagy tartsd hosszan lenyomva az uzenetet.
-2. Valassz egy emojit a gyorsvalasztekbol, vagy nyisd meg az emoji-valasztot
-   a teljes kinalatert.
-3. A reakciod megjelenik az uzenet alatt.
+- **Elfogadás** -- csak most válik a személy a kapcsolatoddá.
+- **Elutasítás** -- a kérés elvetésre kerül.
+- **Letiltás** -- a személy nem küldhet neked további kéréseket.
 
-### Szoveg masolasa
+### Soha ne állandó szomszédként használni
 
-Az uzenet harom pontos menujen keresztul az uzenet szoveget a vagolapra
-masolhatod.
+Egy kapcsolat menüjében megtalálod a **„Soha ne állandó szomszédként használni"**
+kapcsolót (alapértelmezés: ki). Ha be van kapcsolva, ez a kapcsolat nem
+továbbít neked üzeneteket, és így nem is tudja meg, mikor küldesz vagy fogadsz
+üzeneteket. Arra az esetre van gondolva, ha a veszély a saját környezetedből
+fenyeget.
 
-### Uzenetek keresese
+Az ismeretlenektől (sem kapcsolat, sem egy közös csoport tagja) a Cleona egy
+ilyen kérésen kívül semmit sem enged át -- sem üzenetet, sem hívást, sem fájlt.
+És még a kérés is csak akkor érkezik be,
+ha a feladó előbb megoldott egy kis számítási feladatot. Ez tömeges spammelést
+drágává teszi.
 
-A csevegesi ablak felso reszen talalhato a keresofunkcio. Adj meg egy
-keresokifejezest, es a Cleona megmutatja az osszes talalatot az aktualis
-csevegben. A nyilgombokkal lephetsz a talalatok kozott.
+### Ellenőrzési szintek
 
-A kezdokepernyoen tovabba van egy fulek koze kiterjedt keresoszuro, amellyel
-az osszes beszelgetesben kereshetsz egy kifejezesre.
+A Cleona jelzi neked, mennyire biztosan igazolt egy kapcsolat identitása:
 
-### Link-elonezet
+| Szint | Jelentés |
+|-------|-----------|
+| Nem ellenőrzött | Kapcsolatban vagytok, de semmi sem igazolja, hogy tényleg a megfelelő személy áll mögötte. |
+| Látva | A kulcscsere sikeres volt, titkosítva tudtok kommunikálni. |
+| Ellenőrizve | Személyesen találkoztatok, és kamerás szkenneléssel vagy NFC-vel csatlakoztatok. |
+| Megbízható | Ezt a kapcsolatot kifejezetten megbízhatónak jelölted. |
 
-Amikor linket kuldesz, a Cleona automatikusan letrehoz egy elonezetet (cim,
-leiras, elonezeti kep). Ezt az elonezetet a te keszuleked kesziti el es
-kuldi az uzenettel egyutt -- a masik felnek nem kell kapcsolodnia a
-linkelt weboldalhoz.
+„Ellenőrizve" csak a személyes cserénél létezik. Egy olyan meghívó, amely
+csevegéssel vagy e-maillel érkezett, soha nem éri el ezt a szintet -- akkor
+sem, ha ugyanazokat az adatokat tartalmazza.
 
-Ha egy kapott linkre koppintasz, a rendszer megkerdezi, hogy a normala
-bongeszeben, inkognito modban vagy egyaltalan ne nyissad-e meg.
+Ha egy kapcsolat kulcsai bejelentés nélkül megváltoznak, a Cleona
+visszaállítja „Nem ellenőrzött"re. Ez megvéd attól, hogy valaki észrevétlenül
+a kapcsolatodnak adja ki magát.
+
+---
+## 4. Üzenetek
+
+### Szöveg küldése és fogadása
+
+Írd be egyszerűen az üzenetedet az alsó beviteli mezőbe, és nyomd le az Entert
+vagy a küldés gombot. Az üzeneted automatikusan titkosításra kerül, mielőtt
+elhagyja a készülékedet.
+
+A beérkező üzenetek a csevegés előzményében jelennek meg.
+
+### Mit jelentenek az üzeneted jelei
+
+| Jel | Jelentés |
+|---------|-----------|
+| Óra | Az üzenet létrejött, de még egyetlen út sem vitte el. |
+| Egy pipa | Az üzenet úton van. Ez érvényes addig is, amíg a postafiókban várakozik a partneredre. |
+| Két pipa | Kézbesítve: a partnered készüléke visszaigazolta a kézbesítést. |
+| Figyelmeztető jel | 14 napig egyetlen út sem vitte el az üzenetet. Koppints rá, hogy újra elküldd. |
+
+**Az offline nem hiba.** Ha a partnered nem érhető el, az üzenet egy pipánál
+marad, amíg fel nem mélik -- nem veszett el. Ha a te készülékednek magának
+nincs kapcsolata, az üzenet az óránál marad, és magától elindul, amint újra
+van egy út. A figyelmeztető jel csak akkor jelenik meg, ha 14 napig nem
+talált utat; akkor újra elküldheted.
+
+Ez akkor is érvényes, ha egy iPhone-on az alkalmazás nincs nyitva: az üzenet
+a postafiókban vár, amíg az iOS rövid időre fel nem ébreszti az alkalmazást,
+vagy amíg a partnered meg nem nyitja. Ez tovább tarthat, mint más
+készülékeken.
+
+Két pipa csak akkor van, ha a címzett maga igazolja vissza a kézbesítést. Ez
+a visszaigazolás titkosított és aláírt -- senki útközben nem hamisíthatja meg,
+hogy kézbesítést színleljen neked.
+
+### Képek, videók és fájlok küldése
+
+Több lehetőséged van:
+
+- **Gemkapocs-ikon** a beviteli mezőben: Koppints rá, hogy kiválassz egy fájlt,
+  képet vagy videót a galériádból vagy a fájlrendszeredből.
+- **Fogd és vidd** (asztali): Húzz egy fájlt egyszerűen a csevegés ablakába.
+- **Beillesztés a vágólapról** (asztali): Másolj egy képet, és illeszd be a
+  csevegésbe.
+
+Kis fájlok (256 KB alatt) közvetlenül az üzenetben utaznak. A nagyobb fájlok
+darabokra bontódnak, és hibajavítással látják el őket, úgyhogy az egyes
+elveszett darabok nem okoznak gondot. Ha mindketten online vagytok, egy
+szomszédon keresztül kerülnek streamelve; különben olyan készülékeknől kerülnek
+letétbe, amelyek folyamatosan elérhetők, amíg a partnered fel nem médi őket.
+
+256 KB-tól a Cleona fájlonként megkérdez, mielőtt elküldené: egy nagy fájl
+nem mehet az üzeneteid útján. A tartalma titkosított marad, és a partnered
+nem tudja meg az internetcímedet. Az átvitel viszont kívülről eseményként
+látszik, és egy idegen készülék, amely továbbítja vagy megőrzi, látja, ki
+tölti fel, és ki méri le. A beleegyezésed csak erre az egy fájlra érvényes.
+
+### Hangüzenetek
+
+1. Tartsd nyomva a mikrofongombot a beviteli mezőben.
+2. Mondd el az üzenetedet.
+3. Engedd el a gombot, hogy elküldd az üzenetet.
+
+Ha a készülékeden be van kapcsolva a beszédfelismerés (lásd a beállításokat),
+a hangüzeneted automatikusan szöveggé íródik át. A partnered ekkor mind a
+felvételt, mind az átiratolt szöveget látja.
+
+### Üzenetek megválaszolása (idézés)
+
+Egy adott üzenetre való válaszoláshoz:
+
+1. Nyisd meg az üzenet melletti hárompontos menüt.
+2. Válaszd az „Válasz" lehetőséget.
+3. A beviteli mező felett megjelenik egy sáv az idézett üzenettel.
+4. Írd meg a válaszodat, és küldd el.
+
+Az idézett üzenet a válaszodban megjelenik, hogy az utalás egyértelmű legyen.
+
+### Üzenetek szerkesztése és törlése
+
+- **Szerkesztés:** Az üzenet hárompontos menüje, majd „Szerkesztés". Módosítsd
+  a szöveget, és küldd el újra. A partnered látja, hogy az üzenet szerkesztve
+  lett. A szerkesztés a küldéstől számított 15 percen belül lehetséges.
+- **Törlés:** Az üzenet hárompontos menüje, majd „Törlés". Az üzenet nálad és
+  a partnerednél is eltávolításra kerül. A saját üzeneteid bármikor törölheted
+  -- nincs időablak a törlésre.
+
+### Emoji-reakciók
+
+Ahelyett, hogy választ írnál, egy emoji-val is reagálhatsz egy üzenetre:
+
+1. Nyisd meg a hárompontos menüt, vagy tartsd hosszan nyomva az üzenetet.
+2. Válassz egy emoji-t a gyorsválasztóból, vagy nyisd meg az emoji-választót
+   a teljes kínálatért.
+3. A reakciód az üzenet alatt jelenik meg.
+
+### Szöveg másolása
+
+Egy üzenet hárompontos menüjéből a vágólapra másolhatod az üzenet szövegét.
+
+### Üzenetek keresése
+
+A csevegés ablakának felső szélén találod a kereső funkciót. Írj be egy
+keresőkifejezést, és a Cleona megmutatja az összes találatot az aktuális
+csevegésben. A nyílgombokkal ugorhatsz a találatok között oda-vissza.
+
+A kezdőlapon emellett van egy fülek közötti keresési szűrő is, amellyel az
+összes beszélgetést átkutathatod egy kifejezésre.
+
+### Link-előnézet
+
+Ha egy linket küldesz, a Cleona automatikusan előnézetet készít (cím,
+leírás, előnézeti kép). Ezt az előnézetet a te készüléked hozza létre, és
+együtt küldi el -- a partnerednek emiatt nem kell kapcsolatot létesítenie a
+hivatkozott weboldallal.
+
+Azt, hogy mit tesz egy koppintás egy beérkezett linkre, a beállítások „Linkek
+megnyitása" alatt állítod be: „Normál", „Privát ablak előnyben részesítve"
+(ahol a készülék nem tud privát ablakot nyitni, a link normál módon nyílik
+meg) vagy „Rákérdezés minden alkalommal".
 
 ---
 
 ## 5. Csoportok
 
-### Csoport letrehozasa
+### Csoport létrehozása
 
-1. Valts a "Csoportok" fulre.
-2. Koppints a Plusz gombra.
-3. Adj nevet a csoportnak.
-4. Valaszd ki a meghivni kivant kontaktokat.
-5. Koppints a "Letrehozas"-ra.
+1. Válts a „Csoportok" fülre.
+2. Koppints a plusz gombra.
+3. Adj a csoportnak egy nevet.
+4. Válaszd ki a kapcsolatokat, akiket meg akarsz hívni.
+5. Koppints a „Létrehozás" gombra.
 
-A meghivott kontaktok ertesitest kapnak es csatlakozhatnak a csoporthoz.
+A meghívott kapcsolatok értesítést kapnak, és csatlakozhatnak a csoporthoz.
 
-### Tagok meghivasa
+### Hogyan védettek a csoportüzenetek
 
-A letrehozas utan is meghivhatsz tovabbi kontaktokat:
+Egy legfeljebb 16 tagú csoportban a Cleona minden üzenetet minden tagnak
+egyenként küld -- mindegyet csak annak a tagnak titkosítva, mintha mindegyiknek
+egy külön üzenetet írtál volna. A pipák egy csoportüzeneten annak a tagnak az
+állapotát mutatják, akinél a legkevésbé jutott előre.
 
-1. Nyisd meg a csoportinfot (harom pontos menu a csoportattekintesben vagy
-   felso sav a csoportos csevegben).
-2. Koppints a "Meghivas"-ra.
-3. Valaszd ki a hozzaadni kivant kontaktokat.
+Ha a csoport 16 tag fölé nő, közös kulcsot használ. Az minden nap változik,
+és újra sorsolják, ha egy tag kilép vagy eltávolítják; egy új tag csak a
+csatlakozásától olvas. Ott a pipák már nem minden tag állapotát mutatják,
+hanem azt, hogy az üzenet a hálózatban lett letéve. Ha a csoport 12 vagy
+kevesebb tagra csökken, visszaáll az egyenkénti küldés.
 
-### Szerepkorok
+### Képek a csoportokban és csatornákban
 
-Minden csoportban harom szerepkor letezik:
+Egy csoport vagy csatorna beállításaiban a „Képek mindig betöltése"
+kapcsolóval állítod be, hogy a képek azonnal betöltődjenek, vagy csak akkor,
+amikor rájuk koppintasz.
 
-- **Tulajdonos (Owner):** teljes jogosultsaggal rendelkezik. Tagokat adhat
-  hozza es tavolithat el, adminisztratorokat nevezhet ki es kezelheti a
-  csoportot. A tulajdonos atruhazhata statuszat egy masik tagra is.
-- **Adminisztrator:** tagokat tavolithat el es segithet az uzemeltetesben.
-- **Tag:** uzeneteket olvashat es irhat.
+### Tagok meghívása
 
-### Csoport elhagyasa
+A létrehozás után is meghívhatsz további kapcsolatokat:
 
-1. Nyisd meg a harom pontos menut a csoportattekintesben.
-2. Valaszd az "Elhagyas" lehetoseget.
-3. Erositsd meg a dontesedet.
+1. Nyisd meg a csoportinformációkat (hárompontos menü a csoport áttekintésében
+   vagy a felső sáv a csoportcsevegésben).
+2. Koppints a „Meghívás" gombra.
+3. Válaszd ki a kapcsolatokat, akiket hozzá akarsz adni.
 
-Ha elhagysz egy csoportot, a korabbi uzeneteid a tobbi tag szamara lathatoak
+### Szerepkörök
+
+Minden csoportban három szerepkör van:
+
+- **Tulajdonos (Owner):** Teljes kontrollja van. Hozzáadhat és eltávolíthat
+  tagokat, adminokat nevezhet ki, és kezelheti a csoportot. A tulajdonos az
+  státuszát egy másik tagra is átruházhatja.
+- **Admin:** Eltávolíthat tagokat, és segít a csoport kezelésében.
+- **Tag:** Olvashat és írhat üzeneteket.
+
+### Csoport elhagyása
+
+1. Nyisd meg a hárompontos menüt a csoport áttekintésében.
+2. Válaszd az „Elhagyás" lehetőséget.
+3. Erősítsd meg a döntésedet.
+
+Ha elhagyod a csoportot, az eddigi üzeneteid a többi tag számára láthatóak
 maradnak.
 
 ---
 
-## 6. Nyilvanos csatornak
+## 6. Nyilvános csatornák
 
-### Mik azok a csatornak?
+### Mik azok a csatornák?
 
-A csatornak nyilvanos vitaforumok a Cleona-halozaton belul. A csoportokkal
-ellentetben itt barki olvashatja az uzeneteket anelkul, hogy meghivast kapna.
-Csak a tulajdonos es az adminisztratorok tehetnek kozze bejegyzeseket --
-a feliratkozok olvasnak.
+A csatornák a Cleona-hálózaton belüli nyilvános vitafórumok. A csoportokkal
+ellentétben itt mindenki olvashat anélkül, hogy meg kellene hívni. Csak a
+tulajdonos és az adminok tehetnek közzé bejegyzéseket -- a feliratkozók
+csak olvassák.
 
-### Csatornak keresese es feliratkozas
+### Csatornák keresése és csatlakozás
 
-1. Valts a "Csatornak" fulre.
-2. Nyisd meg a "Kereses" fult.
-3. Kergesd az elerheto csatornakat nev vagy tema alapjan.
-4. Koppints egy csatornara, majd koppints a "Feliratkozas"-ra.
+1. Válts a „Csatornák" fülre.
+2. Nyisd meg a „Keresés" fület.
+3. Keresd át az elérhető csatornákat név vagy téma szerint.
+4. Koppints egy csatornára, majd az „Feliratkozás" gombra.
 
-A csatornak nyelv szerint szurhetok. Egyes csatornak "Nem kiskoruaknak"
-jelzessel vannak ellatva -- ezek csak akkor lathatoak, ha a profilodban
-megerositetted, hogy 18 ev feletti vagy.
+A csatornák nyelv szerint szűrhetők. Egyes csatornák „Nem ifjúsági" jelöléssel
+ellátottak -- ezek csak akkor láthatók, ha a profilodban megerősítetted, hogy
+18 évesnél idősebb vagy.
 
-### Sajat csatorna letrehozasa
+### Saját csatorna létrehozása
 
-1. Valts a "Csatornak" fulre.
-2. Koppints a Plusz gombra.
-3. Adj meg egy csatornanevet (az egesz halozatban egyedinek kell lennie).
-4. Valaszd ki a nyelvet es hogy a csatorna nyilvanos vagy privat legyen-e.
-5. Opcionalis: adj hozza leirast es kepet.
-6. Koppints a "Letrehozas"-ra.
+1. Válts a „Csatornák" fülre.
+2. Koppints a plusz gombra.
+3. Írj be egy csatornanevet (az egész hálózatban egyedinek kell lennie).
+4. Válaszd ki a nyelvet, és hogy a csatorna nyilvános vagy privát legyen.
+5. Opcionális: Adj hozzá leírást és egy képet.
+6. Koppints a „Létrehozás" gombra.
 
-Nyilvanos csatornaknal meghatarozhatod, hogy a tartalom "Nem kiskoruaknak"
-besorolasu legyen-e.
+A nyilvános csatornáknál beállíthatod, hogy a tartalom „Nem ifjúsági"
+besorolású-e.
 
-### Tartalom bejelentese
+### Tartalmak jelentése
 
-Ha egy nyilvanos csatornaban nem megfelelo tartalmat latsz, bejelentheted
-azt. A Cleona decentralizalt moderacios rendszert hasznal: a bejelenteseket
-a halozat veletlenszeruen kivalasztott tagjai biraljak el (egyfajta
-"eskudtszek"). Ha szabalysertest allapitanak meg, a csatorna figyelmeztetest
-kap. Ismetelt szabalysertes eseten a keresesi indexben hatrebb sorolodik
-vagy zarolasra kerul.
+Ha egy nyilvános csatornában nem megfelelő tartalmat veszel észre, jelentheted.
+A Cleona decentralizált moderációs rendszert használ: a jelentéseket a hálózat
+véletlenszerűen kiválasztott tagjai értékelik (egyfajta „esküdtbíróság").
+Ha visszaélést állapítanak meg, a csatorna figyelmeztetést kap. Ismételt
+visszaélések esetén a keresési indexben visszasorolásra kerül, vagy blokkolják.
 
-### Rendszercsatornak
+### Rendszercsatornák
 
-A Cleona ket beepitett rendszercsatornaval rendelkezik:
+A Cleona két beépített rendszercsatornával rendelkezik:
 
-- **Bug Log:** ha a Cleona hibat eszlel, megkerdezi, hogy szeretnel-e
-  anonimizalt hibajellentest kuldeni. Ezek a jelentesek a Bug Log
-  csatornaba kerulnek, ahol a kozosseg megtekintheti oket. Nem kerulnek
-  szemelyes adatok atvitelre -- csak technikai hibairasok. Kezzel is
-  kuldhetsz naplojellenteset (elonezeti dialogussal es kifejezett
-  hozzajarulassal).
-- **Feature Requests:** itt a felhasznalok funkciokivanssagokat nyujthatnak
-  be es szavazhatnak a meglevo javaslatokra. A javaslatok szavazatok
-  szerint rendezodnek.
+- **Bug Log:** Ha a Cleona hibát észlel, megkérdezi, hogy akarsz-e
+  hibajelentést küldeni; előtte pontosan látod, mit tesznek közzé. Ezek a
+  jelentések a Bug-Log csatornába
+  kerülnek, ahol a közösség megtekintheti őket. Egy jelentés nem hordoz nevet
+  és nem a beszélgetéseid tartalmát, hanem egy álnevet. A béta esetében
+  emellett feltünteti az azonosítódat (User-ID), hogy a fejlesztők rá tudjanak
+  kérdezni. Manuálisan is küldhetsz log-jelentést
+  (előnézeti ablakkal és kifejezett hozzájárulással).
+- **Feature Requests:** Itt a felhasználók funkciókéréseket nyújthatnak be,
+  és szavazhatnak a meglévő javaslatokra. A javaslatok szavazatok szerint
+  rendezve.
 
-Mindket rendszercsatorna 25 MB-os meretkorlattal rendelkezik es az
-eskudtszek-moderacios rendszer felugyelete alatt all.
+Minden számítógép legfeljebb 25 MB-ot tart rendszercsatornánként, minden
+telefon legfeljebb 5 MB-ot; ha megtelt, a legrégebbi megy el először -- soha
+nem az, amit te magad már láttál.
+
+---
+## 7. Hívások
+
+### Hanghívás indítása
+
+1. Nyisd meg a csevegést azzal a kapcsolattal, akit fel akarsz hívni.
+2. Koppints a telefon szimbólumra a felső sávban.
+3. Várj, amíg a partnered felveszi a hívást.
+
+A beszélgetés alatt látsz egy idővonalat, a hívás hosszát, és hozzáférsz a
+némításhoz és a hangszóróhoz.
+
+A letételhez koppints a piros letétel gombra.
+
+Ha „Nem elérhető” jelzést látsz, a partnered készüléke most nem érhető el,
+például egy iPhone, amelyen az alkalmazás nincs nyitva. Írj helyette
+üzenetet.
+
+### Videohívás indítása
+
+1. Nyisd meg a csevegést a kapcsolattal.
+2. Koppints a kamera szimbólumra a felső sávban.
+3. A videód egy kis ablakban jelenik meg, a partnered képe a nagy területen.
+
+A beszélgetés alatt válthatsz az előlap és a hátlap kamera között.
+
+### Beérkező hívások
+
+Ha valaki felhív, megjelenik egy értesítési ablak a hívó nevével. Választhatsz:
+
+- **Felvesz** -- a beszélgetés elkezdődik.
+- **Elutasít** -- a hívó értesítést kap.
+
+Ha épp beszélgetésben vagy, egy új hívás nem cseng; helyette egy „Nem fogadott
+hívás" üzenetet kapsz. Ugyanez érvényes egy csoportos hívásra, amelyet nem
+fogadtál -- az üzenet akkor a csoportcsevegésben áll.
+
+Ha valaki egy olyan identitásodat hívja, amely épp nincs megjelenítve, akkor
+is cseng; a hívás képernyője megmondja, melyik identitásodat hívják.
+
+Az iPhone-on csak akkor csöng, ha az alkalmazás nyitva van. Aki akkor hív,
+amíg nincs nyitva, 10 másodperc után „Nem elérhető” jelzést lát. Amint
+megnyitod az alkalmazást, találsz egy üzenetet a nem fogadott hívásról.
+
+### Csoportos hívások
+
+Olyan csoportos hívásokat is folytathatsz, amelyeken több személy vesz részt
+egyszerre. A hívást egy intelligens továbbítási fa szervezi, úgyhogy nem kell
+minden résztvevőnek mindenkivel közvetlenül kapcsolódnia. Minden beszélgetés
+végig titkosított.
+
+Bármely csoporttag indíthat csoportos hívást. Két résztvevő, akik nem egymás
+kapcsolatai, sosem látják a másik internetcímét: a hangjuk és a képük egy
+olyan résztvevőn fut át, aki mindkettővel kapcsolatban van. Ha nincs ilyen,
+a kettő nincs összekapcsolva, és a csempe azt mondja: „Nincs közös kapcsolat
+a hívásban". Ha egy továbbítás ki van terhelve, a hang megmarad, és a videó
+e pár számára elmarad.
+
+### Titkosítás a hívásoknál
+
+Minden hívás egyszeri kulcsokkal titkosított, amelyek csak a beszélgetés
+idejére léteznek. A letétel után ezek a kulcsok azonnal törlődnek. Senki sem
+tud egy múltbeli beszélgetést utólag visszafejteni.
+
+Őszintén: a hívások, ahol csak lehetséges, közvetlenül a készülékek között
+folynak, mert már egy kis késés is zavarja a beszédet. Az üzenetekkel ellentétben
+az internetszolgáltatód egy hívásnál emiatt láthatja, melyik internetcímmel
+vagy összeköttetésben. Amit mondtok, azt nem látja.
+
+Hívásnál a kapcsolatod is látja az internetcímedet. Ha ezt egy kapcsolatnál
+nem szeretnéd, kapcsold ki a menüjében a „Hívások engedélyezése" kapcsolót
+(alapértelmezés: be). Ha csak később kapcsolod ki, egy már látott cím
+továbbra is ismert marad nála.
 
 ---
 
-## 7. Hivasok
+## 8. Naptár
 
-### Hanghivas inditasa
+A Cleona tartalmaz egy beépített naptárt, amely titkosított és teljesen
+decentralizált módon működik -- felhőszolgáltatás nélkül.
 
-1. Nyisd meg a csevgest azzal a kontakttal, akit hivni szeretnel.
-2. Koppints a telefon ikonra a felso savban.
-3. Vard meg, amig a masik fel elfogadja a hivast.
+### Nézetek
 
-A beszelgetes soran latod az idovonalat, a beszelgetes idejet, es
-hasznalhatod a nemitas es hangszoro funkciot.
+A naptár öt nézetet kínál: nap, hét, hónap, év és egy feladat-nézet. A
+naptár-képernyő felső szélén lévő fülekkel váltogathatod őket.
 
-A hivas befejezesehez koppints a piros Lerakas gombra.
+### Események létrehozása
 
-### Videohivas inditasa
+Koppints egy idősávra, vagy használd a hozzáadás gombot egy új esemény
+létrehozásához. Megadhatsz címet, dátumot, időt, helyet és jegyzeteket.
+Az események titkosítva a készülékeden tárolódnak.
 
-1. Nyisd meg a csevgest a kontakttal.
-2. Koppints a kamera ikonra a felso savban.
-3. A te videokeped egy kis ablakban jelenik meg, a masik fel kepe a nagy
-   teruleton.
+### Ismétlődő események
 
-A beszelgetes soran valtahatsz az elso es hato kamera kozott.
+Az események ismétlődhetnek naponta, hetente, havonta vagy évente. A
+mintát módosíthatod (pl. minden második kedd, minden hónap elseje), és
+megadhatsz végdátumot vagy ismétlések számát.
 
-### Bejovo hivasok
+### Kapcsolatok meghívása
 
-Ha valaki hiv teged, egy ertesitesi ablak jelenik meg a hivo nevevel. A
-kovetkezoket teheted:
+Esemény létrehozásakor vagy szerkesztésekor meghívhatod a Cleona-kapcsolataidat.
+Titkosított naptár-meghívót kapnak, és igennel, nemmel vagy „talán"nal
+válaszolhatnak. Az esemény változásai automatikusan az összes meghívottnak
+elküldésre kerülnek.
 
-- **Elfogadas** -- a beszelgetes megkezdodik.
-- **Elutasitas** -- a hivo ertesitest kap.
+### Szabad/Foglalt megjelenítés
 
-Ha mar beszelgetsz valakivel, az uj hivas automatikusan elutasitasra kerul.
+Megoszthatod a kapcsolataiddal az elérhetőségedet anélkül, hogy az esemény
+részleteit felfednéd. Három adatvédelmi szint van: teljes részletek, csak
+idősávok vagy rejtett. Beállíthatsz egy alapértelmezést, és kapcsolatonként
+felülírhatod.
 
-### Csoporthivasok
+### Emlékeztetők
 
-Csoporthivasokat is folytathatsz, amelyekben tobb szemely vesz reszt
-egyidejuleg. A hivas egy intelligens tovabbitasi fan keresztul szervezodik,
-igy nem szukseges, hogy minden resztvevo kozvetlenul csatlakozzon minden
-masik resztvevohoz. Minden beszelgetes vegig titkositott.
+Az eseményekhez emlékeztetők tartozhatnak, amelyek az esemény kezdete előtt
+rendszerértesítést váltanak ki. Az emlékeztetőket szükség esetén szundíttathatod.
 
-### Titkositas hivasoknal
+### Külső naptár-szinkronizáció
 
-Minden hivast egyszer hasznalatos kulcsokkal titkositanak, amelyek csak a
-beszelgetes idejetartamara leteznek. A lerakas utan ezek a kulcsok azonnal
-torlodnek. Senki sem tudja utolagosan megfejteni egy korabbi beszelgetest.
+A Cleona szinkronizálhat külső naptárszolgáltatásokkal:
 
----
-
-## 8. Naptar
-
-A Cleona rendelkezik egy beepitett naptarral, amely titkositottan es teljesen
-decentralizaltan mukodik -- felhoszolgaltatas nelkul.
-
-### Nezetek
-
-A naptar ot nezetet kinal: Nap, Het, Honap, Ev es egy Feladat-nezet. Valts
-koztuk a naptar kepernyojenek felso reszen levo fulekkel.
-
-### Esemenyek letrehozasa
-
-Koppints egy idosavra vagy hasznald a Hozzaadas gombot uj esemeny
-letrehozasahoz. Megadhatsz cimet, datumot, idopontot, helyszint es
-jegyzeteket. Az esemenyek titkositottan tarolodnak a keszulemekeden.
-
-### Ismetlodo esemenyek
-
-Az esemenyek ismetlodhetnek naponta, hetente, havonta vagy evente. A mintat
-testre szabhatod (pl. minden masodik kedden, minden honap elsejen) es
-megadhatsz vegdatumot vagy ismetlesszamot.
-
-### Kontaktok meghivasa
-
-Egy esemeny letrehozasakor vagy szerkesztesekor meghivhatod a
-Cleona-kontaktjaidat. Ok titkositott naptarmeghivot kapnak es valaszolhatnak
-elfogadassal, elutasitassal vagy talan-nal. Az esemenyen torteno valtozasok
-automatikusan elkuldodnek minden meghivottnak.
-
-### Szabad/Foglalt jelzes
-
-Megoszthatod az elerhetosegedet a kontaktjaiddal anelkul, hogy az esemenyek
-reszleteit felfedned. Harom adatvedelmi szint letezik: teljes reszletek,
-csak idoblokkok vagy rejtett. Beallithatsz egy alapertelmezettet es
-kontaktonkent felulirhatod.
-
-### Emlekeztetok
-
-Az esemenyek emlekeztetokkel lathatok el, amelyek az esemeny kezdete elott
-rendszerertesitest valtsanak ki. Az emlekeztetoket szukseg eseten
-halaszthatod.
-
-### Kulso naptar-szinkronizalas
-
-A Cleona kulso naptarszolgaltatasokkal is szinkronizalhato:
-
-- **CalDAV** -- csatlakozz barmely CalDAV-kompatibilis szerverhez (Nextcloud,
+- **CalDAV** -- Csatlakozz bármilyen CalDAV-kompatibilis szerverhez (Nextcloud,
   Radicale stb.).
-- **Google Naptar** -- szinkronizalas a Google Calendar API-n keresztul
-  biztonsagos OAuth2-hitelesitessel.
-- **Helyi CalDAV-szerver** -- a Cleona kepes helyi CalDAV-szervert inditani
-  a keszulemekeden, igy asztali naptaralkalmazasok (Thunderbird, Outlook,
-  Apple Naptar, Evolution) szinkronizalhatnak a Cleona-naptaraddal.
-- **Android-rendszernaptar** -- a Cleona esemenyei atvihetok az Android
-  keszuleked beepitett naptaralkalmazasaba.
-- **ICS-fajlok** -- esemenyek importalasa es exportalasa a szabvanyos
-  iCalendar formatumban.
+- **Google Naptár** -- Szinkronizálás a Google Calendar API-n keresztül
+  biztonságos OAuth2-hitelesítéssel.
+- **Helyi CalDAV-szerver** -- A Cleona elindíthat egy helyi CalDAV-szervert a
+  készülékeden, úgyhogy az asztali naptár-alkalmazások (Thunderbird, Outlook,
+  Apple Naptár, Evolution) szinkronizálhatnak a Cleona-naptáradkal.
+- **Android rendszer-naptár** -- A Cleona eseményei átvihetők az Android-
+  készüléked beépített naptár-alkalmazásába.
+- **ICS-fájlok** -- Importálj és exportálj eseményeket a szabványos
+  iCalendar-formátumban.
 
 ### PDF-export
 
-Barmely naptarnezetet (Nap, Het, Honap, Ev) PDF-dokumentumkent
-kinyomtathatod vagy exportalhatod.
+Bármelyik naptárnézetet (nap, hét, hónap, év) kinyomtathatod vagy
+exportálhatod PDF-dokumentumként.
 
 ---
 
-## 9. Szavazasok
+## 9. Szavazások
 
-Barmely csevegben vagy csoportban letrehozhatsz szavazasokat, hogy
-velemenyeket gyujts vagy idopontot egyeztess.
+Minden csevegésben vagy csoportban készíthetsz szavazásokat, hogy véleményeket
+kérj be, vagy időpontokat tervezz.
 
-### Szavazastipusok
+### Szavazástípusok
 
-A Cleona ot szavazastipust tamogat:
+A Cleona ötféle szavazást támogat:
 
-- **Egyszeru valasztas** -- a resztvevok egy lehetoseget valasztanak.
-- **Tobbszoros valasztas** -- a resztvevok tobb lehetoseget is
-  kivalaszthatnak.
-- **Idopontszavazas** -- talald meg az idopontot, ami mindenkinek megfelel.
-  Minden resztvevo jeloli az idopontokat elerheto, talan vagy nem elerheto
-  besorolassal.
-- **Skala** -- ertekelj valamit egy numerikus skalan (pl. 1-tol 5-ig).
-- **Szabad szoveg** -- a resztvevok sajat valaszukat irjak be.
+- **Egyszeres választás** -- A résztvevők egy lehetőséget választanak.
+- **Többszörös választás** -- A résztvevők több lehetőséget is kiválaszthatnak.
+- **Időpont-szavazás** -- Keress egy időpontot, amely mindenkinek megfelel.
+  Minden résztvevő megjelöli az időpontokat elérhetőként, talánként vagy nem
+  elérhetőként.
+- **Skála** -- Értékelj valamit egy numerikus skálán (pl. 1-től 5-ig).
+- **Szabad szöveg** -- A résztvevők saját választ írnak.
 
-### Szavazas letrehozasa
+### Szavazás létrehozása
 
-Nyiss meg egy csevgest es koppints a szavazas ikonra (vagy hasznald a
-mellekeltek menut). Valaszd ki a szavazas tipusat, fogalmazd meg a kerdesed
-es a lehetosegeket, es kuldd el a szavazast. Az uizenetkent jelenik meg a
-csevegben.
+Nyiss meg egy csevegést, és koppints a szavazás szimbólumra (vagy használd a
+melléklet-menüt). Válaszd ki a szavazás típusát, fogalmazd meg a kérdésedet és
+a lehetőségeket, és küldd el a szavazást. Üzenetként jelenik meg a csevegésben.
 
-### Szavazas leadasa
+### Szavazás
 
-Koppints egy szavazasra a szavazatod leadasahoz. A szavazatodat barmikor
-modosithatod vagy visszavonhatod.
+Koppints egy szavazásra, hogy lead a szavadat. A szavadat bármikor
+megváltoztathatod vagy visszavonhatod.
 
-### Anonim szavazas
+### Névtelen szavazás
 
-A szavazasok konfiguralhatok anonim szavazasra. Ha ez be van kapcsolva, a
-szavazatok kriptografiailag anonimek -- senki, meg a szavazas letrehozoja sem
-lathatja, ki mire szavazott. A szavazatok szama ennek ellenere lathato marad.
+A szavazások beállíthatók névtelen szavazásra. Ha engedélyezve van, a szavazatok
+kriptográfiailag anonimek -- senki, még a szavazás készítője sem látja, ki
+mire szavazott. A szavazatok száma ettől is látható marad.
 
-### Idopontszavazas a naptarba
+### Időpont-szavazás a naptárba
 
-Ha egy idopontszavazas lezarult, a nyertes idopont egy koppintassal
-kozvetlenul naptarbejegyezesse alakithato.
+Amikor egy időpont-szavazás lezárult, a nyertes időpont egy koppintással
+közvetlenül naptár-bejegyzéssé alakítható.
+
+---
+## 10. Több identitás
+
+### Miért több identitás?
+
+Képzeld el, hogy szét akarod választani a munkádat és a magánéletedet --
+hasonlóan, mint két különböző telefonszámmal, de második telefon nélkül. A
+Cleonában több identitást is használhatsz egy készüléken. Minden identitásnak
+saját neve, saját profilképe, saját kapcsolatai és saját beszélgetései vannak.
+
+### Új identitás létrehozása
+
+1. A felső sávban az aktuális identitásod fülként látható.
+2. Koppints a plusz jelre (+) az identitás-füleidtől jobbra.
+3. Írj be egy nevet az új identitásnak.
+4. Kész -- az új identitás azonnal aktív.
+
+### Váltás identitások között
+
+Koppints egyszerűen az identitás-fülre a felső sávban. A váltás azonnali --
+nincs várakozás, nincs újratöltés.
+
+### Mind egyszerre fut
+
+Egy fontos dolog: az összes identitásod egyszerre aktív. Még akkor is, ha
+épp „Munka" néven jelenítel meg, a „Privát" identitásod továbbra is fogadja
+az üzeneteket. Semmiről sem maradsz le, bármelyik identitást is választottad
+épp ki.
+
+### Identitás-részletek oldala
+
+Ha az épp aktív identitásod fülére koppintasz, megnyílik a részletek oldala.
+Itt:
+
+- Megjelenítheted a QR-kódodat a kapcsolatoknak.
+- Megváltoztathatod vagy eltávolíthatod a profilképedet.
+- Hozzáadhatsz egy profilismertetőt.
+- Megváltoztathatod a megjelenítendő nevedet.
+- Választhatsz egy dizájnt (skint) ehhez az identitáshoz.
+- Törölheted az identitást, ha már nincs rá szükséged.
+
+### Identitás törlése
+
+Ha törölsz egy identitást, a kapcsolataid értesítést kapnak róla. Az identitás
+és az összes hozzá tartozó adat eltávolításra kerül a készülékedről. Ez a
+folyamat nem fordítható vissza.
 
 ---
 
-## 10. Tobb identitas
+## 11. Több eszköz
 
-### Miert tobb identitas?
+### Egy identitás, egy eszköz -- egyelőre
 
-Kepzeld el, hogy szeretned kulonvalasztani a munkahelyi es a maganeletedet --
-hasonloan ket kulonbozo telefonszamhoz, de masodik telefon nelkul. A Cleonaban
-tobb identitast is hasznalhatsz egyetlen keszuleken. Minden identitasnak sajat
-neve, sajat profilkepe, sajat kontaktjai es sajat beszelgetesei vannak.
+Egy identitás ma egy eszközön fut. Egy második eszköz ugyanahhoz az
+identitáshoz egy későbbi verzióval jön; a beállítások „Eszközök" ->
+„Eszközök kezelése" alatt a „További eszköz párosítása" ezért még „Még nem
+érhető el" állapotban szerepel.
 
-### Uj identitas letrehozasa
+Ha eljön, akkor így lesz: minden eszköz egyenrangú, nincs fő eszköz. Egy
+további eszközt a 24 szavaddal állítasz be, és egy eddigi eszközöd
+jóváhagyja. Legfeljebb 5 eszköz.
 
-1. A felso savban latod az aktualis identitasodat fulkent.
-2. Koppints a plusz jelre (+) az identitas-fulek jobb oldalan.
-3. Adj meg egy nevet az uj identitasnak.
-4. Kesz -- az uj identitas azonnal aktiv.
+Ha ma egy új eszközön beírod a 24 szavad, átköltözöl: az identitás az új
+eszközön áll helyre, és az eddigi eszközöd ezt követően eltávolítja magáról
+(lásd a 12. fejezetet).
 
-### Valtas identitasok kozott
+Több eszközön ma különböző identitásokat használhatsz (10. fejezet).
 
-Egyszeruen koppints az identitas-fulre a felso savban. A valtas azonnali --
-nincs varakozas, nincs ujratoltes.
+### Kulcsok cseréje
 
-### Minden egyszerre fut
-
-Fontos pont: az osszes identitasod egyszerre aktiv. Meg ha eppen
-"Munkahelyi"-kent jelensz is meg, a "Magan" identitasod tovabbra is fogadja
-az uzeneteket. Semmit sem mulasztasz el, barmelyik identitas legyen is
-kivalasztva.
-
-### Identitas-reszletek oldala
-
-Ha a jelenleg aktiv identitas fulere koppintasz, megnyilik a reszletek
-oldala. Itt a kovetkezoket teheted:
-
-- A QR-kodod megjelenitese kontaktok szamara.
-- A profilkeped modositasa vagy eltavolitasa.
-- Profleiras hozzaadasa.
-- A megjelenesi neved modositasa.
-- Egy dizajn (Skin) kivalasztasa ehhez az identitashoz.
-- Az identitas torlese, ha mar nincs ra szukseged.
-
-### Identitas torlese
-
-Ha torolsz egy identitast, a kontaktjaid ertesitest kapnak rola. Az
-identitas es az osszes hozza tartozo adat torlesre kerul a keszulekedrol.
-Ez a muvelet nem visszafordithato.
+Ha gyanítod, hogy valaki a kulcsaidhoz jutott, az „Eszközök kezelése" ->
+„Kulcsok cseréje" alatt új kulcsokat állíthatsz elő. A kapcsolataid
+értesítést kapnak, a nyitott meghívóid visszavonásra kerülnek. Fontos:
+ezután a 24 szó önmagában csak a régi kulcsokat állítja elő. Csinálj ezért
+közvetlenül utána új helyreállítási csomagot; helyreállítani akkor már csak
+ezzel a csomaggal együtt tudsz.
 
 ---
 
-## 11. Multi-Device
+## 12. Helyreállítás
 
-### A Cleona hasznalata tobb keszuleken
+### A seed-kifejezés használata
 
-Ugyanazt az identitast akar 5 keszuleken is hasznalhatod egyidejuleg. Egy
-keszulek a primaris (ez tartalmazza a Seed-Phrase-t), es tovabbi keszulekek
-csatlakoztathatoak hozza.
+Ha elveszíted a készülékedet, vagy újat állítasz be:
 
-### Uj keszulek csatlakoztatasa
+1. Telepítsd a Cleonát az új készülékre.
+2. Válaszd induláskor a „Helyreállítás" lehetőséget.
+3. Írd be a 24 szavadat.
+4. A Cleona ebből az összes identitásodat újra előállítja -- ugyanazokkal a
+   kulcsokkal, mint korábban. A kapcsolataid számára ugyanaz az ember maradsz.
 
-1. Nyisd meg a beallitasokat a primaris keszulemekeden.
-2. Menj az "Osszekapcsolt keszulekek" reszhez.
-3. Valaszd az "Uj keszulek csatlakoztatasa" lehetoseget.
-4. Telepitsd a Cleonat az uj keszuleken es az indulaskor valaszd a "Meglevo
-   keszulekhez csatlakozes" lehetoseget.
-5. Olvasd be a parosito QR-kodot, amely a primaris keszulemekeden jelenik meg,
-   vagy hasznald a parosito linket.
+### Mi jön vissza -- és mi nem
 
-A csatlakoztatott keszulek egy delegacios tanusitvanyt kap a primaris
-keszulektol. A csatlakoztatott keszulekrol kuldott uzeneteket egy delegalt
-kulcs irja ala kriptografiailag, igy a kontaktok ellenorizhetik, hogy az
-uzenet valoban a te identitasodtol szarmazik.
+Az identitásod benne van a 24 szóban, a kapcsolataid és az előzményeid
+nem. Visszajön a hálózati hozzáférésed a **Helyreállítási csomag**
+révén: A készüléked letesz egy kis, titkosított csomagot a hálózatban. Csak
+a 24 szavad tudja megtalálni és kinyitni. Benne áll, amire az új
+készülékednek szüksége van, hogy újra elérje a kapcsolataidat, és azt,
+ami időközben a hálózatban várakozott rád. Ehhez nem kell, hogy egyetlen
+kapcsolat is online legyen.
 
-### Hogyan mukodik
+Az eddigi csevegés-előzményeket egy helyreállítás nem hozza vissza.
 
-- A primaris keszulek tartalmazza a Seed-Phrase-t es a mester-kulcsokat.
-- A csatlakoztatott keszulekek szarmaztatott alairo kulcsokat es egy
-  delegacios tanusitvanyt kapnak -- soha nem kapjak meg magat a
-  Seed-Phrase-t.
-- Minden keszulek ugyanazt az identitast es kontaktokat hasznalja. Az
-  uzenetek minden keszulekre megerkeznek.
-- A delegacios tanusitanyok automatikusan megujulnak a lejaratuk elott.
+A helyreállítási csomag 7 napig él, és a készüléked megújítja, amíg fut; a
+beállításokban látod, meddig érvényes. Ha több mint 7 napig egyetlen
+készüléked sem futott, lejárt. A 24 szó akkor is helyreállítja az
+identitásodat, de a kapcsolataidat újra meg kell hívnod; ami időközben a
+hálózatban várakozott rád, az elveszett.
 
-### Keszulekkezeles
+### A helyreállítás költözést jelent
 
-Nyisd meg a beallitasokat es menj az "Osszekapcsolt keszulekek" reszhez, hogy
-lasd az osszes csatlakoztatott keszulekedet, azok allapotat es utolso
-aktivitasat. Barmikor visszavonhatsz egy csatlakoztatott keszuleket, ha az
-elveszik vagy ellopjak.
+Ha az eddigi készüléked később észleli, hogy az identitást máshol állították
+helyre, eltávolítja magánál -- az előzményeivel együtt. Ezért: akinél a 24
+szavad van, így elviheti az identitásodat a készülékedről. Amíg minden
+kapcsolat vissza nem érkezik, az alkalmazás emlékeztet; a „Befejezés és
+kulcsmegújítás" gombbal magad fejezed be a helyreállítást.
 
-### Veszhellyzeti kulcsrotacio
+### Amit senki sem tud helyreállítani
 
-Ha ugy velod, hogy egy keszulek kompromittalodott, veszhellyzeti
-kulcsrotaciot indithatsz. Ennek soran uj kulcsok generalodnak, es a
-rotaciot a tobbi keszuleked tobbsegenek meg kell erosetenie. Ez meggatolja,
-hogy egyetlen ellopott keszulek egyedul forgasson kulcsokat.
+Ez fontos, és ezért egyértelműen mondjuk:
+
+- **Rajtad kívül senki sem tudja helyreállítani az identitásodat.** Sem a
+  fejlesztő, sem egy ügyfélszolgálat, és a kapcsolataid sem -- bármennyien is
+  legyenek. Nincs masterkulcs és nincs olyan darabja a kulcsodnak, amely
+  másnál lenne letétben.
+- **Ha elvesztetted a 24 szót és nincs több készüléked, az identitásod
+  elveszett.** Akkor csak az marad, hogy újat hozol létre, és a kapcsolataidat
+  újból meghívod.
+
+A legjobb védelem: írd fel a 24 szót papírra, és őrizd biztonságban.
+
+---
+## 13. Beállítások
+
+A beállításokat a fogaskerék-szimbólumon keresztül éred el a jobb felső sarokban.
+
+### Értesítések és csengőhangok
+
+- Válassz hat különböző csengőhang közül a beérkező hívásokhoz.
+- Állíts be egy üzenethangot.
+- Android-készülékeken emellett be- vagy kikapcsolhatod a rezgést.
+- **„Minden némítása"** ezen a készüléken egyetlen üzenetet sem hagy
+  csöngeni, rezegni vagy jelentkezni -- az összes identitásra. A hívások
+  tovább csengenek.
+- **„Csendes órák"**-at identitásonként állítod be Kezdet/Vég értékekkel.
+  Ebben az időben egyetlen üzenet sem cseng, sem rezeg, sem jelentkezik ezen az
+  identitáson; az üzenetek ettől még megérkeznek.
+- **„Értesítések tartalom nélkül"** (alapértelmezés: ki) csak azt mutatja,
+  hogy üzenet, meghívó vagy emlékeztető érkezett -- feladó, név és szöveg
+  nélkül. A hívások továbbra is a nevet mutatják.
+- Amit az indítás után egyszerre érkezik meg, azt a Cleona összesített
+  értesítésben jelenti („5 új üzenet 2 beszélgetésben"); minden későbbi
+  egyenként. Egy üzenet-értesítésre koppintva megnyílik a beszélgetés, akár
+  egy másik identitásban is.
+
+### Dizájnok (skinek)
+
+A Cleona tíz különböző dizájnt kínál: Teal, Ocean, Sunset, Forest, Amethyst,
+Fire, Storm, Slate, Gold és Contrast. A Contrast-dizájn a legmagasabb
+akadálymentességi szintet (WCAG AAA) teljesíti, és korlátozott látás esetén
+különösen jól olvasható.
+
+Minden identitásnak saját dizájnja lehet. A dizájnt az identitás-részletek
+oldalán módosítod (koppints az aktív identitás-fülre).
+
+Emellett a beállítások „Megjelenés" szakaszában váltogathatsz a világos, a
+sötét és a rendszer témája között.
+
+### Nyelv megváltoztatása
+
+A Cleona 34 nyelven elérhető, köztük jobbról-balra író nyelveken is (pl. arab,
+héber). A nyelvet a beállítások „Nyelv" szakaszában módosíthatod.
+
+### Média-archiválás
+
+Ha otthon van egy hálózati tárolód (NAS) vagy egy megosztott mappád, a Cleona
+a médiáidat automatikusan oda helyezheti ki. Támogatott az SMB, SFTP, FTPS
+és WebDAV.
+
+A fokozatos tárolás így működik:
+- Az első 30 nap: Minden megmarad a készülékeden.
+- 30 nap után: Egy előnézeti kép megmarad a készüléken, az eredeti
+  archiválásra kerül.
+- 90 nap után: Már csak egy kis előnézeti kép marad a készüléken.
+- Egy év után: Már csak egy helykitöltő marad, az eredeti biztonságosan az
+  archívumban fekszik.
+
+Bármikor rákoppinthatsz egy archivált médiára, hogy visszahozd -- feltéve, hogy
+csatlakozol a házi hálózatodhoz. A különösen fontos médiákat rögzítheted, hogy
+soha ne kerüljenek kihelyezésre.
+
+A „Tárhely költségkeret" alatt állítod be, hány MB média maradjon a
+készüléken (alapértelmezés: 100 MB a telefonon, 2 GB a számítógépen). Ha
+megtelt, a legrégebbi, nem rögzített média archiválódik először. Egy
+eredetit csak akkor töröl a Cleona, ha biztonságosan az archívumban van --
+a szöveges üzenetek mindig megmaradnak.
+
+### Leiratozás a hangüzenetekhez
+
+Ha engedélyezve van, a hangüzeneteid helyileg, a készülékeden szöveggé
+alakulnak (a nyílt forráskódú Whisper modellel). Az átiratolt szöveg a
+felvétellel együtt a partneredhez kerül. A leiratozás teljesen a
+készülékeden történik -- nem megy adat külső szolgáltatásokhoz.
+
+Melyik modell (tiny, base, small) töltődik le, azt egyszer, a készülékre
+állítod be; a nyelvet (automatikus vagy rögzített) identitásonként.
+
+### Automatikus letöltés
+
+Beállíthatod, milyen mérettől legyenek a médiák automatikusan letöltve. Így
+például a képeket automatikusan töltheted, de a nagy videóknál manuálisan
+dönthess.
+
+### Eszközök
+
+Az „Eszközök" -> „Eszközök kezelése" alatt látod ezt az eszközt. Egy további
+eszköz párosítása egy későbbi verzióval jön (11. fejezet).
+
+### Hálózat
+
+A Cleonának nincs szüksége hálózati beállításokra a működéshez. Három
+hálózati kapcsoló van:
+
+- **Porttovábbítás a routeren** (alapértelmezés: be). A Cleona kéri a saját
+  routeredet, hogy nyisson egy ajtót a Cleonának. Ha sikerül, a készüléked
+  mások számára jobban elérhető, és segíti a hálózatot. A Cleona közben csak a
+  te routereddel beszél, nem az internettel.
+- **Nyilvános címbejegyzések** (alapértelmezés: be). Ha a készülékednek még
+  túl kevés szomszédja van, egy nyilvános címtárban (Nostr) keres további
+  belépési pontokat, és ha ő maga jól elérhető, ott bejegyezi magát. A bejegyzés
+  egy címet tartalmaz, nem nevet és nem kapcsolatot. Ha kikapcsolod, a
+  készüléked csak meghívókon, a helyi hálózaton és a már ismert szomszédokon
+  keresztül talál szomszédokat.
+- **Kevesebb álcacsomag a Wi-Fi-ben** (alapértelmezés: ki). Wi-Fi-n vagy kábelen
+  kikapcsolhatod az üres álcacsomagokat. De akkor ismét látszik, mikor írsz.
+  Mobilon ez a kapcsoló nem létezik -- ott a Cleona amúgy is csak álcacsomagot
+  küld percenként.
+
+Az álcaforgalmat egészként nem lehet kikapcsolni. Ez szándékos: csak ha mindig
+fut, nem mond semmit a készüléked aktivitása arról, hogy épp írsz-e.
+
+A három kapcsoló fölött található az **Adattakarékos mód**: Mobilhálózaton a
+Cleona javasolja, de sosem kapcsolja be magától. Adatot spórol, cserébe a
+készüléked kívülről könnyebben felismerhető.
+
+Alatta állítod be a **„Gyorsítótár mások médiájához"** méretét: A
+készüléked legfeljebb 7 napig őrzi mások médiáinak titkosított darabjait,
+hogy elérjék a címzettjüket (alapértelmezés: 100 MB a telefonon, 1 GB a
+számítógépen). Egy kisebb méret azonnal felszabadítja a helyet -- a
+legrégebbi darabok először.
 
 ---
 
-## 12. Helyreallitas
+## 14. Biztonság
 
-### A Seed-Phrase hasznalata
+### Mit jelent a post-kvantum titkosítás?
 
-Ha elveszited a keszulekedet vagy ujat allitasz be:
+A mai titkosítás olyan matematikai problémákon alapul, amelyek normál
+számítógépek számára rendkívül nehezen megoldhatók. A kvantumszámítógépek a
+jövőben némelyik problémát gyorsan megoldhatják. A post-kvantum titkosítás
+olyan eljárásokat is használ, amelyek a kvantumszámítógépeknek is ellenállnak.
 
-1. Telepitsd a Cleonat az uj keszulekre.
-2. Az indulaskor valaszd a "Helyreallitas" lehetoseget.
-3. Gepeld be a 24 szavadat.
-4. A Cleona helyreallitja az identitasodat es automatikusan felveszi a
-   kapcsolatot a korabbi kontaktjaiddal.
-5. A kontaktjaid valaszolnak a kontaktadataiddal, csoporttagsagaiddal es
-   uzenetelozmennyeiddel.
+A Cleona mindkét megközelítést ötvözi: klasszikus titkosítást a
+megbízhatóságért és post-kvantum eljárásokat a jövőbiztonságért. Így egyszerre
+vagy védve a jelenlegi és a jövőbeli fenyegetésekkel szemben.
 
-A helyreallitas harom lepesben tortenik:
-- Eloszor a kontaktjaid es a csoportjaid jonnek vissza.
-- Aztan az utolso 50 uzenet minden beszelgetesbol.
-- Vegul a teljes uzenetelozmeny.
+Minden egyes üzenethez egy saját kulcs jön létre. Még ha egy támadó fel is
+törné egy üzenet kulcsát, azzal nem tudna másik üzenetet elolvasni.
 
-Elegseges, ha egyetlen kontaktod online van, hogy a helyreallitas mukodjon.
+### Miért biztonságosabb a szerver hiánya
 
-### Guardian Recovery (bizalmi szemelyek)
+A hagyományos üzenetküldőknél az üzeneteid a szolgáltató szerverein keresztül
+mennek. Még ha ott titkosítottak is lennének: a szolgáltató hozzáfér a
+metaadatokhoz (ki mikor kommunikál kivel, milyen gyakran, honnan), és ezeket
+esetleg bírósági intézkedésre ki kell adnia.
 
-Akar ot bizalmi szemelyt is kijelolhetsz "Guardian"-kent. Ennek soran a
-helyreallitasi kulcsod ot reszre osztodik, amelyekbol mindegyik Guardian
-egyet kap. Az identitasod helyreallitasahoz harom az otbol elegseges.
+A Cleonánál nincs ilyen központi pont. Nincs olyan hely, ahol az összes
+metaadat összefut, és nincs olyan címtár, amelyben utána lehetne nézni, ki vagy
+vagy kit ismersz.
 
-Ez azt jelenti: meg ha el is vesztetted a Seed-Phrase-t, harom Guardianod
-egyutt kepes helyreallitani a fiokodot. Egyetlen Guardian sem ferhet hozza
-egyedul az adataidhoz -- mindig legalabb harom szukseges.
+### Ki látja, hogy valakivel írsz?
 
-Igy allitsd be a Guardianokat:
-1. Nyisd meg a beallitasokat.
-2. Menj a "Biztonsag" reszhez.
-3. Valaszd a "Guardian Recovery" lehetoseget.
-4. Valassz ki ot megbizhato kontaktot.
+A titkosítás védi, **mit** írsz. Ugyanilyen fontos, hogy egyetlen megfigyelő se
+tudja meg, **kivel** és **mikor** írsz. Ezt a Cleona így biztosítja:
 
-### Miert a kontaktjaid a biztonsagi mentesed
+- **Az interneten soha nem közvetlenül.** Ha a készüléked közvetlenül a
+  partnered internetcímére küldené az üzenetet, a szolgáltatód láthatná, hogy
+  kivel írsz. Ezért az interneten egy üzenet mindig az állandó szomszédokon
+  keresztül megy: a tieden és a partneredén.
+- **Szomszédok, akikben megbízol.** Az állandó szomszédjaid, ahol csak lehetséges,
+  a saját kapcsolataid készülékei -- legfeljebb három, amelyek épp kívülről
+  elérhetők. Ha egy kiesik, egy másik kapcsolat lép a helyébe. Egy kapcsolatot
+  nem lehet szerverekkel megvenni; egy tetszőleges csomópontot a hálózatban
+  igen. Ha még nincs elérhető kapcsolatod, a Cleona egy másik szomszédot választ.
+  A meghívód sosem nevez meg egyetlen kapcsolatodat sem, hogy senki ne
+  tudja meg rajtuk keresztül egy barátod címét.
+- **Kódok nevek helyett.** A szomszédok nem neveket és nem azonosítókat látnak,
+  hanem csak egy kódot. Pontosan rátok kétőtöző érvényes, egy irányba, egy
+  napra -- a következő napon már egy másik. A szomszédod tudja, honnan jön a
+  csomag, de nem, hová megy végül. A partnered szomszédja tudja, hová megy,
+  de nem, honnan jött. Normál esetben senki útközben nem látja mindkét véget.
+- **Az álcaforgalom.** A készüléked folyamatosan, szabálytalan időközökben
+  álcacsomagokat küld a szomszédjainak. Ugyanakkora mint az igazi csomagok,
+  ugyanazon a porton mennek, és kívülről nem lehet őket megkülönböztetni az
+  igaziaktól. Hogy épp egy ember ír, vagy a készülék csak fut, így nem
+  megállapítható. Az üzeneteid sosem várnak az álcaforgalomra -- azonnal
+  indulnak, az csak mellette fut.
 
-A hagyomanyos uzenetoalkalmazasoknal az adataid a szolgaltato szerveren
-vannak. A Cleona eseten nincs szerver -- de a kontaktjaid atveszik ezt a
-szerepet. Amikor uzenetet kuldesz, a kozos kontaktok egy titkositott
-masolatot tarolnak arra az esetre, ha a cimzett eppen offline. Helyreallitas
-eseten a kontaktjaid visszaadjak az adataidat.
+**Mit költsz az álcaforgalom:** Wi-Fi-n körülbelül 13 MB naponta. Mobilon a
+Cleona csak álcacsomagot küld percenként, ez napi kb. 1,7 MB. A mobilon történő
+fojtás oka nem az adatmennyiség, hanem az akku: minden csomag felébreszti a
+rádiómodemet.
 
-Ez azt jelenti: minel tobb aktiv kontaktod van, annal megbizhatoabb a
-biztonsagi mentesed. Egyetlen kontakt, aki rendszeresen online van, elegseges
-a sikeres helyreallitashoz.
+**Mit nem tud elrejteni a Cleona** -- őszintén:
 
----
+- Egyetlen **megfigyelő** sem látja, ki kivel ír -- sem a szolgáltatód, sem a
+  csomópontok útközben. Aki viszont **mindkét véget egyszerre** figyeli, például
+  egy állam, amely a te csatlakozásodat és a partneredét figyeli, vagy mindkét
+  szomszédot lecsapja, az idővel hozzárendelhet: nálad csomag ki, röviddel
+  utána a partnerednél csomag be. Elég gyakran megismételve ez egy kapcsolatot
+  ad ki.
+- Az álcaforgalom megnehezíti ezt a hozzárendelést, de nem akadályozza meg.
+  Egyedi üzeneteket rejt, nem a mennyiséget: aki nagyon sokat küld, növeli a
+  készüléke összforgalmát.
+- Egy kapcsolat, amely az állandó szomszédod, megtudja, **mikor** és **mennyit**
+  küldesz és fogadsz -- nem azt, hogy kivel, és nem azt, hogy mit. Ha a veszély
+  a saját környezetedből fenyeget, minden kapcsolatot kivehet ebből (lásd a 3.
+  fejezet „Soha ne állandó szomszédként használni" szakaszát).
+- Ha két új felhasználónak csak ugyanaz az egy szomszédja van, az üzenetük
+  pontosan ezen a csomóponton megy át, és ő mindkét véget látja. Amint egyiküknek
+  további szomszédjai lesznek, ennek vége.
+- A meghívód tartalmazza az internetcímeidet. Akinél a szövegsor van, látja,
+  hol vagy online -- csak olyan embereknek add, akiben megbízol ebben.
+- Egy szomszéd, aki továbbít, látja, hogy két kód csomagokat cserél -- nem
+  azt, ki áll mögötte, és nem azt, mi van benne.
+- Egy folyamatban lévő hívás jele, ha az első szomszéd épp nem válaszol,
+  egy olyan csomóponton mehet át, amely mindkét véget látja; megtudja, hogy
+  együtt telefonáltok.
+- Egy nagy fájlt, amelyet jóváhagytál, a gép, amely továbbítja vagy tárolja,
+  mindkét végén lát (lásd a 4. fejezetet).
+- Hívásoknál a szolgáltató elleni védelem nem érvényesül, és a kapcsolatod
+  látja az internetcímedet (lásd a 7. fejezetet).
 
-## 13. Beallitasok
+### Mi történik, ha a partnered offline van?
 
-A beallitasokat a jobb felso sarokban levo fogaskerek ikonon keresztul
-erheted el.
+1. A Cleona egyszerre elindítja az összes megfelelő utat: ugyanabban a Wi-Fi-ben
+   közvetlenül, az interneten két szomszédon keresztül -- és emellett a
+   postafiókot.
+2. A postafiókhoz a Cleona a titkosított üzenetet három szomszédnál teszi le.
+   Amint kettő visszaigazolja a kézbesítést, letettnek minősül.
+3. A Cleona ehhez előnyben részesíti azokat a szomszédokat, amelyeknél a
+   partnered is utánanéz -- először azt a szomszédot, amelyet a meghívója nevez
+   meg.
+4. Az üzenet ott várakozik legfeljebb 7 napig. Ha a partnered visszatér, ő
+   felmenti, és visszaigazolja neked a kézbesítést. Csak akkor látsz két pipát.
 
-### Ertesitesek es csengohangok
+A postafiókot csak a partnered tudja kiüríteni: a felemelés és a törlés csak
+egy olyan kulccsal megy, amely csak neki van, és a törlés csak akkor történik,
+amikor visszaigazolta a kézbesítést. A szomszédok csak titkosított csomagokat
+látnak egy olyan érték alatt, amely minden nap változik.
 
-- Valassz hat kulonbozo csengohang kozul bejovo hivasokhoz.
-- Allits be uzenethangot.
-- Android keszulekeken tovabba be- es kikapcsolhatod a rezgest.
+### Idegenek nem jutnak át
 
-### Dizajnok (Skinek)
+Valakitól, aki sem a kapcsolatod, sem egy közös csoport tagja, a Cleona
+pontosan két dolgot elfogad: a
+kérdést a nyilvános kulcsaid felől, amíg az egyik meghívód nyitva van, és egy
+kapcsolatkérést. A kérésnek érvényes meghívót kell hordoznia tőled, és a
+feladónak előbb meg kell oldania egy számítási feladatot. Minden más --
+üzenetek, hívások, fájlok -- elvetésre kerül, mielőtt az alkalmazást egyáltalán
+elérné. Aki csak a nyomtatott névjegykártyádat megvan, az tehát nem tud
+egyszerűen felhívni. Egy közös csoport tagja csak ebben a csoportban ér el
+-- csoportüzenetekkel és csoportos hívásokkal, soha egyénileg.
 
-A Cleona tiz kulonbozo dizajnt kinal: Teal, Ocean, Sunset, Forest, Amethyst,
-Fire, Storm, Slate, Gold es Contrast. A Contrast dizajn megfelel a legmagasabb
-akadalymentesitesi szintnek (WCAG AAA) es korlatozott latas eseten kulonosen
-jol olvashato.
+### Anti-cenzúra
 
-Minden identitas sajat dizajnnal rendelkezhet. A dizajnt az
-identitas-reszletek oldalon valtoztathatod meg (koppints az aktiv
-identitas-fulre).
+A Cleona úgy van felépítve, hogy nehéz legyen blokkolni:
 
-Ezenkivul a beallitasokban a "Megjelenes" pont alatt valtahatsz vilagos,
-sotet es rendszer-tema kozott.
+- **Nincs szerver, nincs fix cím.** Az alkalmazásban nem szerepel cím, amelyet
+  le lehetne tiltani, és a hálózat nem függ egyetlen csomóponttól sem.
+- **Nincs fix port.** Minden készülék az első indításkor egy véletlenszerű
+  portot választ. Nincs ismert portszám, amelyen a Cleona-forgalmat fel lehetne
+  ismerni.
+- **Mint véletlen adatok.** Két készülék között a kapcsolatfelvétel úgy van
+  kódolva, hogy véletlen adatoktól nem lehet megkülönböztetni.
+- **Sok belépés.** Minden meghívó, minden szomszéd és minden készülék ugyanabban
+  a Wi-Fi-ben egy lehetséges út vissza a hálózatba.
 
-### Nyelv megvaltoztatasa
+### Biztonságos kulcstárolás
 
-A Cleona 33 nyelven elerheto, beleertve a jobbrol balra irt nyelveket
-is (pl. arab, heber). A nyelvet a beallitasokban a "Nyelv" pont alatt
-valtoztathatod meg.
+A támogatott platformokon a Cleona a titkosítási kulcsaidat az operációs
+rendszer biztonságos kulcstárolójában tárolja (Android Keystore, iOS Keychain,
+macOS Keychain). Ahol elérhető, ez hardveres védelmet kínál a kulcsaidnak.
 
-### Tarolasi korlat
+### Adatbázis-titkosítás
 
-Meghatarozhatod, mennyi tarhelyet hasznalhat a Cleona a keszulemekeden
-(100 MB es 2 GB kozott). Amikor a korlat eleresre kerul, a regebbi mediak
-automatikusan kikerulnek vagy torlodnek -- a szoveges uzenetek mindig
-megmaradnak.
+Az üzeneteid és beszélgetéseid egy titkosított adatbázisban fekszenek --
+identitásonként egy külön, mindegyik saját kulccsal. Nemcsak maga az
+adatbázis titkosított, hanem a köztes fájljai is; semmi sem kerül
+titkosítatlanul a lemezre, még rövid időre sem. A beállítások, kapcsolatok és
+médiák szintén titkosítva tárolódnak.
 
-### Media-archivalas
+A kulcsok a 24 szavadból származnak, és csak a készülékeden léteznek. Még ha a
+készülékedbe valaki hozzá is jut és kiolvassa az adatokat, ezek nélkül a
+kulcsok nélkül csak olvashatatlan adatokat talál.
 
-Ha otthon halozati tarhelyed (NAS) vagy megosztott mappad van, a Cleona
-automatikusan oda archivalhatja a mediaidat. Tamogatott protokollok: SMB,
-SFTP, FTPS es WebDAV.
+Csak ott lesz titkosítatlan, ahol te magad viszel ki tartalmat a Cleonából:
+- amikor egy fájlt egy csevegésből a készülékedre mentesz,
+- amikor a képernyőkép-gombbal egy képet a képeid közé teszel,
+- amikor megosztasz valamit egy másik alkalmazással,
+- amikor beállítod a média-archiválást (13. fejezet): az archivált eredetek
+  titkosítatlanul fekszenek a házi hálózati tárolódon, hogy ott Cleona
+  nélkül is meg tudjad nyitni őket,
+- amikor az eseményeket az Android rendszer-naptárba tükrözöd: ott más,
+  naptárhoz hozzáférő alkalmazások olvashatják őket.
 
-Igy mukodik a fokozatos tarolas:
-- Az elso 30 nap: minden a keszulemekeden marad.
-- 30 nap utan: egy elonezeti kep marad a keszuleken, az eredeti archivalasra
-  kerul.
-- 90 nap utan: csak egy kis elonezeti kep marad a keszuleken.
-- Egy ev utan: csak egy helyfoglalo marad, az eredeti biztonsagosan az
-  archivumban van.
+Ami így kikerült, nem törlődik az üzenettel együtt, és nem jár le vele.
 
-Barmikor koppinthatsz egy archivalt mediara, hogy visszatoltsd --
-felteve, hogy csatlakozva vagy az otthoni halozatodhoz. Kulonosen fontos
-mediakat rogzithetsz, hogy soha ne keruljenek archivalasra.
+### Védelem a képernyőn
 
-### Hanguzenet-atiras
-
-Ha be van kapcsolva, a hanguzeneteid helyben, a keszulemekeden szovegge
-alakulnak (a nyilt forrasu Whisper modellel). Az atirt szoveg a felvetellel
-egyutt kerul elkuldesre a masik felnek. Az atiras teljes egeszeben a
-keszulemekeden tortenik -- semmilyen adat nem kerul kulso szolgaltatashoz.
-
-### Automatikus letoltes
-
-Beallithatod, milyen merettol toltsek le automatikusan a mediakat. Igy
-peldaul a kepeket automatikusan letoltetheted, de nagy videoknal kezzel
-donthetsz.
-
-### Osszekapcsolt keszulekek
-
-Kezeld az osszekapcsolt keszulekeidet a beallitasok ezen reszeben.
-Reszleteket lasd a Multi-Device fejezetben.
-
----
-
-## 14. Biztonsag
-
-### Mit jelent a Post-Quantum-titkositas?
-
-A mai titkositas olyan matematikai problemakra epul, amelyek a hagyomanyos
-szamitogepek szamara rendkivul nehezan megoldhatok. A kvantumszamitogepek a
-jovoben ezek kozul nehanyet gyorsan megoldhatnak. A Post-Quantum-titkositas
-tovabbi eljarasokat hasznal, amelyek a kvantumszamitogepeknek is ellenallnak.
-
-A Cleona mindket megkozelitest kombinalja: klasszikus titkositast a
-megbizhatosagert es Post-Quantum-eljarasokat a jovoallossagert. Igy
-egyszerre vagy vedett a jelenlegi es a jovobeli fenyegetesek ellen.
-
-Minden egyes uzenethez kulon kulcs generalodik. Meg ha egy tamado feltorne is
-egy uzenet kulcsat, azzal semmilyen mas uzenetet nem tudna elolvasni.
-
-### Miert biztonsagosabb szerver nelkul
-
-A hagyomanyos uzenetoalkalmazasoknal az uzeneteid a szolgaltato szerveren
-haladnak at. Meg ha titkositottak is lehetnek: a szolgaltato hozzaferhet a
-metaadatokhoz (ki kommunikal kivel, mikor, milyen gyakran, honnan) es ezeket
-korulmenyek kozott biroi vegzesre ki kell adnia.
-
-A Cleona eseten nincs ilyen kozponti pont. Az uzeneteid kozvetlenul
-keszulekrol keszulekre utaznak. Nincs olyan hely, ahol minden metaadat
-osszefutna. Senki sem tudja egyetlen adatpont alapjan rekonstrualni a
-kommunikacios szokasaidat.
-
-### Mi tortenik ha offline vagy?
-
-Ha uzenetet kuldesz es a cimzett offline:
-
-1. A Cleona eloszor megprobjalja kozvetlenul kezbesiteni az uzenetet.
-2. Ha ez nem sikerul, kozos kontaktokon keresztul tovabbitja.
-3. Egyidejuleg az uzenet titkositott darabokra osztva tobb csomopontra
-   kerul elosztasra a halozatban (hasonloan egy kirakoshoz, amely 10
-   darabbol all, amelyekbol 7 elegseges a kep osszeallitasahoz).
-4. Az uzenetet legfeljebb 7 napig tarolodik.
-
-Amint a cimzett ujra online lesz, az uzenetek kezbesitodnek. Ertesitest
-kapsz, ha az uzeneted megerezett.
-
-### Cenzura elleni vedelem
-
-Ha a halozatod blokkolja a szabvanyos kapcsolodasi modszert (UDP), a Cleona
-automatikusan atvalt egy alternativ atvitelre (TLS), amelyet nehezebb
-felismerni es blokkolni. Ez atlatszoan tortenik -- neked nem kell semmit
-beallitanod.
-
-### Biztonsagos kulcstarolas
-
-A tamogatott platformokon a Cleona a titkositasi kulcsaidat az operacios
-rendszer biztonsagos kulcstarojaban tarolja (Android Keystore, iOS Keychain,
-macOS Keychain). Ahol elerheto, ez hardveres vedelmet biztosit a kulcsaid
-szamara.
-
-### Adatbazis-titkositas
-
-Az osszes uzeneted, kontaktod es beallitasod titkositottan tarolodik a
-keszulemekeden. Meg ha valaki hozzaferne is a fajlrendszeredhez, a
-kriptografiai kulcsod nelkul semmit sem tudna olvasni. Ez a kulcs az
-identitasodbol szarmazik es kizarolag a keszulemekeden letezik.
-
-### Zart halozat
-
-A Cleona zart halozatkent mukodik. Minden halozati csomag hitelesitett,
-igy csak legitim Cleona-keszulekek vehetnek reszt. Ez meggatolja, hogy
-kulso felek hamis uzeneteket juttassanak be vagy a halozati forgalmat
-lehallgassak.
+Androidon, Windowsban és macOS-en a Cleona nem engedélyezi más
+alkalmazásoknak a képernyőfelvételt. Ha kell egy kép, használd a felső sávban
+lévő képernyőkép-gombot: a képet a képeid közé teszi -- titkosítatlanul.
+Egy olyan beszélgetésben, amelyben a továbbítás nincs engedélyezve, nincs
+képernyőkép.
 
 ---
 
-## 15. Szoftverfrissitesek
+## 15. Szoftverfrissítések
 
-### Hogyan kapok frissiteseket?
+### Hogyan kapok frissítéseket?
 
-A Cleona tobbfele modon frissitheto. A cel az, hogy akkor is frissiteseket
-kaphass, ha egyes terjesztesi csatornak kiesnek vagy blokkolt lesz:
+A Cleona többféleképpen frissíthető. A cél, hogy akkor is kapj frissítéseket,
+amikor egyes terjesztési útvonalak kiesnek vagy blokkolódnak:
 
-1. **App Store / Play Store:** ha a Cleonat egy App Store-bol telepitetted,
-   a frissiteseket a szokasos modon a Store-bol kapod.
-2. **GitHub Releases:** a projekt GitHub oldalon alirt telepitocsomagokat
-   talalsz minden platformra.
-3. **Halozaton beluli frissitesek:** ha a Cleona-halozatban egy masik
-   felhasznalo mar rendelkezik a legujabb verzioval, a Cleona a frissittest
-   kozvetlenul a P2P-halozaton keresztul szerezheti be -- kulso szerver
-   nelkul. Az uj verzio hibajavitott fragmentumokra bontodik es tobb
-   csomopontra oszlik el. A keszuleked osszegyujti a szukseges
-   fragmentumokat es osszeallitja a frissittest. A hitelleseget a fejleszto
-   Ed25519-alairasa igazolja.
-4. **Meghivolinkek:** meghivolinkeket hozhatsz letre, amelyek mindent
-   tartalmaznak, amire egy uj felhasznalonak szuksege van a Cleona
-   telepitesehez es a halozathoz valo csatlakozashoz.
-5. **Fizikai atadas:** internet nelkuli kornyezetben a Cleonat USB-kulcson
-   vagy helyi halozaton keresztul is tovabbadhatod masoknak.
+1. **App Store / Play Store:** Amint a Cleona megjelenik ott, és egy áruházon
+   keresztül telepítetted, a frissítéseket megszokott módon az áruházon át
+   kapod. Az iPhone-on a frissítések TestFlighton át jönnek.
+2. **GitHub Releases:** A projekt GitHub-oldalán aláírt telepítőcsomagokat
+   találsz minden platformra.
+3. **Frissítések a hálózaton keresztül:** A Cleona közvetlenül a hálózaton
+   keresztül is kérhet frissítést -- letöltő-szerver nélkül. Az új verzió
+   hibajavított darabokra van bontva, amelyek a hálózatban szétterjednek; egy
+   részük még az álcaforgalomban is utazik. A készüléked elég darabot gyűjt, és
+   összeállítja a frissítést. Átvitelre többnyire csak a változás kerül --
+   néhány MB a teljes alkalmazás helyett. Ez Linuxra, Windowsra és Androidra
+   érvényes; macOS-en az új verziókat a weboldalról vagy a GitHubról töltöd le.
+4. **Meghívó linkek:** Készíthetsz meghívó linkeket, amelyek mindent
+   tartalmaznak, amire egy új felhasználónak szüksége van a Cleona telepítéséhez
+   és a hálózathoz való csatlakozáshoz.
+5. **Fizikai átvitel:** Internet nélküli környezetben a Cleonát USB-szalagon
+   vagy a helyi hálózaton keresztül is átadhatod másoknak.
 
-### Frissitesi ertesites
+### Így fut egy frissítés
 
-Ha uj frissites elerheto, a Cleona ertesitest jelez a kezdokepernyoon.
-Ha a frissites a halozaton keresztul is elerheto (halozaton beluli
-frissites), valaszthatsz, hogy kozvetlenul a halozatbol toltod le.
+1. A Cleona automatikusan a háttérben gyűjti egy új frissítés darabjait, és
+   állítja össze őket.
+2. Csak amikor a frissítés **teljes**, és az **aláírása ellenőrizve** lett,
+   ajánlja fel a Cleona neked. Így sosem kapsz fél vagy ellenőrizetlen
+   frissítést.
+3. Ha a „Telepítés" gombra koppintasz, a telepítés további rákérdezés nélkül
+   elindul. Androidon emellett a rendszer is mutatja a telepítő ablakát.
 
-### Binaris terjesztes
+Régebbi verziók nem kerülnek felajánlásra -- egy frissítés mindig csak előre
+megy. Ha egy verzió olyan régi, hogy már nem tud együttműködni a hálózattal, a
+Cleona ezt egyértelműen jelzi, és kér, hogy frissíts.
 
-Alapertelmezetten a keszuleked segit a frissitesek terjeszteseben mas
-felhasznalok szamara a halozatban. Ha ezt nem szeretned, a beallitasokban
-a "Halozat" pont alatt kikapcsolhatod ezt a funkciot. A frissitesi
-fragmentumok tarolasanak merete korlatozott (5 MB mobilkeszulekeken, 20 MB
-asztali gepeken) es rendszeresen takaritodik.
+### Aláírás-ellenőrzés
 
-### Alairas-ellenorzes
+Minden frissítés kétszeresen aláírt: egy klasszikus és egy post-kvantum
+eljárással. A Cleona automatikusan ellenőrzi mindkét aláírást. Így biztosított,
+hogy csak a hivatalos fejlesztőtől származó frissítések kerüljenek elfogadásra --
+még akkor is, ha a frissítés a hálózaton keresztül idegen készülékektől jött.
+Egy frissítés sosem jön létre automatikusan a fejlesztésből, hanem csak akkor,
+amikor a fejlesztő kézzel aláírja.
 
-Minden frissites kriptografiailag alirt. A Cleona automatikusan ellenorzi
-az alairst, mielott egy frissites telepitesre kerulne. Igy biztositott,
-hogy csak a hivatalos fejlesztotol szarmazo frissitesek kerulnek elfogadasra
--- meg akkor is, ha a frissites a P2P-halozaton keresztul erkezett.
+---
+## 16. Gyakori kérdések
+
+### „Használhatom a Cleonát internet nélkül?"
+
+A Cleonának hálózati kapcsolatra van szüksége, de nem feltétlenül internetre:
+ugyanabban a Wi-Fi-ben a Cleona-készülékek önmaguk is megtalálják egymást, és
+internetelérés nélkül is tudnak egymással írni. Ugyanakkor online lenni a
+partnereddel nem kell: ha offline van, az üzenet legfeljebb 7 napig várakozik
+három szomszéd postafiókjában, amíg fel nem médi.
+
+### „Mi van, ha elveszítem a seed-kifejezésemet?"
+
+Amíg egy készülék még fut az identitásoddal, semmi sem veszett el -- ott
+egyszerűen írsz tovább. Abban a készülékben, amelyen az identitást létrehoztad,
+a 24 szót többnyire újra le is olvashatod (lásd a 2. fejezetet). Ne hagyatkozz
+erre: egy újratelepítés eltünteti ezt a másolatot, és Androidon a képernyőzár
+eltávolítása vagy megváltoztatása is megsemmisíti. Ha se a szavak,
+se egy készülék nincs már, nincs visszaút -- a kapcsolataidon, a fejlesztőn
+vagy bárki máson keresztül sem. Ezért olyan fontos a 24 szót biztonságban
+őrizni.
+
+### „Valaki elolvashatja az üzeneteimet?"
+
+Nem. Minden üzenet egy olyan egyszeri kulccsal titkosított, amely csak erre
+az egy üzenetre érvényes. Csak te és a partnered tudjátok visszafejteni az
+üzenetet. Nincs központi szerver, nincs masterkulcs és nincs hozzáférés a
+fejlesztő számára. Még ha egy készülék útközben továbbítja is az üzenetet, csak
+titkosított adathalmazt és egy kódot lát. A szomszédod tudja, hogy a csomag
+tőled jön, de nem, hová megy; a partnered szomszédja tudja, hová megy, de
+nem, kitől.
+
+### „Miért nincs szükségem telefonszámra?"
+
+Mert az identitásod tisztán kriptográfiai. Egy telefonszám vagy e-mail-cím
+helyett, amely a valódi nevedhez van kötve, egy olyan kulcspár azonosít, amely
+a készülékeden jött létre. A kapcsolatokat QR-kóddal, NFC-fel vagy a meghívód
+szövegsorával adod hozzá -- nem egy telefonkönyvön keresztül. Ez több
+magánszférát jelent, mert az üzenetküldő-fiókod nincs a valós identitásodhoz
+kötve.
+
+### „Hogyan találok embereket a Cleonán?"
+
+A Cleonában szándékosan nincs kapcsolatkeresés telefonszám vagy név szerint --
+ez magánszféra-probléma lenne. Ehelyett a meghívókat közvetlenül cserélitek ki:
+QR-kóddal, NFC-fel vagy szövegsorként egy másik úton keresztül. Ez olyan, mint
+névjegykártyák cseréje a telefonkönyvben való keresés helyett.
+
+### „Működik a Cleona külföldön is?"
+
+Igen. Amíg van internetkapcsolatod, a Cleona a világ minden táján működik.
+Mivel nincs központi szerver és nincs fix cím, a szolgáltatás nem kapcsolható
+le egyszerűen bizonyos országokra. Hogyan nehezíti meg a Cleona a blokkolást,
+arról a „Biztonság" fejezet „Anti-cenzúra" szakaszában olvashatsz. Egy olyan
+ország, amely minden ismeretlen forgalmat a határon blokkol, viszont a
+Cleonát is megállíthatja.
+
+### „A Cleona ingyenes?"
+
+Igen. A Cleona ingyenes és reklám nélkül használható. Mivel nincs központi
+szerver, üzemeltetési szerverköltségek sem merülnek fel. A beállításokban a
+„Támogasd a Cleonát" -> „Adományozás" alatt önkéntesen támogathatod a
+fejlesztést.
+
+### „Az üzenetemnek csak egy pipája van -- mit jelent ez?"
+
+Az üzenet úton van, de a partnered még nem igazolta vissza a kézbesítést --
+legtöbbször, mert épp offline. Ez nem hiba: az üzenet legfeljebb 7 napig a
+postafiókban várakozik. Amint felmédi, két pipát látsz. Egy óra azt jelenti,
+hogy még egyetlen út sem vitte el az üzenetet -- magától elindul, amint van
+egy; egy figyelmeztető jel azt, hogy 14 napig nem talált utat, és újra
+elküldheted.
+
+### „Miért érkeznek késve az üzenetek az iPhone-omon?"
+
+Az iOS nem engedi, hogy az alkalmazások véglegesen a háttérben fussanak. A
+Cleonát csak időnként ébreszti fel rövid időre; hogy mikor, azt az iOS dönti
+el. Ilyenkor mindent lekér. Amint megnyitod az alkalmazást, a Cleona lekéri,
+amit neked megőriztek.
+
+### „Átválthatok a WhatsApp-ról a Cleonára?"
+
+Igen, de a WhatsApp-csevegéseidet nem tudod áthozni. A Cleona és a WhatsApp
+alapvetően különböző rendszerek. A kapcsolataidat egyenként kell a Cleonához
+hozzáadni. A legegyszerűbb, ha a meghívód szövegsorát elküldöd a kapcsolataidnak.
+Minden így beérkező kérést te magad erősítesd meg a „Kérések" alatt.
+
+### „Használhatom a Cleonát több eszközön egyszerre?"
+
+Még nem. Egy második eszköz ugyanahhoz az identitáshoz egy későbbi verzióval
+jön (11. fejezet). Több eszközön ma különböző identitásokat használhatsz.
+
+### „Hogyan kapok frissítéseket, ha az áruház blokkolva van?"
+
+A Cleona közvetlenül a hálózaton keresztül is kérhet frissítést, anélkül, hogy
+egy áruházra, weboldalra vagy letöltő-szerverre támaszkodna. Ha egy másik
+készülék a hálózatban a legújabb verzióval rendelkezik, a készüléked onnan is
+letöltheti a frissítést. Az eredetiséget a fejlesztő digitális aláírásával
+ellenőrzik. Alternatívaként egy kapcsolat is átadhatja neked az alkalmazást
+meghívó linkkel vagy USB-szalagon. Erről bővebben a „Szoftverfrissítések"
+fejezetben.
 
 ---
 
-## 16. Gyakran ismetelt kerdesek
+## Súgó és kapcsolat
 
-### "Hasznalhatom a Cleonat internet nelkul?"
-
-Nem, a Cleonanak halozati kapcsolat szukseges az uzenetek kuldesehez es
-fogadasahoz. Ugyanakkor nem kell egyidejuleg online lenned a masik fellel:
-az uzenetek, amelyeket a cimzett offline allapotaban kuldesz, tarolodnak es
-automatikusan kezbesitodnek, amint mindket fel ujra csatlakozik. A helyi
-halozatban (pl. ugyanabban a WLAN-ban) internet-hozzaferes nelkul is
-kommunikalhattok egymassal.
-
-### "Mi van ha elveszitem a Seed-Phrase-t?"
-
-Ha beallitottad a Guardianokat, harom az ot bizalmi szemelybol egyutt kepes
-helyreallitani a hozzaferesedet. Guardianok es Seed-Phrase nelkul sajnos
-nincs mod az identitasod visszaszerzesere. Ezert olyan fontos a 24 szot
-biztonsagosan megorizni.
-
-### "Elolvashatja valaki az uzeneteimet?"
-
-Nem. Minden uzenetet egyszer hasznalatos kulccsal titkositanak, amely csak
-erre az egy uzenetre ervenyes. Csak te es a masik fel tudjatok megfejteni
-az uzenetet. Nincs kozponti szerver, nincs mesterkulcs es nincs hozzaferes
-a fejleszto szamara. Meg ha egy keszulek az atviteli uton tovabbitja is
-az uzenetet, az csak titkositott adathalmazt lat.
-
-### "Miert nincs szukseg telefonszamra?"
-
-Mert az identitasod tisztan kriptografiai. Telefonszam vagy e-mail-cim
-helyett, amely a valos nevedhez kotheto, egy kulcspar azonosit, amelyet a
-keszulemekeden hoztak letre. Kontaktokat QR-koddal, NFC-vel vagy linkkel
-adsz hozza -- nem telefonkonyvbol. Ez tobb maganszferat jelent, mert az
-uzenetoalkalmazas-fiokod nincs a valos identitasodhoz kotve.
-
-### "Hogyan talalhatok embereket a Cleonan?"
-
-A Cleona tudatosan nem rendelkezik telefonszam vagy nev szerinti
-kontaktkeresessel -- az adatvedelmi problema lenne. Ehelyett kozvetlenul
-cserelsz kontaktadatot: QR-koddal, NFC-vel, cleona://-linkkel vagy
-nyilvanos csatornakban. Ez olyan, mint nevjegykartya-csere a telefonkonyvben
-valo keresgetees helyett.
-
-### "Mukodik a Cleona kulfoldon is?"
-
-Igen. Amig van internetkapcsolatod, a Cleona mindenhol mukodik a vilagon.
-Mivel nincs kozponti szerver, a szolgaltatas nem blokkothato egyes orszagokra
-vonatkozoan. A Cleona ezenfelul cenzura elleni fallbackkel is rendelkezik:
-ha a normala kapcsolat (UDP) blokkolt, a Cleona automatikusan atvalt egy
-alternativ atvitelre (TLS), amelyet nehezebb felismerni es blokkolni.
-
-### "Ingyenes a Cleona?"
-
-Igen. A Cleona ingyenes es reklam nelkul hasznalhato. Mivel nincs kozponti
-szerver, szerverkoltsegek sem merulnek fel az uzemelteteshez. Az
-alkalmazasban a "Tamogatas" pont alatt megtalalhato a lehetoseg a fejlesztes
-onkentes tamogatasara.
-
-### "Az uzentemnel egy orajel latszik -- mit jelent ez?"
-
-Ez azt jelenti, hogy az uzeneted meg nem kerult kezbesitesre. A masik fel
-valoszinuleg eppen offline. Amint az uzenet kezbesitesre kerul, a szimbolum
-megvaltozik. Az uzenetek legfeljebb 7 napig tarolodnak a kezbesitesig.
-
-### "Atvalhatok WhatsApp-rol Cleonara?"
-
-Igen, de a WhatsApp-csevegesidet nem tudod atvinni. A Cleona es a WhatsApp
-alapvetoen kulonbozo rendszerek. A kontaktjaidat egyenkent kell hozzaadnod
-a Cleonaban. A legegyszerubb modja az, ha a cleona://-linked bepostolod egy
-WhatsApp-csoportba es megkered a tobieket, hogy adjanak hozza teged.
-
-### "Hasznalhatom a Cleonat tobb keszuleken egyidejuleg?"
-
-Igen. Akar 5 keszuleket is csatlakoztathatsz ugyanazzal az identitassal. Egy
-keszulek a primaris (ez tartalmazza a Seed-Phrase-t), es tovabbi keszulekek
-biztonsagos parosito folyamaton keresztul csatlakoztathatoak. Minden keszulek
-ugyanazt az identitast, kontaktokat es beszelgeteseket hasznalja. Reszleteket
-lasd a Multi-Device fejezetben.
-
-### "Hogyan kapok frissiteseket ha az App Store blokkolt?"
-
-A Cleona a frissiteseket kozvetlenul a P2P-halozaton keresztul is
-beszerezheti, anelkul hogy App Store-ra, weboldalra vagy letoltesi szerverre
-szorulna. Ha a halozatban mas felhasznalo rendelkezik a legujabb verzioval,
-a keszuleked onnan toltheti le a frissittest. A hitelleseget a fejleszto
-digitalis alaiersa igazolja. Alternativakent egy kontaktod meghivolinkkel
-vagy USB-kulcson is tovabbadhatja az alkalmazast. Tovabbiak a
-"Szoftverfrissitesek" fejezetben.
+Ha kérdésed van, vagy egy problémába ütközöl, aktuális információkat a
+Cleona-weboldalon és a GitHubon találsz. Mivel a Cleona egy decentralizált
+projekt, nincs klasszikus ügyfélszolgálat -- de van egy aktív közösség, amely
+szívesen segít.
 
 ---
 
-## Segitseg es kapcsolat
-
-Ha kerdeseid vannak vagy problemaba utkozel, aktualis informaciokat talalsz
-a Cleona weboldalan es a GitHubon. Mivel a Cleona egy decentralizalt projekt,
-nincs klasszikus ugyfelszolgalat -- de van egy aktiv kozosseg, amely szivesen
-segit.
-
----
-
-*Ez a kezikonyv a Cleona Chat 3.1.125 verziojat irja le. Egyes funkciok
-ujabb verziokaban megvaltozhatnak vagy bovulhetnek.*
+*Ez a kézikönyv a Cleona Chat 4.2-es verzióját írja le. Egyes funkciók újabb
+verziókban megváltozhatnak vagy bővülhetnek.*

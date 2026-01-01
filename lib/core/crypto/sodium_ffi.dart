@@ -7,11 +7,13 @@ library;
 
 import 'dart:ffi';
 import 'dart:io' show Platform;
+import 'package:cleona/core/link/elligator_ffi.dart' show ElligatorFFI;
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
 // ---------------------------------------------------------------------------
 // libsodium constants
@@ -189,6 +191,10 @@ typedef _AesGcmDecryptDart = int Function(
     Pointer<Uint8>,
     Pointer<Uint8>);
 
+// crypto_aead_aes256gcm_is_available
+typedef _AeadIsAvailableNative = Int32 Function();
+typedef _AeadIsAvailableDart = int Function();
+
 // crypto_aead_aes256gcm_keygen
 typedef _AesGcmKeygenNative = Void Function(Pointer<Uint8>);
 typedef _AesGcmKeygenDart = void Function(Pointer<Uint8>);
@@ -326,6 +332,24 @@ class SodiumFFI {
   late final _AesGcmEncryptDart _aesGcmEncrypt;
   late final _AesGcmDecryptDart _aesGcmDecrypt;
   late final _AesGcmKeygenDart _aesGcmKeygen;
+  late final _AeadIsAvailableDart _aesGcmIsAvailable;
+
+  /// Whether libsodium's AES-256-GCM can run on this processor
+  /// (`crypto_aead_aes256gcm_is_available() == 1`: AES-NI + PCLMUL + AVX on
+  /// x86, crypto extensions on ARMv8). Asked once, after `sodium_init` has
+  /// run the CPU detection. Where it is false, libsodium's AES-256-GCM must
+  /// never be called: it executes the AES instructions unchecked and the
+  /// process ends with an illegal-instruction fault (v4_2 §4.2, D-130, field
+  /// report S430 WT-1). [aesGcmEncrypt]/[aesGcmDecrypt] then run the same
+  /// AES-256-GCM in software (BearSSL in `native/cleona_link`), with the
+  /// same bytes on the wire and on disk.
+  late final bool aesGcmHardware;
+
+  // The software way: the two exports of the link library, bound with the
+  // SAME function types as libsodium's — the contract is identical.
+  _AesGcmEncryptDart? _swAesGcmEncrypt;
+  _AesGcmDecryptDart? _swAesGcmDecrypt;
+  bool _aesGcmForceSoftware = false;
   late final _HashSha256Dart _hashSha256;
   late final _HmacSha256Dart _hmacSha256;
   late final _SecretBoxEasyDart _secretBoxEasy;
@@ -352,6 +376,49 @@ class SodiumFFI {
     if (rc < 0) {
       throw const SodiumException('sodium_init() failed');
     }
+
+    // After sodium_init: the runtime CPU detection runs there (§4.2).
+    aesGcmHardware = _aesGcmIsAvailable() == 1;
+    if (!aesGcmHardware) _bindSoftwareAesGcm();
+  }
+
+  /// Binds the software AES-256-GCM of the link library. Opened through
+  /// [ElligatorFFI.openLibrary] — one candidate list for that library, not
+  /// a second copy. Idempotent.
+  void _bindSoftwareAesGcm() {
+    if (_swAesGcmEncrypt != null) return;
+    final lib = ElligatorFFI.openLibrary();
+    _swAesGcmDecrypt =
+        lib.lookupFunction<_AesGcmDecryptNative, _AesGcmDecryptDart>(
+            'cleona_link_aes256gcm_decrypt');
+    _swAesGcmEncrypt =
+        lib.lookupFunction<_AesGcmEncryptNative, _AesGcmEncryptDart>(
+            'cleona_link_aes256gcm_encrypt');
+  }
+
+  bool get _aesGcmSoftware => !aesGcmHardware || _aesGcmForceSoftware;
+
+  /// The start log line naming the AES-256-GCM way of this process (§4.2).
+  String get aesGcmBackendDescription {
+    if (!_aesGcmSoftware) return 'AES-256-GCM: libsodium (hardware)';
+    const sw = 'AES-256-GCM: software (BearSSL, cleona_link)';
+    if (aesGcmHardware) return '$sw — forced by a test';
+    final abi = Abi.current().toString();
+    final x86 = abi.endsWith('_x64') || abi.endsWith('_ia32');
+    return x86
+        ? '$sw — processor without AES-NI/PCLMUL/AVX'
+        : '$sw — processor without ARMv8 crypto extensions';
+  }
+
+  /// Test hook only (smokes): routes [aesGcmEncrypt]/[aesGcmDecrypt] through
+  /// the software way on a processor that has the hardware, so that the
+  /// software way can be compared with libsodium and exercised through the
+  /// normal entry points. Not a product switch: no setting, no environment
+  /// variable reaches it.
+  @visibleForTesting
+  set aesGcmForceSoftwareForTest(bool force) {
+    if (force) _bindSoftwareAesGcm();
+    _aesGcmForceSoftware = force;
   }
 
   /// Opens the libsodium shared library for the current platform.
@@ -455,6 +522,10 @@ class SodiumFFI {
     _aesGcmKeygen =
         lib.lookupFunction<_AesGcmKeygenNative, _AesGcmKeygenDart>(
             'crypto_aead_aes256gcm_keygen');
+
+    _aesGcmIsAvailable =
+        lib.lookupFunction<_AeadIsAvailableNative, _AeadIsAvailableDart>(
+            'crypto_aead_aes256gcm_is_available');
 
     _hashSha256 = lib.lookupFunction<_HashSha256Native, _HashSha256Dart>(
         'crypto_hash_sha256');
@@ -801,8 +872,11 @@ class SodiumFFI {
     final adPtr = ad != null ? _toNative(ad) : nullptr.cast<Uint8>();
     final adLen = ad?.length ?? 0;
 
+    // §4.2: libsodium only where the processor carries it; otherwise the
+    // software way with the identical contract.
+    final encrypt = _aesGcmSoftware ? _swAesGcmEncrypt! : _aesGcmEncrypt;
     try {
-      final rc = _aesGcmEncrypt(
+      final rc = encrypt(
         c,
         cLenOut,
         m,
@@ -858,8 +932,9 @@ class SodiumFFI {
     final adPtr = ad != null ? _toNative(ad) : nullptr.cast<Uint8>();
     final adLen = ad?.length ?? 0;
 
+    final decrypt = _aesGcmSoftware ? _swAesGcmDecrypt! : _aesGcmDecrypt;
     try {
-      final rc = _aesGcmDecrypt(
+      final rc = decrypt(
         m,
         mLenOut,
         nullptr.cast<Uint8>(), // nsec (unused)

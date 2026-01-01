@@ -157,6 +157,9 @@ extension HostCodes on Host {
     p.identity.messages
       ..ownNeighbours = p.namedFor // keyed only to whom reads it (S407)
       ..onNeighbours = p.neighboursCame
+      // Only a first copy's list is heard (§9.2, owner 14.11.2026, S423):
+      // the identity's received memory says which copy came before.
+      ..known = ((identifier) => p.histories.store.incomingKnown(identifier))
       ..onWhereAreYouAnswer = p.whereAreYouAnswered; // §8.1, D-76
     p.dayKeyDistribute(); // §8.2, edge "mailbox registered"
     // EDGE: this mailbox brings codes along (contacts, invitations,

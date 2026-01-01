@@ -185,9 +185,7 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // partner counts above; the 5-s cadence of `_refresh` redraws
         // the view anyway.
         _StatTile(
-          icon: widget.service.dataSaverLockedBySecure
-              ? Icons.lock_outline
-              : Icons.data_saver_on,
+          icon: Icons.data_saver_on,
           label: locale.get('datasaver_title'),
           value: locale.get(widget.service.dataSaverActive
               ? 'datasaver_state_on'
@@ -195,14 +193,11 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
           color: widget.service.dataSaverActive ? Colors.orange : null,
         ),
         // §24.4.2: the consequence stands NEXT TO the state, not behind a
-        // question mark. If the switch is locked, the
-        // reason stands here ("locked with its reason named").
+        // question mark.
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
-            widget.service.dataSaverLockedBySecure
-                ? locale.get('datasaver_locked_secure')
-                : locale.get('datasaver_consequence'),
+            locale.get('datasaver_consequence'),
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),

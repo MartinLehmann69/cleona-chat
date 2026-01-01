@@ -2,8 +2,7 @@
 ///
 /// Here is wired what is built individually:
 ///
-/// * the **forwarder** (`forward.dart`) — with the own codes,
-///   the code table and the neighbours of this node;
+/// * the **forwarder** (`forward.dart`) — with the own codes, the code table and the neighbours of this node;
 /// * the **code table** (`code_table.dart`) — filled from the
 ///   registrations that arrive as `0x24`, each answered with `0x25`;
 /// * the **registration** (`code_registration.dart`, `code_registrants.dart`,
@@ -255,7 +254,7 @@ class CodeRoute {
   /// Sends [packet] under [code] to the recipient's fixed neighbours [next] — named itself and holding
   /// the code, first to its device (D-110), then ONE `0x22` via the own fixed neighbour, without one directly (§8.1,
   /// the choice of the first hop: `code_send.dart`; never [recipientAt], S408).
-  void underCodeSendTo(Uint8List code, List<CardAddress> next, Uint8List packet, {List<CardAddress> recipientAt = const []}) {
+  void underCodeSendTo(Uint8List code, List<CardAddress> next, Uint8List packet, {List<CardAddress> recipientAt = const [], bool urgent = false}) {
     final inside = Forwarder.build(code: code, content: packet);
     next = heldHereFirst(table.who(code), next, code: shortFrom(hexFrom(code)), report: _k.report,
         direct: (a) => _out(inside, a), self: (a) => ownTarget(_k, a)); // §7.3 public address too
@@ -280,8 +279,9 @@ class CodeRoute {
         _out(inside, a);
       }
     } else {
-      retry.sent(hop, inside, plan.next, plan.later, plan.resort, shortFrom(hexFrom(code)));
+      retry.sent(hop, inside, plan.next, plan.later, plan.resort, shortFrom(hexFrom(code)), open: plan.open);
       retry.watch(_out(Forwarder.buildDetour(plan.next, inside), hop), hop); // §11.3, fix B
+      if (resortAtOnce(urgent, hop, plan.resort, (c) => _k.stands(InternetAddress.fromRawAddress(c.address), c.port))) { _out(inside, plan.resort!); _k.report(resortAtOnceLine(plan.resort!, hop)); } // D-127
     }
     // AFTER sending (S392 B-3): THE funnel of every `0x20`/`0x22`; the code prefix joins two logs (proposal M).
     _k.report('Step 3: ${plan.why} to ${plan.next.join(", ")}'
@@ -290,13 +290,13 @@ class CodeRoute {
   }
 
   /// Step 3 of the ladder: [code] missing → the step is dropped.
-  void stepThree(Uint8List packet, List<CardAddress> next, Uint8List? code, {List<CardAddress> recipientAt = const []}) {
+  void stepThree(Uint8List packet, List<CardAddress> next, Uint8List? code, {List<CardAddress> recipientAt = const [], bool urgent = false}) {
     if (code == null) {
       withoutCode++;
       _k.report('Neighbour step without code — not sent');
       return;
     }
-    underCodeSendTo(code, next, packet, recipientAt: recipientAt);
+    underCodeSendTo(code, next, packet, recipientAt: recipientAt, urgent: urgent);
   }
 
   /// Remember a sending from [from] to [to] that waits for a receipt under

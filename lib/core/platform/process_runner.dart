@@ -8,8 +8,16 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
+
 /// Runs external processes with a deadline that also terminates the child.
 class ProcessRunner {
+  // Purely static utility without identity reference -> AppPaths.dataDir
+  // (pattern of `DiskSpace`; without profileDir CLogger writes no file).
+  static final _log =
+      CLogger.get('process-runner', profileDir: AppPaths.dataDir);
+
   /// Run an external process with a hard timeout.
   ///
   /// [Process.run] has no timeout parameter, and many network/IPC tools block
@@ -38,7 +46,16 @@ class ProcessRunner {
     final Process proc;
     try {
       proc = await Process.start(executable, args, environment: environment);
-    } catch (_) {
+    } catch (e) {
+      // A program that cannot be started is not a timeout: say which one
+      // (S423 A-1 — Android has no `sftp`, and "Test connection" showed
+      // FAIL without a single log line). Only the program name and the
+      // OS message: `ProcessException.toString()` would add the argument
+      // list, which names host, user and paths.
+      final why = e is ProcessException
+          ? '${e.message} (errno ${e.errorCode})'
+          : e.runtimeType.toString();
+      _log.warn('cannot start "$executable": $why');
       return null;
     }
     // Nothing is ever written to the child: close its stdin at once. An open

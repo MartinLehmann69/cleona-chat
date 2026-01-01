@@ -33,7 +33,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
-import 'package:mycelium/node_helpers.dart' show interfaces;
+import 'package:mycelium/node_helpers.dart' show interfacesAsRead;
 import 'package:mycelium/outside_route.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/split.dart';
@@ -119,7 +119,7 @@ class MappingProbe {
 
     _open.add(close);
     try {
-      wire = await Wire.open(port: 0, interfaces: interfaces, report: (_) {});
+      wire = await Wire.open(port: 0, interfaces: interfacesAsRead, report: (_) {});
       shell = Shell(wire, report: (_) {});
       final identifier = Uint8List.fromList(
           List<int>.generate(kIdentifierLength, (_) => _random.nextInt(256)));

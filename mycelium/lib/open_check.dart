@@ -45,7 +45,7 @@ import 'package:mycelium/board_node.dart' show NodeAnswer;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/node.dart';
-import 'package:mycelium/node_helpers.dart' show interfaces;
+import 'package:mycelium/node_helpers.dart' show interfacesAsRead;
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
 import 'package:mycelium/outside_route.dart' show kIdentifierLength;
 import 'package:mycelium/shell.dart';
@@ -203,8 +203,9 @@ class OpenCheck {
 
     _open.add(close);
     try {
-      wire = await Wire.open(port: 0, interfaces: interfaces, report: (_) {});
-      if (target.$1.type == InternetAddressType.IPv6 && !wire.hasIpv6) {
+      wire = await Wire.open(port: 0, interfaces: interfacesAsRead, report: (_) {});
+      // No socket of the target's kind (§11.1, S427: both kinds equal).
+      if (target.$1.type == InternetAddressType.IPv6 ? !wire.hasIpv6 : !wire.hasIpv4) {
         return null;
       }
       shell = Shell(wire, report: (_) {});

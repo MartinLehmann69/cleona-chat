@@ -13,7 +13,8 @@
 //    forms the pair. Where two members share several groups or channels the
 //    mailbox takes the seed of the smallest identifier (`GroupPair.pairRandom`)
 //    — one rule across both, because a channel identifier is just another
-//    group identifier there.
+//    group identifier there; it moves to a newly shared smaller one only
+//    once it has heard the co-member under it (§4.3, D-131).
 //
 // 4.2.3 (D-21): `pair_seeds` is a new field — an older device keeps it as an
 // unknown field and ignores it; the entry fields of `GroupMember` are read

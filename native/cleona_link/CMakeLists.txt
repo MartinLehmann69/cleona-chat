@@ -28,6 +28,14 @@
 #
 # Licence: BSD-2-Clause OR CC0-1.0 (SPDX line 10 of vendor/monocypher/
 # monocypher.h; full text vendor/monocypher/LICENCE.md).
+#
+# Second vendored part (S430, v4_2 §4.2, D-130): vendor/bearssl/ carries the
+# seven BearSSL 0.6 sources of AES-256-GCM in constant time (aes_ct64,
+# ghash_ctmul64, gcm and two codec helpers) plus a reduced inner.h, for the
+# two exports cleona_link_aes256gcm_encrypt/decrypt — the software way on a
+# processor where libsodium's AES-256-GCM is not available. Origin, archive
+# checksum and per-file checksums: vendor/bearssl/README.txt. Licence: MIT
+# (vendor/bearssl/LICENSE.txt).
 
 cmake_minimum_required(VERSION 3.13)
 
@@ -41,15 +49,22 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT MSVC)
-  # -fvisibility=hidden: the Monocypher symbols stay library-internal,
-  # exported are exactly the three EXPORT-annotated cleona_link_* functions
-  # (verifiable: nm -D --defined-only libcleona_link.so).
+  # -fvisibility=hidden: the Monocypher and BearSSL symbols stay
+  # library-internal, exported are exactly the five EXPORT-annotated
+  # cleona_link_* functions (verifiable: nm -D --defined-only libcleona_link.so).
   add_compile_options(-fvisibility=hidden -Wall -Wextra -Wpedantic -O3)
 endif()
 
 set(CLEONA_LINK_SOURCES
     cleona_link.c
-    vendor/monocypher/monocypher.c)
+    vendor/monocypher/monocypher.c
+    vendor/bearssl/aes_ct64.c
+    vendor/bearssl/aes_ct64_enc.c
+    vendor/bearssl/aes_ct64_ctr.c
+    vendor/bearssl/ghash_ctmul64.c
+    vendor/bearssl/gcm.c
+    vendor/bearssl/dec32le.c
+    vendor/bearssl/enc32le.c)
 
 # iOS requires static libraries (no own dylibs allowed) — same
 # switch as native/cleona_pow/CMakeLists.txt.
@@ -87,4 +102,20 @@ if(CLEONA_LINK_BUILD_SMOKE)
   target_compile_definitions(cleona_link_saboteur PRIVATE CLEONA_LINK_SABOTAGE)
   add_executable(smoke_link_elligator_sabotage test/link_elligator_smoke.c)
   target_link_libraries(smoke_link_elligator_sabotage PRIVATE cleona_link_saboteur)
+
+  # AES-256-GCM software exports (S430, D-130): NIST CAVP vectors + sabotage
+  # cases; the saboteur flips a bit of every tag, so the _sabotage variant
+  # MUST fail.
+  #   ./build/cleona_link/smoke_link_aes_gcm            # must deliver PASS
+  #   ./build/cleona_link/smoke_link_aes_gcm_sabotage   # must FAIL
+  add_executable(smoke_link_aes_gcm test/link_aes_gcm_smoke.c)
+  target_link_libraries(smoke_link_aes_gcm PRIVATE cleona_link)
+  add_executable(smoke_link_aes_gcm_sabotage test/link_aes_gcm_smoke.c)
+  target_link_libraries(smoke_link_aes_gcm_sabotage PRIVATE cleona_link_saboteur)
+
+  # Throughput of the same exports (S431, lab probe without AES-NI, plan S430
+  # §1 "price"): 1200-byte and 64 KiB boxes, MB/s, share of one core for an
+  # 800 kbit/s stream. A measurement, not a gate.
+  add_executable(bench_link_aes_gcm test/link_aes_gcm_bench.c)
+  target_link_libraries(bench_link_aes_gcm PRIVATE cleona_link)
 endif()

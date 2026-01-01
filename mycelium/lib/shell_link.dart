@@ -13,6 +13,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/shell_start.dart' show Start;
 import 'package:mycelium/silence.dart' show kSendingsAtMost;
+import 'package:mycelium/trace.dart' show traceOn;
 import 'package:mycelium/wire.dart' show PacketRoute;
 
 /// How long flight 2 is waited for before flight 1 is repeated — the answer
@@ -255,15 +256,19 @@ bool renewDue(Link l, DateTime now, Duration silence) =>
 
 /// Keeps [links] at [kLinksAtMost]: the least recently used link goes,
 /// and [gone] is told its key. Here and not in `shell.dart` for the line
-/// budget (mycelium/README.md rule 2).
-void capLinks(Map<String, Link> links, void Function(String) gone) {
+/// budget (mycelium/README.md rule 2). [dropped] (tracing only, S426
+/// AVM-M1): the key, its link, and whether that link still stands under
+/// another address.
+void capLinks(Map<String, Link> links, void Function(String) gone,
+    [void Function(String w, Link l, bool elsewhere)? dropped]) {
   while (links.length > kLinksAtMost) {
     var oldest = links.keys.first;
     for (final e in links.entries) {
       if (e.value.last.isBefore(links[oldest]!.last)) oldest = e.key;
     }
-    links.remove(oldest);
+    final l = links.remove(oldest)!;
     gone(oldest);
+    dropped?.call(oldest, l, links.values.any((v) => identical(v, l)));
   }
 }
 
@@ -273,7 +278,17 @@ String shellWho(InternetAddress a, int port) => '${a.address}:$port';
 
 /// Flight 1 of a handshake: part A and part B to [target] (`shell.dart`
 /// `_start`, `_deadline`). Moved out of `shell.dart` unchanged (S405).
-void flight1(PacketRoute bottom, Start b, InternetAddress target, int targetPort) {
-  bottom.send(b.partA, target, targetPort);
-  bottom.send(b.partB, target, targetPort);
+///
+/// S424 M-5: counts the parts the socket did not take and, only then, writes
+/// ONE TRACE line for this attempt — the measurement HB-2 lacks ("did the
+/// handshake leave at all?"). A handshake runs only for a send wish or a
+/// fresh start, never in idle; nothing changes in what is sent.
+void flight1(PacketRoute bottom, Start b, InternetAddress target, int targetPort,
+    void Function(String) report) {
+  final notTaken = (bottom.send(b.partA, target, targetPort) ? 0 : 1) +
+      (bottom.send(b.partB, target, targetPort) ? 0 : 1);
+  if (traceOn && notTaken > 0) {
+    report('TRACE shell flight 1 to ${shellWho(target, targetPort)}: '
+        '$notTaken of 2 part(s) not taken by the socket (§11.1)');
+  }
 }

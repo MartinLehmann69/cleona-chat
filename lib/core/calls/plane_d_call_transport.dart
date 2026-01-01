@@ -272,6 +272,7 @@ class PlaneDCallTransport implements CallTransport {
     final counter = _lossCounters[peerHex] = LossCounter();
     _sendTimes[peerHex] = SendTimes();
     _subscriptions[peerHex] = session.inbound.listen((frame) {
+      _traceFrameDuringMediaSilence(peerHex, frame.kind);
       // THE LOSS REPORT'S COUNT (§17.1.1, RFC 3550 A.3) — over EVERY
       // authenticated frame, before any kind is sifted out: the sequence
       // counter is one over all kinds (`DSession.sendTo`), so every kind
@@ -706,21 +707,59 @@ class PlaneDCallTransport implements CallTransport {
     _armLossTimer(peerHex, kMediaLossTimeout);
   }
 
+  // Measurement (S423 E-1, gui-33 33.G14 → 33a.01): the device kept a call
+  // open after its peer had hung up and sent no more media; the loss rule
+  // never fired. Two questions the log could not answer: did frames of the
+  // peer's session still arrive (and of which kind), and did the loss timer
+  // run on time under load? Only trace lines; nothing changes the behaviour.
+
+  /// Media silence after which every arriving frame is traced (at most one
+  /// line per [_kSilenceTraceGapUs] per peer).
+  static const int _kSilenceTraceAfterUs = 2000000;
+  static const int _kSilenceTraceGapUs = 1000000;
+
+  /// When the last silence trace line for a peer was written, on [_lossClock].
+  final _silenceTracedUs = <String, int>{};
+
+  void _traceFrameDuringMediaSilence(String peerHex, DFrameKind kind) {
+    final last = _lastMediaUs[peerHex];
+    if (last == null) return;
+    final nowUs = _lossClock.elapsedMicroseconds;
+    final silentUs = nowUs - last;
+    if (silentUs < _kSilenceTraceAfterUs) return;
+    final traced = _silenceTracedUs[peerHex];
+    if (traced != null && nowUs - traced < _kSilenceTraceGapUs) return;
+    _silenceTracedUs[peerHex] = nowUs;
+    _log.trace('Plane D: ${kind.name} frame from ${_short(peerHex)} while its '
+        'media is silent for ${silentUs ~/ 1000} ms (loss rule at '
+        '${kMediaLossTimeout.inMilliseconds} ms)');
+  }
+
   /// One single-shot timer, re-armed for exactly the remainder. A call costs
   /// one wake-up per [kMediaLossTimeout], not one per frame.
   void _armLossTimer(String peerHex, Duration after) {
     _lossTimers.remove(peerHex)?.cancel();
+    final armedUs = _lossClock.elapsedMicroseconds;
     _lossTimers[peerHex] = Timer(after, () {
       _lossTimers.remove(peerHex);
       final last = _lastMediaUs[peerHex];
       if (last == null || !_sessions.containsKey(peerHex)) return;
-      final silentUs = _lossClock.elapsedMicroseconds - last;
+      final nowUs = _lossClock.elapsedMicroseconds;
+      final silentUs = nowUs - last;
       final leftUs = kMediaLossTimeout.inMicroseconds - silentUs;
+      // How late the timer fired against its due time (S423 E-1).
+      final lateMs = (nowUs - armedUs - after.inMicroseconds) ~/ 1000;
       if (leftUs > 0) {
+        _log.trace('Plane D: loss timer for ${_short(peerHex)} re-armed — '
+            'last media ${silentUs ~/ 1000} ms ago, ${leftUs ~/ 1000} ms '
+            'left, fired $lateMs ms late');
         _armLossTimer(peerHex, Duration(microseconds: leftUs));
         return;
       }
       _lastMediaUs.remove(peerHex);
+      _log.trace('Plane D: loss timer for ${_short(peerHex)} expired — '
+          'last media ${silentUs ~/ 1000} ms ago, fired $lateMs ms late');
+      // gui-72 reads this line verbatim — keep its text.
       _log.warn('Plane D: no valid '
           '${_lossCountsEveryFrame.contains(peerHex) ? '' : 'media '}frame '
           'from ${_short(peerHex)} for '
@@ -1278,6 +1317,7 @@ class PlaneDCallTransport implements CallTransport {
     // The loss rule ends with the session: nothing fires after a hang-up.
     _lossTimers.remove(participantHex)?.cancel();
     _lastMediaUs.remove(participantHex);
+    _silenceTracedUs.remove(participantHex);
     _lossCounters.remove(participantHex);
     _sendTimes.remove(participantHex);
     _dueLoss.remove(participantHex);

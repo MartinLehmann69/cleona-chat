@@ -1,6 +1,6 @@
 # Cleona Chat -- Benutzerhandbuch
 
-Version 3.1.125 | Stand Juli 2026
+Version 4.2 | Stand November 2026
 
 ---
 
@@ -16,7 +16,7 @@ Version 3.1.125 | Stand Juli 2026
 8. [Kalender](#8-kalender)
 9. [Umfragen](#9-umfragen)
 10. [Mehrere Identitaeten](#10-mehrere-identitaeten)
-11. [Multi-Device](#11-multi-device)
+11. [Mehrere Geraete](#11-mehrere-geraete)
 12. [Wiederherstellung](#12-wiederherstellung)
 13. [Einstellungen](#13-einstellungen)
 14. [Sicherheit](#14-sicherheit)
@@ -30,9 +30,10 @@ Version 3.1.125 | Stand Juli 2026
 ### Dein Messenger, deine Daten
 
 Cleona Chat ist ein Messenger, der komplett ohne zentralen Server funktioniert.
-Deine Nachrichten laufen direkt von deinem Geraet zum Geraet deines
-Gegenueber -- ohne Umweg ueber einen Firmensitz, ohne Cloud, ohne
-Datenzentrum. Kein Unternehmen kann deine Nachrichten lesen, speichern oder
+Deine Nachrichten reisen von deinem Geraet zum Geraet deines Gegenueber --
+ohne Umweg ueber einen Firmensitz, ohne Cloud, ohne Datenzentrum. Wo
+unterwegs ein anderes Geraet hilft, reicht es nur verschluesselte Pakete
+weiter. Kein Unternehmen kann deine Nachrichten lesen, speichern oder
 weitergeben, weil schlicht kein Unternehmen dazwischensteht.
 
 ### Kein Konto, keine Telefonnummer
@@ -53,16 +54,52 @@ dem aktuellen Stand der Technik bestmoeglich geschuetzt ist.
 
 ### Wie funktioniert das ohne Server?
 
-Stell dir vor, du und deine Kontakte bilden zusammen ein Netz. Jedes Geraet
-hilft dabei, Nachrichten weiterzuleiten. Ist dein Gegenueber gerade online,
-geht die Nachricht direkt hin. Ist dein Gegenueber offline, speichern
-gemeinsame Kontakte die Nachricht zwischen und liefern sie zu, sobald der
-Empfaenger wieder da ist. Deine Kontakte sind also gleichzeitig auch dein
-Netzwerk.
+Das Netz von Cleona besteht nur aus den Geraeten seiner Nutzer. Jedes Geraet
+ist ein Knoten, kein Knoten ist wichtiger als ein anderer, und jeder kennt nur
+seine Nachbarn. Vier Dinge machen dieses Netz besonders:
+
+- **Kein fester Punkt.** In der App steht keine Serveradresse, und das Netz
+  haengt von keinem einzelnen Knoten ab. Es gibt nichts, was man abschalten
+  koennte, um Cleona abzuschalten.
+- **Sofort.** Deine Nachricht geht in dem Moment los, in dem du sie
+  abschickst. Sie wartet auf keinen Takt und auf nichts anderes.
+- **Tarnung nebenher.** Dein Geraet sendet laufend kleine Tarnpakete, damit
+  von aussen nicht zu erkennen ist, wann du wirklich schreibst. Keine
+  Nachricht haengt davon ab -- die Tarnung laeuft nur daneben.
+- **Codes statt Namen.** Wer eine Nachricht weiterreicht, sieht nur einen
+  Code, der sich jeden Tag aendert. Im Normalfall kennt keiner von ihnen
+  Absender und Empfaenger zugleich; die Ausnahmen stehen in Kapitel 14.
+
+**Drei Wege, alle gleichzeitig.** Wenn du eine Nachricht abschickst,
+probiert Cleona nicht einen Weg nach dem anderen, sondern alle passenden
+auf einmal. Sobald dein Gegenueber den Empfang bestaetigt, werden die
+anderen abgebrochen.
+
+1. **Im selben Netz:** Seid ihr im selben WLAN, geht die Nachricht direkt
+   hinueber.
+2. **Ueber die festen Nachbarn:** Im Internet gibt dein Geraet die
+   Nachricht an seinen festen Nachbarn. Der reicht sie an die festen Nachbarn
+   deines Gegenueber weiter (bis zu drei auf einmal), und einer davon liefert
+   sie aus.
+3. **Briefkasten:** Ist dein Gegenueber offline, legt Cleona die Nachricht
+   verschluesselt bei drei Nachbarn ab. Dort bleibt sie bis zu 7 Tage. Kommt
+   dein Gegenueber wieder online, holt er sie ab.
+
+**Wie kommst du ins Netz?** In der App steht keine Serveradresse. Deinen
+Einstieg bekommst du von deinem ersten Kontakt: Seine Einladung enthaelt die
+Adressen, ueber die dein Geraet seine ersten Nachbarn findet. Im selben WLAN
+finden sich Cleona-Geraete auch selbst. Von da an lernt dein Geraet mit
+jedem Nachbarn weitere kennen.
 
 ### Plattformen
 
-Cleona ist verfuegbar fuer Android, iOS, macOS, Linux und Windows.
+Cleona ist verfuegbar fuer Android, iOS, macOS, Linux und Windows. Auf
+Computern und auf Android kommen Nachrichten und Anrufe innerhalb von Sekunden
+an. Auf dem iPhone gilt das, solange die App geoeffnet ist. Ist sie nicht
+geoeffnet, weckt iOS sie nur gelegentlich kurz; wann, bestimmt iOS. Dann holt
+Cleona alles Aufbewahrte ab und zeigt eine Mitteilung mit Zahl am App-Symbol.
+Anrufe erreichen ein iPhone mit nicht geoeffneter App nicht. Das ist eine
+Regel von Apple, kein Fehler in Cleona.
 
 ---
 
@@ -90,18 +127,21 @@ Cleona ist verfuegbar fuer Android, iOS, macOS, Linux und Windows.
 
 **Linux (Ubuntu/Debian):**
 1. Lade die .deb-Datei von der Cleona-Website oder von GitHub Releases herunter.
-2. Installiere mit Doppelklick oder im Terminal: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Starte Cleona ueber das Anwendungsmenue oder im Terminal mit `cleona-chat`.
+2. Installiere mit Doppelklick oder im Terminal: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Starte Cleona ueber das Anwendungsmenue oder im Terminal mit `cleona-chat-beta`.
 
 **Linux (Fedora/openSUSE):**
 1. Lade die .rpm-Datei von der Cleona-Website oder von GitHub Releases herunter.
-2. Installiere mit: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Starte Cleona ueber das Anwendungsmenue oder im Terminal mit `cleona-chat`.
+2. Installiere mit: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Starte Cleona ueber das Anwendungsmenue oder im Terminal mit `cleona-chat-beta`.
 
 **Linux (alle Distributionen -- AppImage):**
 1. Lade die .AppImage-Datei von der Cleona-Website oder von GitHub Releases herunter.
-2. Mache die Datei ausfuehrbar: Rechtsklick, Eigenschaften, Ausfuehrbar, oder im Terminal: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Starte per Doppelklick oder im Terminal: `./cleona-chat-VERSION-x86_64.AppImage`
+2. Mache die Datei ausfuehrbar: Rechtsklick, Eigenschaften, Ausfuehrbar, oder im Terminal: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Starte per Doppelklick oder im Terminal: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+Die Paketnamen gelten fuer die Beta, die zurzeit die einzige veroeffentlichte
+Fassung ist; sie heissen `cleona-chat-beta`.
 
 **Windows:**
 1. Lade den Installer von der Cleona-Website oder von GitHub Releases herunter.
@@ -128,12 +168,16 @@ Warum ist das so wichtig?
   wiederherstellen.
 - Ohne die Seed-Phrase gibt es keinen Weg zurueck. Es gibt keinen "Passwort
   vergessen"-Button und keinen Support, der dir dein Konto zurueckgeben
-  koennte -- denn es gibt gar kein Konto auf einem Server.
+  koennte -- denn es gibt gar kein Konto auf einem Server. Auch deine
+  Kontakte koennen deine Identitaet nicht wiederherstellen, egal wie viele.
+  Ein zweites Geraet mit derselben Identitaet kommt mit einer spaeteren
+  Version (siehe Kapitel 11).
 - Gib die Seed-Phrase niemals an andere weiter. Wer diese Woerter kennt, kann
   sich als du ausgeben.
 
-Du findest die Seed-Phrase spaeter auch in den Einstellungen unter
-"Sicherheit", falls du sie noch einmal ablesen moechtest.
+Du findest die 24 Woerter spaeter in den Einstellungen unter "Sicherung" ->
+"Recovery-Phrase anzeigen", falls du sie noch einmal ablesen moechtest. Auf
+Android bestaetigst du dazu mit deiner Bildschirmsperre.
 
 ### Ersten Kontakt hinzufuegen
 
@@ -145,19 +189,39 @@ erklaert.
 
 ## 3. Kontakte
 
+### Deine Einladung
+
+Kontakte entstehen bei Cleona nur ueber eine Einladung. Deine Einladung ist
+vom ersten Start an da -- auch ohne Internet und bevor dein Geraet ueberhaupt
+einen Nachbarn gefunden hat. Du findest sie auf deiner Identitaets-Detailseite
+(Tipp auf den eigenen Namen in der oberen Leiste).
+
+Die Einladung gibt es in zwei Formen, die genau dasselbe enthalten:
+
+- als **QR-Code**, wenn dein Gegenueber neben dir steht, und
+- als **Textzeile**, die du per E-Mail, SMS oder ueber einen anderen
+  Messenger verschickst.
+
+Die Einladung enthaelt keine Telefonnummer und keinen Namen aus einem
+Verzeichnis. Sie enthaelt deine oeffentlichen Schluessel und die Adressen,
+ueber die dein Gegenueber dich und deine Nachbarn erreicht. Fuer jemanden, der
+Cleona neu installiert, ist deine Einladung deshalb auch der Einstieg ins
+Netz.
+
 ### QR-Code scannen (empfohlen)
 
-Der einfachste Weg, einen Kontakt hinzuzufuegen:
+Wenn ihr euch persoenlich trefft:
 
-1. Dein Gegenueber oeffnet seine Identitaets-Detailseite (Tipp auf den eigenen
-   Namen in der oberen Leiste) und zeigt dir seinen QR-Code.
-2. Du tippst auf den Plus-Button und waehlst "QR-Code scannen".
-3. Halte dein Handy vor den QR-Code deines Gegenueber.
-4. Die Kontaktanfrage wird automatisch gesendet. Sobald dein Gegenueber sie
-   annimmt, koennt ihr miteinander schreiben.
+1. Du zeigst deinem Gegenueber den QR-Code deiner Einladung.
+2. Dein Gegenueber tippt auf den Plus-Button, waehlt "QR-Code scannen" und
+   haelt die Kamera auf deinen Bildschirm. Das klappt auch mit der Webcam
+   eines Computers.
+3. Die Anfrage geht an dich und wird **automatisch angenommen** -- denn du
+   hast den Code ja gerade selbst gezeigt.
 
-Wenn ihr euch persoenlich trefft, ist der QR-Code die sicherste Methode, weil
-du dabei genau weisst, mit wem du den Kontakt austauschst.
+Ein QR-Code gilt nur einmal: Die erste gueltige Anfrage wird angenommen,
+danach ist die Einladung verbraucht. Der QR-Code ist die sicherste Methode,
+weil ihr dabei genau wisst, mit wem ihr den Kontakt austauscht.
 
 ### NFC (Handys aneinander halten)
 
@@ -165,34 +229,47 @@ Wenn beide Geraete NFC unterstuetzen:
 
 1. Oeffnet beide die Kontakt-Hinzufuegen-Funktion.
 2. Haltet eure Handys Ruecken an Ruecken aneinander.
-3. Die Kontaktdaten werden automatisch ausgetauscht.
+3. Die Einladung wird uebertragen und automatisch angenommen.
 
 NFC bietet wie der QR-Code eine hohe Sicherheit, weil der Austausch nur
 funktioniert, wenn ihr physisch nebeneinander steht.
 
-### Link teilen (cleona://-URI)
+### Textzeile verschicken
 
-Du kannst deinen Kontaktlink auch per E-Mail, SMS oder ueber einen anderen
-Messenger verschicken:
+Wenn ihr euch nicht treffen koennt:
 
-1. Oeffne deine Identitaets-Detailseite.
-2. Kopiere deinen cleona://-Link.
-3. Sende den Link an die Person, die dich hinzufuegen soll.
-4. Die andere Person oeffnet den Link, oder fuegt ihn im
-   Kontakt-Hinzufuegen-Dialog ein.
-
-Beachte: Bei dieser Methode vertraust du darauf, dass der Link auf dem
-Uebertragungsweg nicht veraendert wurde. Fuer besonders sensible Kontakte
-empfehlen wir QR-Code oder NFC.
+1. Oeffne deine Einladung und kopiere die Textzeile.
+2. Schicke sie der Person, die dich hinzufuegen soll -- per Mail, SMS oder
+   ueber einen anderen Messenger.
+3. Die andere Person fuegt die Zeile in Cleona im Kontakt-Hinzufuegen-Dialog
+   ein.
+4. Die Anfrage erscheint bei dir unter **"Anfragen"**. Hier wird **nicht**
+   automatisch angenommen: Du entscheidest selbst, denn du kannst nicht
+   wissen, wer die Zeile unterwegs noch gelesen hat.
 
 ### Kontaktanfragen annehmen
 
-Wenn jemand dir eine Kontaktanfrage sendet, erscheint sie in deiner Inbox (der
-letzte Tab in der unteren Leiste). Dort kannst du:
+Eine eingehende Anfrage erzeugt noch keinen Kontakt. Sie stellt dir eine
+Frage und erscheint im Tab **"Anfragen"**. Dort siehst du den Namen und die
+Verifikationsstufe und kannst waehlen:
 
-- **Annehmen** -- die Person wird zu deinen Kontakten hinzugefuegt.
+- **Annehmen** -- erst jetzt wird die Person zu deinem Kontakt.
 - **Ablehnen** -- die Anfrage wird verworfen.
 - **Blockieren** -- die Person kann dir keine weiteren Anfragen schicken.
+
+### Nie als festen Nachbarn verwenden
+
+Im Menue eines Kontakts findest du den Schalter **"Nie als festen Nachbarn
+verwenden"** (Vorgabe: aus). Ist er an, reicht dieser Kontakt keine
+Nachrichten fuer dich weiter und erfaehrt deshalb auch nicht, wann du
+Nachrichten sendest oder empfaengst. Das ist fuer den Fall gedacht, dass
+dir Gefahr aus deinem eigenen Umfeld droht.
+
+Von Unbekannten (weder Kontakt noch Mitglied einer gemeinsamen Gruppe) laesst
+Cleona ausser einer solchen Anfrage nichts durch -- keine Nachricht, keinen
+Anruf, keine Datei. Und selbst die Anfrage kommt nur
+an, wenn der Absender vorher eine kleine Rechenaufgabe geloest hat. Das macht
+Massen-Spam teuer.
 
 ### Verifikationsstufen
 
@@ -200,13 +277,18 @@ Cleona zeigt dir an, wie sicher die Identitaet eines Kontakts bestaetigt ist:
 
 | Stufe | Bedeutung |
 |-------|-----------|
-| Unbekannt | Du hast nur die Node-ID oder einen Link erhalten. |
+| Nicht verifiziert | Ihr seid verbunden, aber nichts bestaetigt, dass wirklich die richtige Person dahintersteht. |
 | Gesehen | Der Schluesselaustausch war erfolgreich, ihr koennt verschluesselt kommunizieren. |
-| Verifiziert | Ihr habt euch persoenlich getroffen und per QR-Code oder NFC verifiziert. |
-| Vertraut | Du hast diesen Kontakt explizit als vertrauenswuerdig markiert. |
+| Verifiziert | Ihr habt euch persoenlich getroffen und per Kamera-Scan oder NFC verbunden. |
+| Vertraut | Du hast diesen Kontakt ausdruecklich als vertrauenswuerdig markiert. |
 
-Je hoeher die Stufe, desto sicherer kannst du sein, dass du wirklich mit der
-richtigen Person sprichst.
+"Verifiziert" gibt es nur fuer den persoenlichen Austausch. Eine Einladung,
+die ueber einen Chat oder per Mail kam, erreicht diese Stufe nie -- auch wenn
+sie dieselben Daten enthaelt.
+
+Aendern sich die Schluessel eines Kontakts ohne Ankuendigung, setzt Cleona
+ihn auf "Nicht verifiziert" zurueck. Das schuetzt dich davor, dass sich
+jemand unbemerkt als dein Kontakt ausgibt.
 
 ---
 
@@ -218,8 +300,31 @@ Tippe einfach deine Nachricht ins Eingabefeld unten und druecke Enter oder den
 Senden-Button. Deine Nachricht wird automatisch verschluesselt, bevor sie dein
 Geraet verlaesst.
 
-Eingehende Nachrichten erscheinen im Chat-Verlauf. Ein Haekchen zeigt dir, ob
-deine Nachricht zugestellt wurde.
+Eingehende Nachrichten erscheinen im Chat-Verlauf.
+
+### Was die Zeichen an deiner Nachricht bedeuten
+
+| Zeichen | Bedeutung |
+|---------|-----------|
+| Uhr | Die Nachricht ist erstellt, aber noch hat sie kein Weg getragen. |
+| Ein Haken | Die Nachricht ist unterwegs. Das gilt auch, solange sie im Briefkasten auf dein Gegenueber wartet. |
+| Zwei Haken | Zugestellt: Das Geraet deines Gegenueber hat den Empfang bestaetigt. |
+| Warnzeichen | 14 Tage lang hat kein Weg die Nachricht getragen. Tippe darauf, um sie erneut zu senden. |
+
+**Offline ist kein Fehler.** Ist dein Gegenueber nicht erreichbar, bleibt
+die Nachricht beim einen Haken, bis sie abgeholt wird -- sie ist nicht
+verloren. Hat dein Geraet selbst keine Verbindung, bleibt die Nachricht bei
+der Uhr und geht von selbst los, sobald wieder ein Weg da ist. Das
+Warnzeichen erscheint erst, wenn sie 14 Tage lang keinen Weg gefunden hat;
+dann kannst du sie erneut senden.
+
+Das gilt auch fuer ein iPhone, dessen App nicht geoeffnet ist: Die Nachricht
+wartet im Briefkasten, bis iOS die App kurz weckt oder bis dein Gegenueber sie
+oeffnet. Das kann laenger dauern als bei anderen Geraeten.
+
+Zwei Haken gibt es nur, wenn der Empfaenger selbst den Empfang bestaetigt.
+Diese Quittung ist verschluesselt und unterschrieben -- niemand unterwegs
+kann sie faelschen, um dir eine Zustellung vorzutaeuschen.
 
 ### Bilder, Videos und Dateien senden
 
@@ -231,9 +336,18 @@ Du hast mehrere Moeglichkeiten:
 - **Aus der Zwischenablage einfuegen** (Desktop): Kopiere ein Bild und fuege
   es im Chat ein.
 
-Kleine Dateien (unter 256 KB) werden direkt mitgeschickt. Groessere Dateien
-werden in einem zweistufigen Verfahren uebertragen: Erst wird die Datei
-angekuendigt, dann in Teilen uebermittelt.
+Kleine Dateien (unter 256 KB) reisen direkt in der Nachricht mit. Groessere
+Dateien werden in Stuecke zerlegt und mit einer Fehlerkorrektur versehen, so
+dass einzelne verlorene Stuecke nichts ausmachen. Seid ihr beide online,
+werden sie ueber einen Nachbarn gestreamt; sonst werden sie bei Geraeten
+abgelegt, die staendig erreichbar sind, bis dein Gegenueber sie abholt.
+
+Ab 256 KB fragt Cleona dich je Datei, bevor sie gesendet wird: Eine grosse
+Datei kann nicht den Weg deiner Nachrichten nehmen. Ihr Inhalt bleibt
+verschluesselt, und dein Gegenueber erfaehrt deine Internetadresse nicht.
+Aber die Uebertragung ist von aussen als Ereignis sichtbar, und ein fremdes
+Geraet, das sie weiterreicht oder aufbewahrt, sieht, wer hochlaedt und wer
+abholt. Deine Zustimmung gilt nur fuer diese eine Datei.
 
 ### Sprachnachrichten
 
@@ -299,8 +413,10 @@ Beschreibung, Vorschaubild). Diese Vorschau wird von deinem Geraet erstellt
 und mitverschickt -- dein Gegenueber muss dafuer keine Verbindung zur
 verlinkten Website aufbauen.
 
-Wenn du auf einen empfangenen Link tippst, wirst du gefragt, ob du ihn im
-normalen Browser, im Inkognito-Modus oder gar nicht oeffnen moechtest.
+Was ein Tipp auf einen empfangenen Link tut, stellst du in den Einstellungen
+unter "Links oeffnen" ein: "Normal", "Privates Fenster bevorzugt" (wo das
+Geraet kein privates Fenster oeffnen kann, oeffnet der Link normal) oder
+"Jedes Mal fragen".
 
 ---
 
@@ -316,6 +432,27 @@ normalen Browser, im Inkognito-Modus oder gar nicht oeffnen moechtest.
 
 Die eingeladenen Kontakte erhalten eine Benachrichtigung und koennen der Gruppe
 beitreten.
+
+### Wie Gruppennachrichten geschuetzt sind
+
+In einer Gruppe mit bis zu 16 Mitgliedern verschickt Cleona jede Nachricht an
+jedes Mitglied einzeln -- jeweils nur fuer dieses Mitglied verschluesselt, so
+als haettest du jedem eine eigene Nachricht geschrieben. Die Haken an einer
+Gruppennachricht zeigen den Stand des Mitglieds, bei dem sie am wenigsten
+weit ist.
+
+Waechst die Gruppe ueber 16 Mitglieder, nutzt sie einen gemeinsamen
+Schluessel. Er aendert sich jeden Tag und wird neu gezogen, wenn ein Mitglied
+austritt oder entfernt wird; ein neues Mitglied liest erst ab seinem Beitritt.
+Dort zeigen die Haken nicht mehr den Stand jedes Mitglieds, sondern dass die
+Nachricht im Netz abgelegt ist. Sinkt die Gruppe auf 12 oder weniger
+Mitglieder, geht sie zum Einzelversand zurueck.
+
+### Bilder in Gruppen und Kanaelen
+
+In den Einstellungen einer Gruppe oder eines Kanals legst du mit "Bilder
+immer laden" fest, ob Bilder sofort geladen werden oder erst, wenn du auf
+eines tippst.
 
 ### Mitglieder einladen
 
@@ -351,7 +488,7 @@ anderen Mitglieder sichtbar.
 
 ### Was sind Kanaele?
 
-Kanaele sind oeffentliche Diskussionsforen innerhalb des Cleona-Netzwerks.
+Kanaele sind oeffentliche Diskussionsforen innerhalb des Cleona-Netzes.
 Im Gegensatz zu Gruppen kann hier jeder mitlesen, ohne eingeladen werden zu
 muessen. Nur der Eigentuemer und Admins koennen Beitraege veroeffentlichen --
 Abonnenten lesen mit.
@@ -383,7 +520,7 @@ jugendfrei" eingestuft wird.
 
 Wenn dir in einem oeffentlichen Kanal unangemessene Inhalte auffallen, kannst
 du diese melden. Cleona nutzt ein dezentrales Moderationssystem: Meldungen
-werden von zufaellig ausgewaehlten Mitgliedern des Netzwerks bewertet (eine Art
+werden von zufaellig ausgewaehlten Mitgliedern des Netzes bewertet (eine Art
 "Geschworenengericht"). Wird ein Verstoss festgestellt, erhaelt der Kanal eine
 Warnung. Bei wiederholten Verstoessen wird er im Suchindex herabgestuft oder
 gesperrt.
@@ -393,17 +530,20 @@ gesperrt.
 Cleona verfuegt ueber zwei eingebaute System-Kanaele:
 
 - **Bug Log:** Wenn Cleona einen Fehler erkennt, fragt es dich, ob du einen
-  anonymisierten Fehlerbericht senden moechtest. Diese Berichte landen im
-  Bug-Log-Kanal, wo sie von der Community eingesehen werden koennen. Es
-  werden keine persoenlichen Daten uebertragen -- nur technische
-  Fehlerbeschreibungen. Du kannst auch manuell einen Log-Report senden
-  (mit Vorschau-Dialog und expliziter Zustimmung).
+  Fehlerbericht senden moechtest; vorher siehst du genau, was veroeffentlicht
+  wird. Diese Berichte landen im Bug-Log-Kanal, wo sie von der Community
+  eingesehen werden koennen. Ein Bericht traegt keinen Namen und keinen
+  Inhalt deiner Unterhaltungen, sondern ein Pseudonym. In der Beta nennt er
+  zusaetzlich deine Kennung (User-ID), damit die Entwickler nachfragen
+  koennen. Du kannst auch manuell einen Log-Report senden (mit
+  Vorschau-Dialog und expliziter Zustimmung).
 - **Feature Requests:** Hier koennen Nutzer Funktionswuensche einreichen
   und fuer bestehende Vorschlaege abstimmen. Die Vorschlaege werden nach
   Stimmen sortiert.
 
-Beide System-Kanaele haben ein Groessenlimit von 25 MB und werden durch
-das Jury-Moderationssystem ueberwacht.
+Jeder Computer haelt bis zu 25 MB je System-Kanal, jedes Handy bis zu 5 MB;
+ist das voll, geht das Aelteste zuerst -- nie, was du selbst schon gesehen
+hast.
 
 ---
 
@@ -419,6 +559,10 @@ Waehrend des Gespraechs siehst du eine Zeitleiste, die Gespraechsdauer und
 hast Zugriff auf Stummschalten und Lautsprecher.
 
 Zum Auflegen tippe auf den roten Auflegen-Button.
+
+Siehst du "Nicht erreichbar", ist das Geraet deines Gegenueber gerade nicht zu
+erreichen, zum Beispiel ein iPhone mit nicht geoeffneter App. Schreib
+stattdessen eine Nachricht.
 
 ### Videoanruf starten
 
@@ -437,8 +581,19 @@ des Anrufers. Du kannst:
 - **Annehmen** -- das Gespraech beginnt.
 - **Ablehnen** -- der Anrufer wird benachrichtigt.
 
-Wenn du bereits in einem Gespraech bist, wird ein neuer Anruf automatisch
-abgelehnt.
+Bist du gerade in einem Gespraech, klingelt ein neuer Anruf nicht; du
+bekommst stattdessen eine Nachricht "Verpasster Anruf". Dasselbe gilt fuer
+einen Gruppenanruf, den du nicht angenommen hast -- die Nachricht steht dann
+im Gruppenchat.
+
+Ruft jemand eine deiner Identitaeten an, die gerade nicht angezeigt wird,
+klingelt es trotzdem; der Anrufbildschirm nennt, welche deiner Identitaeten
+angerufen wird.
+
+Auf dem iPhone klingelt es nur, wenn die App geoeffnet ist. Wer dich anruft,
+waehrend sie nicht geoeffnet ist, sieht nach 10 Sekunden "Nicht erreichbar".
+Sobald du die App oeffnest, findest du eine Nachricht ueber den verpassten
+Anruf.
 
 ### Gruppenanrufe
 
@@ -447,12 +602,29 @@ teilnehmen. Der Anruf wird ueber einen intelligenten Weiterleitungsbaum
 organisiert, sodass nicht jeder Teilnehmer mit jedem anderen direkt verbunden
 sein muss. Alle Gespraeche sind durchgehend verschluesselt.
 
+Jedes Gruppenmitglied kann einen Gruppenanruf starten. Zwei Teilnehmer, die
+keine Kontakte voneinander sind, sehen nie die Internetadresse des anderen:
+Ihr Ton und Bild laeuft ueber einen Teilnehmer, der mit beiden Kontakt ist.
+Gibt es keinen solchen, sind die beiden nicht verbunden, und die Kachel sagt
+"Kein gemeinsamer Kontakt im Anruf". Ist eine Weiterleitung ausgelastet,
+bleibt der Ton, und das Video faellt fuer dieses Paar weg.
+
 ### Verschluesselung bei Anrufen
 
 Alle Anrufe werden mit einmaligen Schluesseln verschluesselt, die nur fuer
 die Dauer des Gespraechs existieren. Nach dem Auflegen werden diese Schluessel
 sofort geloescht. Niemand kann ein vergangenes Gespraech nachtraeglich
 entschluesseln.
+
+Ehrlich gesagt: Anrufe laufen, wo immer moeglich, direkt zwischen den
+Geraeten, denn schon eine kleine Verzoegerung stoert beim Sprechen. Anders
+als bei Nachrichten kann dein Internetanbieter deshalb bei einem Anruf sehen,
+mit welcher Internetadresse du verbunden bist. Was ihr sagt, sieht er nicht.
+
+Bei einem Anruf sieht auch dein Kontakt deine Internetadresse. Willst du das
+bei einem Kontakt nicht, schalte in seinem Menue "Anrufe erlauben" ab
+(Vorgabe: an). Schaltest du spaeter ab, bleibt ihm eine schon gesehene
+Adresse bekannt.
 
 ---
 
@@ -615,53 +787,34 @@ Geraet entfernt. Dieser Vorgang ist nicht umkehrbar.
 
 ---
 
-## 11. Multi-Device
+## 11. Mehrere Geraete
 
-### Cleona auf mehreren Geraeten nutzen
+### Eine Identitaet, ein Geraet -- vorerst
 
-Du kannst dieselbe Identitaet auf bis zu 5 Geraeten gleichzeitig nutzen. Ein
-Geraet ist das primaere (es haelt die Seed-Phrase), und weitere Geraete werden
-damit verknuepft.
+Eine Identitaet laeuft heute auf einem Geraet. Ein zweites Geraet fuer
+dieselbe Identitaet kommt mit einer spaeteren Version; in den Einstellungen
+unter "Geraete" -> "Geraete verwalten" steht "Weiteres Geraet koppeln"
+deshalb noch als "Noch nicht verfuegbar".
 
-### Neues Geraet verknuepfen
+Wenn es kommt, gilt: Alle Geraete sind gleichberechtigt, es gibt kein
+Hauptgeraet. Ein weiteres Geraet richtest du mit deinen 24 Woertern ein, und
+eines deiner bisherigen Geraete stimmt zu. Hoechstens 5 Geraete.
 
-1. Oeffne die Einstellungen auf deinem primaeren Geraet.
-2. Gehe zu "Verknuepfte Geraete".
-3. Waehle "Neues Geraet verknuepfen".
-4. Installiere auf dem neuen Geraet Cleona und waehle beim Start "Mit
-   bestehendem Geraet verknuepfen".
-5. Scanne den Pairing-QR-Code, der auf deinem primaeren Geraet angezeigt
-   wird, oder verwende den Pairing-Link.
+Gibst du heute auf einem neuen Geraet deine 24 Woerter ein, ziehst du um: Die
+Identitaet wird auf das neue Geraet wiederhergestellt, und dein bisheriges
+Geraet entfernt sie danach bei sich (siehe Kapitel 12).
 
-Das verknuepfte Geraet erhaelt ein Delegationszertifikat vom primaeren Geraet.
-Nachrichten, die von einem verknuepften Geraet gesendet werden, sind
-kryptografisch mit einem delegierten Schluessel signiert, sodass Kontakte
-ueberpruefen koennen, dass die Nachricht tatsaechlich von deiner Identitaet
-stammt.
+Auf mehreren Geraeten kannst du heute verschiedene Identitaeten nutzen
+(Kapitel 10).
 
-### Wie es funktioniert
+### Identitaet neu schluesseln
 
-- Das primaere Geraet haelt deine Seed-Phrase und die Master-Schluessel.
-- Verknuepfte Geraete erhalten abgeleitete Signatur-Schluessel und ein
-  Delegationszertifikat -- sie erhalten niemals die Seed-Phrase selbst.
-- Alle Geraete teilen dieselbe Identitaet und Kontakte. Nachrichten kommen
-  auf allen Geraeten an.
-- Delegationszertifikate werden automatisch vor Ablauf erneuert.
-
-### Geraeteverwaltung
-
-Oeffne die Einstellungen und gehe zu "Verknuepfte Geraete", um alle deine
-verknuepften Geraete, deren Status und letzte Aktivitaet zu sehen. Du kannst
-ein verknuepftes Geraet jederzeit widerrufen, falls es verloren geht oder
-gestohlen wird.
-
-### Notfall-Schluesselrotation
-
-Wenn du vermutest, dass ein Geraet kompromittiert wurde, kannst du eine
-Notfall-Schluesselrotation ausloesen. Dabei werden neue Schluessel generiert,
-und die Rotation muss von einer Mehrheit deiner anderen Geraete bestaetigt
-werden. Das verhindert, dass ein einzelnes gestohlenes Geraet eigenmaechtig
-Schluessel rotieren kann.
+Vermutest du, dass jemand an deine Schluessel gekommen ist, kannst du unter
+"Geraete verwalten" -> "Identitaet neu schluesseln" neue Schluessel erzeugen.
+Deine Kontakte werden benachrichtigt, deine offenen Einladungen werden
+widerrufen. Wichtig: Danach stellen die 24 Woerter allein nur noch die alten
+Schluessel her. Lege deshalb direkt danach ein neues Recovery-Paket an;
+wiederherstellen kannst du dann nur noch zusammen mit diesem Paket.
 
 ---
 
@@ -674,48 +827,49 @@ Wenn du dein Geraet verlierst oder ein neues einrichtest:
 1. Installiere Cleona auf dem neuen Geraet.
 2. Waehle beim Start "Wiederherstellen".
 3. Gib deine 24 Woerter ein.
-4. Cleona stellt deine Identitaet wieder her und kontaktiert automatisch deine
-   bisherigen Kontakte.
-5. Deine Kontakte antworten mit deinen Kontaktdaten, Gruppenmitgliedschaften
-   und Nachrichtenverlaeufen.
+4. Cleona erzeugt daraus alle deine Identitaeten wieder -- mit denselben
+   Schluesseln wie vorher. Fuer deine Kontakte bist du derselbe Mensch.
 
-Die Wiederherstellung geschieht in drei Schritten:
-- Zuerst kommen deine Kontakte und Gruppen zurueck.
-- Dann die letzten 50 Nachrichten aus jeder Unterhaltung.
-- Zuletzt der vollstaendige Nachrichtenverlauf.
+### Was zurueckkommt -- und was nicht
 
-Es genuegt, wenn ein einziger deiner Kontakte online ist, damit die
-Wiederherstellung funktioniert.
+Deine Identitaet steckt in den 24 Woertern, deine Kontakte und dein Verlauf
+nicht. Zurueck kommt dein Netzzugang ueber das **Recovery-Paket**: Dein
+Geraet legt ein kleines, verschluesseltes Paket im Netz ab. Nur deine 24
+Woerter koennen es finden und oeffnen. Darin steht, was dein neues Geraet
+braucht, um deine Kontakte wieder zu erreichen, und was in der Zwischenzeit
+fuer dich im Netz lag. Dafuer muss kein Kontakt online sein.
 
-### Guardian Recovery (Vertrauenspersonen)
+Den bisherigen Chatverlauf bringt eine Wiederherstellung nicht zurueck.
 
-Du kannst bis zu fuenf Vertrauenspersonen als "Guardians" benennen. Dabei wird
-dein Wiederherstellungsschluessel in fuenf Teile aufgeteilt, von denen jeder
-Guardian einen erhaelt. Um deine Identitaet wiederherzustellen, genuegen drei
-der fuenf Teile.
+Das Recovery-Paket lebt 7 Tage und wird von deinem Geraet erneuert, solange
+es laeuft; in den Einstellungen siehst du, bis wann es gilt. Lief mehr als
+7 Tage lang keines deiner Geraete, ist es abgelaufen. Dann stellen die 24
+Woerter deine Identitaet trotzdem her, aber deine Kontakte musst du neu
+einladen; was in der Zwischenzeit fuer dich im Netz lag, ist verloren.
 
-Das bedeutet: Selbst wenn du deine Seed-Phrase verloren hast, koennen drei
-deiner Guardians zusammen dein Konto wiederherstellen. Kein einzelner Guardian
-kann allein auf deine Daten zugreifen -- es werden immer mindestens drei
-benoetigt.
+### Wiederherstellen heisst umziehen
 
-So richtest du Guardians ein:
-1. Oeffne die Einstellungen.
-2. Gehe zu "Sicherheit".
-3. Waehle "Guardian Recovery".
-4. Waehle fuenf vertrauenswuerdige Kontakte aus.
+Findet dein bisheriges Geraet spaeter, dass die Identitaet woanders
+wiederhergestellt wurde, entfernt es sie bei sich -- mit ihrem Verlauf.
+Deshalb: Wer deine 24 Woerter hat, kann deine Identitaet auf diese Weise von
+deinem Geraet holen. Bis alle Kontakte wieder da sind, erinnert dich die App;
+mit "Abschliessen und Schluessel erneuern" beendest du die Wiederherstellung
+selbst.
 
-### Warum Kontakte dein Backup sind
+### Was niemand wiederherstellen kann
 
-In herkoemmlichen Messengern liegen deine Daten auf den Servern des Anbieters.
-Bei Cleona gibt es keinen Server -- aber deine Kontakte uebernehmen diese Rolle.
-Wenn du eine Nachricht sendest, speichern gemeinsame Kontakte eine verschluesselte
-Kopie fuer den Fall, dass der Empfaenger gerade offline ist. Bei einer
-Wiederherstellung liefern deine Kontakte dir deine Daten zurueck.
+Das ist wichtig, und wir sagen es deshalb deutlich:
 
-Das heisst: Je mehr aktive Kontakte du hast, desto zuverlaessiger ist dein
-Backup. Ein Kontakt, der regelmaessig online ist, reicht fuer eine
-erfolgreiche Wiederherstellung aus.
+- **Niemand ausser dir kann deine Identitaet wiederherstellen.** Nicht der
+  Entwickler, nicht ein Support, und auch nicht deine Kontakte -- egal wie
+  viele es sind. Es gibt keinen Generalschluessel und keinen Teil deines
+  Schluessels, der bei anderen hinterlegt waere.
+- **Hast du die 24 Woerter verloren und kein Geraet mehr, ist deine Identitaet
+  verloren.** Dann bleibt nur, eine neue anzulegen und deine Kontakte neu
+  einzuladen.
+
+Der beste Schutz: Schreib die 24 Woerter auf Papier und bewahre sie sicher
+auf.
 
 ---
 
@@ -730,6 +884,19 @@ Ecke.
 - Stelle einen Nachrichtenton ein.
 - Auf Android-Geraeten kannst du zusaetzlich die Vibration aktivieren oder
   deaktivieren.
+- **"Alles stummschalten"** laesst auf diesem Geraet keine Nachricht mehr
+  klingeln, vibrieren oder sich melden -- fuer alle Identitaeten. Anrufe
+  klingeln weiter.
+- **"Ruhezeiten"** legst du je Identitaet mit Von/Bis fest. In dieser Zeit
+  klingelt, vibriert und meldet sich keine Nachricht dieser Identitaet; die
+  Nachrichten kommen trotzdem an.
+- **"Benachrichtigungen ohne Inhalt"** (Vorgabe: aus) zeigt nur, dass eine
+  Nachricht, Einladung oder Erinnerung angekommen ist -- ohne Absender, Namen
+  und Text. Anrufe zeigen weiter den Namen.
+- Was nach dem Start auf einmal ankommt, meldet Cleona in einer Sammelmeldung
+  ("5 neue Nachrichten in 2 Unterhaltungen"); alles Spaetere einzeln. Ein Tipp
+  auf eine Nachrichtenmeldung oeffnet die Unterhaltung, auch in einer anderen
+  Identitaet.
 
 ### Designs (Skins)
 
@@ -746,16 +913,9 @@ hellem, dunklem und dem System-Theme wechseln.
 
 ### Sprache aendern
 
-Cleona ist in 33 Sprachen verfuegbar, darunter auch Sprachen mit
+Cleona ist in 34 Sprachen verfuegbar, darunter auch Sprachen mit
 Rechts-nach-Links-Schrift (z.B. Arabisch, Hebraeisch). Aendere die Sprache in
 den Einstellungen unter "Sprache".
-
-### Speicherlimit
-
-Du kannst festlegen, wie viel Speicherplatz Cleona auf deinem Geraet nutzen
-darf (zwischen 100 MB und 2 GB). Wenn das Limit erreicht ist, werden aeltere
-Medien automatisch ausgelagert oder geloescht -- Textnachrichten bleiben immer
-erhalten.
 
 ### Media-Archivierung
 
@@ -775,6 +935,12 @@ Du kannst jederzeit auf ein archiviertes Medium tippen, um es zurueckzuholen --
 vorausgesetzt, du bist mit deinem Heimnetzwerk verbunden. Besonders wichtige
 Medien lassen sich anheften, damit sie nie ausgelagert werden.
 
+Unter "Speicher-Budget" legst du fest, wie viele MB Medien auf dem Geraet
+bleiben (Vorgabe: 100 MB auf dem Handy, 2 GB am Computer). Ist es voll, wird
+das aelteste nicht angeheftete Medium zuerst archiviert. Geloescht wird ein
+Original nur, wenn es sicher im Archiv liegt -- Textnachrichten bleiben immer
+erhalten.
+
 ### Transkription fuer Sprachnachrichten
 
 Wenn aktiviert, werden deine Sprachnachrichten lokal auf deinem Geraet in
@@ -782,16 +948,53 @@ Text umgewandelt (mit dem Open-Source-Modell Whisper). Der transkribierte Text
 wird zusammen mit der Aufnahme an dein Gegenueber geschickt. Die Transkription
 geschieht komplett auf deinem Geraet -- keine Daten gehen an externe Dienste.
 
+Welches Modell (tiny, base, small) heruntergeladen wird, stellst du einmal
+fuer das Geraet ein; die Sprache (automatisch oder fest) je Identitaet.
+
 ### Auto-Download
 
 Du kannst einstellen, ab welcher Groesse Medien automatisch heruntergeladen
 werden sollen. So kannst du zum Beispiel Bilder automatisch laden lassen, aber
 bei grossen Videos manuell entscheiden.
 
-### Verknuepfte Geraete
+### Geraete
 
-Verwalte deine verknuepften Geraete in diesem Bereich der Einstellungen.
-Siehe das Multi-Device-Kapitel fuer Details.
+Unter "Geraete" -> "Geraete verwalten" siehst du dieses Geraet. Ein weiteres
+Geraet zu koppeln kommt mit einer spaeteren Version (Kapitel 11).
+
+### Netzwerk
+
+Cleona braucht keine Netzwerk-Einstellungen, um zu funktionieren. Es gibt
+drei Netzschalter:
+
+- **Portfreigabe am Router** (Vorgabe: an). Cleona bittet deinen eigenen
+  Router, eine Tuer fuer Cleona zu oeffnen. Klappt das, ist dein Geraet fuer
+  andere besser erreichbar und hilft dem Netz. Cleona spricht dabei nur mit
+  deinem Router, nicht mit dem Internet.
+- **Oeffentliche Adresseintraege** (Vorgabe: an). Hat dein Geraet noch zu
+  wenige Nachbarn, schaut es in einem oeffentlichen Verzeichnis (Nostr) nach
+  weiteren Einstiegspunkten, und ist es selbst gut erreichbar, traegt es sich
+  dort ein. Der Eintrag enthaelt eine Adresse, keinen Namen und keinen Kontakt.
+  Schaltest du ihn ab, findet dein Geraet Nachbarn nur noch ueber Einladungen,
+  das lokale Netz und die Nachbarn, die es schon kennt.
+- **Weniger Tarnpakete im WLAN** (Vorgabe: aus). Im WLAN oder am Kabel kannst
+  du die leeren Tarnpakete abschalten. Dann ist dort aber wieder zu sehen,
+  wann du schreibst. Im Mobilfunk gibt es diesen Schalter nicht -- dort
+  sendet Cleona ohnehin nur ein Tarnpaket pro Minute.
+
+Den Tarnstrom als Ganzes kann man nicht abschalten. Das ist Absicht: Nur wenn
+er immer laeuft, sagt die Aktivitaet deines Geraets nichts darueber aus, ob
+du gerade schreibst.
+
+Ueber den drei Schaltern steht der **Datensparmodus**: Im Mobilfunk schlaegt
+Cleona ihn vor, schaltet ihn aber nie selbst ein. Er spart Daten, dafuer ist
+dein Geraet von aussen leichter zu erkennen.
+
+Darunter stellst du den **"Zwischenspeicher fuer Medien anderer"** ein: Dein
+Geraet haelt verschluesselte Teile von Medien anderer bis zu 7 Tage, damit
+sie ihre Empfaenger erreichen (Vorgabe: 100 MB auf dem Handy, 1 GB am
+Computer). Eine kleinere Groesse gibt den Platz sofort frei -- die aeltesten
+Teile zuerst.
 
 ---
 
@@ -819,31 +1022,119 @@ Anbieters. Auch wenn sie dort verschluesselt sein moegen: Der Anbieter hat
 Zugriff auf Metadaten (wer kommuniziert wann mit wem, wie oft, von wo) und
 muss diese unter Umstaenden auf richterliche Anordnung herausgeben.
 
-Bei Cleona gibt es keinen solchen zentralen Punkt. Deine Nachrichten reisen
-direkt von Geraet zu Geraet. Es gibt keinen Ort, an dem alle Metadaten
-zusammenlaufen. Niemand kann anhand eines einzigen Datenpunkts dein
-Kommunikationsverhalten rekonstruieren.
+Bei Cleona gibt es keinen solchen zentralen Punkt. Es gibt keinen Ort, an dem
+alle Metadaten zusammenlaufen, und kein Verzeichnis, in dem man nachschlagen
+koennte, wer du bist oder wen du kennst.
 
-### Was passiert wenn du offline bist?
+### Wer sieht, dass du mit jemandem schreibst?
 
-Wenn du eine Nachricht sendest und der Empfaenger offline ist:
+Verschluesselung schuetzt, **was** du schreibst. Genauso wichtig ist, dass
+kein einzelner Beobachter erfaehrt, **mit wem** und **wann** du schreibst.
+Dafuer sorgt Cleona so:
 
-1. Cleona versucht zunaechst, die Nachricht direkt zuzustellen.
-2. Wenn das nicht klappt, wird sie ueber gemeinsame Kontakte weitergeleitet.
-3. Gleichzeitig wird die Nachricht als verschluesselte Stuecke auf mehrere
-   Knoten im Netzwerk verteilt (aehnlich wie ein Puzzle, das aus 10 Teilen
-   besteht, von denen 7 genuegen, um das Bild zusammenzusetzen).
-4. Die Nachricht wird bis zu 7 Tage lang aufbewahrt.
+- **Im Internet nie direkt.** Wuerde dein Geraet eine Nachricht direkt an die
+  Internetadresse deines Gegenueber schicken, koennte dein Anbieter sehen, mit
+  wem du schreibst. Deshalb geht eine Nachricht im Internet immer ueber eure
+  festen Nachbarn: deinen und die deines Gegenueber.
+- **Nachbarn, denen du vertraust.** Deine festen Nachbarn sind, wo immer
+  moeglich, Geraete deiner eigenen Kontakte -- bis zu drei, die gerade von
+  aussen erreichbar sind. Faellt einer weg, rueckt ein anderer Kontakt nach.
+  Ein Kontakt laesst sich nicht mit Servern kaufen; ein beliebiger Knoten im
+  Netz schon. Hast du noch keinen erreichbaren Kontakt, nimmt Cleona einen
+  anderen Nachbarn. Deine Einladung nennt nie einen deiner Kontakte, damit
+  niemand ueber sie die Adresse eines Freundes erfaehrt.
+- **Codes statt Namen.** Die Nachbarn sehen keine Namen und keine Kennungen,
+  sondern nur einen Code. Er gilt fuer genau euch beide, in eine Richtung,
+  fuer einen Tag -- am naechsten Tag ist es ein anderer. Dein Nachbar weiss,
+  woher das Paket kommt, aber nicht, wohin es am Ende geht. Der Nachbar deines
+  Gegenueber weiss, wohin es geht, aber nicht, woher es kam. Im Normalfall
+  sieht niemand unterwegs beide Enden.
+- **Der Tarnstrom.** Dein Geraet sendet laufend, in unregelmaessigen
+  Abstaenden, Tarnpakete an seine Nachbarn. Sie sind genauso gross wie echte
+  Pakete, gehen ueber denselben Port und sind von aussen nicht von ihnen zu
+  unterscheiden. Ob gerade ein Mensch schreibt oder das Geraet nur laeuft, ist
+  damit nicht zu erkennen. Deine Nachrichten warten nie auf den Tarnstrom --
+  sie gehen sofort los, er laeuft nur daneben.
 
-Sobald der Empfaenger wieder online kommt, werden die Nachrichten zugestellt.
-Du bekommst eine Bestaetigung, wenn deine Nachricht angekommen ist.
+**Was der Tarnstrom kostet:** Im WLAN rund 13 MB am Tag. Im Mobilfunk sendet
+Cleona nur ein Tarnpaket pro Minute, das sind etwa 1,7 MB am Tag. Der Grund
+fuer die Drosselung im Mobilfunk ist nicht die Datenmenge, sondern der Akku:
+Jedes Paket weckt das Funkmodem auf.
+
+**Was Cleona nicht verbergen kann** -- ehrlich gesagt:
+
+- Kein **einzelner** Beobachter sieht, wer mit wem schreibt -- weder dein
+  Anbieter noch die Knoten unterwegs. Wer aber **beide Enden gleichzeitig**
+  ueberwacht, etwa ein Staat, der deinen Anschluss und den deines
+  Gegenueber beobachtet oder beide Nachbarn stellt, kann ueber die Zeit
+  zuordnen: Paket raus bei dir, kurz darauf Paket rein bei deinem Gegenueber.
+  Oft genug wiederholt, ergibt das eine Verbindung.
+- Der Tarnstrom erschwert diese Zuordnung, verhindert sie aber nicht. Er
+  verbirgt einzelne Nachrichten, nicht die Menge: Wer sehr viel sendet,
+  erhoeht den Gesamtverkehr seines Geraets.
+- Ein Kontakt, der dein fester Nachbar ist, erfaehrt, **wann** und **wie viel**
+  du sendest und empfaengst -- nicht mit wem und nicht was. Kommt die Gefahr
+  aus deinem eigenen Umfeld, kannst du jeden Kontakt davon ausnehmen (siehe
+  Kapitel 3, "Nie als festen Nachbarn verwenden").
+- Haben zwei neue Nutzer nur denselben einen Nachbarn, laeuft ihre Nachricht
+  ueber genau diesen Knoten, und er sieht beide Enden. Sobald einer von
+  beiden weitere Nachbarn hat, ist das vorbei.
+- Deine Einladung enthaelt deine Internetadressen. Wer die Textzeile hat,
+  sieht, wo du online bist -- gib sie nur Menschen, denen du das zutraust.
+- Ein Nachbar, der weiterreicht, sieht, dass zwei Codes Pakete austauschen --
+  nicht, wer dahintersteht, und nicht, was drinsteht.
+- Ein Signal eines laufenden Anrufs kann, wenn der erste Nachbar gerade
+  nicht antwortet, ueber einen Knoten gehen, der beide Enden sieht; er
+  erfaehrt, dass ihr gemeinsam telefoniert.
+- Eine grosse Datei, der du zugestimmt hast, sieht der Rechner, der sie
+  weiterreicht oder aufbewahrt, an beiden Enden (siehe Kapitel 4).
+- Bei Anrufen gilt der Schutz vor dem Anbieter nicht, und dein Kontakt sieht
+  deine Internetadresse (siehe Kapitel 7).
+
+### Was passiert, wenn dein Gegenueber offline ist?
+
+1. Cleona startet alle passenden Wege gleichzeitig: im selben WLAN direkt,
+   im Internet ueber zwei Nachbarn -- und zusaetzlich den Briefkasten.
+2. Fuer den Briefkasten legt Cleona die verschluesselte Nachricht bei drei
+   Nachbarn ab. Sobald zwei den Empfang bestaetigt haben, gilt sie als
+   abgelegt.
+3. Cleona waehlt dafuer bevorzugt Nachbarn, bei denen dein Gegenueber auch
+   nachschaut -- zuerst den Nachbarn, den seine Einladung nennt.
+4. Die Nachricht wartet dort bis zu 7 Tage. Kommt dein Gegenueber zurueck,
+   holt er sie ab und bestaetigt dir den Empfang. Erst dann siehst du zwei
+   Haken.
+
+Den Briefkasten kann nur dein Gegenueber leeren: Abholen und Loeschen geht
+nur mit einem Schluessel, den nur er besitzt, und geloescht wird erst, wenn
+er den Empfang bestaetigt hat. Die Nachbarn sehen nur verschluesselte
+Pakete unter einem Wert, der jeden Tag wechselt.
+
+### Fremde kommen nicht durch
+
+Von jemandem, der weder dein Kontakt noch Mitglied einer gemeinsamen Gruppe
+ist, nimmt Cleona genau zwei Dinge an:
+die Frage nach deinen oeffentlichen Schluesseln, solange eine deiner
+Einladungen offen ist, und eine Kontaktanfrage. Die Anfrage muss eine gueltige
+Einladung von dir tragen, und der Absender muss vorher eine Rechenaufgabe
+geloest haben. Alles andere -- Nachrichten, Anrufe, Dateien -- wird verworfen,
+bevor es die App ueberhaupt erreicht. Wer nur deine gedruckte Visitenkarte
+hat, kann dich also nicht einfach anrufen. Ein Mitglied einer gemeinsamen
+Gruppe erreicht dich nur in dieser Gruppe -- mit Gruppennachrichten und
+Gruppenanrufen, nie einzeln.
 
 ### Anti-Zensur
 
-Wenn dein Netzwerk die Standard-Verbindungsmethode (UDP) blockiert, wechselt
-Cleona automatisch auf eine alternative Uebertragung (TLS), die schwerer zu
-erkennen und zu blockieren ist. Das geschieht transparent -- du musst nichts
-konfigurieren.
+Cleona ist so gebaut, dass man es schwer blockieren kann:
+
+- **Kein Server, keine feste Adresse.** In der App steht keine Adresse, die
+  man sperren koennte, und das Netz haengt von keinem einzelnen Knoten ab.
+- **Kein fester Port.** Jedes Geraet waehlt beim ersten Start einen
+  zufaelligen Port. Es gibt keine bekannte Portnummer, an der man
+  Cleona-Verkehr erkennen koennte.
+- **Wie Zufallsdaten.** Der Verbindungsaufbau zwischen zwei Geraeten ist so
+  kodiert, dass er von Zufallsdaten nicht zu unterscheiden ist.
+- **Viele Einstiege.** Jede Einladung, jeder Nachbar und jedes Geraet im
+  selben WLAN ist ein moeglicher Weg zurueck ins Netz.
 
 ### Sichere Schluesselspeicherung
 
@@ -854,18 +1145,37 @@ Schutz fuer deine Schluessel.
 
 ### Datenbank-Verschluesselung
 
-Alle deine Nachrichten, Kontakte und Einstellungen sind auf deinem Geraet
-verschluesselt gespeichert. Selbst wenn jemand Zugriff auf dein Dateisystem
-bekaeme, koennte er ohne deinen kryptografischen Schluessel nichts lesen.
-Dieser Schluessel wird aus deiner Identitaet abgeleitet und existiert nur auf
-deinem Geraet.
+Deine Nachrichten und Unterhaltungen liegen in einer verschluesselten
+Datenbank -- eine eigene fuer jede Identitaet, jede mit eigenem Schluessel.
+Verschluesselt ist nicht nur die Datenbank selbst, sondern auch ihre
+Zwischendateien; nichts wird unverschluesselt auf die Platte geschrieben,
+auch nicht kurzzeitig. Einstellungen, Kontakte und Medien sind ebenfalls
+verschluesselt gespeichert.
 
-### Geschlossenes Netzwerk
+Die Schluessel werden aus deinen 24 Woertern abgeleitet und existieren nur
+auf deinem Geraet. Selbst wer dein Geraet in die Haende bekommt und die Daten
+ausliest, findet ohne diese Schluessel nur unlesbare Daten.
 
-Cleona arbeitet als geschlossenes Netzwerk. Jedes Netzwerkpaket ist
-authentifiziert, sodass nur legitime Cleona-Geraete teilnehmen koennen. Das
-verhindert, dass Aussenstehende gefaelschte Nachrichten einschleusen oder
-den Netzwerkverkehr abhoeren koennen.
+Unverschluesselt wird es nur, wo du Inhalte selbst aus Cleona hinausgibst:
+- wenn du eine Datei aus einem Chat auf dein Geraet speicherst,
+- wenn du mit dem Screenshot-Knopf ein Bild in deine Bilder legst,
+- wenn du etwas an eine andere App teilst,
+- wenn du die Media-Archivierung einrichtest (Kapitel 13): Die archivierten
+  Originale liegen unverschluesselt auf deinem Netzwerkspeicher zu Hause,
+  damit du sie dort auch ohne Cleona oeffnen kannst,
+- wenn du Termine in den Android-Systemkalender spiegelst: Dort koennen
+  andere Apps mit Kalenderzugriff sie lesen.
+
+Was so hinausgegangen ist, wird nicht mit der Nachricht geloescht und laeuft
+nicht mit ihr ab.
+
+### Schutz auf dem Bildschirm
+
+Auf Android, Windows und macOS laesst Cleona keine Bildschirmaufnahme durch
+andere Apps zu. Brauchst du ein Bild, nimm den Screenshot-Knopf in der oberen
+Leiste: Er legt das Bild in deine Bilder -- unverschluesselt. In einer
+Unterhaltung, in der Weiterleiten nicht erlaubt ist, gibt es keinen
+Screenshot.
 
 ---
 
@@ -877,44 +1187,48 @@ Cleona kann auf verschiedenen Wegen aktualisiert werden. Das Ziel ist, dass
 du auch dann Updates erhalten kannst, wenn einzelne Vertriebswege ausfallen
 oder gesperrt werden:
 
-1. **App Store / Play Store:** Wenn du Cleona ueber einen App Store
-   installiert hast, erhaeltst du Updates wie gewohnt ueber den Store.
+1. **App Store / Play Store:** Sobald Cleona dort erscheint und du es ueber
+   einen Store installiert hast, erhaeltst du Updates wie gewohnt ueber den
+   Store. Auf dem iPhone kommen Updates ueber TestFlight.
 2. **GitHub Releases:** Auf der GitHub-Seite des Projekts findest du
    signierte Installationspakete fuer alle Plattformen.
-3. **In-Network-Updates:** Wenn ein anderer Cleona-Nutzer in deinem Netzwerk
-   bereits die neueste Version hat, kann Cleona das Update direkt ueber das
-   P2P-Netzwerk beziehen -- ohne externen Server. Dabei wird die neue
-   Version in fehlerkorrigierte Fragmente zerlegt und ueber mehrere Knoten
-   verteilt. Dein Geraet sammelt genug Fragmente und setzt das Update
-   zusammen. Die Echtheit wird durch eine Ed25519-Signatur des Entwicklers
-   geprueft.
+3. **Updates ueber das Netz:** Cleona kann ein Update direkt ueber das Netz
+   beziehen -- ohne Download-Server. Die neue Version ist in
+   fehlerkorrigierte Stuecke zerlegt, die sich im Netz verteilen; ein Teil
+   davon reist sogar im Tarnstrom mit. Dein Geraet sammelt genug Stuecke und
+   setzt das Update zusammen. Uebertragen wird meist nur die Aenderung --
+   wenige MB statt der ganzen App. Das gilt fuer Linux, Windows und Android;
+   unter macOS laedst du neue Versionen von der Website oder von GitHub.
 4. **Einladungslinks:** Du kannst Einladungslinks erstellen, die alles
    enthalten, was ein neuer Nutzer braucht, um Cleona zu installieren und
-   sich mit dem Netzwerk zu verbinden.
+   sich mit dem Netz zu verbinden.
 5. **Physischer Transfer:** In Umgebungen ohne Internet kannst du Cleona
    per USB-Stick oder im lokalen Netzwerk an andere weitergeben.
 
-### Update-Benachrichtigung
+### So laeuft ein Update ab
 
-Wenn ein neues Update verfuegbar ist, zeigt Cleona dir eine Benachrichtigung
-auf dem Startbildschirm. Wenn das Update auch ueber das Netzwerk verfuegbar
-ist (In-Network-Update), hast du die Wahl, es direkt aus dem Netzwerk
-herunterzuladen.
+1. Cleona sammelt die Stuecke eines neuen Updates automatisch im Hintergrund
+   und setzt sie zusammen.
+2. Erst wenn das Update **vollstaendig** ist und seine **Signatur geprueft**
+   wurde, bietet Cleona es dir an. Du bekommst also nie ein halbes oder
+   ungeprueftes Update angeboten.
+3. Tippst du auf "Installieren", startet die Installation ohne weitere
+   Rueckfrage. Auf Android zeigt zusaetzlich das System seinen
+   Installationsdialog.
 
-### Binaer-Verteilung
-
-Standardmaessig hilft dein Geraet dabei, Updates an andere Nutzer im
-Netzwerk weiterzugeben. Wenn du das nicht moechtest, kannst du diese
-Funktion in den Einstellungen unter "Netzwerk" deaktivieren. Die
-Speichernutzung fuer Update-Fragmente ist begrenzt (5 MB auf Mobilgeraeten,
-20 MB auf Desktop-Geraeten) und wird regelmaessig bereinigt.
+Aeltere Versionen werden nicht angeboten -- ein Update geht immer nur
+vorwaerts. Ist eine Version so alt, dass sie mit dem Netz nicht mehr
+zusammenarbeiten kann, zeigt Cleona das deutlich an und bittet dich, zu
+aktualisieren.
 
 ### Signaturpruefung
 
-Jedes Update wird kryptografisch signiert. Cleona prueft die Signatur
-automatisch, bevor ein Update installiert wird. So ist sichergestellt, dass
-nur Updates vom offiziellen Entwickler akzeptiert werden -- selbst wenn das
-Update ueber das P2P-Netzwerk bezogen wurde.
+Jedes Update ist doppelt unterschrieben: mit einem klassischen und einem
+Post-Quantum-Verfahren. Cleona prueft beide Unterschriften automatisch. So
+ist sichergestellt, dass nur Updates vom offiziellen Entwickler akzeptiert
+werden -- auch wenn das Update ueber das Netz von fremden Geraeten kam. Ein
+Update entsteht nie automatisch aus der Entwicklung, sondern nur, wenn der
+Entwickler es von Hand unterschreibt.
 
 ---
 
@@ -922,19 +1236,22 @@ Update ueber das P2P-Netzwerk bezogen wurde.
 
 ### "Kann ich Cleona ohne Internet nutzen?"
 
-Nein, Cleona braucht eine Netzwerkverbindung, um Nachrichten zu senden und zu
-empfangen. Allerdings musst du nicht gleichzeitig mit deinem Gegenueber online
-sein: Nachrichten, die gesendet werden waehrend der Empfaenger offline ist,
-werden zwischengespeichert und automatisch zugestellt, sobald beide Seiten
-wieder verbunden sind. Im lokalen Netzwerk (z.B. im selben WLAN) koennt ihr
-auch ganz ohne Internetzugang miteinander kommunizieren.
+Cleona braucht eine Netzwerkverbindung, aber nicht unbedingt das Internet:
+Im selben WLAN finden sich Cleona-Geraete selbst und koennen ganz ohne
+Internetzugang miteinander schreiben. Gleichzeitig online sein musst du mit
+deinem Gegenueber nicht: Ist er offline, wartet die Nachricht bis zu 7 Tage
+im Briefkasten bei drei Nachbarn, bis er sie abholt.
 
 ### "Was wenn ich meine Seed-Phrase verliere?"
 
-Wenn du Guardians eingerichtet hast, koennen drei von fuenf
-Vertrauenspersonen gemeinsam deinen Zugang wiederherstellen. Ohne Guardians
-und ohne Seed-Phrase gibt es leider keinen Weg, deine Identitaet
-zurueckzubekommen. Deshalb ist es so wichtig, die 24 Woerter sicher
+Solange noch ein Geraet mit deiner Identitaet laeuft, ist nichts verloren --
+dort schreibst du einfach weiter. Auf dem Geraet, auf dem du die Identitaet
+angelegt hast, kannst du die 24 Woerter meist erneut ablesen (siehe
+Kapitel 2). Verlass dich nicht darauf: Eine Neuinstallation raeumt diese
+Kopie weg, und auf Android vernichtet auch das Entfernen oder Aendern der
+Bildschirmsperre sie. Hast du weder die Woerter noch ein Geraet, gibt es
+keinen Weg zurueck -- auch nicht ueber deine Kontakte, den Entwickler oder
+irgendjemand sonst. Deshalb ist es so wichtig, die 24 Woerter sicher
 aufzubewahren.
 
 ### "Kann jemand meine Nachrichten mitlesen?"
@@ -943,67 +1260,78 @@ Nein. Jede Nachricht wird mit einem einmaligen Schluessel verschluesselt, der
 nur fuer diese eine Nachricht gilt. Nur du und dein Gegenueber koennen die
 Nachricht entschluesseln. Es gibt keinen zentralen Server, keinen Generalschluessel
 und keinen Zugang fuer den Entwickler. Selbst wenn ein Geraet auf dem
-Transportweg die Nachricht weiterleitet, sieht es nur verschluesselten Datenbrei.
+Transportweg die Nachricht weiterleitet, sieht es nur verschluesselten Datenbrei
+und einen Code. Dein Nachbar weiss, dass das Paket von dir kommt, aber nicht,
+an wen es geht; der Nachbar deines Gegenueber weiss, an wen es geht, aber
+nicht, von wem.
 
 ### "Warum brauche ich keine Telefonnummer?"
 
 Weil deine Identitaet rein kryptografisch ist. Statt einer Telefonnummer oder
 E-Mail-Adresse, die mit deinem echten Namen verknuepft ist, identifiziert dich
 ein Schluesselpaar, das auf deinem Geraet erzeugt wurde. Kontakte fuegst du
-per QR-Code, NFC oder Link hinzu -- nicht ueber ein Telefonbuch. Das bedeutet
+per QR-Code, NFC oder die Textzeile deiner Einladung hinzu -- nicht ueber ein
+Telefonbuch. Das bedeutet
 mehr Privatsphaere, weil dein Messenger-Konto nicht an deine reale Identitaet
 gebunden ist.
 
 ### "Wie finde ich Leute auf Cleona?"
 
 Cleona hat bewusst keine Kontaktsuche nach Telefonnummer oder Name -- das waere
-ein Privatsphaere-Problem. Stattdessen tauschst du Kontaktdaten direkt aus: per
-QR-Code, NFC, cleona://-Link oder in oeffentlichen Kanaelen. Das ist wie
+ein Privatsphaere-Problem. Stattdessen tauschst du Einladungen direkt aus: per
+QR-Code, NFC oder als Textzeile ueber einen anderen Weg. Das ist wie
 Visitenkarten austauschen statt im Telefonbuch nachschlagen.
 
 ### "Funktioniert Cleona auch im Ausland?"
 
 Ja. Solange du eine Internetverbindung hast, funktioniert Cleona ueberall auf
-der Welt. Da es keinen zentralen Server gibt, kann der Dienst auch nicht fuer
-bestimmte Laender gesperrt werden. Cleona verfuegt zudem ueber einen
-Anti-Zensur-Fallback: Wenn die normale Verbindung (UDP) blockiert wird,
-wechselt Cleona automatisch auf eine alternative Uebertragung (TLS), die
-schwerer zu erkennen und zu blockieren ist.
+der Welt. Da es keinen zentralen Server und keine feste Adresse gibt, laesst
+sich der Dienst nicht einfach fuer bestimmte Laender abschalten. Wie Cleona
+Sperren erschwert, steht im Kapitel "Sicherheit" unter "Anti-Zensur". Ein Land,
+das jeden unbekannten Verkehr an der Grenze blockiert, kann allerdings auch
+Cleona aufhalten.
 
 ### "Ist Cleona kostenlos?"
 
 Ja. Cleona ist kostenlos und ohne Werbung nutzbar. Da es keinen zentralen
-Server gibt, fallen auch keine Serverkosten fuer den Betrieb an. In der App
-findest du unter "Spende" die Moeglichkeit, die Entwicklung freiwillig zu
-unterstuetzen.
+Server gibt, fallen auch keine Serverkosten fuer den Betrieb an. In den
+Einstellungen unter "Unterstuetze Cleona" -> "Spenden" kannst du die
+Entwicklung freiwillig unterstuetzen.
 
-### "Meine Nachricht hat ein Uhrsymbol -- was bedeutet das?"
+### "Meine Nachricht hat nur einen Haken -- was bedeutet das?"
 
-Das bedeutet, dass die Nachricht noch nicht zugestellt wurde. Dein Gegenueber
-ist vermutlich gerade offline. Sobald die Nachricht zugestellt ist, aendert
-sich das Symbol. Nachrichten werden bis zu 7 Tage lang fuer die Zustellung
-aufbewahrt.
+Die Nachricht ist unterwegs, aber dein Gegenueber hat den Empfang noch nicht
+bestaetigt -- meistens, weil er gerade offline ist. Das ist kein Fehler: Die
+Nachricht wartet bis zu 7 Tage im Briefkasten. Sobald er sie abholt, siehst du
+zwei Haken. Eine Uhr bedeutet, dass noch kein Weg die Nachricht getragen hat
+-- sie geht von selbst los, sobald einer da ist; ein Warnzeichen, dass sie
+14 Tage lang keinen Weg gefunden hat und du sie erneut senden kannst.
+
+### "Warum kommen Nachrichten auf meinem iPhone verspaetet?"
+
+iOS laesst Apps im Hintergrund nicht dauerhaft laufen. Cleona wird nur
+gelegentlich kurz geweckt; wann, bestimmt iOS. Dann holt es alles ab. Sobald
+du die App oeffnest, holt Cleona ab, was fuer dich aufbewahrt wurde.
 
 ### "Kann ich von WhatsApp zu Cleona wechseln?"
 
 Ja, aber du kannst deine WhatsApp-Chats nicht uebertragen. Cleona und WhatsApp
 sind grundverschiedene Systeme. Du musst deine Kontakte einzeln in Cleona
-hinzufuegen. Am einfachsten geht das, wenn du deinen cleona://-Link in eine
-WhatsApp-Gruppe postest und bittest, dass dich die anderen dort hinzufuegen.
+hinzufuegen. Am einfachsten geht das, wenn du die Textzeile deiner Einladung
+an deine Kontakte schickst. Jede Anfrage, die so ankommt, bestaetigst du
+selbst unter "Anfragen".
 
 ### "Kann ich Cleona auf mehreren Geraeten gleichzeitig nutzen?"
 
-Ja. Du kannst bis zu 5 Geraete mit derselben Identitaet verknuepfen. Ein Geraet
-ist das primaere (es haelt die Seed-Phrase), und weitere Geraete werden ueber
-einen sicheren Pairing-Prozess verknuepft. Alle Geraete teilen dieselbe
-Identitaet, Kontakte und Unterhaltungen. Siehe das Multi-Device-Kapitel fuer
-Details.
+Noch nicht. Ein zweites Geraet fuer dieselbe Identitaet kommt mit einer
+spaeteren Version (Kapitel 11). Auf mehreren Geraeten kannst du heute
+verschiedene Identitaeten nutzen.
 
 ### "Wie bekomme ich Updates wenn der App Store gesperrt ist?"
 
-Cleona kann Updates direkt ueber das P2P-Netzwerk beziehen, ohne auf einen
+Cleona kann Updates direkt ueber das Netz beziehen, ohne auf einen
 App Store, eine Website oder einen Download-Server angewiesen zu sein. Wenn
-ein anderer Nutzer im Netzwerk die neueste Version hat, kann dein Geraet das
+ein anderes Geraet im Netz die neueste Version hat, kann dein Geraet das
 Update von dort laden. Die Echtheit wird durch eine digitale Signatur des
 Entwicklers geprueft. Alternativ kann dir ein Kontakt die App per
 Einladungslink oder USB-Stick weitergeben. Mehr dazu im Kapitel
@@ -1020,5 +1348,5 @@ Gemeinschaft, die gerne hilft.
 
 ---
 
-*Dieses Handbuch beschreibt Cleona Chat Version 3.1.125. Einzelne Funktionen
+*Dieses Handbuch beschreibt Cleona Chat Version 4.2. Einzelne Funktionen
 koennen sich in neueren Versionen aendern oder erweitern.*

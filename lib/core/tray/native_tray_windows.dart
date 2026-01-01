@@ -1,259 +1,158 @@
 // ignore_for_file: constant_identifier_names, camel_case_types
-import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
 import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/readiness_names.dart';
 import 'package:cleona/core/tray/tray_status.dart';
+import 'package:cleona/core/tray/windows_tray_thread.dart';
+
+// ── WHO OWNS WHAT (S423 B-5) ────────────────────────────────────────
+//
+// The hidden tray window, its message loop, the icon handles and every
+// `Shell_NotifyIconW` call live on ONE native thread in cleona_tray.dll
+// (windows/cleona_tray/cleona_tray.c, binding windows_tray_thread.dart).
+// Until S423 this file created the window itself, on whatever Dart
+// thread-pool worker ran `init`; when that worker ended after 5 s idle,
+// Windows freed the window and with it the icon (lab 14.11.2026:
+// `NIM_MODIFY rejected … window alive=false`, 7 s after `NIM_ADD`). This
+// file keeps what needs no thread: the record (NOTIFYICONDATAW), the texts,
+// the menu content, the decisions — and hands each change to the thread.
+// It creates no window and pumps no messages; the guard
+// `smoke_tray_windows_modify_measure.dart` keeps it that way.
 
 // ── Win32 constants ─────────────────────────────────────────────────
 const _NIM_ADD = 0x00000000;
 const _NIM_MODIFY = 0x00000001;
-const _NIM_DELETE = 0x00000002;
 const _NIF_MESSAGE = 0x00000001;
 const _NIF_ICON = 0x00000002;
 const _NIF_TIP = 0x00000004;
 const _WM_APP = 0x8000;
+// The icon's callback message. The tray thread sets the same value itself
+// (TRAY_MSG_CALLBACK in cleona_tray.c); written here so the record is
+// complete as built.
 const _WM_TRAYICON = _WM_APP + 1;
-const _WM_COMMAND = 0x0111;
-const _WM_LBUTTONDBLCLK = 0x0203;
-const _WM_RBUTTONUP = 0x0205;
-const _WS_OVERLAPPEDWINDOW = 0x00CF0000;
-const _IMAGE_ICON = 1;
 const _LR_LOADFROMFILE = 0x0010;
 const _LR_DEFAULTSIZE = 0x0040;
-const _MF_STRING = 0x00000000;
-const _MF_SEPARATOR = 0x00000800;
-// For the state line: visible, but neither clickable nor highlighted.
-const _MF_GRAYED = 0x00000001;
-const _MF_DISABLED = 0x00000002;
-const _TPM_BOTTOMALIGN = 0x0020;
-const _TPM_LEFTALIGN = 0x0000;
-const _IDI_APPLICATION = 32512;
 // GetSystemMetrics: edge length of the SMALL icon. Exactly the size
 // that the notification area displays.
 const _SM_CXSMICON = 49;
 const _SM_CYSMICON = 50;
 
-// Menu item IDs
-const _IDM_SHOW = 1001;
+// Menu item IDs. The tray thread reports the chosen one through the event
+// callback; 1001 doubles as the double-click event (kTrayEventShow).
+const _IDM_SHOW = kTrayEventShow;
 const _IDM_STOP = 1002;
 const _IDM_START = 1003;
 const _IDM_QUIT = 1004;
 
-// ── Win32 type definitions ──────────────────────────────────────────
-
-// Shell_NotifyIconW
-typedef _Shell_NotifyIconWC = Int32 Function(Uint32, Pointer);
-typedef _Shell_NotifyIconWDart = int Function(int, Pointer);
-
-// CreateWindowExW
-typedef _CreateWindowExWC = IntPtr Function(
-    Uint32, Pointer<Utf16>, Pointer<Utf16>, Uint32,
-    Int32, Int32, Int32, Int32,
-    IntPtr, IntPtr, IntPtr, Pointer);
-typedef _CreateWindowExWDart = int Function(
-    int, Pointer<Utf16>, Pointer<Utf16>, int,
-    int, int, int, int,
-    int, int, int, Pointer);
-
-// RegisterClassW
-typedef _RegisterClassWC = Uint16 Function(Pointer);
-typedef _RegisterClassWDart = int Function(Pointer);
-
-// DefWindowProcW
-typedef _DefWindowProcWC = IntPtr Function(IntPtr, Uint32, IntPtr, IntPtr);
-typedef _DefWindowProcWDart = int Function(int, int, int, int);
-
-// PeekMessageW
-typedef _PeekMessageWC = Int32 Function(Pointer, IntPtr, Uint32, Uint32, Uint32);
-typedef _PeekMessageWDart = int Function(Pointer, int, int, int, int);
-
-// TranslateMessage / DispatchMessageW
-typedef _TranslateMessageC = Int32 Function(Pointer);
-typedef _TranslateMessageDart = int Function(Pointer);
-typedef _DispatchMessageWC = IntPtr Function(Pointer);
-typedef _DispatchMessageWDart = int Function(Pointer);
-
-// LoadImageW
-typedef _LoadImageWC = IntPtr Function(IntPtr, Pointer<Utf16>, Uint32, Int32, Int32, Uint32);
-typedef _LoadImageWDart = int Function(int, Pointer<Utf16>, int, int, int, int);
-
-// LoadIconW
-typedef _LoadIconWC = IntPtr Function(IntPtr, IntPtr);
-typedef _LoadIconWDart = int Function(int, int);
-
-// CreatePopupMenu / AppendMenuW / TrackPopupMenu / DestroyMenu
-typedef _CreatePopupMenuC = IntPtr Function();
-typedef _CreatePopupMenuDart = int Function();
-typedef _AppendMenuWC = Int32 Function(IntPtr, Uint32, IntPtr, Pointer<Utf16>);
-typedef _AppendMenuWDart = int Function(int, int, int, Pointer<Utf16>);
-typedef _TrackPopupMenuC = Int32 Function(IntPtr, Uint32, Int32, Int32, Int32, IntPtr, Pointer);
-typedef _TrackPopupMenuDart = int Function(int, int, int, int, int, int, Pointer);
-typedef _DestroyMenuC = Int32 Function(IntPtr);
-typedef _DestroyMenuDart = int Function(int);
-
-// GetCursorPos
-typedef _GetCursorPosC = Int32 Function(Pointer);
-typedef _GetCursorPosDart = int Function(Pointer);
-
-// SetForegroundWindow / PostMessageW
-typedef _SetForegroundWindowC = Int32 Function(IntPtr);
-typedef _SetForegroundWindowDart = int Function(int);
-typedef _PostMessageWC = Int32 Function(IntPtr, Uint32, IntPtr, IntPtr);
-typedef _PostMessageWDart = int Function(int, int, int, int);
-
-// GetModuleHandleW
-typedef _GetModuleHandleWC = IntPtr Function(Pointer<Utf16>);
-typedef _GetModuleHandleWDart = int Function(Pointer<Utf16>);
-
-// DestroyIcon / GetSystemMetrics — for the five tier icons (§22.9).
-typedef _DestroyIconC = Int32 Function(IntPtr);
-typedef _DestroyIconDart = int Function(int);
+// GetSystemMetrics — any thread may ask it; it creates nothing.
 typedef _GetSystemMetricsC = Int32 Function(Int32);
 typedef _GetSystemMetricsDart = int Function(int);
 
-// GetLastError / IsWindow — measurement of a rejected NIM_MODIFY (D-123 11a).
-typedef _GetLastErrorC = Uint32 Function();
-typedef _GetLastErrorDart = int Function();
-typedef _IsWindowC = Int32 Function(IntPtr);
-typedef _IsWindowDart = int Function(int);
+// S425 T-1 measurement: where the tray window lives (window station,
+// desktop, session), so the E2E probe can be compared against it.
+typedef _GetWindowThreadProcessIdC = Uint32 Function(IntPtr, Pointer<Uint32>);
+typedef _GetWindowThreadProcessIdDart = int Function(int, Pointer<Uint32>);
+typedef _GetThreadDesktopC = IntPtr Function(Uint32);
+typedef _GetThreadDesktopDart = int Function(int);
+typedef _GetProcessWindowStationC = IntPtr Function();
+typedef _GetProcessWindowStationDart = int Function();
+typedef _GetUserObjectInformationWC = Int32 Function(
+    IntPtr, Int32, Pointer<Uint16>, Uint32, Pointer<Uint32>);
+typedef _GetUserObjectInformationWDart = int Function(
+    int, int, Pointer<Uint16>, int, Pointer<Uint32>);
+typedef _ProcessIdToSessionIdC = Int32 Function(Uint32, Pointer<Uint32>);
+typedef _ProcessIdToSessionIdDart = int Function(int, Pointer<Uint32>);
+
+/// `Tray window 0x… of thread N on <station>\<desktop>, session S` — the
+/// daemon's side of the S425 T-1 measurement. UOI_NAME = 2 (Microsoft Learn,
+/// GetUserObjectInformationW). Never throws.
+String trayWindowWhereLine(int hwnd) {
+  try {
+    final user32 = DynamicLibrary.open('user32.dll');
+    final kernel32 = DynamicLibrary.open('kernel32.dll');
+    final threadOf = user32.lookupFunction<_GetWindowThreadProcessIdC,
+        _GetWindowThreadProcessIdDart>('GetWindowThreadProcessId');
+    final desktopOf = user32.lookupFunction<_GetThreadDesktopC,
+        _GetThreadDesktopDart>('GetThreadDesktop');
+    final station = user32.lookupFunction<_GetProcessWindowStationC,
+        _GetProcessWindowStationDart>('GetProcessWindowStation');
+    final info = user32.lookupFunction<_GetUserObjectInformationWC,
+        _GetUserObjectInformationWDart>('GetUserObjectInformationW');
+    final sessionOf = kernel32.lookupFunction<_ProcessIdToSessionIdC,
+        _ProcessIdToSessionIdDart>('ProcessIdToSessionId');
+    final buf = calloc<Uint16>(256);
+    final need = calloc<Uint32>();
+    final sid = calloc<Uint32>();
+    try {
+      String name(int handle) {
+        if (handle == 0 || info(handle, 2, buf, 512, need) == 0) return '?';
+        return buf.cast<Utf16>().toDartString();
+      }
+      final tid = threadOf(hwnd, nullptr);
+      final desk = name(desktopOf(tid));
+      final sta = name(station());
+      final session = sessionOf(pid, sid) != 0 ? '${sid.value}' : '?';
+      return 'Tray window 0x${hwnd.toRadixString(16)} of thread $tid on '
+          '$sta\\$desk, session $session';
+    } finally {
+      calloc.free(buf);
+      calloc.free(need);
+      calloc.free(sid);
+    }
+  } catch (e) {
+    return 'Tray window 0x${hwnd.toRadixString(16)}: where-probe failed (${e.runtimeType})';
+  }
+}
 
 // ── NOTIFYICONDATAW struct (simplified, 64-bit) ─────────────────────
 // We use a raw byte buffer since Dart FFI structs can't easily handle
-// the complex NOTIFYICONDATAW with its embedded arrays.
+// the complex NOTIFYICONDATAW with its embedded arrays. cleona_tray.c fails
+// its build when sizeof(NOTIFYICONDATAW) is not this number, and rejects any
+// other cbSize at run time.
 const _NOTIFYICONDATAW_SIZE = 976; // sizeof(NOTIFYICONDATAW) on 64-bit
 
-/// Pending actions from the tray menu, polled by the daemon.
-bool pendingShow = false;
-bool pendingStop = false;
-bool pendingStart = false;
-bool pendingQuit = false;
-
-/// Global state for the window procedure callback.
-int _trayHwnd = 0;
-int _trayHicon = 0;
-bool _serviceRunning = true;
-
-/// The state line for the context menu (§22.9, owner decision
-/// V-10 = A: icon AND text).
+/// The context menu as handed to the tray thread (`cleona_tray_set_menu`).
 ///
-/// GLOBAL, because `_showContextMenu` is called from the window procedure —
-/// a `Pointer.fromFunction` callback that cannot carry an instance
-/// with it. The same design as `_serviceRunning` next to it, for
-/// the same reason.
-String _statusLine = '';
-
-/// Language of the menu items. Until S376 four German
-/// strings stood here in the code — the only surface of the product that
-/// knew none of the 34 languages.
-String _menuLocale = 'en';
-
-/// The individual lines of the identities for the context menu (V-10-c = b,
-/// 09.09.2026). GLOBAL for the same reason as [_statusLine]:
-/// `_showContextMenu` runs in a `Pointer.fromFunction` callback
-/// without instance reference. Empty with a single identity.
-List<String> _identityLines = const [];
-
-// Win32 function pointers (global for callback access)
-late _Shell_NotifyIconWDart _shellNotifyIcon;
-late _CreatePopupMenuDart _createPopupMenu;
-late _AppendMenuWDart _appendMenuW;
-late _TrackPopupMenuDart _trackPopupMenu;
-late _DestroyMenuDart _destroyMenu;
-late _GetCursorPosDart _getCursorPos;
-late _SetForegroundWindowDart _setForegroundWindow;
-late _PostMessageWDart _postMessage;
-late _DefWindowProcWDart _defWindowProc;
-
-/// Window procedure callback for the hidden tray window.
-int _wndProc(int hwnd, int msg, int wParam, int lParam) {
-  if (msg == _WM_TRAYICON) {
-    final event = lParam & 0xFFFF;
-    if (event == _WM_LBUTTONDBLCLK) {
-      pendingShow = true;
-    } else if (event == _WM_RBUTTONUP) {
-      _showContextMenu(hwnd);
+/// Lines separated by `\n`; a line `-` is a separator, every other line is
+/// `<id>\t<text>`, and id 0 is an information line (greyed, not selectable).
+/// The content and order are what the menu showed before S423, when it was
+/// built in the window procedure of this file:
+///
+///   STATE LINE AT THE VERY TOP, GREYED OUT (§22.9) — information, not a
+///   command; then each identity on its own greyed line (V-10-c = b, the same
+///   structure as the GTK menu, so that both platforms say the same); then
+///   "show", "stop" or "start" depending on the service, and "quit".
+///
+/// Tabs and line breaks inside a text would break the format; they become
+/// spaces.
+String trayMenuSpec({
+  required String statusLine,
+  required List<String> identityLines,
+  required bool serviceRunning,
+  required String localeCode,
+}) {
+  String clean(String s) => s.replaceAll(RegExp(r'[\t\r\n]'), ' ');
+  final lines = <String>[];
+  if (statusLine.isNotEmpty) {
+    lines.add('0\t${clean(statusLine)}');
+    for (final line in identityLines) {
+      lines.add('0\t    ${clean(line)}');
     }
-    return 0;
+    lines.add('-');
   }
-  if (msg == _WM_COMMAND) {
-    final id = wParam & 0xFFFF;
-    switch (id) {
-      case _IDM_SHOW:
-        pendingShow = true;
-        break;
-      case _IDM_STOP:
-        pendingStop = true;
-        break;
-      case _IDM_START:
-        pendingStart = true;
-        break;
-      case _IDM_QUIT:
-        pendingQuit = true;
-        break;
-    }
-    return 0;
-  }
-  return _defWindowProc(hwnd, msg, wParam, lParam);
-}
-
-void _showContextMenu(int hwnd) {
-  final menu = _createPopupMenu();
-
-  // ── STATE LINE AT THE VERY TOP, GREYED OUT (§22.9) ────────────────────
-  //
-  // `MF_GRAYED | MF_DISABLED`: information, not a command. The identifier
-  // is 0, so that an accidental click in `_wndProc` falls into none of the
-  // four `case` branches.
-  if (_statusLine.isNotEmpty) {
-    final st = _statusLine.toNativeUtf16();
-    _appendMenuW(menu, _MF_STRING | _MF_GRAYED | _MF_DISABLED, 0, st);
-    calloc.free(st);
-    // Each identity individually (V-10-c = b) — the same structure as in the
-    // GTK menu, so that both platforms say the same.
-    for (final line in _identityLines) {
-      final z = '    $line'.toNativeUtf16();
-      _appendMenuW(menu, _MF_STRING | _MF_GRAYED | _MF_DISABLED, 0, z);
-      calloc.free(z);
-    }
-    _appendMenuW(menu, _MF_SEPARATOR, 0, nullptr);
-  }
-
-  final show = trayTranslate('tray_menu_show', _menuLocale).toNativeUtf16();
-  _appendMenuW(menu, _MF_STRING, _IDM_SHOW, show);
-  calloc.free(show);
-
-  _appendMenuW(menu, _MF_SEPARATOR, 0, nullptr);
-
-  if (_serviceRunning) {
-    final stop = trayTranslate('tray_menu_stop', _menuLocale).toNativeUtf16();
-    _appendMenuW(menu, _MF_STRING, _IDM_STOP, stop);
-    calloc.free(stop);
+  lines.add('$_IDM_SHOW\t${clean(trayTranslate('tray_menu_show', localeCode))}');
+  lines.add('-');
+  if (serviceRunning) {
+    lines.add('$_IDM_STOP\t${clean(trayTranslate('tray_menu_stop', localeCode))}');
   } else {
-    final start = trayTranslate('tray_menu_start', _menuLocale).toNativeUtf16();
-    _appendMenuW(menu, _MF_STRING, _IDM_START, start);
-    calloc.free(start);
+    lines.add(
+        '$_IDM_START\t${clean(trayTranslate('tray_menu_start', localeCode))}');
   }
-
-  _appendMenuW(menu, _MF_SEPARATOR, 0, nullptr);
-
-  final quit = trayTranslate('tray_menu_quit', _menuLocale).toNativeUtf16();
-  _appendMenuW(menu, _MF_STRING, _IDM_QUIT, quit);
-  calloc.free(quit);
-
-  // Get cursor position
-  final pt = calloc<Int32>(2);
-  _getCursorPos(pt);
-  final x = pt[0];
-  final y = pt[1];
-  calloc.free(pt);
-
-  _setForegroundWindow(hwnd);
-  _trackPopupMenu(menu, _TPM_LEFTALIGN | _TPM_BOTTOMALIGN, x, y, 0, hwnd, nullptr);
-  _postMessage(hwnd, _WM_COMMAND, 0, 0); // dismiss
-  _destroyMenu(menu);
+  lines.add('-');
+  lines.add('$_IDM_QUIT\t${clean(trayTranslate('tray_menu_quit', localeCode))}');
+  return lines.join('\n');
 }
 
 /// Has the notification area accepted the icon?
@@ -288,16 +187,18 @@ bool trayIconAccepted(int shellNotifyIconResult) => shellNotifyIconResult != 0;
 
 /// Measurement line for a rejected `NIM_MODIFY` (S420 G3 11a, D-123).
 ///
-/// The cause of the rejections seen in the lab (first `NIM_MODIFY` after
-/// the service starts, `S420-RCA-WIN-35-W02.md` finding B) is not proven;
-/// this line carries what tells the candidates apart: the error code
-/// (Microsoft Learn, `Shell_NotifyIconW`: "Returns TRUE if successful, or
-/// FALSE otherwise. … you can call GetLastError for more specific
-/// information"), whether the owning window still exists (`IsWindow`), the
-/// time since `NIM_ADD` and how many rejections in a row. The error code is
-/// read right after the call; the Dart VM does not promise to keep the
-/// thread's last error across an FFI call, so a 0 here is "no code", not
-/// "no error".
+/// The measurement this line carries found the cause (S423 B-5): the window
+/// was gone (`window alive=false`) because the thread that had created it
+/// had ended; since S423 the window lives on its own thread
+/// (cleona_tray.dll). The line stays, because it is what tells a rejection
+/// apart: the error code (Microsoft Learn, `Shell_NotifyIconW`: "Returns
+/// TRUE if successful, or FALSE otherwise. … you can call GetLastError for
+/// more specific information"), whether the owning window still exists
+/// (`IsWindow`), the time since `NIM_ADD` and how many rejections in a row.
+/// The error code is read by the tray thread right after its own call, on
+/// the thread that made it — no Dart code runs in between. When the call
+/// could not even be handed over, it is the error of the hand-over
+/// (1460 = timeout, 1400 = no window).
 String trayModifyRejectedLine({
   required int lastError,
   required bool windowAlive,
@@ -380,11 +281,21 @@ void writeSzTip(Pointer<Uint8> nid, String text) {
   tipPtr[n] = 0;
 }
 
-/// Windows system tray implementation using Win32 Shell_NotifyIcon.
+/// Windows system tray implementation using Win32 Shell_NotifyIcon, carried
+/// out by the tray thread of cleona_tray.dll.
 class NativeTrayWindows {
-  Timer? _pumpTimer;
   bool _initialized = false;
   final _nid = calloc<Uint8>(_NOTIFYICONDATAW_SIZE);
+
+  /// The tray thread, once [init] has opened and started it.
+  TrayThreadLibrary? _tray;
+
+  /// The callback the tray thread reports events through. A
+  /// `NativeCallable.listener` may be called from any thread; the call is
+  /// posted to this isolate and returns at once, so the tray thread never
+  /// waits for Dart. It is closed only after the thread has ended
+  /// ([_stopThread]) — until then the thread may still call it.
+  NativeCallable<TrayEventCallback>? _events;
 
   /// Log channel of the caller (`NativeTray.init`'s `logger`). Without it
   /// a failed `Shell_NotifyIcon` stayed mute even when the
@@ -392,13 +303,22 @@ class NativeTrayWindows {
   void Function(String level, String msg)? _logger;
 
   /// The tooltip without counter, as [init] got it. Basis for
-  /// [trayTooltipText] at every [updateMenu].
+  /// [trayTooltipText] at every [updateStatus].
   String _tooltipBasis = 'Cleona Chat';
 
   /// Last set tooltip — prevents one `NIM_MODIFY` per call
-  /// when nothing has changed. `updateMenu` comes with every
+  /// when nothing has changed. `updateStatus` comes with every
   /// incoming message.
   String? _tooltipSet;
+
+  /// Last menu handed to the tray thread — the same reason as
+  /// [_tooltipSet].
+  String? _menuSet;
+
+  /// Language of the menu items. Until S376 four German
+  /// strings stood here in the code — the only surface of the product that
+  /// knew none of the 34 languages.
+  String _menuLocale = 'en';
 
   /// Loaded state icons (HICON) per readiness state.
   ///
@@ -418,7 +338,15 @@ class NativeTrayWindows {
   /// state keeps travelling via the text. A tray that loses its icon at a
   /// state change would be worse than one
   /// that does not show the state in the icon.
+  ///
+  /// Loaded BY THE TRAY THREAD (`cleona_tray_load_icon`), which also
+  /// destroys them (`DestroyIcon`) when it ends — after the icon has left
+  /// the notification area. The base icon is destroyed there as well when
+  /// it came from a file; the shared system icon of the fallback never.
   final Map<String, int> _stateSymbols = {};
+
+  /// The base icon (HICON).
+  int _trayHicon = 0;
 
   /// The icon last written into the structure — prevents a
   /// `NIM_MODIFY` for a change that does not exist.
@@ -444,11 +372,7 @@ class NativeTrayWindows {
   /// that no longer changes at runtime.
   final Map<String, String> _statePaths = {};
 
-  _DestroyIconDart? _destroyIcon;
-
   // Measurement of `NIM_MODIFY` (see [trayModifyRejectedLine]).
-  _GetLastErrorDart? _getLastError;
-  _IsWindowDart? _isWindow;
   final Stopwatch _sinceAdd = Stopwatch();
   bool _modifyEverAccepted = false;
   int _modifyRejectedInARow = 0;
@@ -458,6 +382,11 @@ class NativeTrayWindows {
   void Function()? onStop;
   void Function()? onStart;
   void Function()? onQuit;
+
+  /// `Shell_NotifyIconW(message, nid)` — run by the tray thread, the owner
+  /// of the window the record names.
+  TrayNotifyResult _shellNotifyIcon(int message, Pointer<Uint8> nid) =>
+      _tray!.notify(message, nid);
 
   bool init({
     required String iconPath,
@@ -484,108 +413,41 @@ class NativeTrayWindows {
     if (_initialized) return true;
 
     try {
-      final shell32 = DynamicLibrary.open('shell32.dll');
-      final user32 = DynamicLibrary.open('user32.dll');
-      final kernel32 = DynamicLibrary.open('kernel32.dll');
-
-      _shellNotifyIcon = shell32.lookupFunction<_Shell_NotifyIconWC, _Shell_NotifyIconWDart>(
-          'Shell_NotifyIconW');
-
-      final createWindowExW = user32.lookupFunction<_CreateWindowExWC, _CreateWindowExWDart>(
-          'CreateWindowExW');
-      final registerClassW = user32.lookupFunction<_RegisterClassWC, _RegisterClassWDart>(
-          'RegisterClassW');
-      _defWindowProc = user32.lookupFunction<_DefWindowProcWC, _DefWindowProcWDart>(
-          'DefWindowProcW');
-      final peekMessageW = user32.lookupFunction<_PeekMessageWC, _PeekMessageWDart>(
-          'PeekMessageW');
-      final translateMessage = user32.lookupFunction<_TranslateMessageC, _TranslateMessageDart>(
-          'TranslateMessage');
-      final dispatchMessageW = user32.lookupFunction<_DispatchMessageWC, _DispatchMessageWDart>(
-          'DispatchMessageW');
-      final loadImageW = user32.lookupFunction<_LoadImageWC, _LoadImageWDart>(
-          'LoadImageW');
-      final loadIconW = user32.lookupFunction<_LoadIconWC, _LoadIconWDart>(
-          'LoadIconW');
-      _createPopupMenu = user32.lookupFunction<_CreatePopupMenuC, _CreatePopupMenuDart>(
-          'CreatePopupMenu');
-      _appendMenuW = user32.lookupFunction<_AppendMenuWC, _AppendMenuWDart>(
-          'AppendMenuW');
-      _trackPopupMenu = user32.lookupFunction<_TrackPopupMenuC, _TrackPopupMenuDart>(
-          'TrackPopupMenu');
-      _destroyMenu = user32.lookupFunction<_DestroyMenuC, _DestroyMenuDart>(
-          'DestroyMenu');
-      _getCursorPos = user32.lookupFunction<_GetCursorPosC, _GetCursorPosDart>(
-          'GetCursorPos');
-      _setForegroundWindow = user32.lookupFunction<_SetForegroundWindowC, _SetForegroundWindowDart>(
-          'SetForegroundWindow');
-      _postMessage = user32.lookupFunction<_PostMessageWC, _PostMessageWDart>(
-          'PostMessageW');
-      final getModuleHandle = kernel32.lookupFunction<_GetModuleHandleWC, _GetModuleHandleWDart>(
-          'GetModuleHandleW');
-      _getLastError =
-          kernel32.lookupFunction<_GetLastErrorC, _GetLastErrorDart>('GetLastError');
-      _isWindow = user32.lookupFunction<_IsWindowC, _IsWindowDart>('IsWindow');
-
-      final hInstance = getModuleHandle(nullptr);
-
-      // Register window class
-      final className = 'CleonaTrayWindow'.toNativeUtf16();
-      final wndProcPtr = Pointer.fromFunction<IntPtr Function(IntPtr, Uint32, IntPtr, IntPtr)>(
-          _wndProc, 0);
-
-      // WNDCLASSW struct (80 bytes on 64-bit)
-      final wc = calloc<Uint8>(80);
-      final wcView = wc.cast<IntPtr>();
-      // style = 0
-      wcView[0] = 0;
-      // lpfnWndProc
-      wcView[1] = wndProcPtr.address;
-      // cbClsExtra, cbWndExtra = 0
-      wc.cast<Int32>()[4] = 0;
-      wc.cast<Int32>()[5] = 0;
-      // hInstance
-      wcView[3] = hInstance;
-      // hIcon, hCursor, hbrBackground = 0
-      wcView[4] = 0;
-      wcView[5] = 0;
-      wcView[6] = 0;
-      // lpszMenuName = null
-      wcView[7] = 0;
-      // lpszClassName
-      wcView[8] = className.address;
-
-      registerClassW(wc);
-      calloc.free(wc);
-
-      // Create hidden window
-      final windowName = 'Cleona Tray'.toNativeUtf16();
-      _trayHwnd = createWindowExW(
-        0, className, windowName, _WS_OVERLAPPEDWINDOW,
-        0, 0, 0, 0,
-        0, 0, hInstance, nullptr,
-      );
-      calloc.free(className);
-      calloc.free(windowName);
-
-      if (_trayHwnd == 0) return false;
-
-      _destroyIcon =
-          user32.lookupFunction<_DestroyIconC, _DestroyIconDart>('DestroyIcon');
-      final getSystemMetrics =
-          user32.lookupFunction<_GetSystemMetricsC, _GetSystemMetricsDart>(
+      // Outside Windows this throws (no cleona_tray.dll) and `init` reports
+      // false below, with the reason in the log.
+      final tray = TrayThreadLibrary.open();
+      final getSystemMetrics = DynamicLibrary.open('user32.dll')
+          .lookupFunction<_GetSystemMetricsC, _GetSystemMetricsDart>(
               'GetSystemMetrics');
+
+      final events = NativeCallable<TrayEventCallback>.listener(_onEvent);
+      // The tray must not keep the daemon alive; the daemon's lifetime is
+      // decided elsewhere (tray "quit" -> shutdownAll -> dispose).
+      events.keepIsolateAlive = false;
+      _events = events;
+      _tray = tray;
+      _stopRequested = false;
+      final hwnd = tray.start(events.nativeFunction);
+      if (hwnd == 0) {
+        _logger?.call(
+            'warn',
+            'The tray thread (cleona_tray.dll) could not create its window '
+            '— NO icon will appear.');
+        _stopThread();
+        return false;
+      }
+      // S425 T-1 measurement: the E2E probe compares its own desktop and
+      // session against this line.
+      _logger?.call('info', trayWindowWhereLine(hwnd));
 
       // Load icon
       if (iconPath.endsWith('.ico') && File(iconPath).existsSync()) {
-        final iconPathW = iconPath.toNativeUtf16();
-        _trayHicon = loadImageW(0, iconPathW, _IMAGE_ICON, 0, 0,
-            _LR_LOADFROMFILE | _LR_DEFAULTSIZE);
-        calloc.free(iconPathW);
+        _trayHicon = tray.loadIcon(
+            iconPath, 0, 0, _LR_LOADFROMFILE | _LR_DEFAULTSIZE);
       }
       if (_trayHicon == 0) {
         // Fallback: default application icon
-        _trayHicon = loadIconW(0, _IDI_APPLICATION);
+        _trayHicon = tray.loadIcon(null, 0, 0, 0);
       }
       _setSymbol = _trayHicon;
 
@@ -611,9 +473,7 @@ class NativeTrayWindows {
       for (final entry in _statePaths.entries) {
         final state = entry.key;
         final path = entry.value;
-        final pw = path.toNativeUtf16();
-        final h = loadImageW(0, pw, _IMAGE_ICON, kx, ky, flags);
-        calloc.free(pw);
+        final h = tray.loadIcon(path, kx, ky, flags);
         if (h == 0) {
           _logger?.call('warn',
               'State icon "$path" could not be loaded (LoadImageW = 0).');
@@ -637,7 +497,7 @@ class NativeTrayWindows {
       // Fill NOTIFYICONDATAW
       final nidView = _nid.cast<Uint32>();
       nidView[0] = _NOTIFYICONDATAW_SIZE; // cbSize
-      _nid.cast<IntPtr>()[1] = _trayHwnd; // hWnd (offset 8 on 64-bit)
+      _nid.cast<IntPtr>()[1] = hwnd; // hWnd (offset 8 on 64-bit)
       nidView[4] = 1; // uID (offset 16)
       nidView[5] = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP; // uFlags (offset 20)
       nidView[6] = _WM_TRAYICON; // uCallbackMessage (offset 24)
@@ -646,38 +506,38 @@ class NativeTrayWindows {
       // szTip: UTF-16 string at offset 40, max 128 chars
       writeSzTip(_nid, tooltip);
 
+      // The menu as it stands before the first state report.
+      _pushMenu(trayMenuSpec(
+        statusLine: '',
+        identityLines: const [],
+        serviceRunning: true,
+        localeCode: _menuLocale,
+      ));
+
       // The return value IS the statement — see [trayIconAccepted].
-      // If the insertion fails, abort here, BEFORE the
-      // pump timer stands: there is then nothing to withdraw, and
-      // `service_daemon.dart` prints "Tray icon: FAILED" instead of "OK".
-      if (!trayIconAccepted(_shellNotifyIcon(_NIM_ADD, _nid))) {
+      // If the insertion fails, abort here and end the tray thread: there
+      // is then nothing to withdraw, and `service_daemon.dart` prints
+      // "Tray icon: FAILED" instead of "OK".
+      final added = _shellNotifyIcon(_NIM_ADD, _nid);
+      if (!trayIconAccepted(added.result)) {
         _logger?.call(
             'warn',
             'Shell_NotifyIcon(NIM_ADD) rejected — in this session there is '
             'no notification area (session 0 / no shell / Explorer not '
-            'started). NO icon will appear.');
+            'started). NO icon will appear (GetLastError=${added.lastError}).');
+        _stopThread();
         return false;
       }
       _sinceAdd
         ..reset()
         ..start();
 
-      // Message pump timer
-      final msg = calloc<Uint8>(48); // MSG struct
-      _pumpTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-        // Process Windows messages
-        while (peekMessageW(msg, _trayHwnd, 0, 0, 1) != 0) {
-          translateMessage(msg);
-          dispatchMessageW(msg);
-        }
-        _processEvents();
-      });
-
       _initialized = true;
       return true;
     } catch (e) {
       _logger?.call('warn', 'NativeTrayWindows init failed: $e');
       try { RedactedConsole.err('NativeTrayWindows init failed: $e'); } catch (_) {}
+      _stopThread();
       return false;
     }
   }
@@ -703,15 +563,19 @@ class NativeTrayWindows {
   /// (szTip, on hovering) and via the greyed-out first line of the
   /// context menu (on right-click).
   void updateStatus(TrayStatus status, String basisName, String localeCode) {
-    _serviceRunning = status.serviceRunning;
     _menuLocale = localeCode;
-    _statusLine = trayStatusText(status, localeCode);
-    _identityLines = [
-      for (final z in status.identities) trayIdentityLineText(z, localeCode)
-    ];
+    final statusLine = trayStatusText(status, localeCode);
+    final menu = trayMenuSpec(
+      statusLine: statusLine,
+      identityLines: [
+        for (final z in status.identities) trayIdentityLineText(z, localeCode)
+      ],
+      serviceRunning: status.serviceRunning,
+      localeCode: localeCode,
+    );
     lastState = status;
     final basis = basisName.isEmpty ? _tooltipBasis : basisName;
-    final text = trayTooltipText(basis, status.unreadCount, _statusLine);
+    final text = trayTooltipText(basis, status.unreadCount, statusLine);
     intendedTooltip = text;
     // The intended statement about the ICON — before the
     // `_initialized` check, for the same reason as the tooltip
@@ -724,6 +588,8 @@ class NativeTrayWindows {
         ? null
         : (_statePaths[status.readiness] ?? _baseIconPath);
     if (!_initialized) return;
+
+    _pushMenu(menu);
 
     final symbol = _stateSymbols[status.readiness] ?? _trayHicon;
     final symbolNew = symbol != 0 && symbol != _setSymbol;
@@ -743,15 +609,16 @@ class NativeTrayWindows {
     // NIM_MODIFY with unchanged uFlags (MESSAGE|ICON|TIP): the
     // notification area takes over the whole record anew — now including
     // a changed icon.
-    if (_shellNotifyIcon(_NIM_MODIFY, _nid) == 0) {
-      // Read first: any further call may overwrite the thread's last error.
-      final lastError = _getLastError?.call() ?? -1;
+    final r = _shellNotifyIcon(_NIM_MODIFY, _nid);
+    if (!trayIconAccepted(r.result)) {
+      // Read by the tray thread right after its call (see
+      // [trayModifyRejectedLine]).
       _modifyRejectedInARow++;
       _logger?.call(
           'warn',
           trayModifyRejectedLine(
-            lastError: lastError,
-            windowAlive: (_isWindow?.call(_trayHwnd) ?? 0) != 0,
+            lastError: r.lastError,
+            windowAlive: r.windowAlive,
             sinceAdd: _sinceAdd.elapsed,
             inARow: _modifyRejectedInARow,
           ));
@@ -767,41 +634,90 @@ class NativeTrayWindows {
     }
   }
 
-  void _processEvents() {
-    if (pendingShow) {
-      pendingShow = false;
-      onShowWindow?.call();
+  /// Hands [spec] to the tray thread when it differs from the last one.
+  void _pushMenu(String spec) {
+    final tray = _tray;
+    if (tray == null || spec == _menuSet) return;
+    if (tray.setMenu(spec)) {
+      _menuSet = spec;
+    } else {
+      _logger?.call('warn',
+          'The tray thread did not take the context menu over — it keeps the previous one.');
     }
-    if (pendingStop) {
-      pendingStop = false;
-      onStop?.call();
+  }
+
+  /// An event of the tray thread, delivered on this isolate by the
+  /// `NativeCallable.listener` — the same order as the menu clicks, one
+  /// call per event.
+  void _onEvent(int event) {
+    switch (event) {
+      case _IDM_SHOW:
+        onShowWindow?.call();
+      case _IDM_STOP:
+        onStop?.call();
+      case _IDM_START:
+        onStart?.call();
+      case _IDM_QUIT:
+        onQuit?.call();
+      case kTrayEventReadded:
+        _logger?.call('info',
+            'Tray icon added again after the taskbar was re-created (TaskbarCreated).');
+      case kTrayEventReaddFailed:
+        _logger?.call('warn',
+            'The taskbar was re-created (TaskbarCreated), but the tray icon could not be added again.');
+      // Measurement (S424 R-3, M-1): when and how the tray window ends.
+      case kTrayEventCloseReceived:
+        _logger?.call('warn',
+            'Tray window received WM_CLOSE (stop requested by this process: $_stopRequested).');
+      case kTrayEventDestroyed:
+        _logger?.call('warn',
+            'Tray window destroyed (WM_DESTROY) — the tray icon is gone (stop requested by this process: $_stopRequested).');
+      case kTrayEventThreadEnded:
+        _logger?.call('warn',
+            'Tray thread ended (exit code 0): its message loop received WM_QUIT (stop requested by this process: $_stopRequested).');
+      case kTrayEventThreadEndedLoopError:
+        _logger?.call('warn',
+            'Tray thread ended (exit code 0): GetMessageW failed with -1 (stop requested by this process: $_stopRequested).');
     }
-    if (pendingStart) {
-      pendingStart = false;
-      onStart?.call();
+  }
+
+  /// Set when this process itself ends the tray thread ([_stopThread]), so
+  /// the measurement lines above tell an intended end from a foreign one.
+  bool _stopRequested = false;
+
+  /// Ends the tray thread (it removes the icon, destroys the window and the
+  /// icons it loaded) and only then closes the event callback. If the
+  /// thread does not end within 5 s the callback stays open — a thread that
+  /// may still call it must never find it closed.
+  void _stopThread() {
+    final tray = _tray;
+    final events = _events;
+    _tray = null;
+    _events = null;
+    var ended = true;
+    if (tray != null) {
+      _stopRequested = true;
+      try {
+        ended = tray.stop();
+      } catch (_) {
+        ended = false;
+      }
     }
-    if (pendingQuit) {
-      pendingQuit = false;
-      onQuit?.call();
+    if (events == null) return;
+    if (ended) {
+      events.close();
+    } else {
+      _logger?.call('warn',
+          'The tray thread did not end within 5 s; its event callback stays open.');
     }
   }
 
   void dispose() {
-    _pumpTimer?.cancel();
-    if (_initialized) {
-      _shellNotifyIcon(_NIM_DELETE, _nid);
-    }
-    // Only free the tier icons created by ourselves with `LoadImageW(..., LR_LOADFROMFILE)`.
-    // The base icon stays untouched: it
-    // can stem from `LoadIconW(0, IDI_APPLICATION)`, and a
-    // shared system icon must not be destroyed.
-    final destroy = _destroyIcon;
-    if (destroy != null) {
-      for (final h in _stateSymbols.values) {
-        try { destroy(h); } catch (_) {}
-      }
-    }
+    _stopThread();
     _stateSymbols.clear();
+    _trayHicon = 0;
+    _setSymbol = 0;
+    _menuSet = null;
     calloc.free(_nid);
     _initialized = false;
   }

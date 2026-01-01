@@ -63,6 +63,10 @@ class PostBoxPlacing {
 
   int get runs => _deposits.length;
 
+  /// The holders the running deposits asked (D73B-2, `post_box_deposit.dart`).
+  Iterable<Neighbour> get askedHolders =>
+      [for (final h in _deposits.values) ...h.asked];
+
   /// The node stops: every own run ends with what it has.
   void close() {
     for (final h in _deposits.values) {

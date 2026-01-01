@@ -33,6 +33,11 @@
  * achievable in shared mode); otherwise the render endpoint's own
  * IAudioClient::GetMixFormat() rate is read and used. Either way the
  * negotiated format is reported back truthfully, never assumed.
+ * S425 N3-1: the codec above this ABI is Opus (v4_2 §17.5), which takes only
+ * 8/12/16/24/48 kHz; a 44100 Hz render endpoint made every call silent
+ * ("AudioMixer start failed … 44100"). The session therefore asks for the
+ * smallest Opus rate at or above that rate — AUTOCONVERTPCM converts inside
+ * the audio engine (format conversion, not DSP of our own, I1).
  *
  * I4 (frame size guaranteed here): WASAPI delivers capture data in
  * variable-sized packets tied to the engine's scheduling period (~10 ms by
@@ -585,8 +590,17 @@ static void wv_recompute_routes_locked(cleona_voice_session_t* s) {
 /* ==========================================================================
  * Format negotiation
  * ========================================================================== */
+/* The smallest Opus rate at or above [r] (S425 N3-1, see the file head). */
+static int32_t wv_codec_rate(int32_t r) {
+    static const int32_t opus[] = { 8000, 12000, 16000, 24000, 48000 };
+    for (size_t i = 0; i < sizeof(opus) / sizeof(opus[0]); i++) {
+        if (r <= opus[i]) return opus[i];
+    }
+    return 48000;
+}
+
 static int32_t wv_pick_rate(int32_t rate_hint, IMMDevice* probe_render) {
-    if (rate_is_valid(rate_hint)) return rate_hint;
+    if (rate_is_valid(rate_hint)) return wv_codec_rate(rate_hint);
 
     int32_t rate = CLEONA_VOICE_RATE_MAX; /* last-resort only if the probe itself fails */
     if (probe_render) {
@@ -606,7 +620,7 @@ static int32_t wv_pick_rate(int32_t rate_hint, IMMDevice* probe_render) {
     if (rate < CLEONA_VOICE_RATE_MIN) rate = CLEONA_VOICE_RATE_MIN;
     if (rate % CLEONA_VOICE_FRAME_HZ != 0) rate -= (rate % CLEONA_VOICE_FRAME_HZ);
     if (rate < CLEONA_VOICE_RATE_MIN) rate = CLEONA_VOICE_RATE_MIN;
-    return rate;
+    return wv_codec_rate(rate);
 }
 
 static void wv_build_wfx(WAVEFORMATEX* wfx, int32_t rate) {
@@ -652,6 +666,8 @@ static HRESULT wv_activate_and_init(IMMDevice* device, int32_t* io_rate,
             && (int32_t)mix->nSamplesPerSec >= CLEONA_VOICE_RATE_MIN) {
             int32_t retry_rate = (int32_t)mix->nSamplesPerSec;
             if (retry_rate > CLEONA_VOICE_RATE_MAX) retry_rate = CLEONA_VOICE_RATE_MAX;
+            /* S425 N3-1: the retry must not hand back a rate Opus rejects. */
+            retry_rate = wv_codec_rate(retry_rate);
             wv_build_wfx(&wfx, retry_rate);
             hr = IAudioClient2_Initialize(client, AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &wfx, NULL);
             if (SUCCEEDED(hr)) *io_rate = retry_rate;

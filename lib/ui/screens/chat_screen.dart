@@ -34,6 +34,7 @@ import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/group_alone_dialog.dart';
+import 'package:cleona/ui/components/leaves_protection_notice.dart';
 import 'package:cleona/ui/components/forward_picker.dart';
 import 'package:cleona/ui/components/media_consent_dialog.dart';
 import 'package:cleona/ui/components/message_bubble.dart';
@@ -1070,6 +1071,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _saveMediaToDownloads(UiMessage msg) async {
     if (msg.filePath == null) return;
+    // §21.4.2 / D-49 (S432): the saved file lies unencrypted on the device —
+    // said once per device, before the first save.
+    await LeavesProtectionNotice.showOnce(context, LeavesProtectionKind.save);
+    if (!mounted) return;
     // S362: read decrypted. The TARGET stays plain text — the user
     // has explicitly chosen the folder and wants to open the file there with
     // foreign programs (S362 report section 5).
@@ -1082,16 +1087,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (customDir != null && customDir.isNotEmpty) {
       downloadDirPath = customDir;
     } else {
-      final home = Platform.environment['HOME'] ?? '/tmp';
-      downloadDirPath = Platform.isAndroid
-          ? '/storage/emulated/0/Download'
-          : '$home/Downloads';
+      // §21.5.4 default: desktop `~/Downloads` (Windows home from USERPROFILE,
+      // not `HOME`), mobile app-internal (S423 B-4 / A-2).
+      downloadDirPath = AppPaths.defaultDownloadDir;
     }
     final downloadDir = Directory(downloadDirPath);
     if (!downloadDir.existsSync()) downloadDir.createSync(recursive: true);
 
-    final destPath =
-        '${downloadDir.path}/${msg.filename ?? msg.filePath!.split('/').last}';
+    final destPath = '${downloadDir.path}${Platform.pathSeparator}'
+        '${msg.filename ?? msg.filePath!.split('/').last}';
 
     // The self-copy protection that formerly stood here (`resolveSymbolicLinks`
     // on source and target) is moot with S362: the source is
@@ -1109,6 +1113,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _shareMedia(UiMessage msg) async {
     if (msg.filePath == null) return;
+    // §21.4.2 / D-49 (S432): what goes to another application is outside
+    // Cleona — said once per device, before the first share.
+    await LeavesProtectionNotice.showOnce(context, LeavesProtectionKind.share);
+    if (!mounted) return;
     // S362: the system dialog passes a FILE on to a foreign app —
     // it does not take a URL. The plain text is therefore laid down as a
     // file.
@@ -3322,19 +3330,27 @@ class _ChatScreenState extends State<ChatScreen> {
               Positioned(
                 top: -4,
                 right: -4,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: cs.primary,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '$newCount',
-                    style: TextStyle(
-                      color: cs.onPrimary,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
+                // Its own node in the accessibility tree (S429 run 5, AVM
+                // 60.A06, S429-RCA-L5-23A01-60A06.md): without it the count
+                // was merged into the clickable node of the whole message
+                // area ([0,357][1080,2166]) — a screen reader did not name
+                // it at the button, and the test's reader did not find it.
+                child: Semantics(
+                  container: true,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: cs.primary,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '$newCount',
+                      style: TextStyle(
+                        color: cs.onPrimary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ),

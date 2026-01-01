@@ -139,11 +139,17 @@ typedef _OpusDecodeNative = Int32 Function(
 typedef _OpusDecodeDart = int Function(
     Pointer<Void>, Pointer<Uint8>, int, Pointer<Int16>, int, int);
 
-// int opus_encoder_ctl(OpusEncoder *st, int request, int value)
-// Dart FFI has no varargs — we use the 3-arg (encoder, request, int) form
-// and look it up under the same symbol name.
+// int opus_encoder_ctl(OpusEncoder *st, int request, ...) is variadic, and
+// the value MUST be declared as a variadic argument: on Apple arm64 every
+// variadic argument travels on the stack, not in a register ("Writing ARM64
+// code for Apple platforms", developer.apple.com/documentation/xcode/
+// writing-arm64-code-for-apple-platforms). A fixed 3-argument declaration
+// works on Android arm64, Linux and Windows x64, but on iOS and macOS Opus
+// reads garbage — measured S424 on iOS 26.5.2: "opus_encoder_ctl(OPUS_SET_VBR=0)
+// failed: -1", so no voice frame left the phone. Gate:
+// scripts/check-ffi-varargs.sh.
 typedef _OpusEncoderCtlIntNative = Int32 Function(
-    Pointer<Void>, Int32, Int32);
+    Pointer<Void>, Int32, VarArgs<(Int32,)>);
 typedef _OpusEncoderCtlIntDart = int Function(Pointer<Void>, int, int);
 
 // ── OpusFFI Class ────────────────────────────────────────────────────────

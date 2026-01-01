@@ -59,6 +59,15 @@ abstract interface class EnvelopePairs {
   void tagShown(Address from);
 }
 
+/// An [EnvelopePairs] that wants to know WHICH `K_AB` a tagged envelope
+/// held under: a group pair learns from it which seed the sender carries
+/// (§4.3, S431 D-131). A separate interface, so that every other
+/// [EnvelopePairs] stays as it is.
+abstract interface class EnvelopeTagHeld {
+  /// The tag of an envelope from [from] held under [kAB].
+  void tagHeld(Address from, Uint8List kAB);
+}
+
 final Expando<EnvelopePairs> _pairs = Expando('envelope pairs');
 
 /// Wires [pairs] to the post box [me].

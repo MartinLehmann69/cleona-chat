@@ -34,8 +34,8 @@ class IosFetchInProcess {
   final int Function() port;
 
   /// Binds the host's data port sockets afresh on the same port
-  /// (`Host.socketsReopen`, §11.1, §31.3).
-  final Future<({bool ipv4, bool? ipv6})> Function() socketsReopen;
+  /// (`Host.socketsReopen`, §11.1, §31.3); no side of a kind: `null` (S427).
+  final Future<({bool? ipv4, bool? ipv6})> Function() socketsReopen;
 
   /// What rests goes again, then the post box is asked (§8.2) —
   /// `Host.applicationOpened`, the same edge the app's own return runs.

@@ -1,7 +1,7 @@
 name: cleona
 description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
 publish_to: 'none'
-version: 4.2.8+40208
+version: 4.2.9+40209
 
 environment:
   sdk: ^3.12.0
@@ -102,6 +102,12 @@ dependencies:
   # no FFI — the daemon stays flutter-free, and redaction also runs
   # before crypto initialisation.
   crypto: ^3.0.7
+
+  # SSH/SFTP in Dart for the media archive on Android/iOS, which ship no
+  # `ssh`/`sftp` program (§21.6 "SFTP mandatory", S423 A-1). MIT licence,
+  # pure Dart (no FFI), pub.dev 4.1.0 published 2026-09-04, 160/160 pub
+  # points (checked 14.11.2026, https://pub.dev/packages/dartssh2).
+  dartssh2: ^4.1.0
 
 dev_dependencies:
   flutter_test:

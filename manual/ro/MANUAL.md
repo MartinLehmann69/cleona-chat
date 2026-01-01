@@ -1,13 +1,13 @@
 # Cleona Chat -- Manual de utilizare
 
-Version 3.1.125 | Actualizat iulie 2026
+Versiunea 4.2 | Actualizat noiembrie 2026
 
 ---
 
 ## Cuprins
 
 1. [Ce este Cleona Chat?](#1-ce-este-cleona-chat)
-2. [Primii pasi](#2-primii-pasi)
+2. [Primii pași](#2-primii-pași)
 3. [Contacte](#3-contacte)
 4. [Mesaje](#4-mesaje)
 5. [Grupuri](#5-grupuri)
@@ -15,292 +15,275 @@ Version 3.1.125 | Actualizat iulie 2026
 7. [Apeluri](#7-apeluri)
 8. [Calendar](#8-calendar)
 9. [Sondaje](#9-sondaje)
-10. [Identitati multiple](#10-identitati-multiple)
-11. [Multi-Device](#11-multi-device)
+10. [Mai multe identități](#10-mai-multe-identități)
+11. [Mai multe dispozitive](#11-mai-multe-dispozitive)
 12. [Recuperare](#12-recuperare)
-13. [Setari](#13-setari)
+13. [Setări](#13-setări)
 14. [Securitate](#14-securitate)
-15. [Actualizari software](#15-actualizari-software)
-16. [Intrebari frecvente](#16-intrebari-frecvente)
+15. [Actualizări software](#15-actualizări-software)
+16. [Întrebări frecvente](#16-întrebări-frecvente)
 
 ---
 
 ## 1. Ce este Cleona Chat?
 
-### Mesageria ta, datele tale
+### Aplicația ta de mesagerie, datele tale
 
-Cleona Chat este un mesager care functioneaza complet fara un server central.
-Mesajele tale ajung direct de la dispozitivul tau la dispozitivul
-interlocutorului -- fara ocolul unui sediu de firma, fara cloud, fara centru
-de date. Nicio companie nu iti poate citi, stoca sau distribui mesajele,
-pentru ca pur si simplu nicio companie nu se afla la mijloc.
+Cleona Chat este o aplicație de mesagerie care funcționează complet fără un server central. Mesajele tale călătoresc de pe dispozitivul tău la dispozitivul interlocutorului -- fără ocol prin sediul unei firme, fără cloud, fără centru de date. Unde, pe traseu, un alt dispozitiv ajută, el doar retransmite pachete criptate. Nicio companie nu poate să-ți citească, să-ți stocheze sau să-ți transmită mai departe mesajele, pur și simplu pentru că nicio companie nu se află la mijloc.
 
-### Fara cont, fara numar de telefon
+### Fără cont, fără număr de telefon
 
-La Cleona nu ai nevoie nici de un numar de telefon, nici de o adresa de
-e-mail pentru a te inregistra. Identitatea ta consta dintr-o pereche de chei
-criptografice, generata automat pe dispozitivul tau la prima pornire. Asta
-inseamna ca nimeni nu te poate identifica dupa numarul de telefon sau adresa
-de e-mail, decat daca imparti tu insuti aceste date de contact.
+La Cleona nu ai nevoie nici de număr de telefon, nici de adresă de e-mail pentru a te înregistra. Identitatea ta constă într-o pereche de chei criptografice, generată automat pe dispozitivul tău la prima pornire. Asta înseamnă: nimeni nu te poate găsi prin numărul tău de telefon sau adresa de e-mail, cu excepția cazului în care dai tu însuți/însăți mai departe datele tale de contact.
 
-### Criptare pregatita pentru viitor
+### Criptare rezistentă la viitor
 
-Cleona foloseste asa-numita criptare post-cuantica. Asta inseamna ca nici
-chiar viitoarele calculatoare cuantice nu ar putea sparge mesajele tale. Nu
-trebuie sa intelegi detaliile tehnice -- important este doar ca
-comunicarea ta este protejata cat mai bine posibil, conform stadiului actual
-al tehnologiei.
+Cleona folosește așa-numita criptare post-cuantum. Asta înseamnă: nici măcar viitoarele calculatoare cuantice nu ar putea să-ți spargă mesajele. Nu trebuie să înțelegi detaliile -- important este doar că informațiile tale sunt protejate cât mai bine, conform stadiului actual al tehnologiei.
 
-### Cum functioneaza fara server?
+### Cum funcționează fără server?
 
-Imagineaza-ti ca tu si contactele tale formati impreuna o retea. Fiecare
-dispozitiv ajuta la transmiterea mesajelor mai departe. Daca interlocutorul
-tau este online chiar acum, mesajul ajunge direct la el. Daca interlocutorul
-tau este offline, contactele comune stocheaza mesajul temporar si il livreaza
-de indata ce destinatarul revine online. Asadar, contactele tale sunt in
-acelasi timp si reteaua ta.
+Rețeaua Cleona este formată doar din dispozitivele utilizatorilor săi. Fiecare dispozitiv este un nod, niciun nod nu este mai important decât altul, și fiecare își cunoaște doar vecinii. Patru lucruri fac această rețea deosebită:
+
+- **Niciun punct fix.** În aplicație nu figurează nicio adresă de server, iar rețeaua nu depinde de niciun nod unic. Nu există nimic ce s-ar putea opri pentru a opri Cleona.
+- **Instant.** Mesajul tău pornește în momentul în care îl trimiți. Nu așteaptă niciun tact și nimic altceva.
+- **Camuflaj pe lângă.** Dispozitivul tău trimite în mod constant mici pachete de camuflaj, ca să nu se poată vedea din afară când scrii cu adevărat. Niciun mesaj nu depinde de ele -- camuflajul rulează doar pe lângă.
+- **Coduri în loc de nume.** Cine retransmite un mesaj vede doar un cod care se schimbă în fiecare zi. În mod normal, niciunul dintre ei nu cunoaște expeditorul și destinatarul în același timp; excepțiile sunt în capitolul 14.
+
+**Trei rute, toate deodată.** Când trimiți un mesaj, Cleona nu încearcă o rută după alta, ci toate cele potrivite deodată. De îndată ce interlocutorul confirmă primirea, celelalte sunt întrerupte.
+
+1. **În aceeași rețea:** Dacă sunteți în același Wi-Fi, mesajul merge direct.
+2. **Peste vecinii fixi:** Pe internet, dispozitivul tău predă mesajul vecinului său fix. Acesta îl retransmite către vecinii fixi ai interlocutorului (până la trei deodată), iar unul dintre ei îl livrează.
+3. **Căsuță poștală:** Dacă interlocutorul este offline, Cleona depune mesajul criptat la trei vecini. Acolo rămâne până la 7 zile. Când interlocutorul revine online, îl ridică.
+
+**Cum intri în rețea?** În aplicație nu figurează nicio adresă de server. Punctul tău de intrare îl primești de la primul tău contact: invitația lui conține adresele prin care dispozitivul tău își găsește primii vecini. În același Wi-Fi, dispozitivele Cleona se găsesc și singure. De atunci, dispozitivul tău află cu fiecare vecin și alți vecini noi.
 
 ### Platforme
 
-Cleona este disponibil pentru Android, iOS, macOS, Linux si Windows.
+Cleona este disponibil pentru Android, iOS, macOS, Linux și Windows. Pe calculatoare și pe Android, mesajele și apelurile sosesc în câteva secunde. Pe iPhone asta se aplică cât timp aplicația este deschisă. Când nu este, iOS o trezește doar din când în când, pe scurt; când anume, decide iOS. Cleona colectează atunci tot ce a fost păstrat pentru tine și arată o notificare cu un număr pe pictograma aplicației. Apelurile nu ajung pe un iPhone a cărui aplicație nu este deschisă. Aceasta este o regulă a Apple, nu o defecțiune în Cleona.
 
 ---
 
-## 2. Primii pasi
+## 2. Primii pași
 
-### Instalarea aplicatiei
+### Instalarea aplicației
 
 **Android:**
-1. Descarca fisierul APK de pe website-ul Cleona sau din GitHub Releases.
-2. Deschide fisierul pe telefonul tau. Daca este necesar, permite
-   instalarea din surse necunoscute (Android te va intreba automat).
-3. Apasa pe "Instalare" si asteapta pana cand instalarea se incheie.
+1. Descarcă fișierul APK de pe site-ul Cleona sau de pe GitHub Releases.
+2. Deschide fișierul pe telefon. Dacă e nevoie, permite instalarea din surse necunoscute (Android te întreabă automat).
+3. Atinge „Instalare" și așteaptă până când instalarea se termină.
 
 **iOS:**
-1. Deschide link-ul de invitatie TestFlight pe iPhone-ul tau.
-2. Apasa pe "Instalare". TestFlight este metoda oficiala Apple de
-   distribuire a aplicatiilor beta.
-3. Dupa instalare, gasesti Cleona pe ecranul principal.
+1. Deschide linkul de invitație TestFlight pe iPhone-ul tău.
+2. Atinge „Instalare". TestFlight este modul oficial al Apple de a distribui aplicații beta.
+3. După instalare, găsești Cleona pe ecranul principal.
 
 **macOS:**
-1. Descarca fisierul DMG de pe website-ul Cleona sau din GitHub Releases.
-2. Deschide DMG-ul si trage Cleona in folderul Aplicatii.
-3. La prima pornire, macOS te poate intreba daca vrei sa deschizi
-   aplicatia unui dezvoltator identificat -- confirma acest lucru.
+1. Descarcă fișierul DMG de pe site-ul Cleona sau de pe GitHub Releases.
+2. Deschide DMG-ul și trage Cleona în folderul Aplicații.
+3. La prima pornire, macOS te poate întreba dacă vrei să deschizi o aplicație de la un dezvoltator identificat -- confirmă.
 
 **Linux (Ubuntu/Debian):**
-1. Descarca fisierul .deb de pe website-ul Cleona sau din GitHub Releases.
-2. Instaleaza cu dublu-clic sau in terminal: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Porneste Cleona din meniul de aplicatii sau in terminal cu `cleona-chat`.
+1. Descarcă fișierul .deb de pe site-ul Cleona sau de pe GitHub Releases.
+2. Instalează cu dublu-clic sau în terminal: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Pornește Cleona din meniul de aplicații sau în terminal cu `cleona-chat-beta`.
 
 **Linux (Fedora/openSUSE):**
-1. Descarca fisierul .rpm de pe website-ul Cleona sau din GitHub Releases.
-2. Instaleaza cu: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Porneste Cleona din meniul de aplicatii sau in terminal cu `cleona-chat`.
+1. Descarcă fișierul .rpm de pe site-ul Cleona sau de pe GitHub Releases.
+2. Instalează cu: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Pornește Cleona din meniul de aplicații sau în terminal cu `cleona-chat-beta`.
 
-**Linux (toate distributiile -- AppImage):**
-1. Descarca fisierul .AppImage de pe website-ul Cleona sau din GitHub Releases.
-2. Fa fisierul executabil: clic-dreapta, Proprietati, Executabil, sau in terminal: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Porneste prin dublu-clic sau in terminal: `./cleona-chat-VERSION-x86_64.AppImage`
+**Linux (toate distribuțiile -- AppImage):**
+1. Descarcă fișierul .AppImage de pe site-ul Cleona sau de pe GitHub Releases.
+2. Fă fișierul executabil: clic dreapta, proprietăți, executabil, sau în terminal: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Pornește cu dublu-clic sau în terminal: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+Numele pachetelor sunt cele pentru beta, care este momentan singura versiune
+publicată; ele se numesc `cleona-chat-beta`.
 
 **Windows:**
-1. Descarca programul de instalare de pe website-ul Cleona sau din GitHub Releases.
-2. Ruleaza fisierul de instalare si urmeaza instructiunile.
-3. Porneste Cleona din meniul Start sau de pe scurtatura de pe desktop.
+1. Descarcă programul de instalare de pe site-ul Cleona sau de pe GitHub Releases.
+2. Rulează fișierul de instalare și urmează instrucțiunile.
+3. Pornește Cleona din meniul Start sau din comanda rapidă de pe desktop.
 
-### Crearea unei identitati
+### Crearea unei identități
 
-La prima pornire, Cleona iti creeaza automat o noua identitate. Poti sa iti
-alegi un nume afisat -- acesta este numele pe care il vor vedea contactele
-tale. Acest nume poate fi schimbat oricand.
+La prima pornire, Cleona creează automat o identitate nouă pentru tine. Îți poți da un nume afișat -- acesta este numele pe care îl văd contactele tale. Acest nume se poate schimba oricând.
 
-### Notarea Seed-Phrase -- cel mai important lucru dintre toate
+### Notează fraza-seed -- cel mai important lucru din toate
 
-Dupa crearea identitatii tale, Cleona iti afiseaza 24 de cuvinte. Aceasta este
-**Seed-Phrase**-ul tau -- cheia ta personala de recuperare.
+După crearea identității, Cleona îți arată 24 de cuvinte. Aceasta este **fraza-seed** a ta -- cheia ta personală de recuperare.
 
-**Noteaza aceste 24 de cuvinte pe hartie si pastreaza-le intr-un loc sigur.**
+**Notează aceste 24 de cuvinte pe hârtie și păstrează-le în siguranță.**
 
-De ce este atat de important?
+De ce este asta atât de important?
 
-- Daca telefonul tau se strica, se pierde sau este furat, poti sa iti
-  recuperezi intreaga identitate pe un dispozitiv nou folosind aceste 24 de
-  cuvinte.
-- Fara Seed-Phrase nu exista cale de intoarcere. Nu exista un buton "am uitat
-  parola" si niciun suport care sa iti poata reda contul -- pentru ca nu
-  exista niciun cont pe un server.
-- Nu impartasi niciodata Seed-Phrase-ul cu altcineva. Cine cunoaste aceste
-  cuvinte se poate da drept tine.
+- Dacă telefonul tău se strică, se pierde sau îți este furat, poți restabili întreaga ta identitate pe un dispozitiv nou cu aceste 24 de cuvinte.
+- Fără fraza-seed nu există cale de întoarcere. Nu există buton „am uitat parola" și niciun suport care ți-ar putea returna contul -- pentru că nu există deloc un cont pe un server. Nici măcar contactele tale nu îți pot restabili identitatea, indiferent câte sunt. Un al doilea dispozitiv cu aceeași identitate vine într-o versiune ulterioară (vezi capitolul 11).
+- Nu da fraza-seed niciodată altora. Cine cunoaște aceste cuvinte se poate da drept tine.
 
-Vei gasi Seed-Phrase-ul mai tarziu si in setari, la "Securitate", daca vrei
-sa il vezi din nou.
+Cele 24 de cuvinte le găsești mai târziu în setări, la „Backup" ->
+„Arată fraza de recuperare", în caz că vrei să le citești din nou. Pe
+Android confirmi pentru asta cu blocarea ecranului tău.
 
-### Adaugarea primului contact
+### Adăugarea primului contact
 
-Pentru a discuta cu cineva, trebuie mai intai sa adaugi acea persoana ca
-si contact. Exista mai multe metode pentru asta -- toate sunt explicate in
-sectiunea urmatoare.
+Ca să comunici cu cineva, trebuie mai întâi să adaugi persoana drept contact. Pentru asta există mai multe căi -- toate sunt explicate în secțiunea următoare.
 
 ---
 
 ## 3. Contacte
 
-### Scanarea unui QR-Code (recomandat)
+### Invitația ta
 
-Cel mai simplu mod de a adauga un contact:
+La Cleona, contactele apar doar printr-o invitație. Invitația ta este acolo de la prima pornire -- chiar și fără internet și înainte ca dispozitivul tău să fi găsit măcar un vecin. O găsești pe pagina de detalii a identității (atinge propriul nume din bara de sus).
 
-1. Interlocutorul tau deschide pagina de detalii a identitatii sale
-   (apasa pe propriul nume din bara de sus) si iti arata QR-Code-ul sau.
-2. Apesi pe butonul plus si alegi "Scaneaza QR-Code".
-3. Tine telefonul in fata QR-Code-ului interlocutorului tau.
-4. Cererea de contact este trimisa automat. De indata ce interlocutorul tau
-   o accepta, puteti sa va scrieti unul altuia.
+Invitația există în două forme care conțin exact același lucru:
 
-Daca va intalniti personal, QR-Code este cea mai sigura metoda, pentru ca
-stii exact cu cine faci schimb de contact.
+- ca **cod QR**, când interlocutorul stă lângă tine, și
+- ca **linie de text**, pe care o trimiți prin e-mail, SMS sau printr-o altă aplicație de mesagerie.
+
+Invitația nu conține niciun număr de telefon și niciun nume dintr-un director. Ea conține cheile tale publice și adresele prin care interlocutorul te ajunge pe tine și pe vecinii tăi. Pentru cineva care tocmai și-a instalat Cleona, invitația ta este, prin urmare, și punctul de intrare în rețea.
+
+### Scanarea codului QR (recomandat)
+
+Când vă întâlniți în persoană:
+
+1. Îi arăți interlocutorului codul QR al invitației tale.
+2. Interlocutorul atinge butonul cu plus, alege „Scanează cod QR" și îndreaptă camera spre ecranul tău. Funcționează și cu webcam-ul unui calculator.
+3. Cererea ajunge la tine și este **acceptată automat** -- pentru că tocmai ai arătat codul tu însuți/însăți.
+
+Un cod QR este valabil o singură dată: prima cerere validă este acceptată, după aceea invitația este consumată. Codul QR este cea mai sigură metodă, pentru că, făcând asta, știți exact cu cine schimbați contactul.
 
 ### NFC (apropierea telefoanelor)
 
-Daca ambele dispozitive suporta NFC:
+Când ambele dispozitive suportă NFC:
 
-1. Deschideti amandoi functia de adaugare contact.
-2. Tineti telefoanele spate in spate, unul langa altul.
-3. Datele de contact sunt schimbate automat.
+1. Deschideți pe ambele funcția de adăugare a contactelor.
+2. Apropiați telefoanele spate în spate.
+3. Invitația este transferată și acceptată automat.
 
-NFC ofera, la fel ca QR-Code, un nivel ridicat de securitate, pentru ca
-schimbul functioneaza doar daca stati fizic unul langa altul.
+NFC oferă, ca și codul QR, un nivel ridicat de siguranță, pentru că schimbul funcționează doar când stați fizic unul lângă celălalt.
 
-### Trimiterea unui link (URI cleona://)
+### Trimiterea liniei de text
 
-Poti sa iti trimiti link-ul de contact si prin e-mail, SMS sau printr-un
-alt mesager:
+Când nu vă puteți întâlni:
 
-1. Deschide pagina de detalii a identitatii tale.
-2. Copiaza link-ul tau cleona://.
-3. Trimite link-ul persoanei care vrea sa te adauge.
-4. Cealalta persoana deschide link-ul sau il lipeste in dialogul de
-   adaugare contact.
-
-Retine: prin aceasta metoda ai incredere ca link-ul nu a fost modificat pe
-parcursul transmiterii. Pentru contacte deosebit de sensibile, recomandam
-QR-Code sau NFC.
+1. Deschide invitația ta și copiază linia de text.
+2. Trimite-o persoanei care trebuie să te adauge -- prin e-mail, SMS sau printr-o altă aplicație de mesagerie.
+3. Cealaltă persoană lipește linia în Cleona, în dialogul de adăugare a contactelor.
+4. Cererea apare la tine sub **„Cereri"**. Aici **nu** se acceptă automat: decizi tu, pentru că nu poți ști cine a mai citit linia pe traseu.
 
 ### Acceptarea cererilor de contact
 
-Cand cineva iti trimite o cerere de contact, aceasta apare in Inbox-ul tau
-(ultimul tab din bara de jos). Acolo poti:
+O cerere primită nu creează încă un contact. Ea îți pune o întrebare și apare în tabul **„Cereri"**. Acolo vezi numele și nivelul de verificare și poți alege:
 
-- **Accepta** -- persoana este adaugata la contactele tale.
-- **Respinge** -- cererea este eliminata.
-- **Bloca** -- persoana nu iti mai poate trimite alte cereri.
+- **Acceptă** -- abia acum persoana devine contactul tău.
+- **Refuză** -- cererea este eliminată.
+- **Blochează** -- persoana nu îți mai poate trimite alte cereri.
+
+### Nu folosi niciodată ca vecin fix
+
+În meniul unui contact găsești comutatorul **„Nu folosi niciodată ca vecin fix"** (implicit: oprit). Când este pornit, acest contact nu mai retransmite mesaje pentru tine și, prin urmare, nici nu află când trimiți sau primești mesaje. Este gândit pentru cazul în care pericolul îți vine din propriul tău anturaj.
+
+De la necunoscuți (nici contact, nici membru al unui grup comun), Cleona nu lasă să treacă nimic în afară de o astfel de cerere -- niciun mesaj, niciun apel, niciun fișier. Și chiar și cererea ajunge doar dacă expeditorul a rezolvat în prealabil o mică problemă de calcul. Asta face spamul în masă scump.
 
 ### Niveluri de verificare
 
-Cleona iti arata cat de sigur este confirmata identitatea unui contact:
+Cleona îți arată cât de sigur este confirmată identitatea unui contact:
 
-| Nivel | Semnificatie |
+| Nivel | Semnificație |
 |-------|-----------|
-| Necunoscut | Ai primit doar Node-ID-ul sau un link. |
-| Vazut | Schimbul de chei a reusit, puteti comunica criptat. |
-| Verificat | V-ati intalnit personal si ati verificat prin QR-Code sau NFC. |
-| De incredere | Ai marcat explicit acest contact ca fiind de incredere. |
+| Neverificat | Sunteți conectați, dar nimic nu confirmă că în spate este chiar persoana potrivită. |
+| Văzut | Schimbul de chei a reușit; puteți comunica criptat. |
+| Verificat | V-ați întâlnit în persoană și v-ați conectat prin scanare cu camera sau NFC. |
+| De încredere | Ai marcat explicit acest contact drept demn de încredere. |
 
-Cu cat nivelul este mai ridicat, cu atat poti fi mai sigur ca vorbesti
-intr-adevar cu persoana potrivita.
+„Verificat" există doar pentru schimbul în persoană. O invitație venită printr-un chat sau prin e-mail nu atinge niciodată acest nivel -- chiar dacă conține aceleași date.
+
+Dacă cheile unui contact se schimbă fără anunț, Cleona îl repoziționează la „Neverificat". Asta te protejează ca cineva să nu se dea drept contactul tău pe neobservate.
 
 ---
-
 ## 4. Mesaje
 
-### Trimiterea si primirea de text
+### Trimiterea și primirea textului
 
-Scrie pur si simplu mesajul tau in campul de introducere de jos si apasa
-Enter sau butonul de trimitere. Mesajul tau este criptat automat inainte de
-a parasi dispozitivul tau.
+Pur și simplu tastează mesajul în câmpul de introducere de jos și apasă Enter sau butonul de trimitere. Mesajul tău este criptat automat înainte să părăsească dispozitivul.
 
-Mesajele primite apar in istoricul conversatiei. O bifa iti arata daca
-mesajul tau a fost livrat.
+Mesajele primite apar în istoricul chatului.
 
-### Trimiterea de imagini, videoclipuri si fisiere
+### Ce înseamnă semnele de pe mesajul tău
 
-Ai mai multe optiuni:
+| Semn | Semnificație |
+|---------|-----------|
+| Ceas | Mesajul este creat, dar încă nicio rută nu l-a dus. |
+| Un bif | Mesajul este pe drum. Asta valabil și cât timp așteaptă în căsuța poștală pentru interlocutor. |
+| Două bifuri | Livrat: dispozitivul interlocutorului a confirmat primirea. |
+| Semn de avertizare | Timp de 14 zile, nicio rută nu a dus mesajul. Atinge-l pentru a-l retrimite. |
 
-- **Iconita de agrafa** din campul de introducere: apasa pe ea pentru a
-  selecta un fisier, o imagine sau un videoclip din galeria sau din sistemul
-  tau de fisiere.
-- **Drag and drop** (desktop): trage pur si simplu un fisier in fereastra
-  de chat.
-- **Lipire din clipboard** (desktop): copiaza o imagine si lipeste-o in
-  chat.
+**Offline nu este o eroare.** Dacă interlocutorul nu este disponibil, mesajul rămâne la un bif până este ridicat -- nu s-a pierdut. Dacă dispozitivul tău însuși nu are conexiune, mesajul rămâne la ceas și pornește de la sine de îndată ce există din nou o rută. Semnul de avertizare apare abia când mesajul nu a găsit timp de 14 zile nicio rută; atunci îl poți retrimite.
 
-Fisierele mici (sub 256 KB) sunt trimise direct impreuna cu mesajul.
-Fisierele mai mari sunt transferate printr-o procedura in doua etape: mai
-intai fisierul este anuntat, apoi transmis in bucati.
+Aceasta se aplică și pentru un iPhone a cărui aplicație nu este deschisă: mesajul așteaptă în căsuța poștală până când iOS trezește aplicația pe scurt sau până când interlocutorul tău o deschide. Asta poate dura mai mult decât pe alte dispozitive.
+
+Două bifuri există doar când destinatarul confirmă singur primirea. Această confirmare este criptată și semnată -- nimeni de pe traseu nu o poate falsifica ca să-ți simuleze o livrare.
+
+### Trimiterea de imagini, videoclipuri și fișiere
+
+Ai mai multe posibilități:
+
+- **Iconița cu agrafă** din câmpul de introducere: atinge-o pentru a alege un fișier, o imagine sau un videoclip din galeria ta sau din sistemul tău de fișiere.
+- **Drag and drop** (desktop): trage pur și simplu un fișier în fereastra de chat.
+- **Lipire din clipboard** (desktop): copiază o imagine și lipește-o în chat.
+
+Fișierele mici (sub 256 KB) călătoresc direct în mesaj. Fișierele mai mari sunt despicate în bucăți și prevăzute cu corecție de erori, astfel încât bucățile pierdute individual nu contează. Dacă sunteți amândoi online, ele sunt transmise în flux peste un vecin; altfel sunt depuse la dispozitive permanent accesibile, până când interlocutorul le ridică.
+
+De la 256 KB în sus, Cleona te întreabă pentru fiecare fișier înainte de a fi trimis: un fișier mare nu poate lua ruta mesajelor tale. Conținutul lui rămâne criptat, iar interlocutorul nu află adresa ta de internet. Dar transferul este vizibil din afară ca eveniment, iar un dispozitiv străin care îl retransmite sau îl păstrează vede cine îl încarcă și cine îl ridică. Consimțământul tău este valabil doar pentru acest singur fișier.
 
 ### Mesaje vocale
 
-1. Tine apasat butonul de microfon din campul de introducere.
-2. Rosteste mesajul tau.
-3. Elibereaza butonul pentru a trimite mesajul.
+1. Ține apăsat butonul microfon din câmpul de introducere.
+2. Roște mesajul tău.
+3. Eliberează butonul pentru a trimite mesajul.
 
-Daca recunoasterea vocala este activata pe dispozitivul tau (vezi setari),
-mesajul tau vocal este transcris automat in text. Interlocutorul tau vede
-atunci atat inregistrarea, cat si textul transcris.
+Dacă pe dispozitivul tău este activată recunoașterea vorbirii (vezi setări), mesajul tău vocal este transcris automat în text. Interlocutorul vede atunci atât înregistrarea, cât și textul transcris.
 
-### Raspunsul la mesaje (citare)
+### Răspunsul la mesaje (citat)
 
-Pentru a raspunde la un mesaj anume:
+Pentru a răspunde la un anumit mesaj:
 
-1. Deschide meniul cu trei puncte de langa mesaj.
-2. Alege "Raspunde".
-3. Deasupra campului de introducere apare un banner cu mesajul citat.
-4. Scrie raspunsul tau si trimite-l.
+1. Deschide meniul cu trei puncte de lângă mesaj.
+2. Alege „Răspunde".
+3. Deasupra câmpului de introducere apare un banner cu mesajul citat.
+4. Scrie răspunsul tău și trimite-l.
 
-Mesajul citat este afisat in raspunsul tau, astfel incat legatura sa fie
-clara.
+Mesajul citat este afișat în răspunsul tău, astfel încât referința este clară.
 
-### Editarea si stergerea mesajelor
+### Editarea și ștergerea mesajelor
 
-- **Editare:** meniul cu trei puncte al mesajului, apoi "Editeaza".
-  Modifica textul si trimite-l din nou. Interlocutorul tau vede ca mesajul
-  a fost editat. Editarea este posibila timp de 15 minute de la trimitere.
-- **Stergere:** meniul cu trei puncte al mesajului, apoi "Sterge". Mesajul
-  este eliminat atat la tine, cat si la interlocutorul tau. Poti sa iti
-  stergi propriile mesaje oricand -- nu exista o limita de timp pentru
-  stergere.
+- **Editare:** meniul cu trei puncte al mesajului, apoi „Editează". Modifică textul și trimite-l din nou. Interlocutorul vede că mesajul a fost editat. Editarea este posibilă în decurs de 15 minute de la trimitere.
+- **Ștergere:** meniul cu trei puncte al mesajului, apoi „Șterge". Mesajul este eliminat la tine și la interlocutor. Îți poți șterge propriile mesaje oricând -- nu există o fereastră de timp pentru ștergere.
 
-### Reactii cu emoji
+### Reacții cu emoji
 
-In loc sa scrii un raspuns, poti reactiona la un mesaj cu un emoji:
+În loc să scrii un răspuns, poți reacționa la un mesaj cu un emoji:
 
-1. Deschide meniul cu trei puncte sau tine apasat mesajul.
-2. Alege un emoji din selectia rapida sau deschide selectorul de emoji
-   pentru gama completa.
-3. Reactia ta apare sub mesaj.
+1. Deschide meniul cu trei puncte sau ține mesajul apăsat mult timp.
+2. Alege un emoji din selecția rapidă sau deschide selectorul de emoji pentru selecția completă.
+3. Reacția ta apare sub mesaj.
 
 ### Copierea textului
 
-Prin meniul cu trei puncte al unui mesaj poti copia textul mesajului in
-clipboard.
+Prin meniul cu trei puncte al unui mesaj poți copia textul mesajului în clipboard.
 
-### Cautarea mesajelor
+### Căutarea mesajelor
 
-In partea de sus a ferestrei de chat gasesti functia de cautare. Introdu
-un termen de cautare, iar Cleona iti va arata toate rezultatele din chat-ul
-curent. Cu tastele sageata poti sari inainte si inapoi intre rezultate.
+În partea de sus a ferestrei de chat găsești funcția de căutare. Introdu un termen de căutare, iar Cleona îți arată toate potrivirile din chatul curent. Cu tastele săgeată poți sări înainte și înapoi între potriviri.
 
-Pe ecranul principal exista suplimentar un filtru de cautare pe toate
-tab-urile, cu care poti cauta toate conversatiile dupa un anumit termen.
+Pe pagina de start există suplimentar un filtru de căutare peste toate taburile, cu care poți căuta în toate conversațiile după un termen.
 
-### Previzualizarea link-urilor
+### Previzualizarea linkurilor
 
-Cand trimiti un link, Cleona genereaza automat o previzualizare (titlu,
-descriere, imagine de previzualizare). Aceasta previzualizare este creata
-de dispozitivul tau si trimisa impreuna cu mesajul -- interlocutorul tau nu
-trebuie sa stabileasca o conexiune la website-ul respectiv.
+Când trimiți un link, Cleona generează automat o previzualizare (titlu, descriere, imagine de previzualizare). Această previzualizare este creată de dispozitivul tău și trimisă împreună -- interlocutorul nu trebuie să stabilească o conexiune la site-ul legat.
 
-Cand apesi pe un link primit, esti intrebat daca vrei sa il deschizi in
-browser-ul normal, in modul incognito sau deloc.
+Ce face o atingere pe un link primit o stabilești în setări, la „Deschidere linkuri": „Normal", „Preferă o fereastră privată" (unde dispozitivul nu poate deschide o fereastră privată, linkul se deschide normal) sau „Întreabă de fiecare dată".
 
 ---
 
@@ -308,41 +291,47 @@ browser-ul normal, in modul incognito sau deloc.
 
 ### Crearea unui grup
 
-1. Treci la tab-ul "Grupuri".
-2. Apasa pe butonul plus.
-3. Da grupului un nume.
-4. Selecteaza contactele pe care vrei sa le inviti.
-5. Apasa pe "Creeaza".
+1. Treci la tabul „Grupuri".
+2. Atinge butonul cu plus.
+3. Dă grupului un nume.
+4. Selectează contactele pe care vrei să le inviți.
+5. Atinge „Creează".
 
-Contactele invitate primesc o notificare si se pot alatura grupului.
+Contactele invitate primesc o notificare și pot adera la grup.
+
+### Cum sunt protejate mesajele de grup
+
+Într-un grup cu până la 16 membri, Cleona trimite fiecare mesaj fiecărui membru individual -- criptat doar pentru acel membru, ca și cum ai fi scris fiecăruia un mesaj separat. Bifurile de pe un mesaj de grup arată starea membrului pentru care a avansat cel mai puțin.
+
+Dacă grupul crește peste 16 membri, el folosește o cheie comună. Ea se schimbă în fiecare zi și se trage din nou când un membru iese sau este eliminat; un membru nou citește abia de la intrarea lui. Acolo bifurile nu mai arată starea fiecărui membru, ci că mesajul este depus în rețea. Dacă grupul scade la 12 membri sau mai puțin, revine la trimiterea individuală.
+
+### Imagini în grupuri și canale
+
+În setările unui grup sau ale unui canal stabilești cu „Încarcă mereu imaginile" dacă imaginile se încarcă imediat sau abia când atingi una.
 
 ### Invitarea membrilor
 
-Si dupa creare poti invita alte contacte:
+Chiar și după creare, poți invita și alte contacte:
 
-1. Deschide informatiile grupului (meniul cu trei puncte din
-   prezentarea grupului sau bara de sus din chat-ul grupului).
-2. Apasa pe "Invita".
-3. Selecteaza contactele pe care vrei sa le adaugi.
+1. Deschide informațiile grupului (meniul cu trei puncte în prezentarea generală a grupurilor sau bara de sus în chatul de grup).
+2. Atinge „Invită".
+3. Selectează contactele pe care vrei să le adaugi.
 
 ### Roluri
 
 Fiecare grup are trei roluri:
 
-- **Proprietar (Owner):** are control total. Poate adauga si elimina
-  membri, poate numi admini si administra grupul. Proprietarul isi poate
-  transfera statutul si catre alt membru.
-- **Admin:** poate elimina membri si ajuta la administrare.
-- **Membru:** poate citi si scrie mesaje.
+- **Proprietar (Owner):** Are controlul complet. Poate adăuga și elimina membri, numi administratori și gestiona grupul. Proprietarul își poate transfera și statutul către alt membru.
+- **Admin:** Poate elimina membri și ajuta la administrare.
+- **Membru:** Poate citi și scrie mesaje.
 
-### Parasirea unui grup
+### Părăsirea unui grup
 
-1. Deschide meniul cu trei puncte din prezentarea grupului.
-2. Alege "Paraseste".
-3. Confirma decizia ta.
+1. Deschide meniul cu trei puncte în prezentarea generală a grupurilor.
+2. Alege „Părăsește".
+3. Confirmă decizia ta.
 
-Cand parasesti un grup, mesajele tale anterioare raman vizibile pentru
-ceilalti membri.
+Când părăsești un grup, mesajele tale anterioare rămân vizibile pentru ceilalți membri.
 
 ---
 
@@ -350,671 +339,496 @@ ceilalti membri.
 
 ### Ce sunt canalele?
 
-Canalele sunt forumuri publice de discutie in cadrul retelei Cleona. Spre
-deosebire de grupuri, aici oricine poate citi fara sa fie nevoie sa fie
-invitat. Doar proprietarul si adminii pot publica postari -- abonatii
-doar citesc.
+Canalele sunt forumuri publice de discuție în interiorul rețelei Cleona. Spre deosebire de grupuri, aici oricine poate citi fără să fie invitat. Doar proprietarul și administratorii pot publica contribuții -- abonații doar citesc.
 
-### Gasirea si alaturarea la canale
+### Găsirea și aderarea la canale
 
-1. Treci la tab-ul "Canale".
-2. Deschide fila "Cautare".
-3. Cauta printre canalele disponibile dupa nume sau tema.
-4. Apasa pe un canal si apoi pe "Aboneaza-te".
+1. Treci la tabul „Canale".
+2. Deschide fila „Căutare".
+3. Caută canalele disponibile după nume sau temă.
+4. Atinge un canal și apoi „Abonează-te".
 
-Canalele pot fi filtrate dupa limba. Unele canale sunt marcate ca
-"Interzis minorilor" -- acestea sunt vizibile doar daca ai confirmat in
-profilul tau ca ai peste 18 ani.
+Canalele pot fi filtrate după limbă. Unele canale sunt marcate ca „Nesigure pentru minori" -- acestea sunt vizibile doar dacă ai confirmat în profilul tău că ai peste 18 ani.
 
-### Crearea unui canal propriu
+### Crearea propriului canal
 
-1. Treci la tab-ul "Canale".
-2. Apasa pe butonul plus.
-3. Introdu un nume de canal (trebuie sa fie unic in intreaga retea).
-4. Alege limba si daca canalul va fi public sau privat.
-5. Optional: adauga o descriere si o imagine.
-6. Apasa pe "Creeaza".
+1. Treci la tabul „Canale".
+2. Atinge butonul cu plus.
+3. Introdu un nume de canal (trebuie să fie unic în toată rețeaua).
+4. Alege limba și dacă canalul trebuie să fie public sau privat.
+5. Opțional: adaugă o descriere și o imagine.
+6. Atinge „Creează".
 
-La canalele publice poti stabili daca continutul este clasificat drept
-"Interzis minorilor".
+La canalele publice poți stabili dacă conținutul este clasificat ca „Nesigur pentru minori".
 
-### Raportarea continutului
+### Raportarea conținutului
 
-Daca observi continut nepotrivit intr-un canal public, il poti raporta.
-Cleona foloseste un sistem de moderare descentralizat: raportarile sunt
-evaluate de membri ai retelei selectati aleatoriu (un fel de "juriu
-popular"). Daca se constata o incalcare, canalul primeste un avertisment.
-In cazul incalcarilor repetate, canalul este retrogradat in indexul de
-cautare sau blocat.
+Dacă observi conținut inadecvat într-un canal public, îl poți raporta. Cleona folosește un sistem de moderare descentralizat: raportările sunt evaluate de membri ai rețelei selectați aleatoriu (un fel de „jurați"). Dacă se constată o abatere, canalul primește un avertisment. La abateri repetate, este retrogradat în indexul de căutare sau blocat.
 
 ### Canale de sistem
 
-Cleona are doua canale de sistem integrate:
+Cleona dispune de două canale de sistem integrate:
 
-- **Bug Log:** cand Cleona detecteaza o eroare, te intreaba daca vrei sa
-  trimiti un raport de eroare anonimizat. Aceste rapoarte ajung in canalul
-  Bug Log, unde pot fi vizualizate de comunitate. Nu se transmit date
-  personale -- doar descrieri tehnice ale erorilor. Poti trimite si manual
-  un raport de log (cu dialog de previzualizare si consimtamant explicit).
-- **Feature Requests:** aici utilizatorii pot depune cereri de functii noi
-  si pot vota propunerile existente. Propunerile sunt sortate dupa numarul
-  de voturi.
+- **Bug Log:** Când Cleona detectează o eroare, te întreabă dacă vrei să trimiți un raport de eroare; înainte vezi exact ce se publică. Aceste rapoarte ajung în canalul Bug Log, unde pot fi consultate de comunitate. Un raport nu poartă niciun nume și niciun conținut al conversațiilor tale, ci un pseudonim. În beta el numește în plus identificatorul tău (User-ID), ca dezvoltatorii să poată întreba. Poți trimite și manual un raport de jurnal (cu dialog de previzualizare și consimțământ explicit).
+- **Cereri de funcții:** Aici utilizatorii pot depune dorințe de funcții și vota pentru propunerile existente. Propunerile sunt sortate după voturi.
 
-Ambele canale de sistem au o limita de dimensiune de 25 MB si sunt
-monitorizate prin sistemul de moderare Jury.
+Fiecare calculator păstrează până la 25 MB pe canal de sistem, fiecare telefon până la 5 MB; când se umple, iese primul cel mai vechi -- niciodată ce ai văzut tu deja.
 
 ---
-
 ## 7. Apeluri
 
-### Initierea unui apel vocal
+### Pornirea unui apel vocal
 
-1. Deschide chat-ul cu contactul pe care vrei sa il suni.
-2. Apasa pe simbolul de telefon din bara de sus.
-3. Asteapta pana cand interlocutorul tau accepta apelul.
+1. Deschide chatul cu contactul pe care vrei să-l suni.
+2. Atinge simbolul de telefon din bara de sus.
+3. Așteaptă până când interlocutorul acceptă apelul.
 
-In timpul convorbirii vezi o cronologie, durata convorbirii si ai acces
-la functiile de mut si difuzor.
+În timpul convorbirii vezi o linie de timp, durata convorbirii și ai acces la funcțiile de dezactivare a microfonului și difuzor.
 
-Pentru a inchide, apasa pe butonul rosu de inchidere.
+Pentru a închide, atinge butonul roșu de închidere.
 
-### Initierea unui apel video
+Dacă vezi „Indisponibil", dispozitivul interlocutorului tău nu poate fi contactat chiar acum, de exemplu un iPhone a cărui aplicație nu este deschisă. Trimite un mesaj în schimb.
 
-1. Deschide chat-ul cu contactul.
-2. Apasa pe simbolul de camera din bara de sus.
-3. Imaginea ta video apare intr-o fereastra mica, iar imaginea
-   interlocutorului tau in zona mare.
+### Pornirea unui apel video
 
-Poti schimba intre camera frontala si cea din spate in timpul convorbirii.
+1. Deschide chatul cu contactul.
+2. Atinge simbolul de cameră din bara de sus.
+3. Imaginea ta video apare într-o fereastră mică, imaginea interlocutorului în zona mare.
+
+Poți comuta în timpul convorbirii între camera din față și cea din spate.
 
 ### Apeluri primite
 
-Cand cineva te suna, apare o fereastra de notificare cu numele
-apelantului. Poti:
+Când cineva te sună, apare o fereastră de notificare cu numele apelantului. Poți:
 
-- **Accepta** -- convorbirea incepe.
-- **Respinge** -- apelantul este notificat.
+- **Acceptă** -- convorbirea începe.
+- **Refuză** -- apelantul este notificat.
 
-Daca esti deja intr-o convorbire, un apel nou este respins automat.
+Dacă ești chiar acum într-o convorbire, un apel nou nu sună; primești în schimb un mesaj „Apel pierdut". Același lucru este valabil pentru un apel de grup pe care nu l-ai acceptat -- mesajul stă atunci în chatul de grup.
+
+Dacă cineva sună una dintre identitățile tale care nu este afișată chiar acum, sună totuși; ecranul de apel spune care dintre identitățile tale este sunată.
+
+Pe iPhone sună doar cât timp aplicația este deschisă. Cine te sună cât timp aplicația nu este deschisă vede „Indisponibil" după 10 secunde. De îndată ce deschizi aplicația, găsești un mesaj despre apelul pierdut.
 
 ### Apeluri de grup
 
-Poti face si apeluri de grup, la care participa mai multe persoane
-simultan. Apelul este organizat printr-un arbore de retransmitere
-inteligent, astfel incat nu fiecare participant trebuie sa fie conectat
-direct cu ceilalti. Toate convorbirile sunt criptate integral.
+Poți purta și apeluri de grup în care participă mai multe persoane simultan. Apelul este organizat printr-un arbore inteligent de retransmitere, astfel încât nu trebuie ca fiecare participant să fie conectat direct cu fiecare altul. Toate convorbirile sunt criptate pe toată durata.
 
-### Criptarea apelurilor
+Fiecare membru al grupului poate porni un apel de grup. Doi participanți care nu sunt contacte unul pentru altul nu văd niciodată adresa de internet a celuilalt: sunetul și imaginea lor trec peste un participant care este contact cu amândoi. Dacă nu există unul astfel, cei doi nu sunt conectați, iar caseta spune „Niciun contact comun în apel". Dacă o retransmitere este supraîncărcată, rămâne sunetul, iar imaginea video cade pentru această pereche.
 
-Toate apelurile sunt criptate cu chei unice, care exista doar pe durata
-convorbirii. Dupa inchidere, aceste chei sunt sterse imediat. Nimeni nu
-poate decripta ulterior o convorbire trecuta.
+### Criptarea la apeluri
+
+Toate apelurile sunt criptate cu chei de unică folosință care există doar pe durata convorbirii. După închidere, aceste chei sunt șterse imediat. Nimeni nu poate decripta ulterior o convorbire trecută.
+
+Sincer spus: apelurile rulează, pe cât posibil, direct între dispozitive, pentru că și o mică întârziere deranjează la vorbire. Spre deosebire de mesaje, furnizorul tău de internet poate deci vedea, în timpul unui apel, cu ce adresă de internet ești conectat. Ce spuneți, nu vede.
+
+În timpul unui apel, contactul tău îți vede și el adresa de internet. Dacă nu vrei asta la un contact, oprește în meniul lui „Permite apelurile" (implicit: pornit). Dacă oprești mai târziu, o adresă pe care a văzut-o deja îi rămâne cunoscută.
 
 ---
 
 ## 8. Calendar
 
-Cleona include un calendar integrat, care functioneaza criptat si complet
-descentralizat -- fara niciun serviciu cloud.
+Cleona conține un calendar integrat care funcționează criptat și complet descentralizat -- fără serviciu cloud.
 
-### Vizualizari
+### Vizualizări
 
-Calendarul ofera cinci vizualizari: Zi, Saptamana, Luna, An si o
-vizualizare de tip Sarcini. Comuti intre ele prin tab-urile din partea de
-sus a ecranului calendarului.
+Calendarul oferă cinci vizualizări: zi, săptămână, lună, an și o vizualizare de sarcini. Comută între ele prin taburile din partea de sus a ecranului calendarului.
 
-### Crearea evenimentelor
+### Crearea programărilor
 
-Apasa pe un interval orar sau foloseste butonul de adaugare pentru a crea
-un eveniment nou. Poti introduce titlu, data, ora, locul si notite.
-Evenimentele sunt stocate criptat pe dispozitivul tau.
+Atinge un interval de timp sau folosește butonul de adăugare pentru a crea o programare nouă. Poți introduce titlu, dată, oră, loc și notițe. Programările sunt stocate criptat pe dispozitivul tău.
 
-### Evenimente recurente
+### Programări recurente
 
-Evenimentele se pot repeta zilnic, saptamanal, lunar sau anual. Poti
-personaliza tiparul (de exemplu, in fiecare a doua marti, in prima zi a
-fiecarei luni) si poti stabili o data de final sau un numar de repetari.
+Programările se pot repeta zilnic, săptămânal, lunar sau anual. Poți ajusta modelul (de exemplu, în fiecare al doilea marți, în prima zi a fiecărei luni) și poți stabili o dată de sfârșit sau un număr de repetări.
 
 ### Invitarea contactelor
 
-La crearea sau editarea unui eveniment, poti invita contactele tale
-Cleona. Ele primesc o invitatie de calendar criptata si pot raspunde cu
-Da, Nu sau Poate. Modificarile evenimentului sunt trimise automat tuturor
-invitatilor.
+La crearea sau editarea unei programări îți poți invita contactele Cleona. Ele primesc o invitație de calendar criptată și pot răspunde cu da, nu sau poate. Modificările programării sunt trimise automat tuturor invitaților.
 
-### Afisarea Liber/Ocupat
+### Afișare liber/ocupat
 
-Poti impartasi disponibilitatea ta cu contactele fara sa dezvalui detalii
-despre evenimente. Exista trei niveluri de confidentialitate: detalii
-complete, doar intervale orare sau ascuns. Poti seta un mod implicit si
-il poti suprascrie pentru fiecare contact in parte.
+Îți poți împărtăși disponibilitatea cu contactele fără să divulgi detaliile programărilor. Există trei niveluri de confidențialitate: detalii complete, doar blocuri de timp sau ascuns. Poți stabili un implicit și îl poți suprascrie per contact.
 
-### Notificari de reamintire
+### Memento-uri
 
-Evenimentele pot avea reamintiri, care declanseaza o notificare de sistem
-inainte de inceperea evenimentului. Poti amana reamintirile daca este
-nevoie.
+Programările pot avea memento-uri care declanșează o notificare de sistem înainte de începerea programării. Poți amâna memento-urile la nevoie.
 
-### Sincronizare externa a calendarului
+### Sincronizare externă de calendar
 
 Cleona se poate sincroniza cu servicii externe de calendar:
 
-- **CalDAV** -- conecteaza-te la orice server compatibil CalDAV
-  (Nextcloud, Radicale etc.).
-- **Google Calendar** -- sincronizare prin Google Calendar API, cu
-  autentificare sigura OAuth2.
-- **Server CalDAV local** -- Cleona poate porni un server CalDAV local pe
-  dispozitivul tau, astfel incat aplicatiile de calendar de pe desktop
-  (Thunderbird, Outlook, Apple Calendar, Evolution) sa se poata sincroniza
-  cu calendarul tau Cleona.
-- **Calendarul de sistem Android** -- evenimentele din Cleona pot fi
-  transferate in aplicatia de calendar integrata a dispozitivului tau
-  Android.
-- **Fisiere ICS** -- importa si exporta evenimente in formatul standard
-  iCalendar.
+- **CalDAV** -- Conectează-te la orice server compatibil CalDAV (Nextcloud, Radicale etc.).
+- **Google Calendar** -- Sincronizare prin Google Calendar API cu autentificare OAuth2 securizată.
+- **Server CalDAV local** -- Cleona poate porni un server CalDAV local pe dispozitivul tău, astfel încât aplicațiile de calendar pentru desktop (Thunderbird, Outlook, Apple Calendar, Evolution) să se sincronizeze cu calendarul tău Cleona.
+- **Calendarul de sistem Android** -- Programările din Cleona pot fi transferate în aplicația de calendar integrată a dispozitivului tău Android.
+- **Fișiere ICS** -- Importă și exportă programări în formatul standard iCalendar.
 
 ### Export PDF
 
-Poti tipari sau exporta orice vizualizare a calendarului (Zi, Saptamana,
-Luna, An) ca document PDF.
+Poți tipări sau exporta orice vizualizare de calendar (zi, săptămână, lună, an) ca document PDF.
 
 ---
 
 ## 9. Sondaje
 
-Poti crea sondaje in orice chat sau grup, pentru a aduna opinii sau pentru
-a planifica intalniri.
+Poți crea sondaje în orice chat sau grup pentru a aduna opinii sau a planifica date.
 
 ### Tipuri de sondaje
 
-Cleona suporta cinci tipuri de sondaje:
+Cleona suportă cinci tipuri de sondaje:
 
-- **Alegere unica** -- participantii aleg o singura optiune.
-- **Alegere multipla** -- participantii pot alege mai multe optiuni.
-- **Sondaj de data** -- gaseste o data potrivita pentru toata lumea.
-  Fiecare participant marcheaza datele ca disponibile, posibile sau
-  indisponibile.
-- **Scala** -- evalueaza ceva pe o scala numerica (de exemplu de la 1 la
-  5).
-- **Text liber** -- participantii scriu propriul raspuns.
+- **O singură alegere** -- participanții aleg o opțiune.
+- **Alegere multiplă** -- participanții pot alege mai multe opțiuni.
+- **Sondaj de date** -- Găsește o dată care se potrivește tuturor. Fiecare participant marchează datele ca disponibile, poate sau nu disponibile.
+- **Scară** -- Evaluează ceva pe o scară numerică (de exemplu 1 la 5).
+- **Text liber** -- participanții scriu propriul lor răspuns.
 
 ### Crearea unui sondaj
 
-Deschide un chat si apasa pe simbolul de sondaj (sau foloseste meniul de
-atasamente). Alege tipul sondajului, formuleaza intrebarea si optiunile si
-trimite sondajul. Acesta apare ca un mesaj in chat.
+Deschide un chat și atinge simbolul de sondaj (sau folosește meniul de atașare). Alege tipul de sondaj, formulează întrebarea și opțiunile, și trimite sondajul. Apare ca mesaj în chat.
 
 ### Votarea
 
-Apasa pe un sondaj pentru a-ti da votul. Iti poti schimba sau retrage
-votul oricand.
+Atinge un sondaj pentru a-ți da votul. Îți poți schimba sau retrage votul oricând.
 
-### Vot anonim
+### Votare anonimă
 
-Sondajele pot fi configurate pentru vot anonim. Daca este activat,
-voturile sunt anonime din punct de vedere criptografic -- nimeni, nici
-macar creatorul sondajului, nu poate vedea cine a votat pentru ce.
-Numarul de voturi ramane insa vizibil.
+Sondajele pot fi configurate pentru votare anonimă. Când este activat, voturile sunt anonime criptografic -- nimeni, nici măcar creatorul sondajului, nu poate vedea cine a votat pentru ce. Numărul de voturi rămâne totuși vizibil.
 
-### De la sondaj de data la calendar
+### Sondaj de date în calendar
 
-Cand un sondaj de data s-a incheiat, data castigatoare poate fi
-transformata direct intr-un eveniment din calendar cu o singura atingere.
+Când un sondaj de date este încheiat, data câștigătoare poate fi transformată într-o programare de calendar cu o singură atingere.
+
+---
+## 10. Mai multe identități
+
+### De ce mai multe identități?
+
+Imaginează-ți că vrei să-ți separi viața profesională de cea privată -- similar cu două numere de telefon diferite, dar fără un al doilea telefon. În Cleona poți folosi mai multe identități pe un singur dispozitiv. Fiecare identitate are propriul nume, propria imagine de profil, propriile contacte și propriile conversații.
+
+### Crearea unei identități noi
+
+1. În bara de sus îți vezi identitatea curentă ca tab.
+2. Atinge semnul plus (+) din dreapta taburilor de identitate.
+3. Introdu un nume pentru identitatea nouă.
+4. Gata -- identitatea nouă este activă imediat.
+
+### Comutarea între identități
+
+Pur și simplu atinge tabul de identitate din bara de sus. Comutarea este imediată -- fără timp de așteptare, fără reîncărcare.
+
+### Toate rulează simultan
+
+Un punct important: toate identitățile tale sunt active în același timp. Chiar dacă ești afișat acum ca „Profesional", identitatea ta „Privat" primește în continuare mesaje. Nu ratezi nimic, indiferent ce identitate ai selectat acum.
+
+### Pagina de detalii a identității
+
+Când atingi tabul identității tale curent active, se deschide pagina de detalii. Aici poți:
+
+- Afișa codul QR pentru contacte.
+- Schimba sau elimina imaginea de profil.
+- Adăuga o descriere de profil.
+- Schimba numele afișat.
+- Alege un design (temă) pentru această identitate.
+- Șterge identitatea, dacă nu mai ai nevoie de ea.
+
+### Ștergerea unei identități
+
+Când ștergi o identitate, contactele tale sunt notificate despre asta. Identitatea și toate datele asociate sunt eliminate de pe dispozitivul tău. Acest proces nu este reversibil.
 
 ---
 
-## 10. Identitati multiple
+## 11. Mai multe dispozitive
 
-### De ce mai multe identitati?
+### O identitate, un dispozitiv -- deocamdată
 
-Imagineaza-ti ca vrei sa separi viata profesionala de cea privata --
-similar cu doua numere de telefon diferite, dar fara un al doilea telefon.
-In Cleona poti folosi mai multe identitati pe un singur dispozitiv. Fiecare
-identitate are propriul nume, propria imagine de profil, propriile
-contacte si propriile conversatii.
+O identitate rulează astăzi pe un dispozitiv. Un al doilea dispozitiv pentru aceeași identitate vine într-o versiune ulterioară; în setările, la „Dispozitive" -> „Gestionează dispozitivele", „Cuplează un dispozitiv suplimentar" stă de aceea încă ca „Încă indisponibil".
 
-### Crearea unei identitati noi
+Când vine, va fi așa: toate dispozitivele au drepturi egale, nu există un dispozitiv principal. Un dispozitiv suplimentar îl configurezi cu cele 24 de cuvinte ale tale, iar unul dintre dispozitivele tale de până acum dă aprobarea. Maximum 5 dispozitive.
 
-1. In bara de sus vezi identitatea ta curenta ca un tab.
-2. Apasa pe semnul plus (+) din dreapta tab-urilor de identitate.
-3. Introdu un nume pentru noua identitate.
-4. Gata -- noua identitate este activa imediat.
+Dacă introduci astăzi cele 24 de cuvinte pe un dispozitiv nou, te muți: identitatea este restabilită pe dispozitivul nou, iar dispozitivul tău de până acum o elimină apoi la el (vezi capitolul 12).
 
-### Comutarea intre identitati
+Pe mai multe dispozitive poți folosi astăzi identități diferite (capitolul 10).
 
-Apasa pur si simplu pe tab-ul de identitate din bara de sus. Comutarea
-este instantanee -- fara timp de asteptare, fara reincarcare.
+### Rotirea cheilor identității
 
-### Toate ruleaza simultan
-
-Un aspect important: toate identitatile tale sunt active simultan. Chiar
-daca esti afisat momentan ca "Profesional", identitatea ta "Personal"
-continua sa primeasca mesaje. Nu ratezi nimic, indiferent de identitatea
-pe care ai selectat-o in acel moment.
-
-### Pagina de detalii a identitatii
-
-Cand apesi pe tab-ul identitatii tale active, se deschide pagina de
-detalii. Aici poti:
-
-- Sa iti afisezi QR-Code-ul pentru contacte.
-- Sa iti schimbi sau sa iti elimini imaginea de profil.
-- Sa adaugi o descriere de profil.
-- Sa iti schimbi numele afisat.
-- Sa alegi un design (skin) pentru aceasta identitate.
-- Sa stergi identitatea, daca nu mai ai nevoie de ea.
-
-### Stergerea unei identitati
-
-Cand stergi o identitate, contactele tale sunt notificate despre acest
-lucru. Identitatea si toate datele asociate sunt eliminate de pe
-dispozitivul tau. Acest proces este ireversibil.
-
----
-
-## 11. Multi-Device
-
-### Folosirea Cleona pe mai multe dispozitive
-
-Poti folosi aceeasi identitate pe pana la 5 dispozitive simultan. Un
-dispozitiv este cel primar (el detine Seed-Phrase-ul), iar celelalte
-dispozitive sunt asociate cu acesta.
-
-### Asocierea unui dispozitiv nou
-
-1. Deschide setarile pe dispozitivul tau primar.
-2. Mergi la "Dispozitive asociate".
-3. Alege "Asociaza dispozitiv nou".
-4. Instaleaza Cleona pe noul dispozitiv si alege la pornire "Asociaza cu
-   dispozitiv existent".
-5. Scaneaza codul QR de asociere afisat pe dispozitivul tau primar sau
-   foloseste link-ul de asociere.
-
-Dispozitivul asociat primeste un certificat de delegare de la dispozitivul
-primar. Mesajele trimise de pe un dispozitiv asociat sunt semnate
-criptografic cu o cheie delegata, astfel incat contactele pot verifica ca
-mesajul provine intr-adevar de la identitatea ta.
-
-### Cum functioneaza
-
-- Dispozitivul primar detine Seed-Phrase-ul tau si cheile master.
-- Dispozitivele asociate primesc chei de semnatura derivate si un
-  certificat de delegare -- nu primesc niciodata Seed-Phrase-ul in sine.
-- Toate dispozitivele impartasesc aceeasi identitate si aceleasi contacte.
-  Mesajele ajung pe toate dispozitivele.
-- Certificatele de delegare sunt reinnoite automat inainte de expirare.
-
-### Gestionarea dispozitivelor
-
-Deschide setarile si mergi la "Dispozitive asociate" pentru a vedea toate
-dispozitivele tale asociate, statusul lor si ultima activitate. Poti
-revoca un dispozitiv asociat oricand, daca acesta se pierde sau este
-furat.
-
-### Rotatia de urgenta a cheilor
-
-Daca banuiesti ca un dispozitiv a fost compromis, poti declansa o rotatie
-de urgenta a cheilor. In acest proces sunt generate chei noi, iar rotatia
-trebuie confirmata de o majoritate a celorlalte dispozitive ale tale.
-Acest lucru impiedica un singur dispozitiv furat sa roteasca cheile in mod
-unilateral.
+Dacă bănuiești că cineva a pus mâna pe cheile tale, poți genera chei noi la „Gestionează dispozitivele" -> „Rotire chei". Contactele tale sunt notificate, invitațiile tale deschise sunt revocate. Important: după asta, cele 24 de cuvinte produc de ele singure doar cheile vechi. Creează de aceea direct după asta un pachet de recuperare nou; restabilirea merge atunci doar împreună cu acest pachet.
 
 ---
 
 ## 12. Recuperare
 
-### Folosirea Seed-Phrase-ului
+### Folosirea frazei-seed
 
-Daca iti pierzi dispozitivul sau configurezi unul nou:
+Când îți pierzi dispozitivul sau configurezi unul nou:
 
-1. Instaleaza Cleona pe noul dispozitiv.
-2. Alege la pornire "Recupereaza".
+1. Instalează Cleona pe dispozitivul nou.
+2. Alege la pornire „Restaurează".
 3. Introdu cele 24 de cuvinte ale tale.
-4. Cleona iti recupereaza identitatea si contacteaza automat contactele
-   tale anterioare.
-5. Contactele tale raspund cu datele tale de contact, apartenentele la
-   grupuri si istoricul mesajelor.
+4. Cleona generează din ele toate identitățile tale -- cu aceleași chei ca înainte. Pentru contactele tale ești aceeași persoană.
 
-Recuperarea are loc in trei etape:
-- Mai intai revin contactele si grupurile tale.
-- Apoi ultimele 50 de mesaje din fiecare conversatie.
-- La final, istoricul complet al mesajelor.
+### Ce revine -- și ce nu
 
-Este suficient ca un singur contact de-al tau sa fie online pentru ca
-recuperarea sa functioneze.
+Identitatea ta stă în cele 24 de cuvinte, contactele tale și istoricul tău nu. Înapoi revine accesul tău la rețea prin **pachetul de recuperare**: dispozitivul tău depune un pachet mic, criptat, în rețea. Doar cele 24 de cuvinte ale tale îl pot găsi și deschide. În el stă ce are nevoie dispozitivul tău nou pentru a-ți reajunge contactele, și ce a stat între timp în rețea pentru tine. Pentru asta nu trebuie ca niciun contact să fie online.
 
-### Guardian Recovery (persoane de incredere)
+O restabilire nu aduce înapoi istoricul de chat de până acum.
 
-Poti desemna pana la cinci persoane de incredere ca "Guardieni". In acest
-proces, cheia ta de recuperare este impartita in cinci parti, dintre care
-fiecare Guardian primeste una. Pentru a-ti recupera identitatea, sunt
-suficiente trei din cele cinci parti.
+Pachetul de recuperare trăiește 7 zile și este reînnoit de dispozitivul tău cât timp rulează; în setări vezi până când este valabil. Dacă niciunul dintre dispozitivele tale nu a rulat mai mult de 7 zile, pachetul a expirat. Atunci cele 24 de cuvinte îți restabilesc identitatea totuși, dar contactele trebuie să le reinvii; ce a stat între timp în rețea pentru tine este pierdut.
 
-Asta inseamna ca, chiar daca ti-ai pierdut Seed-Phrase-ul, trei dintre
-Guardienii tai pot recupera impreuna contul tau. Niciun Guardian singur nu
-poate accesa datele tale -- sunt necesari intotdeauna cel putin trei.
+### Restabilirea înseamnă mutare
 
-Asa configurezi Guardieni:
-1. Deschide setarile.
-2. Mergi la "Securitate".
-3. Alege "Guardian Recovery".
-4. Selecteaza cinci contacte de incredere.
+Dacă dispozitivul tău de până acum constată mai târziu că identitatea a fost restabilită în altă parte, el o elimină la el -- împreună cu istoricul ei. De aceea: cine are cele 24 de cuvinte ale tale îți poate lua identitatea în felul acesta de pe dispozitivul tău. Până revin toate contactele, aplicația îți amintește de asta; cu „Finalizează și reînnoiește cheile" închei tu însuți/însăți restabilirea.
 
-### De ce contactele tale sunt backup-ul tau
+### Ce nu poate restabili nimeni
 
-In mesagerii traditionali, datele tale se afla pe serverele furnizorului.
-La Cleona nu exista niciun server -- dar contactele tale preiau acest rol.
-Cand trimiti un mesaj, contactele comune stocheaza o copie criptata pentru
-cazul in care destinatarul este offline in acel moment. La o recuperare,
-contactele tale iti returneaza datele.
+Asta este important, și de aceea o spunem limpede:
 
-Asta inseamna: cu cat ai mai multe contacte active, cu atat mai fiabil
-este backup-ul tau. Un singur contact care este online in mod regulat este
-suficient pentru o recuperare reusita.
+- **Nimeni în afară de tine nu îți poate restabili identitatea.** Nu dezvoltatorul, nu un suport, și nici contactele tale -- indiferent câte sunt. Nu există nicio cheie principală și nicio parte a cheii tale depusă la alții.
+- **Dacă ai pierdut cele 24 de cuvinte și nu mai ai niciun dispozitiv, identitatea ta este pierdută.** Atunci rămâne doar să creezi una nouă și să-ți reinvii contactele.
+
+Cea mai bună protecție: scrie cele 24 de cuvinte pe hârtie și păstrează-le în siguranță.
 
 ---
+## 13. Setări
 
-## 13. Setari
+Setările le accesezi prin simbolul de roată dințată din colțul din dreapta sus.
 
-Ajungi la setari prin simbolul de rotita din coltul din dreapta sus.
+### Notificări și tonuri de apel
 
-### Notificari si tonuri de apel
+- Alege din șase tonuri de apel diferite pentru apelurile primite.
+- Setează un sunet de mesaj.
+- Pe dispozitivele Android poți activa sau dezactiva suplimentar vibrația.
+- **„Dezactivează sunetul pentru tot"** nu mai lasă pe acest dispozitiv niciun mesaj să sune, să vibreze sau să te anunțe -- pentru toate identitățile. Apelurile sună în continuare.
+- **„Ore de liniște"** le stabilești pentru fiecare identitate cu De/Până la. În acest interval, niciun mesaj al acestei identități nu sună, nu vibrează și nu te anunță; mesajele sosesc totuși.
+- **„Notificări fără conținut"** (implicit: oprit) arată doar că a sosit un mesaj, o invitație sau un memento -- fără expeditor, nume și text. Apelurile arată în continuare numele.
+- Ce sosește dintr-odată după pornire, Cleona anunță într-o notificare colectivă („5 mesaje noi în 2 conversații"); tot ce vine mai târziu, individual. O atingere pe o notificare de mesaj deschide conversația, chiar și într-o altă identitate.
 
-- Alege dintre sase tonuri de apel diferite pentru apelurile primite.
-- Seteaza un ton de mesaj.
-- Pe dispozitivele Android poti activa sau dezactiva suplimentar
-  vibratia.
+### Design-uri (teme)
 
-### Design-uri (Skins)
+Cleona oferă zece design-uri diferite: Teal, Ocean, Sunset, Forest, Amethyst, Fire, Storm, Slate, Gold și Contrast. Design-ul Contrast îndeplinește cel mai înalt nivel de accesibilitate (WCAG AAA) și este deosebit de ușor de citit cu vedere limitată.
 
-Cleona ofera zece design-uri diferite: Teal, Ocean, Sunset, Forest,
-Amethyst, Fire, Storm, Slate, Gold si Contrast. Design-ul Contrast
-indeplineste cel mai inalt nivel de accesibilitate (WCAG AAA) si este
-deosebit de usor de citit pentru persoanele cu vedere limitata.
+Fiecare identitate poate avea propriul design. Modifici design-ul pe pagina de detalii a identității (atinge tabul de identitate activ).
 
-Fiecare identitate poate avea propriul design. Schimbi design-ul in
-pagina de detalii a identitatii (apasa pe tab-ul identitatii active).
-
-Suplimentar, in setari, la "Aspect", poti comuta intre tema deschisa,
-intunecata si tema sistemului.
+Suplimentar, poți comuta în setări, la „Aspect", între temele luminoasă, întunecată și cea de sistem.
 
 ### Schimbarea limbii
 
-Cleona este disponibil in 33 de limbi, inclusiv limbi scrise de la dreapta
-la stanga (de exemplu araba, ebraica). Schimba limba in setari, la
-"Limba".
+Cleona este disponibil în 34 de limbi, inclusiv limbi cu scriere de la dreapta la stânga (de exemplu araba, ebraica). Schimbă limba în setări, la „Limbă".
 
-### Limita de stocare
+### Arhivarea mediilor
 
-Poti stabili cat spatiu de stocare are voie sa foloseasca Cleona pe
-dispozitivul tau (intre 100 MB si 2 GB). Cand limita este atinsa, media
-mai veche este mutata automat in arhiva sau stearsa -- mesajele text
-raman intotdeauna pastrate.
+Dacă ai acasă un spațiu de stocare în rețea (NAS) sau un folder partajat, Cleona îți poate descărca automat mediile acolo. Sunt suportate SMB, SFTP, FTPS și WebDAV.
 
-### Arhivare media
+Așa funcționează stocarea în trepte:
+- Primele 30 de zile: Totul rămâne pe dispozitivul tău.
+- După 30 de zile: O imagine de previzualizare rămâne pe dispozitiv, originalul este arhivat.
+- După 90 de zile: Doar o mică imagine de previzualizare rămâne pe dispozitiv.
+- După un an: Rămâne doar un înlocuitor, originalul stă în siguranță în arhivă.
 
-Daca ai acasa un spatiu de stocare in retea (NAS) sau un folder partajat,
-Cleona iti poate arhiva automat media acolo. Sunt suportate SMB, SFTP,
-FTPS si WebDAV.
+Poți atinge oricând un mediu arhivat pentru a-l recupera -- cu condiția să fii conectat la rețeaua ta de acasă. Mediile deosebit de importante pot fi fixate, ca să nu fie niciodată descărcate.
 
-Iata cum functioneaza stocarea esalonata:
-- Primele 30 de zile: totul ramane pe dispozitivul tau.
-- Dupa 30 de zile: o imagine de previzualizare ramane pe dispozitiv,
-  originalul este arhivat.
-- Dupa 90 de zile: doar o mica imagine de previzualizare mai ramane pe
-  dispozitiv.
-- Dupa un an: ramane doar un substituent, originalul se afla in siguranta
-  in arhiva.
+La „Buget stocare" stabilești câți MB de media rămân pe dispozitiv (implicit: 100 MB pe telefon, 2 GB pe calculator). Când se umple, este arhivat mai întâi cel mai vechi mediu nefixat. Un original este șters doar când stă în siguranță în arhivă -- mesajele text rămân mereu păstrate.
 
-Poti apasa oricand pe un fisier media arhivat pentru a-l recupera --
-cu conditia sa fii conectat la reteaua ta de acasa. Media deosebit de
-importanta poate fi fixata, astfel incat sa nu fie niciodata mutata in
-arhiva.
+### Transcrierea mesajelor vocale
 
-### Transcriere pentru mesajele vocale
+Când este activat, mesajele tale vocale sunt convertite local în text pe dispozitivul tău (cu modelul open-source Whisper). Textul transcris este trimis împreună cu înregistrarea către interlocutor. Transcrierea se face complet pe dispozitivul tău -- niciun date nu merg la servicii externe.
 
-Daca este activata, mesajele tale vocale sunt convertite in text local pe
-dispozitivul tau (cu modelul open-source Whisper). Textul transcris este
-trimis interlocutorului tau impreuna cu inregistrarea. Transcrierea are
-loc complet pe dispozitivul tau -- niciun fel de date nu ajung la
-servicii externe.
+Ce model (tiny, base, small) se descarcă stabilești o singură dată pentru dispozitiv; limba (automată sau fixă) pentru fiecare identitate.
 
-### Descarcare automata
+### Descărcare automată
 
-Poti stabili de la ce dimensiune media va fi descarcata automat. Astfel
-poti, de exemplu, sa lasi imaginile sa se incarce automat, dar sa decizi
-manual pentru videoclipurile mari.
+Poți seta de la ce mărime mediile să fie descărcate automat. Așa poți, de exemplu, lăsa imaginile să se încarce automat, dar să decizi manual la videoclipuri mari.
 
-### Dispozitive asociate
+### Dispozitive
 
-Gestioneaza dispozitivele tale asociate in aceasta sectiune a setarilor.
-Vezi capitolul Multi-Device pentru detalii.
+La „Dispozitive" -> „Gestionează dispozitivele" vezi acest dispozitiv. Cuplarea unui dispozitiv suplimentar vine într-o versiune ulterioară (capitolul 11).
+
+### Rețea
+
+Cleona nu are nevoie de setări de rețea ca să funcționeze. Există
+trei comutatoare de rețea:
+
+- **Redirecționare port pe router** (implicit: pornit). Cleona cere propriului tău router să deschidă o ușă pentru Cleona. Dacă reușește, dispozitivul tău este mai ușor de atins de alții și ajută rețeaua. Cleona vorbește doar cu routerul tău, nu cu internetul.
+- **Înregistrări publice de adresă** (implicit: pornit). Dacă dispozitivul tău are încă prea puțini vecini, caută în-un director public (Nostr) alte puncte de intrare, iar dacă el însuși este bine accesibil, se înregistrează acolo. Înregistrarea conține o adresă, niciun nume și niciun contact. Dacă îl oprești, dispozitivul tău găsește vecini doar prin invitații, rețeaua locală și vecinii pe care îi cunoaște deja.
+- **Mai puține pachete de camuflaj în Wi-Fi** (implicit: oprit). În Wi-Fi sau la cablu poți opri pachetele goale de camuflaj. Atunci este însă din nou vizibil când scrii. În datele mobile nu există acest comutator -- acolo Cleona trimite oricum doar un pachet de camuflaj pe minut.
+
+Camuflajul ca întreg nu poate fi oprit. Asta este intenționat: doar dacă rulează mereu, activitatea dispozitivului tău nu spune nimic despre dacă scrii sau nu chiar acum.
+
+Peste cele trei comutatoare stă **Mod economie de date**: în datele mobile, Cleona ți-l propune, dar nu îl pornește niciodată singură. El economisește date, în schimb dispozitivul tău este mai ușor de recunoscut din afară.
+
+Dedesubt stabilești **„Cache pentru media altor persoane"**: dispozitivul tău păstrează părți criptate din media altora până la 7 zile, ca ele să-și ajungă destinatarii (implicit: 100 MB pe telefon, 1 GB pe calculator). O mărime mai mică eliberează imediat locul -- întâi părțile cele mai vechi.
 
 ---
 
 ## 14. Securitate
 
-### Ce inseamna criptarea post-cuantica?
+### Ce înseamnă criptare post-cuantum?
 
-Criptarea de astazi se bazeaza pe probleme matematice extrem de greu de
-rezolvat pentru calculatoarele normale. Calculatoarele cuantice ar putea
-rezolva unele dintre aceste probleme rapid, in viitor. Criptarea
-post-cuantica foloseste metode suplimentare care rezista si
-calculatoarelor cuantice.
+Criptarea de azi se bazează pe probleme matematice care sunt extrem de greu de rezolvat pentru calculatoarele normale. Calculatoarele cuantice ar putea rezolva unele dintre aceste probleme rapid în viitor. Criptarea post-cuantum folosește proceduri suplimentare care rezistă și calculatoarelor cuantice.
 
-Cleona combina ambele abordari: criptarea clasica pentru fiabilitate si
-metodele post-cuantice pentru siguranta pe termen lung. Astfel esti
-protejat simultan impotriva amenintarilor de astazi si a celor viitoare.
+Cleona combină ambele abordări: criptare clasică pentru fiabilitate și proceduri post-cuantum pentru siguranță la viitor. Așa ești protejat simultan împotriva amenințărilor de azi și de mâine.
 
-Pentru fiecare mesaj in parte este generata o cheie proprie. Chiar daca un
-atacator ar sparge cheia unui mesaj, nu ar putea citi cu ea niciun alt
-mesaj.
+Pentru fiecare mesaj individual se generează o cheie separată. Chiar dacă un atacator ar sparge cheia unui mesaj, nu ar putea citi cu ea niciun alt mesaj.
 
-### De ce lipsa unui server este mai sigura
+### De ce niciun server este mai sigur
 
-La mesagerii traditionali, mesajele tale trec prin serverele
-furnizorului. Chiar daca acolo sunt criptate, furnizorul are acces la
-metadate (cine comunica cu cine, cand, cat de des, de unde) si trebuie
-uneori sa le predea in urma unui ordin judecatoresc.
+La aplicațiile de mesagerie convenționale, mesajele tale trec prin serverele furnizorului. Chiar dacă acolo ar fi criptate: furnizorul are acces la metadate (cine comunică cu cine, când, cât de des, de unde) și trebuie eventual să le predea la ordinul instanței.
 
-La Cleona nu exista un astfel de punct central. Mesajele tale calatoresc
-direct de la dispozitiv la dispozitiv. Nu exista niciun loc unde toate
-metadatele se aduna. Nimeni nu poate reconstitui comportamentul tau de
-comunicare pornind de la un singur punct de date.
+La Cleona nu există un astfel de punct central. Nu există niciun loc unde să convergă toate metadatele și niciun director în care s-ar putea căuta cine ești sau pe cine cunoști.
 
-### Ce se intampla cand esti offline?
+### Cine vede că scrii cu cineva?
 
-Cand trimiti un mesaj, iar destinatarul este offline:
+Criptarea protejează **ce** scrii. La fel de important este ca niciun observator singular să nu afle **cu cine** și **când** scrii. De asta se îngrijește Cleona astfel:
 
-1. Cleona incearca mai intai sa livreze mesajul direct.
-2. Daca nu functioneaza, acesta este retransmis prin contacte comune.
-3. In acelasi timp, mesajul este impartit in bucati criptate si distribuit
-   pe mai multi noduri din retea (asemenea unui puzzle format din 10
-   piese, dintre care 7 sunt suficiente pentru a reconstitui imaginea).
-4. Mesajul este pastrat pana la 7 zile.
+- **Pe internet niciodată direct.** Dacă dispozitivul tău ar trimite un mesaj direct la adresa de internet a interlocutorului, furnizorul tău ar putea vedea cu cine scrii. De aceea un mesaj pe internet merge mereu peste vecinii tăi fixi: al tău și al interlocutorului.
+- **Vecini în care ai încredere.** Vecinii tăi fixi sunt, pe cât posibil, dispozitive ale propriilor tale contacte -- până la trei care sunt accesibile din afară chiar acum. Dacă unul cedează, un alt contact îi ia locul. Un contact nu poate fi cumpărat cu servere; un nod oarecare din rețea, da. Dacă nu ai încă niciun contact accesibil, Cleona ia un alt vecin. Invitația ta nu numește niciodată vreun contact de-ale tale, ca nimeni să nu afle prin ele adresa unui prieten.
+- **Coduri în loc de nume.** Vecinii nu văd nume și nici identificatori, ci doar un cod. El este valabil exact pentru voi doi, într-o direcție, pentru o zi -- a doua zi este altul. Vecinul tău știe de unde vine pachetul, dar nu unde ajunge la final. Vecinul interlocutorului știe unde merge, dar nu de unde a venit. În mod normal, nimeni de pe traseu nu vede ambele capete.
+- **Camuflajul.** Dispozitivul tău trimite în mod constant, la intervale neregulate, pachete de camuflaj către vecinii săi. Ele sunt la fel de mari ca pachetele reale, trec peste același port și din afară nu se disting de ele. Dacă un om scrie chiar acum sau dispozitivul doar rulează nu se poate deduce. Mesajele tale nu așteaptă niciodată camuflajul -- pornesc imediat, el rulează doar pe lângă.
 
-De indata ce destinatarul revine online, mesajele sunt livrate. Primesti
-o confirmare cand mesajul tau a ajuns.
+**Cât costă camuflajul:** În Wi-Fi aproximativ 13 MB pe zi. În datele mobile, Cleona trimite doar un pachet de camuflaj pe minut, adică aproximativ 1,7 MB pe zi. Motivul limitării în datele mobile nu este volumul de date, ci bateria: fiecare pachet trezește modemul radio.
 
-### Anti-cenzura
+**Ce nu poate ascunde Cleona** -- sincer spus:
 
-Daca reteaua ta blocheaza metoda standard de conectare (UDP), Cleona
-comuta automat pe o transmisie alternativa (TLS), mai greu de detectat si
-de blocat. Acest lucru se intampla transparent -- nu trebuie sa configurezi
-nimic.
+- Niciun observator **singular** nu vede cine scrie cu cine -- nici furnizorul tău, nici nodurile de pe traseu. Cine supraveghează însă **ambele capete simultan**, de exemplu un stat care îți urmărește conexiunea ta și a interlocutorului sau instalează ambii vecini, poate corela în timp: pachet ieșit la tine, la scurt timp pachet intrat la interlocutor. Repetat suficient de des, asta dă o conexiune.
+- Camuflajul îngreunează această corelare, dar nu o previne. El ascunde mesaje individuale, nu volumul: cine trimite foarte mult crește traficul total al dispozitivului său.
+- Un contact care îți este vecin fix află **când** și **cât** trimiți și primești -- nu cu cine și nu ce. Dacă pericolul vine din propriul tău anturaj, poți exclude fiecare contact din asta (vezi capitolul 3, „Nu folosi niciodată ca vecin fix").
+- Dacă doi utilizatori noi au doar același singur vecin, mesajul lor trece exact peste acest nod, și el vede ambele capete. De îndată ce unul dintre ei are alți vecini, asta se termină.
+- Invitația ta conține adresele tale de internet. Cine are linia de text vede unde ești online -- dă-o doar oamenilor cărora le încredințezi asta.
+- Un vecin care retransmite vede că două coduri schimbă pachete -- nu cine este în spate, și nu ce e înăuntru.
+- Un semnal al unui apel în curs poate trece, dacă primul vecin nu răspunde chiar atunci, peste un nod care vede ambele capete; el află că vorbiți împreună la telefon.
+- Un fișier mare căruia i-ai dat consimțământul este văzut de calculatorul care îl retransmite sau îl păstrează, la ambele capete (vezi capitolul 4).
+- La apeluri, protecția față de furnizor nu se aplică, iar contactul tău îți vede adresa de internet (vezi capitolul 7).
 
-### Stocarea sigura a cheilor
+### Ce se întâmplă când interlocutorul este offline?
 
-Pe platformele suportate, Cleona iti stocheaza cheile de criptare in
-inelul de chei securizat al sistemului de operare (Android Keystore, iOS
-Keychain, macOS Keychain). Acolo unde este disponibila, aceasta ofera
-protectie bazata pe hardware pentru cheile tale.
+1. Cleona pornește simultan toate rutele potrivite: în același Wi-Fi direct, pe internet peste doi vecini -- și suplimentar căsuța poștală.
+2. Pentru căsuța poștală, Cleona depune mesajul criptat la trei vecini. De îndată ce doi confirmă primirea, el este considerat depus.
+3. Cleona alege pentru asta preferențial vecini la care interlocutorul caută și el -- mai întâi vecinul pe care îl numește invitația lui.
+4. Mesajul așteaptă acolo până la 7 zile. Când interlocutorul revine, îl ridică și îți confirmă primirea. Abia atunci vezi două bifuri.
+
+Căsuța poștală o poate goli doar interlocutorul: ridicarea și ștergerea merg doar cu o cheie pe care o are doar el, iar ștergerea se face abia după ce a confirmat primirea. Vecinii văd doar pachete criptate sub o valoare care se schimbă în fiecare zi.
+
+### Străinii nu trec
+
+De la cineva care nu este nici contactul tău, nici membru al unui grup comun, Cleona acceptă exact două lucruri: cererea de chei publice ale tale, atâta timp cât una dintre invitațiile tale este deschisă, și o cerere de contact. Cererea trebuie să poarte o invitație validă de la tine, iar expeditorul trebuie să fi rezolvat în prealabil o problemă de calcul. Tot restul -- mesaje, apeluri, fișiere -- este eliminat înainte să ajungă măcar la aplicație. Cine are doar cartea ta de vizită tipărită nu te poate deci pur și simplu suna. Un membru al unui grup comun te ajunge doar în acest grup -- cu mesaje de grup și apeluri de grup, niciodată individual.
+
+### Anti-cenzură
+
+Cleona este construită ca să fie greu de blocat:
+
+- **Fără server, fără adresă fixă.** În aplicație nu figurează nicio adresă care s-ar putea bloca, iar rețeaua nu depinde de niciun nod unic.
+- **Fără port fix.** Fiecare dispozitiv alege un port aleatoriu la prima pornire. Nu există niciun număr de port cunoscut după care s-ar putea recunoaște traficul Cleona.
+- **Ca date aleatoare.** Stabilirea conexiunii dintre două dispozitive este codată astfel încât să nu se distingă de date aleatoare.
+- **Multe puncte de intrare.** Fiecare invitație, fiecare vecin și fiecare dispozitiv din același Wi-Fi este o rută posibilă înapoi în rețea.
+
+### Stocare securizată a cheilor
+
+Pe platformele suportate, Cleona îți stochează cheile de criptare în inelul de chei securizat al sistemului de operare (Android Keystore, iOS Keychain, macOS Keychain). Unde este disponibil, asta oferă protecție susținută de hardware pentru cheile tale.
 
 ### Criptarea bazei de date
 
-Toate mesajele, contactele si setarile tale sunt stocate criptat pe
-dispozitivul tau. Chiar daca cineva ar avea acces la sistemul tau de
-fisiere, nu ar putea citi nimic fara cheia ta criptografica. Aceasta cheie
-este derivata din identitatea ta si exista doar pe dispozitivul tau.
+Mesajele și conversațiile tale se află într-o bază de date criptată -- una separată pentru fiecare identitate, fiecare cu propria cheie. Criptat nu este doar baza de date însăși, ci și fișierele ei intermediare; nimic nu se scrie necriptat pe disc, nici măcar temporar. Setările, contactele și mediile sunt și ele stocate criptat.
 
-### Retea inchisa
+Cheile sunt derivate din cele 24 de cuvinte ale tale și există doar pe dispozitivul tău. Chiar și cine pune mâna pe dispozitivul tău și citește datele găsește fără aceste chei doar date ilizibile.
 
-Cleona functioneaza ca o retea inchisa. Fiecare pachet de retea este
-autentificat, astfel incat doar dispozitivele Cleona legitime pot
-participa. Acest lucru impiedica persoanele din afara sa introduca mesaje
-falsificate sau sa intercepteze traficul de retea.
+Necriptat devine doar acolo unde scoți tu însuți/însăți conținuturi din Cleona:
+- când salvezi un fișier dintr-un chat pe dispozitivul tău,
+- când pui cu butonul de captură de ecran o imagine în imaginile tale,
+- când trimiți ceva către o altă aplicație,
+- când configurezi arhivarea mediilor (capitolul 13): originalele arhivate stau necriptate pe stocarea ta de rețea de acasă, ca să le poți deschide acolo și fără Cleona,
+- când oglindești programări în calendarul de sistem Android: acolo le pot citi alte aplicații cu acces la calendar.
 
----
+Ce a ieșit astfel nu se șterge odată cu mesajul și nu expiră odată cu el.
 
-## 15. Actualizari software
+### Protecție pe ecran
 
-### Cum primesc actualizari?
-
-Cleona poate fi actualizat in mai multe moduri. Scopul este ca tu sa poti
-primi actualizari chiar si atunci cand anumite canale de distributie sunt
-indisponibile sau blocate:
-
-1. **App Store / Play Store:** daca ai instalat Cleona printr-un App
-   Store, primesti actualizari ca de obicei prin acel Store.
-2. **GitHub Releases:** pe pagina GitHub a proiectului gasesti pachete de
-   instalare semnate pentru toate platformele.
-3. **Actualizari in retea (In-Network):** daca un alt utilizator Cleona
-   din reteaua ta are deja cea mai noua versiune, Cleona poate obtine
-   actualizarea direct prin reteaua P2P -- fara un server extern. In acest
-   proces, noua versiune este descompusa in fragmente cu corectie de
-   erori si distribuita pe mai multi noduri. Dispozitivul tau colecteaza
-   suficiente fragmente si reasambleaza actualizarea. Autenticitatea este
-   verificata printr-o semnatura Ed25519 a dezvoltatorului.
-4. **Link-uri de invitatie:** poti crea link-uri de invitatie care contin
-   tot ce are nevoie un utilizator nou pentru a instala Cleona si a se
-   conecta la retea.
-5. **Transfer fizic:** in medii fara internet, poti transmite Cleona altor
-   persoane printr-un stick USB sau in reteaua locala.
-
-### Notificarea de actualizare
-
-Cand este disponibila o noua actualizare, Cleona iti arata o notificare
-pe ecranul principal. Daca actualizarea este disponibila si prin retea
-(In-Network-Update), ai posibilitatea sa o descarci direct din retea.
-
-### Distributia binara
-
-Implicit, dispozitivul tau ajuta la distribuirea actualizarilor catre alti
-utilizatori din retea. Daca nu doresti acest lucru, poti dezactiva aceasta
-functie in setari, la "Retea". Utilizarea de stocare pentru fragmentele de
-actualizare este limitata (5 MB pe dispozitivele mobile, 20 MB pe
-dispozitivele desktop) si este curatata periodic.
-
-### Verificarea semnaturii
-
-Fiecare actualizare este semnata criptografic. Cleona verifica automat
-semnatura inainte de instalarea unei actualizari. Astfel se asigura ca
-sunt acceptate doar actualizari de la dezvoltatorul oficial -- chiar daca
-actualizarea a fost obtinuta prin reteaua P2P.
+Pe Android, Windows și macOS, Cleona nu permite nicio înregistrare a ecranului de către alte aplicații. Dacă ai nevoie de o imagine, folosește butonul de captură de ecran din bara de sus: el pune imaginea în imaginile tale -- necriptată. Într-o conversație în care transmiterea mai departe nu este permisă, nu există captură de ecran.
 
 ---
 
-## 16. Intrebari frecvente
+## 15. Actualizări software
 
-### "Pot folosi Cleona fara internet?"
+### Cum primesc actualizări?
 
-Nu, Cleona are nevoie de o conexiune de retea pentru a trimite si primi
-mesaje. Totusi, nu trebuie sa fii online in acelasi timp cu interlocutorul
-tau: mesajele trimise in timp ce destinatarul este offline sunt stocate
-temporar si livrate automat de indata ce ambele parti sunt din nou
-conectate. In reteaua locala (de exemplu in acelasi WLAN) puteti comunica
-si complet fara acces la internet.
+Cleona poate fi actualizată pe diferite căi. Scopul este să poți primi actualizări chiar și când canale individuale de distribuție cedează sau sunt blocate:
 
-### "Ce se intampla daca imi pierd Seed-Phrase-ul?"
+1. **App Store / Play Store:** De îndată ce Cleona apare acolo și ai instalat-o printr-un store, primești actualizări ca de obicei prin store. Pe iPhone, actualizările vin prin TestFlight.
+2. **GitHub Releases:** Pe pagina de GitHub a proiectului găsești pachete de instalare semnate pentru toate platformele.
+3. **Actualizări peste rețea:** Cleona poate obține o actualizare direct peste rețea -- fără server de descărcare. Noua versiune este despiciată în bucăți cu corecție de erori care se răspândesc în rețea; o parte din ele călătorește chiar și în camuflaj. Dispozitivul tău adună suficiente bucăți și asamblează actualizarea. Este transferat de obicei doar modificarea -- câțiva MB în locul întregii aplicații. Asta este valabil pentru Linux, Windows și Android; pe macOS descarci versiuni noi de pe site sau de pe GitHub.
+4. **Linkuri de invitație:** Poți crea linkuri de invitație care conțin tot ce are nevoie un utilizator nou pentru a instala Cleona și a se conecta la rețea.
+5. **Transfer fizic:** În medii fără internet poți pasa Cleona mai departe altora prin stick USB sau în rețeaua locală.
 
-Daca ai configurat Guardieni, trei din cinci persoane de incredere pot
-recupera impreuna accesul tau. Fara Guardieni si fara Seed-Phrase, din
-pacate nu exista nicio cale de a-ti recupera identitatea. De aceea este
-atat de important sa pastrezi cele 24 de cuvinte in siguranta.
+### Cum rulează o actualizare
 
-### "Poate cineva sa imi citeasca mesajele?"
+1. Cleona adună automat în fundal bucățile unei actualizări noi și le asamblează.
+2. Abia când actualizarea este **completă** și **semnătura ei verificată**, Cleona ți-o oferă. Nu primești deci niciodată o actualizare pe jumătate sau neverificată.
+3. Când atingi „Instalează", instalarea pornește fără alte întrebări. Pe Android, sistemul își arată suplimentar dialogul de instalare.
 
-Nu. Fiecare mesaj este criptat cu o cheie unica, valabila doar pentru
-acel mesaj. Doar tu si interlocutorul tau puteti decripta mesajul. Nu
-exista niciun server central, nicio cheie generala si niciun acces pentru
-dezvoltator. Chiar daca un dispozitiv retransmite mesajul pe parcursul
-transportului, acesta vede doar date criptate fara sens.
+Versiunile mai vechi nu sunt oferite -- o actualizare merge mereu doar înainte. Dacă o versiune este atât de veche încât nu mai poate coopera cu rețeaua, Cleona indică asta clar și te roagă să actualizezi.
 
-### "De ce nu am nevoie de un numar de telefon?"
+### Verificarea semnăturii
 
-Pentru ca identitatea ta este pur criptografica. In loc de un numar de
-telefon sau o adresa de e-mail legata de numele tau real, te identifica o
-pereche de chei generata pe dispozitivul tau. Adaugi contacte prin
-QR-Code, NFC sau link -- nu printr-o agenda de telefoane. Asta inseamna
-mai multa confidentialitate, pentru ca contul tau de mesagerie nu este
-legat de identitatea ta reala.
+Fiecare actualizare este semnată dublu: cu o procedură clasică și una post-cuantum. Cleona verifică automat ambele semnături. Astfel este asigurat că sunt acceptate doar actualizări de la dezvoltatorul oficial -- chiar dacă actualizarea a venit peste rețea de la dispozitive străine. O actualizare nu apare niciodată automat din dezvoltare, ci doar când dezvoltatorul o semnează de mână.
 
-### "Cum gasesc oameni pe Cleona?"
+---
+## 16. Întrebări frecvente
 
-Cleona nu are, in mod deliberat, cautare de contacte dupa numar de telefon
-sau nume -- asta ar fi o problema de confidentialitate. In schimb, faci
-schimb de date de contact direct: prin QR-Code, NFC, link cleona:// sau in
-canale publice. Este ca un schimb de carti de vizita, in loc sa cauti
-intr-o agenda telefonica.
+### „Pot folosi Cleona fără internet?"
 
-### "Functioneaza Cleona si in strainatate?"
+Cleona are nevoie de o conexiune de rețea, dar nu neapărat de internet: în același Wi-Fi, dispozitivele Cleona se găsesc singure și pot scrie între ele complet fără acces la internet. Nu trebuie să fii online simultan cu interlocutorul: dacă este offline, mesajul așteaptă până la 7 zile în căsuța poștală la trei vecini, până când îl ridică.
 
-Da. Atata timp cat ai o conexiune la internet, Cleona functioneaza oriunde
-in lume. Pentru ca nu exista niciun server central, serviciul nu poate fi
-blocat nici pentru anumite tari. Cleona dispune in plus de un mecanism
-anti-cenzura: daca conexiunea normala (UDP) este blocata, Cleona comuta
-automat pe o transmisie alternativa (TLS), mai greu de detectat si de
-blocat.
+### „Ce fac dacă îmi pierd fraza-seed?"
 
-### "Este Cleona gratuit?"
+Atâta timp cât mai rulează un dispozitiv cu identitatea ta, nimic nu este pierdut -- acolo pur și simplu continui să scrii. Pe dispozitivul pe care ai creat identitatea, poți de obicei citi din nou cele 24 de cuvinte (vezi capitolul 2). Nu te baza pe asta: o reinstalare îndepărtează această copie, iar pe Android o distruge și eliminarea sau modificarea blocării ecranului. Dacă nu ai nici cuvintele, nici un dispozitiv, nu există cale de întoarcere -- nici prin contactele tale, dezvoltator sau oricine altcineva. De aceea este atât de important să păstrezi în siguranță cele 24 de cuvinte.
 
-Da. Cleona poate fi folosit gratuit si fara reclame. Pentru ca nu exista
-niciun server central, nu exista nici costuri de server pentru
-functionare. In aplicatie gasesti la "Donatie" posibilitatea de a sustine
-voluntar dezvoltarea.
+### „Poate cineva să-mi citească mesajele?"
 
-### "Mesajul meu are un simbol de ceas -- ce inseamna asta?"
+Nu. Fiecare mesaj este criptat cu o cheie de unică folosință care este valabilă doar pentru acest singur mesaj. Doar tu și interlocutorul tău puteți decripta mesajul. Nu există niciun server central, nicio cheie principală și niciun acces pentru dezvoltator. Chiar dacă un dispozitiv retransmite mesajul pe traseul de transport, el vede doar tocătură de date criptate și un cod. Vecinul tău știe că pachetul vine de la tine, dar nu și către cine merge; vecinul interlocutorului știe către cine merge, dar nu și de la cine.
 
-Asta inseamna ca mesajul inca nu a fost livrat. Interlocutorul tau este
-probabil offline chiar acum. De indata ce mesajul este livrat, simbolul se
-schimba. Mesajele sunt pastrate pana la 7 zile pentru livrare.
+### „De ce nu am nevoie de număr de telefon?"
 
-### "Pot trece de la WhatsApp la Cleona?"
+Pentru că identitatea ta este pur criptografică. În loc de un număr de telefon sau o adresă de e-mail legate de numele tău real, te identifică o pereche de chei generată pe dispozitivul tău. Contactele le adaugi prin cod QR, NFC sau linia de text a invitației tale -- nu printr-o agendă telefonică. Asta înseamnă mai multă intimitate, pentru că un cont de mesagerie nu este legat de identitatea ta reală.
 
-Da, dar nu iti poti transfera conversatiile din WhatsApp. Cleona si
-WhatsApp sunt sisteme fundamental diferite. Trebuie sa iti adaugi
-contactele individual in Cleona. Cel mai simplu este sa postezi link-ul
-tau cleona:// intr-un grup de WhatsApp si sa ii rogi pe ceilalti sa te
-adauge acolo.
+### „Cum găsesc oameni pe Cleona?"
 
-### "Pot folosi Cleona pe mai multe dispozitive simultan?"
+Cleona nu are intenționat nicio căutare de contacte după număr de telefon sau nume -- asta ar fi o problemă de intimitate. În schimb, schimbi invitații direct: prin cod QR, NFC sau ca linie de text pe o altă cale. Asta e ca schimbul de cartele de vizită, nu ca căutarea în agenda telefonică.
 
-Da. Poti asocia pana la 5 dispozitive cu aceeasi identitate. Un dispozitiv
-este cel primar (el detine Seed-Phrase-ul), iar celelalte dispozitive sunt
-asociate printr-un proces sigur de asociere. Toate dispozitivele
-impartasesc aceeasi identitate, aceleasi contacte si conversatii. Vezi
-capitolul Multi-Device pentru detalii.
+### „Funcționează Cleona și în străinătate?"
 
-### "Cum primesc actualizari daca App Store-ul este blocat?"
+Da. Atâta timp cât ai o conexiune la internet, Cleona funcționează oriunde în lume. Deoarece nu există niciun server central și nicio adresă fixă, serviciul nu poate fi pur și simplu oprit pentru anumite țări. Cum îngreunează Cleona blocarea este descris în capitolul „Securitate" la „Anti-cenzură". O țară care blochează la graniță fiecare trafic necunoscut poate însă opri și Cleona.
 
-Cleona poate obtine actualizari direct prin reteaua P2P, fara sa depinda
-de un App Store, un website sau un server de descarcare. Daca un alt
-utilizator din retea are cea mai noua versiune, dispozitivul tau poate
-incarca actualizarea de acolo. Autenticitatea este verificata printr-o
-semnatura digitala a dezvoltatorului. Alternativ, un contact iti poate
-trimite aplicatia printr-un link de invitatie sau un stick USB. Mai multe
-detalii in capitolul "Actualizari software".
+### „Este Cleona gratuit?"
+
+Da. Cleona este gratuit de folosit și fără reclame. Deoarece nu există un server central, nu cad nici costuri de server pentru funcționare. În setări, la „Sprijină Cleona" -> „Donează", poți sprijini voluntar dezvoltarea.
+
+### „Mesajul meu are doar un bif -- ce înseamnă?"
+
+Mesajul este pe drum, dar interlocutorul nu a confirmat încă primirea -- cel mai des pentru că este offline chiar acum. Asta nu este o eroare: mesajul așteaptă până la 7 zile în căsuța poștală. De îndată ce îl ridică, vezi două bifuri. Un ceas înseamnă că încă nicio rută nu a dus mesajul -- el pornește de la sine de îndată ce există una; un semn de avertizare, că mesajul nu a găsit timp de 14 zile nicio rută și că îl poți retrimite.
+
+### „De ce sosesc mesajele cu întârziere pe iPhone-ul meu?"
+
+iOS nu permite aplicațiilor să ruleze permanent în fundal. Cleona este trezită doar din când în când, pe scurt; când anume, decide iOS. Colectează atunci totul. De îndată ce deschizi aplicația, Cleona colectează ce a fost păstrat pentru tine.
+
+### „Pot trece de la WhatsApp la Cleona?"
+
+Da, dar nu îți poți transfera chaturile de WhatsApp. Cleona și WhatsApp sunt sisteme fundamental diferite. Trebuie să-ți adaugi contactele individual în Cleona. Cel mai simplu merge dacă trimi contactelor tale linia de text a invitației tale. Fiecare cerere care sosește așa o confirmi tu însuți/însăți sub „Cereri".
+
+### „Pot folosi Cleona pe mai multe dispozitive simultan?"
+
+Încă nu. Un al doilea dispozitiv pentru aceeași identitate vine într-o versiune ulterioară (capitolul 11). Pe mai multe dispozitive poți folosi astăzi identități diferite.
+
+### „Cum primesc actualizări când App Store-ul este blocat?"
+
+Cleona poate obține actualizări direct peste rețea, fără să depindă de un App Store, un site web sau un server de descărcare. Dacă un alt dispozitiv din rețea are cea mai nouă versiune, dispozitivul tău poate încărca actualizarea de acolo. Autenticitatea este verificată printr-o semnătură digitală a dezvoltatorului. Alternativ, un contact îți poate pasa aplicația prin link de invitație sau stick USB. Mai multe în capitolul „Actualizări software".
 
 ---
 
-## Ajutor si contact
+## Ajutor și contact
 
-Daca ai intrebari sau intampini o problema, gasesti informatii actuale pe
-website-ul Cleona si pe GitHub. Pentru ca Cleona este un proiect
-descentralizat, nu exista un suport clasic pentru clienti -- dar exista o
-comunitate activa, bucuroasa sa ajute.
+Dacă ai întrebări sau te lovesti de o problemă, găsești informații actuale pe site-ul Cleona și pe GitHub. Deoarece Cleona este un proiect descentralizat, nu există niciun suport clasic pentru clienți -- dar o comunitate activă care ajută cu drag.
 
 ---
 
-*Acest manual descrie Cleona Chat versiunea 3.1.125. Anumite functii se
-pot schimba sau extinde in versiunile viitoare.*
+*Acest manual descrie Cleona Chat versiunea 4.2. Funcții individuale se pot
+schimba sau extinde în versiuni mai noi.*

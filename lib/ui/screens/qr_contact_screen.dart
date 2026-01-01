@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:cleona/core/contact/invitation_card_reader.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/invitation_card_view.dart';
 import 'package:cleona/ui/components/invitation_messages.dart';
@@ -90,6 +92,14 @@ class _QrScanScreenState extends State<QrScanScreen> {
   final _manualController = TextEditingController();
   _ScannerSituation _scannerSituation = _ScannerSituation.checking;
 
+  // Measurement (S423 U-2, gui-14a 14.A01: the scanner read nothing and
+  // left no line). One line per DIFFERENT detected code (format and
+  // lengths as the key — the scanner reports up to 15 times a second for a
+  // code that stays in view), never its content: the card is secret.
+  static final _log = CLogger.get('qr-scan', profileDir: AppPaths.dataDir);
+  final _detectionsLogged = <String>{};
+  int _detections = 0;
+
   @override
   void initState() {
     super.initState();
@@ -99,6 +109,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
     _scannerSituation = _scannerPacketCarriesPlatform
         ? _ScannerSituation.camera
         : _ScannerSituation.noCamera;
+    _log.info('scanner opened (${_scannerSituation.name})');
   }
 
   @override
@@ -148,6 +159,12 @@ class _QrScanScreenState extends State<QrScanScreen> {
         DecodedVisionBarcodeBytes(:final bytes) => bytes,
         null => null,
       };
+      _detections++;
+      final key = '${barcode.format.name} raw=${raw?.length ?? 0} B '
+          'text=${barcode.rawValue?.length ?? 0} chars';
+      if (_detectionsLogged.length < 20 && _detectionsLogged.add(key)) {
+        _log.info('detected: $key');
+      }
       if (raw != null && raw.isNotEmpty) {
         final bytes = Uint8List.fromList(raw);
         final r = InvitationRedeem.readBytes(bytes);
@@ -369,6 +386,8 @@ class _QrScanScreenState extends State<QrScanScreen> {
 
   @override
   void dispose() {
+    _log.info('scanner closed after $_detections detected code(s)'
+        '${_reading != null ? ', a card was read' : ''}');
     _manualController.dispose();
     super.dispose();
   }

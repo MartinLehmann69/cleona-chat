@@ -173,6 +173,21 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Self check of cleona-notify.exe (toast XML, no toast)"
     VERBATIM
 )
+# === cleona_tray.dll (owner thread of the daemon's tray icon, S423 B-5) ===
+# Built from windows/cleona_tray/ (system libraries only), copied next to
+# cleona.exe: windows_tray_thread.dart opens `<bundleDir>\cleona_tray.dll`.
+# The thread in it owns the hidden tray window; before S423 that window was
+# created on a Dart thread-pool worker and freed by Windows when the worker
+# ended. Without the DLL the daemon has no tray icon -- the verification
+# below fails the build when it is missing (-DEXPECTED_DLLS).
+add_subdirectory("${CMAKE_SOURCE_DIR}/cleona_tray" "${CMAKE_BINARY_DIR}/cleona_tray_build")
+add_dependencies(${BINARY_NAME} cleona_tray)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_tray>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_tray.dll into Windows bundle"
+)
 # === cleona-firewall.cmd (inbound firewall rule of the daemon, S407) ===
 # The one definition of the rule: the setup runs it elevated after install,
 # the uninstaller to remove it, and the app's "Allow in firewall" button
@@ -449,7 +464,9 @@ message(STATUS "runner: whisper.cpp DLLs from provisioned package (${CLEONA_WHIS
 # outlived the §10.4 audio rework by 18 days on the build VM. Inspecting the
 # directory is the only place that catches all three classes. EXPECTED_DLLS
 # is the authoritative allowed-set; preflight Check 14b keeps it bound to the
-# tracked native/*/CMakeLists.txt in both directions, and release-build.sh
+# tracked native/*/CMakeLists.txt in both directions (and accepts a
+# Windows-only cleona_*.dll whose module is tracked under windows/<name>/,
+# cleona_tray since S423), and release-build.sh
 # derives WIN_BUNDLE_DLLS from this literal — keep the -DEXPECTED_DLLS=
 # format greppable. Comma-separated on purpose: a semicolon would be split
 # while CMake assembles the argument list.
@@ -462,7 +479,7 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
           -DEXPECTED_LIB_DLLS=whisper.dll,whisper_wrapper.dll,ggml.dll,ggml-base.dll,ggml-cpu.dll
-          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll
+          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll,cleona_tray.dll
           -DEXPECTED_PROGRAMS=cleona-play.exe,cleona-notify.exe,cleona-firewall.cmd
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"

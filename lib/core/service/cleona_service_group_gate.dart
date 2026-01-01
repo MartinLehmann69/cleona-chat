@@ -370,30 +370,69 @@ extension GroupGateOps on CleonaService {
   /// that ends in between finds the rest at the next start
   /// ([_groupWaitingAtStart]), and a frame handled twice is recognised by
   /// its identifier like any second copy.
+  ///
+  /// D-129 (b) (§16.2.2, owner 19.11.2026): "A buffered post the authority
+  /// gate rejects against that member state stays buffered and is tried
+  /// again with each newer member state the device takes, until it is
+  /// applied or the device leaves the group or is removed from it". Every
+  /// path that takes a newer member state calls this again; a call while a
+  /// pass runs (a waiting frame that was itself a member state) asks the
+  /// running pass for one more round instead of nesting.
   void _groupWaitingApply(String gid) {
+    if (_groupWaitingApplying != null) {
+      if (_groupWaitingApplying == gid) _groupWaitingAgain = true;
+      return;
+    }
+    _groupWaitingApplying = gid;
+    try {
+      do {
+        _groupWaitingAgain = false;
+        final kept = _groupWaitingPass(gid);
+        if (kept == 0) break;
+      } while (_groupWaitingAgain);
+    } finally {
+      _groupWaitingApplying = null;
+      _groupWaitingRefused = false;
+      _groupWaitingAgain = false;
+    }
+  }
+
+  /// One pass over what waits for [gid]; the count of frames the authority
+  /// gate refused, which stay.
+  int _groupWaitingPass(String gid) {
     final Map<String, Map<String, dynamic>> rows;
     try {
       rows = store.loadAreaPrefix(kGroupPostsWaitingArea, '$gid:');
     } catch (e) {
       _log.warn('Posts waiting for the group ${_short(gid)} unreadable: $e');
-      return;
+      return 0;
     }
-    if (rows.isEmpty) return;
+    if (rows.isEmpty) return 0;
     final keys = rows.keys.toList()..sort();
     var applied = 0;
+    var kept = 0;
     for (final key in keys) {
       final w = _WaitingKey.parse(key);
       final event = w == null ? null : _groupWaitingEvent(w, rows[key]!);
       if (event != null) {
         final receipt = rows[key]!['receipt'];
         if (receipt is String) _bulkReceiptsHeld[w!.messageId] = receipt;
+        _groupWaitingRefused = false;
         try {
           _applicationEventDispatch(event, wasDirect: false);
-          _fileOrderReceived(event);
-          applied++;
+          if (!_groupWaitingRefused) {
+            _fileOrderReceived(event);
+            applied++;
+          }
         } catch (e) {
           _log.warn('${event.type.name} that waited for the group '
               '${_short(gid)} could not be applied: $e');
+        }
+        if (_groupWaitingRefused) {
+          _groupWaitingRefused = false;
+          kept++;
+          if (receipt is String) _bulkReceiptsHeld.remove(w!.messageId);
+          continue; // stays for the next member state (D-129 b)
         }
       }
       try {
@@ -403,7 +442,16 @@ extension GroupGateOps on CleonaService {
       }
     }
     _log.event('GROUP ${_short(gid)} is held: $applied of ${keys.length} '
-        'frame(s) that waited for the invitation applied (§16.2.2)');
+        'frame(s) that waited for the invitation applied, $kept refused by '
+        'the authority gate and kept for a newer member state (§16.2.2)');
+    return kept;
+  }
+
+  /// The authority gate of §16.2.2 refused a frame of [gid]. While the
+  /// waiting frames of [gid] are applied, that frame stays waiting
+  /// (D-129 b); a frame that arrives now is discarded as before.
+  void _groupAuthorityRefused(String gid) {
+    if (_groupWaitingApplying == gid) _groupWaitingRefused = true;
   }
 
   /// The frame a waiting row was made from, or `null` if the row cannot be

@@ -49,6 +49,7 @@ class WindowsToastNotifier implements SystemNotifier {
     required this.helperPath,
     ToastHelperStart? start,
     this.warn,
+    this.trace,
     this.limit = callLimit,
   }) : _start = start ?? Process.start;
 
@@ -92,6 +93,12 @@ class WindowsToastNotifier implements SystemNotifier {
 
   /// Where the one failure line of a run goes (the daemon's log).
   final void Function(String line)? warn;
+
+  /// S427 measurement (WIN 35.W02, run 20261118-151542): one line per call —
+  /// exit code and duration, never the text. Until then a success was never
+  /// logged and a failure only once per run, so the log could not say whether
+  /// a notification went out.
+  final void Function(String line)? trace;
   final Duration limit;
   bool _failureLogged = false;
 
@@ -197,10 +204,16 @@ class WindowsToastNotifier implements SystemNotifier {
       } finally {
         input.fillRange(0, input.length, 0);
       }
+      final started = DateTime.now();
       final code = await process.exitCode.timeout(limit, onTimeout: () {
         process.kill();
         return -1;
       });
+      if (code != 0) await outDone.timeout(const Duration(seconds: 1), onTimeout: () {});
+      final d = code == 0 ? null : detailOf(out);
+      trace?.call('TRACE toast helper exit $code after '
+          '${DateTime.now().difference(started).inMilliseconds} ms'
+          '${d == null ? '' : ' (${d.step}, HRESULT ${d.hresult})'}');
       if (code != 0) {
         await outDone.timeout(const Duration(seconds: 1), onTimeout: () {});
         final detail = detailOf(out);

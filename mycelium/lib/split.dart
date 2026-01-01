@@ -9,6 +9,8 @@ import 'package:mycelium/silence.dart' show kSendingsAtMost;
 import 'package:mycelium/send_batch.dart';
 import 'package:mycelium/split_flow.dart';
 import 'package:mycelium/split_missing.dart';
+import 'package:mycelium/split_same_link.dart' show answerableUnderLink;
+import 'package:mycelium/shell_counterpart.dart' show SameCounterpart;
 import 'package:mycelium/split_trace.dart';
 import 'package:mycelium/trace.dart' show traceSplitFailed;
 import 'package:mycelium/wire.dart';
@@ -145,6 +147,7 @@ class Splitter {
 
   /// Whether the shell still holds packets for a hop (set by [attach]).
   bool Function(InternetAddress, int) _held = (_, __) => false;
+  SameCounterpart? _sameLink; // one link, two addresses (S426 N6-2, [attach])
 
   Splitter(
     this._wire, {
@@ -171,6 +174,7 @@ class Splitter {
         ? flow.unreachableHop(hopKey(target, port))
         : flow.released(hopKey(target, port));
     _held = shell.holds;
+    _sameLink = shell.sameCounterpart; // S426 N6-2
   }
 
   /// Transmissions whose parts wait for a re-request — at most one per hop.
@@ -300,6 +304,7 @@ class Splitter {
     _incoming.remove(key);
     // The end mark (§11.3), once for 2+ parts, AFTER the hand-on: a holder's
     // `0x31` leaves before it (§8.2, S399 step 4).
+    traceSplitWhole(_say, s.identifier, s.count, result, s.from, s.fromPort); // TEMPORARY S427
     try {
       onShipment(result, s.from, s.fromPort);
     } finally {
@@ -345,7 +350,8 @@ class Splitter {
   /// named parts go out again (§11.3) — [kSendBatch] per event-loop turn.
   Future<void> _onMissingRequest(
       Uint8List identifier, int countMissing, Uint8List packet, InternetAddress from, int fromPort) async {
-    final t = flow.answerableFor(hopKey(from, fromPort), identifier);
+    final t = flow.answerableFor(hopKey(from, fromPort), identifier) ??
+        answerableUnderLink(flow, identifier, from, fromPort, _sameLink);
     if (t == null) return traceSplitUnknownRequest(_say, identifier, countMissing, from, fromPort);
     if (countMissing == 0) {
       traceSplitEndMarkCame(_say, identifier, from, fromPort, t.how);

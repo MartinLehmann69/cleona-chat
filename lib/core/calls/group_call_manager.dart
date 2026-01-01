@@ -1368,40 +1368,49 @@ class GroupCallManager {
           '(§17.3/§17.4).');
       return;
     }
-    final PunchOutcome out;
+    // While the window runs, the broker binds nothing: this pair may yet
+    // carry and become a candidate (§17.7, L5-GCB-1). The window's end is
+    // reported on every way out — after its decision, so that the broker
+    // already knows the new media pair when it binds again.
+    session.broker?.punchWindowStarted(participantHex);
     try {
-      out = await transport.openMediaPath(
-        peerHex: participantHex,
-        callKey: key,
-        localCookie: local,
-        remoteCookie: foreign,
-        peerCandidatesPacked:
-            session.peerCandidates[participantHex] ?? const <int>[],
-      );
-    } catch (e, st) {
-      // A-1 CLASS. The caller attaches this method detached. A
-      // throw without an observer runs into the zone handler of
-      // `service_daemon.dart` and ends the WHOLE daemon (`exit(99)`).
-      // Therefore the body catches itself — `unawaited()` alone catches
-      // nothing in Dart.
-      _log.error('Layer D: the punch window for '
-          '${participantHex.substring(0, 8)} threw detached: $e\n$st');
-      _pairDecided(session, participantHex, MediaPairState.none);
-      return;
+      final PunchOutcome out;
+      try {
+        out = await transport.openMediaPath(
+          peerHex: participantHex,
+          callKey: key,
+          localCookie: local,
+          remoteCookie: foreign,
+          peerCandidatesPacked:
+              session.peerCandidates[participantHex] ?? const <int>[],
+        );
+      } catch (e, st) {
+        // A-1 CLASS. The caller attaches this method detached. A
+        // throw without an observer runs into the zone handler of
+        // `service_daemon.dart` and ends the WHOLE daemon (`exit(99)`).
+        // Therefore the body catches itself — `unawaited()` alone catches
+        // nothing in Dart.
+        _log.error('Layer D: the punch window for '
+            '${participantHex.substring(0, 8)} threw detached: $e\n$st');
+        _pairDecided(session, participantHex, MediaPairState.none);
+        return;
+      }
+      if (!out.carried) {
+        _log.error('Layer D does not carry for '
+            '${participantHex.substring(0, 8)}: ${out.refusal} '
+            '(${out.packetsSent} probes / ${out.bytesSent} B)');
+        // "contacts whose address pair does not carry" — a pair for a
+        // broker (§17.7).
+        _pairDecided(session, participantHex, MediaPairState.none);
+        return;
+      }
+      _log.info('Layer D carries for ${participantHex.substring(0, 8)}: '
+          '${out.address!.address}:${out.port} (${out.packetsSent} probes / '
+          '${out.bytesSent} B, §17.3)');
+      _pairDecided(session, participantHex, MediaPairState.carrying);
+    } finally {
+      session.broker?.punchWindowEnded(participantHex);
     }
-    if (!out.carried) {
-      _log.error('Layer D does not carry for '
-          '${participantHex.substring(0, 8)}: ${out.refusal} '
-          '(${out.packetsSent} probes / ${out.bytesSent} B)');
-      // "contacts whose address pair does not carry" — a pair for a
-      // broker (§17.7).
-      _pairDecided(session, participantHex, MediaPairState.none);
-      return;
-    }
-    _log.info('Layer D carries for ${participantHex.substring(0, 8)}: '
-        '${out.address!.address}:${out.port} (${out.packetsSent} probes / '
-        '${out.bytesSent} B, §17.3)');
-    _pairDecided(session, participantHex, MediaPairState.carrying);
   }
 
   /// The punch window decided the media pair with [peerHex] — an edge for

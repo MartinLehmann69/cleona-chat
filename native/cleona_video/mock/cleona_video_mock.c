@@ -109,6 +109,8 @@ struct cleona_video_session {
     int32_t knob_camera_count;
     int32_t knob_hw_encode, knob_hw_decode;
     int32_t knob_min_bitrate_kbps;  /* lowest supported step (Erratum 1) */
+    int32_t knob_min_width;         /* smallest capture geometry (Erratum 8), */
+    int32_t knob_min_height;        /*   0/0 = no floor                       */
 
     /* capture / encode state */
     int32_t capture_enabled;
@@ -258,9 +260,13 @@ static int32_t nominal_for(int32_t knob_frame_bytes, int32_t kbps, int32_t fps) 
  * reconfigure() can never disagree about what this backend supports.
  *
  * Writes the accepted configuration to *out. Returns CLEONA_VIDEO_OK,
- * CLEONA_VIDEO_ERR_INVALID or CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE.
+ * CLEONA_VIDEO_ERR_INVALID, CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM or
+ * CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE.
  *
  * Scaling policy of the mock, kept deliberately simple and visible:
+ *   - a width or height below the pretended camera floor (min_w/min_h, 0 = no
+ *     floor) is ERR_BELOW_DEVICE_MINIMUM, decided after validity and before
+ *     any rate question, never rounded up (Erratum 8);
  *   - geometry and fps are clamped to the mock's caps (down only);
  *   - if the resulting keyframe would not fit under max_frame_bytes, the
  *     bitrate is lowered to the largest value that does fit;
@@ -277,6 +283,7 @@ static int32_t nominal_for(int32_t knob_frame_bytes, int32_t kbps, int32_t fps) 
 static int32_t negotiate(const cleona_video_config_t* cfg,
                          int32_t knob_frame_bytes,
                          int32_t min_bitrate_kbps,
+                         int32_t min_w, int32_t min_h,
                          cleona_video_config_t* out) {
     if (!cfg || !out) return CLEONA_VIDEO_ERR_INVALID;
 
@@ -297,6 +304,10 @@ static int32_t negotiate(const cleona_video_config_t* cfg,
     if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
         cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY) {
         return CLEONA_VIDEO_ERR_INVALID;
+    }
+    /* Erratum 8: the pretended camera cannot go this small. Never round up. */
+    if (cfg->width < min_w || cfg->height < min_h) {
+        return CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM;
     }
 
     int32_t codec = cfg->codec;
@@ -379,7 +390,7 @@ cleona_video_session_t* cleona_video_open(const cleona_video_config_t* cfg,
      * this comment used to recommend — open permissively, then reconfigure to
      * learn the reason — is no longer needed. */
     int32_t rc = negotiate(cfg, 0, CLEONA_VIDEO_MOCK_DEFAULT_MIN_BITRATE_KBPS,
-                           &accepted);
+                           0, 0, &accepted);
     if (rc != CLEONA_VIDEO_OK) {
         write_open_error(out_negotiated, rc);
         return NULL;
@@ -408,6 +419,8 @@ cleona_video_session_t* cleona_video_open(const cleona_video_config_t* cfg,
     s->knob_hw_encode          = CLEONA_VIDEO_HW_NO;  /* the truth, not a guess */
     s->knob_hw_decode          = CLEONA_VIDEO_HW_NO;
     s->knob_min_bitrate_kbps   = CLEONA_VIDEO_MOCK_DEFAULT_MIN_BITRATE_KBPS;
+    s->knob_min_width          = 0;
+    s->knob_min_height         = 0;
 
     /* Erratum 7: a DECODE_ONLY session never had a camera to enable. This is
      * the state, not a user-visible mute — set_capture_enabled cannot turn it
@@ -442,11 +455,12 @@ int32_t cleona_video_reconfigure(cleona_video_session_t* s,
 
     cleona_video_config_t accepted;
     int32_t rc = negotiate(cfg, s->knob_frame_bytes, s->knob_min_bitrate_kbps,
-                           &accepted);
+                           s->knob_min_width, s->knob_min_height, &accepted);
     if (rc != CLEONA_VIDEO_OK) {
         /* Side-effect free on failure: the session keeps running exactly as it
          * was. On ERR_RATE_UNACHIEVABLE the caller stops own video and tells
-         * the user why — it does not retry silently (Erratum 1). */
+         * the user why — it does not retry silently (Erratum 1). On
+         * ERR_BELOW_DEVICE_MINIMUM the caller stays on its step (Erratum 8). */
         cv_unlock(&s->lock);
         return rc;
     }
@@ -885,5 +899,14 @@ void cleona_video_mock_set_min_bitrate_kbps(cleona_video_session_t* s, int32_t k
     cv_lock(&s->lock);
     s->knob_min_bitrate_kbps =
         kbps > 0 ? kbps : CLEONA_VIDEO_MOCK_DEFAULT_MIN_BITRATE_KBPS;
+    cv_unlock(&s->lock);
+}
+
+void cleona_video_mock_set_min_capture_size(cleona_video_session_t* s,
+                                            int32_t w, int32_t h) {
+    if (!s) return;
+    cv_lock(&s->lock);
+    s->knob_min_width  = w > 0 ? w : 0;
+    s->knob_min_height = h > 0 ? h : 0;
     cv_unlock(&s->lock);
 }

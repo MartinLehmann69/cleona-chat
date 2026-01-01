@@ -62,7 +62,7 @@ extension MailboxEnvelopeTag on Mailbox {
   }
 }
 
-class _Pairs implements EnvelopePairs {
+class _Pairs implements EnvelopePairs, EnvelopeTagHeld {
   final Mailbox m;
   _Pairs(this.m);
 
@@ -105,5 +105,13 @@ class _Pairs implements EnvelopePairs {
       m.groupPairReadsTag(id);
       m.report?.call('group pair ${id.substring(0, 8)} reads tagged envelopes');
     }
+  }
+
+  /// The seed of the held `K_AB` is one the group pair carries (§4.3,
+  /// S431 D-131); a contact or a restored contact has only one.
+  @override
+  void tagHeld(Address from, Uint8List kAB) {
+    final id = identifierFrom(from);
+    if (m.contactOrNull(id) == null) m.groupPairHeard(id, kAB);
   }
 }

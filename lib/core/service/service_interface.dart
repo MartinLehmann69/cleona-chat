@@ -287,30 +287,15 @@ abstract class ICleonaService {
   int get independentSyncPartners;
 
 
-  /// §24.4.2 — DATA SAVER MODE: whether it is IN EFFECT.
-  ///
-  /// Not the same as "the user has chosen it": a Secure chat
-  /// overrides the choice (see [dataSaverLockedBySecure]). The display
-  /// must show the EFFECT, not the wish — §24.4.2 demands "a
-  /// visible state, not a setting buried in a submenu", and a state
-  /// that claims something other than what the stream does is no state.
+  /// §24.4.2 — DATA SAVER MODE: whether it is IN EFFECT ("a visible
+  /// state, not a setting buried in a submenu").
   bool get dataSaverActive;
-
-  /// §24.4.2 — whether the switch is locked because on this node a
-  /// chat is set to High-Secure.
-  ///
-  /// "**Secure-Mode is exempt, without exception** (owner, 2026-08-30) …
-  /// The cover stream is a node-wide stream, not per chat — so a node
-  /// holding even one Secure chat keeps it in full, and the switch is
-  /// then locked with its reason named."
-  bool get dataSaverLockedBySecure;
 
   /// §24.4.2 — the setter. **Only a user action calls it**
   /// ("the app may suggest but must never activate it itself").
   ///
-  /// Returns [kDataSaverOk] or [kDataSaverLockedBySecure]. The reason
-  /// is REPORTED BACK and not merely swallowed: a setter that
-  /// silently does nothing cannot be told apart from a broken one.
+  /// Returns [kDataSaverOk] when stored; any other value is a failure
+  /// reported back (e.g. no service over IPC), never swallowed.
   String setDataSaver(bool on);
 
   /// V4.2 §11.9 — whether the fourth neighbour source (external address entries on
@@ -1317,6 +1302,14 @@ abstract class ICleonaService {
   /// lies. `null` if no share is configured or nothing could be asked.
   Future<({bool reachable, ShareIdentityState? identity})?> testArchiveShare();
 
+  /// The `authorized_keys` line of this identity's own SSH key for an SFTP
+  /// share (S423 A-1); with [create] the key is created first if there is
+  /// none. `null`: no key yet (without [create]) or none obtainable. The
+  /// private half never leaves the service. Offered on Android/iOS, which
+  /// have no account key (`ArchiveTransport.forProtocol`); the desktop logs
+  /// in with its operating-system account's keys and/or the password.
+  Future<String?> archiveSftpPublicKey({bool create = false});
+
   // Retrieval of an archived original (§21.6, S398-W4). FROM THE SHARE,
   // never via the network: no packet, no receipt, no post box entry. The
   // answer only says whether a fetch IS RUNNING; the progress and the end
@@ -1417,6 +1410,3 @@ extension ReadinessGate on ICleonaService {
 /// enumeration would have to be mapped to a name there anyway,
 /// and two mappings are one more than necessary.
 const String kDataSaverOk = 'ok';
-
-/// The latch has engaged: at least one chat is set to High-Secure.
-const String kDataSaverLockedBySecure = 'locked_secure';

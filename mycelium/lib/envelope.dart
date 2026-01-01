@@ -248,11 +248,12 @@ class Envelope {
       }
       final bound = _charsData(
           sender: sender, recipient: recipient.address, plaintext: plaintext);
-      if (!keys.any((kAB) => envelopeTagHolds(kAB, bound, tag))) {
-        throw EnvelopeBroken('pair tag does not hold');
-      }
+      final held =
+          keys.where((kAB) => envelopeTagHolds(kAB, bound, tag)).firstOrNull;
+      if (held == null) throw EnvelopeBroken('pair tag does not hold');
       final accepted = senderAccept(recipient.book, sender);
       pairs.tagShown(accepted);
+      if (pairs case final EnvelopeTagHeld h) h.tagHeld(accepted, held); // D-131
       return (plaintext: plaintext, sender: accepted, tagged: true);
     }
     if (p + _edSigLength > inside.length) {

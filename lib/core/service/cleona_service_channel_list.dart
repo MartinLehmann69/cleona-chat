@@ -134,7 +134,35 @@ extension CleonaServiceChannelList on CleonaService {
     _log.warn('GM-4: CHANNEL SPLIT-VIEW in "${c.name}" (role state) — '
         'local role epoch=$r, short list epoch=$v, wire epoch=$wireEpoch '
         'from ${senderHex.substring(0, 8)}');
+    // D-129 (a): the SAME epoch of the role state or of the short list is
+    // also answered with a resync request to the owner.
+    if (wireEpoch == r || wireEpoch == v) {
+      _askSameEpochChannelResync(c, wireEpoch, bytesToHex(wireHash));
+    }
     return true;
+  }
+
+  /// D-129 (a) (§16.2.2, owner 19.11.2026) for a channel: a post's state of
+  /// [epoch] — one this device holds — with another hash [hashHex] is "once
+  /// per observed (epoch, hash), also answered with a resync request to the
+  /// owner"; the owner's signed state of the same epoch, given in answer,
+  /// is then taken (`_handleChannelInvite`). The answer is compared there
+  /// with the epoch that path orders by — the short list's for a subscriber
+  /// that holds one, else the membership epoch — so that is the epoch owed.
+  void _askSameEpochChannelResync(ChannelInfo c, int epoch, String hashHex) {
+    final cid = c.channelIdHex;
+    if (c.ownerNodeIdHex == identity.userIdHex) return;
+    final asked = _sameEpochAsked[cid];
+    final hashes = asked != null && asked.epoch == epoch
+        ? asked.hashes
+        : <String>{};
+    if (!hashes.add(hashHex)) return; // this (epoch, hash) was asked once
+    _sameEpochAsked[cid] = (epoch: epoch, hashes: hashes);
+    _sameEpochAnswerOwed[cid] = c.roleView ? c.viewEpoch : c.membershipEpoch;
+    _log.info('GM-4: same epoch $epoch, other hash '
+        '${hashHex.length > 16 ? hashHex.substring(0, 16) : hashHex} in '
+        '"${c.name}" — resync asked once (D-129)');
+    _sendChannelResyncRequest(c, localEpoch: 0);
   }
 
   /// [m] for a list that goes to owner and admins: with the capabilities and
@@ -643,6 +671,7 @@ extension CleonaServiceChannelList on CleonaService {
     if (!_channelIsRole(c.members[senderHex])) {
       _log.warn('CHANNEL_MEMBERS_CHANGE from ${senderHex.substring(0, 8)}, '
           'no owner/admin of "${c.name}" — discarded');
+      _groupAuthorityRefused(cid);
       return;
     }
     final meHex = identity.userIdHex;
@@ -728,13 +757,18 @@ extension CleonaServiceChannelList on CleonaService {
         !constantTimeEquals(Uint8List.fromList(ch.stateHash), expect)) {
       _log.warn('CHANNEL_MEMBERS_CHANGE for "${c.name}": the state after it '
           'differs from the sender\'s — resync asked (§16.2.2)');
-      _sendChannelResyncRequest(c,
-          localEpoch: 0);
+      // D-129 (a): the same epoch with another hash — once per (epoch,
+      // hash), and the owner's answer of this epoch is taken.
+      _askSameEpochChannelResync(c, c.roleView ? c.roleEpoch : c.membershipEpoch,
+          bytesToHex(Uint8List.fromList(ch.stateHash)));
     }
     _log.info('CHANNEL_MEMBERS_CHANGE for "${c.name}" from '
         '${senderHex.substring(0, 8)}: +${ch.upserted.length} '
         '-${ch.removed.length}, epoch $members, role epoch $role');
     onStateChanged?.call();
+    // D-129 (b): a newer member state — what the authority gate refused
+    // against the older one is tried again.
+    _groupWaitingApply(cid);
   }
 
   /// The fields of a leaving by an owner or admin of this build

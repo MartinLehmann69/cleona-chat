@@ -34,6 +34,7 @@ import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/fountain/fountain_block.dart';
 import 'package:cleona/core/fountain/fountain_decoder.dart' show FountainOffer;
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/shell_counterpart.dart' show SameCounterpart, askedOf;
 import 'package:mycelium/update_partial.dart';
 import 'package:mycelium/update_piece.dart';
 import 'package:mycelium/update_run.dart';
@@ -47,6 +48,11 @@ class UpdateAssembler {
 
   /// The target completed outside a run (by cover fill): its file.
   void Function(Uint8List object, String path)? onComplete;
+
+  /// Whether two addresses stand under one link (`Shell.sameCounterpart`,
+  /// D73B-2): an answer from another address under the asked holder's link
+  /// is its answer. `null` keeps the strict comparison.
+  SameCounterpart? sameCounterpart;
 
   UpdatePartial? _partial;
   String? _taken;
@@ -203,7 +209,7 @@ class UpdateAssembler {
     if (l == null || p == null || packet.isEmpty) return;
     if (l.holderNo >= l.holder.length || _checking) return;
     final h = l.holder[l.holderNo];
-    if (h.$1.address != from.address || h.$2 != fromPort) return;
+    if (askedOf(sameCounterpart, h, from, fromPort) == null) return;
     switch (packet[0]) {
       case kinds.kPieceTask:
         final a = pleaOrTaskRead(packet);

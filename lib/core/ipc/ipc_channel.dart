@@ -387,6 +387,14 @@ class IpcSecureLink {
       },
       cancelOnError: true,
     );
+    // A socket error also completes `done` with that error (dart:io
+    // `_Socket._onError` hands it to the stream AND to the sink). Unobserved,
+    // it is an uncaught error of the whole process — a daemon that resets the
+    // connection ended the window (S429 D-1, smoke
+    // smoke_desktop_open_asks_post_box_run: "Connection reset by peer").
+    // The daemon side observes `done` the same way (IpcServer). `fail` is
+    // safe to call a second time after the stream's own onError.
+    unawaited(socket.done.then<void>((_) {}, onError: (Object e) => fail(e)));
 
     socket.write('${IpcHello.line(clientNonce)}\n');
     return ready.future.timeout(timeout, onTimeout: () {

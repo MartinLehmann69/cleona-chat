@@ -1,16 +1,17 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/link_io/native_send_path.dart';
-
 import 'package:mycelium/wire_counters.dart';
+import 'package:mycelium/wire_family.dart' show dartSendForbidden, noNativeIpv6Line;
+import 'package:mycelium/wire_side.dart';
 export 'package:mycelium/wire_counters.dart' show WireCounters;
+export 'package:mycelium/wire_side.dart' show kReceiveBatch;
 import 'package:mycelium/wire_target.dart';
-import 'package:mycelium/wire_port.dart' show bindAgain, bindAlone;
-import 'package:mycelium/own_address.dart' show rankTheAddress, usableIpv6Present;
+import 'package:mycelium/wire_port.dart' show bindAlone;
+import 'package:mycelium/own_address.dart' show rankTheAddress, usableIpv4Present, usableIpv6Present;
 import 'package:mycelium/packet_route.dart';
+import 'package:mycelium/trace.dart' show kErrorLinePrefix;
 export 'package:mycelium/packet_route.dart' show PacketRoute;
 
 /// The wire.
@@ -21,7 +22,7 @@ export 'package:mycelium/packet_route.dart' show PacketRoute;
 /// everything this file will ever do. No clock, no cap, no acknowledgement,
 /// no encryption — whoever needs that builds it ONE level higher and leaves
 /// this file alone. The one queue in here is the receive queue of §11.1
-/// „Reading." (see [_Side.subscribe]): it holds what was read and not yet
+/// „Reading." (see [WireSide.subscribe]): it holds what was read and not yet
 /// processed, and it evicts nothing (§20.2, D-44).
 ///
 /// The only thing besides packets that belongs in here is the care for the
@@ -37,71 +38,120 @@ export 'package:mycelium/packet_route.dart' show PacketRoute;
 /// would not even remember him. On Windows the same socket carries no
 /// IPv4 at all. Two sockets avoid both — and are what the spec says.
 ///
+/// ── BOTH KINDS ARE EQUAL (S427) ───────────────────────────────────
+///
+/// Owner 18.11.2026: IPv4 and IPv6 are interchangeable. A node without an IP
+/// address of either kind reports an error; with only an IPv4 address only
+/// IPv4 is wired, with only IPv6 only IPv6, with both both — an address that
+/// is present is used, where none is, socket and protocol stay off. A side is bound only while this host has an
+/// address of its kind ([usableIpv4Present], [usableIpv6Present]); a carrier-
+/// grade IPv4 counts. The port number belongs to the wire, not to a side: the
+/// side bound first fixes it (or the requested [open] port), and every side
+/// bound later takes the same number. Without any address no socket stands,
+/// an ERROR line says so, and the next network change ([followUp]) binds again.
+///
 /// **Each side lives for itself** (measured S390, cases E and F): an error ends
 /// only its own socket, which binds again on the same port (§11.1) — except
 /// "no route" on the IPv6 side before a global IPv6 send was accepted on this
-/// network: that closes it until the next network change ([_Side.error], S422).
-class Wire implements PacketRoute {
-  late final _Side _v4;  // version-name-ok: IP address family
-  _Side? _v6;
+/// network: that closes it until the next network change ([WireSide.error], S422).
+class Wire implements PacketRoute, WireSideOwner {
+  WireSide? _v4; // version-name-ok: IP address family
+  WireSide? _v6;
   final void Function(String)? _report;
 
+  /// A named address ([open] `toAddress`/`toAddress6`) is an announcement:
+  /// a network change never closes that side, and binds it again on exactly
+  /// that address after it was lost.
+  InternetAddress? _named4, _named6;
+
+  /// The port number of both sockets — of the wire, also while no side stands.
+  int _port;
+
   /// Who gets the packets — remembered because a new socket (see
-  /// [_Side.againOpen]) needs it again.
+  /// [WireSide.againOpen]) needs it again.
   void Function(Uint8List packet, InternetAddress from, int fromPort)? _onPacket;
   bool _to = false;
 
   /// What went out and came in on both sockets (§25.5, `wire_counters.dart`).
+  @override
   final WireCounters counters = WireCounters();
 
-  Wire._(this._report);
+  Wire._(this._report, this._port);
 
   /// Opens the wire. [port] 0 = the operating system chooses one.
   /// [report] gets send errors that the operating system only reports back
   /// later (see [listen]); without [report] they go to stderr.
   ///
-  /// **First IPv4, then IPv6 on THE port number that resulted from it**: the
-  /// IPv4 socket must stand (§11.1: „with IPv4 alone", never IPv6 alone), and
-  /// its number goes into every card (both orders measured 16.09.2026).
+  /// **A side only for an address kind this host has** ([interfaces], in
+  /// operation the list of `interfacesRead`; without it the interfaces are
+  /// read here): a bind „on suspicion" succeeds without the kind and fails at
+  /// the first throw (owner decision 16.09.2026, 18.11.2026). The side bound
+  /// first takes [port] through [bindAlone] and throws when it is held —
+  /// `Host.start` then draws anew; a later side binds the same number.
   ///
-  /// **The IPv6 socket is only bound if this host has an IPv6 address under
-  /// which someone can reach it** ([usableIpv6Present] over [interfaces], in
-  /// operation the list of `interfacesRead`): a bind „on suspicion" succeeds
-  /// without IPv6 and fails at the first throw (owner decision 16.09.2026). A
-  /// failed bind is no error either (§11.1) — see [_ipv6Open].
-  ///
-  /// [toAddress]/[toAddress6] are the wildcards in operation; a probe uses them
-  /// to trigger errno 22 (loopback wire, outside target, S389 case O) and a
-  /// real bind error (errno 99, S390 case H) without a dummy.
+  /// [toAddress]/[toAddress6] are announcements, bound whatever the
+  /// interfaces say: a probe uses them to trigger errno 22 (loopback wire,
+  /// outside target, S389 case O) and a real bind error (errno 99, S390 case
+  /// H) without a dummy; the smokes use them for 127.0.0.1.
   static Future<Wire> open(
       {int port = 0,
       InternetAddress? toAddress,
       InternetAddress? toAddress6,
       List<NetworkInterface>? interfaces,
       void Function(String)? report}) async {
-    final to4 = toAddress ?? InternetAddress.anyIPv4;
-    final s4 = await bindAlone(to4, port); // S413: no shared data port
-    final d = Wire._(report);
-    d._v4 = _Side(d, to4, 'IPv4', s4);
+    final d = Wire._(report, port);
+    final list = toAddress != null && toAddress6 != null
+        ? const <NetworkInterface>[]
+        : interfaces ?? await NetworkInterface.list();
+    if (toAddress != null) {
+      d._named4 = toAddress;
+      await d._open4(toAddress, opening: true);
+    } else if (usableIpv4Present(list)) {
+      await d._open4(InternetAddress.anyIPv4, opening: true);
+    }
     if (toAddress6 != null) {
       // An explicitly named address is an announcement, not a question:
       // the probe wants to see exactly this bind, succeeded or failed.
+      d._named6 = toAddress6;
       await d._ipv6Open(toAddress6);
-    } else {
-      await d.ipv6FollowUp(interfaces ?? await NetworkInterface.list());
+    } else if (usableIpv6Present(list)) {
+      await d._ipv6Open(InternetAddress.anyIPv6, opening: true);
     }
+    d._noneSaid();
     return d;
   }
 
-  /// Brings the IPv6 socket to the state that the network environment yields —
-  /// at opening and at every edge at which the interfaces
-  /// can change (§11.1, §11.8). Returns whether afterwards an
-  /// IPv6 socket stands.
-  ///
-  /// Both directions, and the second is the one that is easily forgotten:
-  /// a phone that leaves the WLAN and has no IPv6 any more in cellular
-  /// would otherwise keep a socket whose first throw ends it.
-  Future<bool> ipv6FollowUp(List<NetworkInterface> interfaces) async {
+  /// Brings both sides to the state that the network environment yields — at
+  /// opening and at every edge at which the interfaces can change (§11.1,
+  /// §11.8). Both directions: a phone leaving the WLAN without IPv6 in
+  /// cellular would keep a socket whose first throw ends it; a host that
+  /// gains an address of a kind gets its side. Returns whether afterwards a
+  /// side stands.
+  Future<bool> followUp(List<NetworkInterface> interfaces) async {
+    final n4 = _named4, n6 = _named6;
+    if (n4 != null && _v4 == null) await _open4(n4);
+    if (n6 != null && _v6 == null) await _ipv6Open(n6);
+    if (n4 == null) {
+      final should = usableIpv4Present(interfaces);
+      if (should && _v4 == null) {
+        await _open4(InternetAddress.anyIPv4);
+      } else if (!should && _v4 != null) {
+        _v4!.shut();
+        _v4 = null;
+        _say('Wire: IPv4 socket closed — this host has no IPv4 address any '
+            'more (§11.1).');
+      }
+    }
+    if (n6 == null) {
+      await _ipv6Follow(interfaces);
+    } else {
+      _v6?.routeSeen = false; // a new network proves its way out anew (S422)
+    }
+    _noneSaid();
+    return hasIpv4 || hasIpv6;
+  }
+
+  Future<bool> _ipv6Follow(List<NetworkInterface> interfaces) async {
     final should = usableIpv6Present(interfaces);
     _v6?.routeSeen = false; // a new network proves its way out anew (S422)
     if (should == hasIpv6) return hasIpv6;
@@ -115,30 +165,69 @@ class Wire implements PacketRoute {
     return _ipv6Open(InternetAddress.anyIPv6);
   }
 
-  /// The bind itself. A failure is NOT an error (§11.1: „that is not an
-  /// error and the node continues with IPv4 alone") — it is reported,
-  /// [hasIpv6] stays `false`, and an IPv6 target is rejected in [send]
-  /// instead of thrown.
-  Future<bool> _ipv6Open(InternetAddress to6) async {
+  /// Binds the IPv4 side on the wire's number. At [opening], as the side
+  /// bound first, it goes through [bindAlone] and throws when the number is
+  /// held (as the data port always did) — `Host.start` then draws anew. At a
+  /// network change a failure is no error: reported, and the node continues
+  /// without IPv4 until the next change (§11.1).
+  Future<bool> _open4(InternetAddress to4, {bool opening = false}) async {
     try {
-      final sock = await RawDatagramSocket.bind(to6, port);
-      _v6 = _Side(this, to6, 'IPv6', sock);
-      if (_onPacket != null) _v6!.subscribe(); // opened after listen (S407)
+      final sock = opening
+          ? await bindAlone(to4, _port) // S413: no shared data port
+          : await RawDatagramSocket.bind(to4, _port);
+      _port = sock.port;
+      _v4 = WireSide(this, to4, 'IPv4', sock);
+      if (_onPacket != null) _v4!.subscribe();
       return true;
     } on Object catch (e) {
-      _say('wire: no IPv6 socket on port $port ($e) — this '
-          'node carries on with IPv4 alone. That is not an error (§11.1).');
+      if (opening) rethrow;
+      _say('wire: no IPv4 socket on port $_port ($e) — this node carries on '
+          'without IPv4. That is not an error (§11.1).');
       return false;
     }
   }
 
-  /// The port number of both sockets. It comes from the IPv4 socket, because that one
-  /// always stands — the IPv6 one was bound to exactly this number.
-  int get port => _v4.sock.port;
+  /// The IPv6 bind on the wire's number. At [opening] with no IPv4 side it is
+  /// the side bound first: through [bindAlone], throwing when the number is
+  /// held, as [_open4]. Otherwise a failure is NOT an error (§11.1) — it is
+  /// reported, [hasIpv6] stays `false`, and an IPv6 target is refused in
+  /// [send]; a named [to6] (a probe) always takes this path.
+  Future<bool> _ipv6Open(InternetAddress to6, {bool opening = false}) async {
+    final strict = opening && !hasIpv4;
+    try {
+      final sock = strict
+          ? await bindAlone(to6, _port)
+          : await RawDatagramSocket.bind(to6, _port);
+      _port = sock.port;
+      _v6 = WireSide(this, to6, 'IPv6', sock);
+      if (dartSendForbidden('IPv6') && _v6!.native == null) { _v6!.shut(); _v6 = null; _say(noNativeIpv6Line(_port)); return false; }
+      if (_onPacket != null) _v6!.subscribe(); // opened after listen (S407)
+      return true;
+    } on Object catch (e) {
+      if (strict) rethrow;
+      _say('wire: no IPv6 socket on port $_port ($e) — this '
+          'node carries on without IPv6. That is not an error (§11.1).');
+      return false;
+    }
+  }
 
-  /// Whether this wire has an IPv6 socket. `false` means: the bind
-  /// failed or the socket could not be had again — not an error,
-  /// but IPv6 targets are then not reachable.
+  /// No side stands: this host has no IP address of any kind (§11.1) — an
+  /// error, said at the edge that found it; the next network change binds.
+  void _noneSaid() {
+    if (hasIpv4 || hasIpv6 || _to) return;
+    _say('${kErrorLinePrefix}wire: this host has no IP address of any kind — '
+        'no IPv4, no IPv6 under which someone can reach it; no socket is bound '
+        'and the node is unreachable until the next network change (§11.1).');
+  }
+
+  /// The port number of both sockets — the wire's, also while no side stands.
+  int get port => _port;
+
+  /// Whether this wire has an IPv4 socket — `false`: this host has no IPv4
+  /// address, or the side could not be had again; IPv4 targets are then refused.
+  bool get hasIpv4 => _v4 != null;
+
+  /// Whether this wire has an IPv6 socket — `false` as for [hasIpv4].
   bool get hasIpv6 => _v6 != null;
 
   /// Sends [packet] to [target]:[targetPort].
@@ -163,14 +252,14 @@ class Wire implements PacketRoute {
       _say('wire: not sent to ${target.address}:$targetPort — $reason');
       return false;
     }
-    final side = z.type == InternetAddressType.IPv4 ? _v4 : _v6;
-    // No IPv6 socket: a throw via the IPv4 socket would end it (errno 97,
-    // asynchronous, S390) — so the target is refused.
+    final toIpv4 = z.type == InternetAddressType.IPv4;
+    final side = toIpv4 ? _v4 : _v6;
+    // No socket of the target's kind: a throw via the other socket would end
+    // it (errno 97, asynchronous, S390) — so the target is refused.
     if (side == null) {
-      _say('wire: not sent to ${target.address}:$targetPort — this '
-          'wire has no IPv6 socket, and the operating system closes '
-          'the IPv4 socket on a target of another address family (errno 97). '
-          '§11.1: the node carries on with IPv4 alone.');
+      _say('wire: not sent to ${target.address}:$targetPort — this wire has '
+          'no ${toIpv4 ? 'IPv4' : 'IPv6'} socket (this host has no such address, '
+          '§11.1), and a socket of the other kind would be closed by it (errno 97).');
       return false;
     }
     // Windows: Dart's IOCP path returns 0 for a datagram sent while the
@@ -180,7 +269,7 @@ class Wire implements PacketRoute {
     // native shim on Windows.
     final n = side.native;
     final ok = side.failures.watch(() => n != null ? n.send(z.address, targetPort, packet)
-        : side.sock.send(packet, z, targetPort), packet.length) == packet.length;
+        : dartSendForbidden(side.kind) ? 0 : side.sock.send(packet, z, targetPort), packet.length) == packet.length;
     if (ok) counters.sent(packet.length);
     if (ok && rankTheAddress(z) == 3) side.routeSeen = true; // global IPv6 (S422)
     return ok;
@@ -197,204 +286,47 @@ class Wire implements PacketRoute {
     void Function(Uint8List packet, InternetAddress from, int fromPort) onPacket,
   ) {
     _onPacket = onPacket;
-    _v4.subscribe();
+    _v4?.subscribe();
     _v6?.subscribe();
   }
 
-  /// A side that has not got its socket back drops away.
-  /// Only the IPv6 side may do that: it is the one that §11.1 calls dispensable.
-  void _lost(_Side s) {
+  // ── what a side needs of its wire ([WireSideOwner]) ──
+  @override
+  void sideSay(String what) => _say(what);
+  @override
+  bool get closedForGood => _to;
+  @override
+  bool holds(WireSide s) => identical(s, _v4) || identical(s, _v6);
+  @override
+  void Function(Uint8List packet, InternetAddress from, int fromPort)? get packetTaker => _onPacket;
+
+  /// A side that has not got its socket back, or gave it up, drops away
+  /// until the next network change — either kind (S427, §11.1).
+  @override
+  void sideLost(WireSide s) {
+    if (identical(s, _v4)) _v4 = null;
     if (identical(s, _v6)) _v6 = null;
+    _noneSaid();
   }
 
   void _say(String what) => (_report ?? stderr.writeln)(what);
 
   /// Binds both sockets afresh on THE SAME port (§11.1; §31.3 "bind fresh
   /// sockets": iOS closes them while the app sleeps, and a closed one says
-  /// nothing). Per family whether a fresh socket stands; no IPv6 side: `null`.
-  Future<({bool ipv4, bool? ipv6})> reopen() async {
-    final six = _v6;
-    return (ipv4: await _v4.againOpen(), ipv6: await six?.againOpen());
+  /// nothing). Per kind whether a fresh socket stands; no side of a kind: `null`.
+  Future<({bool? ipv4, bool? ipv6})> reopen() async {
+    final four = _v4, six = _v6;
+    return (ipv4: await four?.againOpen(), ipv6: await six?.againOpen());
   }
 
-  void osClosedForProbe() => _v4.closedUnder(_v4.sock, 'probe'); // S422 smoke
+  void osClosedForProbe() { // S422 smoke
+    final s = _v4;
+    if (s != null) s.closedUnder(s.sock, 'probe');
+  }
+
   void close() {
     _to = true;
-    _v4.shut();
+    _v4?.shut();
     _v6?.shut();
-  }
-}
-
-/// Packets processed per event-loop turn (§11.1 „Reading.": „processes
-/// afterwards, in batches"). Between two batches the event loop runs once,
-/// so the next read event drains the socket before more work is done.
-/// Measured (S398 drain proposal, variant „drainturn", batches of 32): 0
-/// re-request rounds for 367 parts between two processes.
-const int kReceiveBatch = 32;
-
-/// One side of the wire: a socket, the address to which it is bound, and the
-/// care for it — once per address type, one class so the self-healing does
-/// not stand twice (a second copy is where one half is repaired, not both).
-class _Side {
-  final Wire _d;
-  final InternetAddress to;
-  final String kind;
-  RawDatagramSocket sock;
-  bool _reopening = false; // [againOpen] in flight (S407)
-  bool routeSeen = false; // a send to a global IPv6 was accepted on this network (S422)
-
-  /// The native send path of this side — only on Windows, `null` elsewhere
-  /// ([NativeSendPath.usesNativeSendPath]); receiving stays on [sock].
-  NativeSendPath? native;
-
-  /// Send failures, said once per series, each one counted (S420, S422).
-  late final SendFailures failures = SendFailures(
-      () => '$kind socket of port ${sock.port}', _d._say, () => _d.counters.failed(kind));
-
-  _Side(this._d, this.to, this.kind, this.sock) {
-    _nativeOpen();
-  }
-
-  void _nativeOpen() => native = NativeSendPath.tryOpen(
-      port: sock.port, ipv6: kind == 'IPv6', log: _d._say);
-
-  void shut() {
-    native?.close();
-    native = null;
-    sock.close();
-  }
-
-  /// Read, not yet processed. It lives on the side, not on the socket:
-  /// [againOpen] replaces the socket and the queue carries on.
-  final Queue<Datagram> _read = ListQueue();
-
-  /// A batch is scheduled for the next event-loop turn.
-  bool _batchDue = false;
-
-  /// §11.1 „Reading.": at every read event the socket is read until
-  /// empty, and only then processed — in batches of [kReceiveBatch], one
-  /// batch per event-loop turn, and the socket is emptied again before
-  /// every batch. Without that second read, 3 of 30 bursts of 367 parts
-  /// still lost 10–42 parts in the kernel (S399 probe, two processes):
-  /// read events queued behind a batch arrived too late. With it: 0 of 30.
-  ///
-  /// Until S399 one datagram per read event: a 367-part burst overran the
-  /// 212 992-B kernel buffer, 100–144 dropped (`smoke_burst_loss`).
-  ///
-  /// Nothing is evicted and nothing is dropped: the queue is bounded by
-  /// the flow of the senders (§11.3, §20.2). `Timer.run` is no clock —
-  /// it yields the event loop once and is scheduled only while the queue
-  /// is not empty.
-  void subscribe() {
-    final s = sock; // an error of a replaced socket reopens nothing (S407)
-    s.listen((e) {
-      if (e == RawSocketEvent.read) {
-        _drain();
-        _schedule();
-      } else if (e != RawSocketEvent.write) {
-        closedUnder(s, '$e');
-      }
-    }, onError: (Object e) => identical(s, sock) ? error(e) : null,
-        onDone: () => closedUnder(s, 'end of its events'));
-  }
-
-  /// §31.3: a socket the operating system closed WITHOUT an error is dead the
-  /// same way (field 11.11./12.11.2026, S422: an iPhone's data port silent, no
-  /// error line). Our own closes pass: a reopen is under way, the wire is
-  /// closed, the socket was replaced, or the IPv6 side was given up.
-  void closedUnder(RawDatagramSocket s, String how) {
-    if (!identical(s, sock) || _reopening || _d._to) return;
-    if (kind == 'IPv6' && !identical(_d._v6, this)) return;
-    _d._say('wire: the operating system closed the $kind socket of port '
-        '${sock.port} without an error ($how) — opened again (§31.3)');
-    againOpen();
-  }
-
-  /// Reads [sock] until `receive()` returns nothing. On a socket that
-  /// [againOpen] has just closed `receive()` returns null.
-  void _drain() {
-    for (var g = sock.receive(); g != null; g = sock.receive()) {
-      _d.counters.received(g.data.length);
-      _read.add(g);
-    }
-  }
-
-  void _schedule() {
-    if (_batchDue || _read.isEmpty) return;
-    _batchDue = true;
-    Timer.run(_batch);
-  }
-
-  void _batch() {
-    _batchDue = false;
-    // The wire is closed for good ([Wire.close]): nobody above takes
-    // packets any more.
-    if (_d._to) return _read.clear();
-    _drain();
-    try {
-      for (var i = 0; i < kReceiveBatch && _read.isNotEmpty; i++) {
-        final g = _read.removeFirst();
-        // [asAddressKind]: what comes in as `::ffff:a.b.c.d` goes up as the
-        // four bytes behind it. As measured, the IPv4 socket got the
-        // IPv4 traffic, so the form never occurred — that is not promised,
-        // and above it the neighbour list and four address keys depend on it.
-        _d._onPacket
-            ?.call(Uint8List.fromList(g.data), asAddressKind(g.address), g.port);
-      }
-    } finally {
-      // A throwing handler above must not leave the rest of the queue
-      // waiting for the next read event.
-      _schedule();
-    }
-  }
-
-  /// The operating system's error for an earlier send. Dart closes the socket
-  /// on every error it reports (SDK `socket_patch.dart` `reportError`: "For all
-  /// errors we close the socket") — hence dead (S389), hence reopened. Except
-  /// "no route" ([noRoute]) on the IPv6 side before [routeSeen]: this network
-  /// has no way out over IPv6, a fresh socket meets the same (S422, §11.1).
-  void error(Object e) {
-    if (kind == 'IPv6' && noRoute(e) && !routeSeen) {
-      if (_reopening || !identical(_d._v6, this)) return; // once per burst
-      _d._say('wire: no route for IPv6 ($e) — the IPv6 socket of port '
-          '${sock.port} stays closed until the next network change (§11.1)');
-      shut();
-      return _d._lost(this);
-    }
-    // `sock.port` still names the old number even on the dead socket
-    // (measured S389) — exactly the one that is about to be bound anew.
-    _d._say('wire: send error from the operating system ($e) — the $kind socket '
-        'is dead with that, port ${sock.port} is opened again');
-    againOpen();
-  }
-
-  /// Reopen the SAME port (it is the node's address, §11.1, every card names
-  /// it); after `close()` it binds again at once (measured S390, case E).
-  /// One error burst reopens ONCE: the OS reports two errors per dead socket,
-  /// and two concurrent reopens left one socket open, unread (S407: 35).
-  /// Returns whether THIS call bound a fresh socket (`false` also while
-  /// another reopen is under way — that one binds).
-  Future<bool> againOpen() async {
-    if (_d._to || _reopening) return false;
-    _reopening = true;
-    final old = sock.port;
-    shut();
-    try {
-      sock = await bindAgain(() => RawDatagramSocket.bind(to, old)); // §31.3
-    } on Object catch (e) {
-      _d._say('Wire: port $old cannot be had again for $kind ($e) — '
-          '${kind == 'IPv6' ? 'this node continues with IPv4 alone '
-              '(§11.1).' : 'this node no longer accepts anything.'}');
-      _d._lost(this);
-      return false;
-    } finally {
-      _reopening = false;
-    }
-    if (_d._to) sock.close();
-    if (_d._to) return false;
-    _nativeOpen();
-    subscribe();
-    _d._say('wire: port $old open again ($kind).');
-    return true;
   }
 }

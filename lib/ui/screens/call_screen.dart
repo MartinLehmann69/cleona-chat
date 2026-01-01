@@ -269,6 +269,47 @@ class _CallScreenState extends State<CallScreen> {
                       )),
           ),
 
+          // Scrims behind the top bar and the bottom controls: the bars draw
+          // white text and translucent white buttons straight onto the
+          // remote picture, and on a light picture they vanished (S429 run
+          // 5, 33.G14: the remote picture on A was white where the bar
+          // stands, "Mikrofon / Video / Kamera" and the duration unreadable;
+          // S429-RCA-L5-33G14.md L5-33-1). They take no touches.
+          const Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 120,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0x99000000), Color(0x00000000)],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: 180,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [Color(0x99000000), Color(0x00000000)],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
           // Top bar: duration + encryption
           Positioned(
             top: 0,

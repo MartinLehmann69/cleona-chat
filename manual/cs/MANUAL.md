@@ -1,337 +1,448 @@
 # Cleona Chat -- Uživatelská příručka
 
-Verze 3.1.125 | Červenec 2026
+Verze 4.2 | Stav k listopadu 2026
 
 ---
 
 ## Obsah
 
 1. [Co je Cleona Chat?](#1-co-je-cleona-chat)
-2. [První kroky](#2-prvni-kroky)
+2. [První kroky](#2-první-kroky)
 3. [Kontakty](#3-kontakty)
-4. [Zprávy](#4-zpravy)
+4. [Zprávy](#4-zprávy)
 5. [Skupiny](#5-skupiny)
-6. [Veřejné kanály](#6-verejne-kanaly)
+6. [Veřejné kanály](#6-veřejné-kanály)
 7. [Hovory](#7-hovory)
-8. [Kalendář](#8-kalendar)
+8. [Kalendář](#8-kalendář)
 9. [Ankety](#9-ankety)
-10. [Více identit](#10-vice-identit)
-11. [Multi-Device](#11-multi-device)
-12. [Obnovení](#12-obnoveni)
-13. [Nastavení](#13-nastaveni)
-14. [Zabezpečení](#14-zabezpeceni)
+10. [Více identit](#10-více-identit)
+11. [Více zařízení](#11-více-zařízení)
+12. [Obnova](#12-obnova)
+13. [Nastavení](#13-nastavení)
+14. [Zabezpečení](#14-zabezpečení)
 15. [Aktualizace softwaru](#15-aktualizace-softwaru)
-16. [Časté dotazy](#16-caste-dotazy)
+16. [Časté otázky](#16-časté-otázky)
 
 ---
-
 ## 1. Co je Cleona Chat?
 
 ### Tvůj messenger, tvá data
 
-Cleona Chat je messenger, který funguje zcela bez centrálního serveru.
-Tvoje zprávy putují přímo z tvého zařízení do zařízení tvého protějšku --
-bez oklik přes sídlo firmy, bez cloudu, bez datového centra. Žádná
-společnost nemůže tvoje zprávy číst, ukládat ani předávat dál, protože mezi
-vámi jednoduše žádná společnost nestojí.
+Cleona Chat je messenger, který funguje úplně bez centrálního serveru. Tvé
+zprávy cestují z tvého zařízení do zařízení tvého protějšku -- bez objížďky
+přes sídlo firmy, bez cloudu, bez datacentra. Kdekoliv na cestě pomůže jiné
+zařízení, jen předá dál šifrované pakety. Žádná firma nemůže tvé zprávy číst,
+ukládat ani předávat dál, protože prostě žádná firma nestojí mezi nimi.
 
 ### Žádný účet, žádné telefonní číslo
 
-U Cleony nepotřebuješ k přihlášení ani telefonní číslo, ani e-mailovou
-adresu. Tvá identita se skládá z kryptografického páru klíčů, který se při
-prvním spuštění automaticky vygeneruje na tvém zařízení. To znamená: nikdo
-tě nemůže vypátrat podle telefonního čísla nebo e-mailové adresy, pokud své
-kontaktní údaje sám nesdělíš.
+U Cleony nepotřebuješ k registraci ani telefonní číslo, ani e-mailovou adresu.
+Tvoje identita se skládá z kryptografického klíčového páru, který se při prvním
+spuštění automaticky vygeneruje na tvém zařízení. To znamená: nikdo tě nemůže
+vypátrat přes tvé telefonní číslo nebo e-mailovou adresu, ledaže bys své
+kontaktní údaje sám někam předal.
 
-### Budoucnosti odolné šifrování
+### Šifrování odolné vůči budoucnosti
 
-Cleona používá tzv. postkvantové šifrování. To znamená: ani budoucí
-kvantové počítače by nedokázaly tvoje zprávy prolomit. Detaily nemusíš
-chápat -- důležité je jen to, že tvá komunikace je chráněna co nejlépe podle
-současného stavu techniky.
+Cleona používá takzvané post-kvantové šifrování. To znamená: ani budoucí
+kvantové počítače by tvé zprávy nedokázaly rozluštit. Nemusíš rozumět
+detailům -- důležité je jen, že je tvá komunikace chráněna tak dobře, jak
+umožňuje současný stav techniky.
 
 ### Jak to funguje bez serveru?
 
-Představ si, že ty a tvoje kontakty společně tvoříte síť. Každé zařízení
-pomáhá předávat zprávy dál. Pokud je tvůj protějšek zrovna online, jde
-zpráva přímo k němu. Pokud je offline, uloží zprávu mezitím společné
-kontakty a doručí ji, jakmile se příjemce znovu objeví. Tvoje kontakty jsou
-tedy zároveň i tvá síť.
+Síť Cleony se skládá jen ze zařízení jejích uživatelů. Každé zařízení je uzel,
+žádný uzel není důležitější než jiný a každý zná jen své sousedy. Čtyři věci
+činí tuto síť zvláštní:
+
+- **Žádný pevný bod.** V aplikaci nestojí žádná adresa serveru a síť nezávisí
+  na žádném jediném uzlu. Neexistuje nic, co by šlo vypnout, aby se vypnula
+  Cleona.
+- **Okamžitě.** Tvá zpráva vyrazí v okamžiku, kdy ji odešleš. Nečeká na žádný
+  takt ani na nic jiného.
+- **Krycí provoz při tom.** Tvé zařízení neustále odesílá malé krycí pakety,
+  aby zvenku nebylo poznat, kdy opravdu píšeš. Žádná zpráva na tom nezávisí --
+  krycí provoz jen běží vedle.
+- **Kódy místo jmen.** Kdo zprávu předává dál, vidí jen kód, který se každý den
+  mění. Normálně žádný z nich nezná odesílatele i příjemce zároveň; výjimky
+  stojí v kapitole 14.
+
+**Tři cesty, všechny najednou.** Když odešleš zprávu, Cleona nezkouší jednu
+cestu po druhé, ale všechny vhodné najednou. Jakmile tvůj protějšek potvrdí
+příjem, ostatní se přeruší.
+
+1. **Ve stejné síti:** Jste-li ve stejné Wi-Fi, zpráva přejde přímo.
+2. **Přes pevné sousedy:** Na internetu předá tvé zařízení zprávu svému pevnému
+   sousedovi. Ten ji předá dál pevným sousedům tvého protějšku (až třem
+   najednou) a jeden z nich ji doručí.
+3. **Schránka:** Je-li tvůj protějšek offline, uloží Cleona zprávu šifrovaně u
+   tří sousedů. Tam zůstane až 7 dní. Jakmile se tvůj protějšek vrátí online,
+   vyzvedne si ji.
+
+**Jak se dostaneš do sítě?** V aplikaci nestojí žádná adresa serveru. Svůj
+vstupní bod dostaneš od svého prvního kontaktu: Jeho pozvánka obsahuje adresy,
+přes které tvé zařízení najde své první sousedy. Ve stejné Wi-Fi se zařízení
+Cleony najdou i sama. Od té chvíle se tvé zařízení s každým sousedem učí
+poznávat další.
 
 ### Platformy
 
-Cleona je dostupná pro Android, iOS, macOS, Linux a Windows.
+Cleona je dostupná pro Android, iOS, macOS, Linux a Windows. Na počítačích a na
+Androidu dorazí zprávy a hovory během několika sekund. Na iPhone to platí, dokud
+je aplikace otevřená. Není-li otevřená, iOS ji probouzí jen občas a jen krátce;
+kdy, to rozhoduje iOS. Cleona pak vyzvedne všechno, co pro tebe bylo schováno, a
+ukáže upozornění s počtem na ikoně aplikace. Hovory nedorazí na iPhone se
+zavřenou aplikací. To je pravidlo Applu, ne chyba v Cleoně.
 
 ---
 
 ## 2. První kroky
 
-### Instalace aplikace
+### Nainstalovat aplikaci
 
 **Android:**
 1. Stáhni si soubor APK z webu Cleony nebo z GitHub Releases.
-2. Otevři soubor v telefonu. Pokud je potřeba, povol instalaci z neznámých
-   zdrojů (Android se tě zeptá automaticky).
-3. Klepni na "Instalovat" a počkej, až se instalace dokončí.
+2. Otevři soubor na svém telefonu. Pokud je to potřeba, povol instalaci z
+   neznámých zdrojů (Android se tě zeptá automaticky).
+3. Klepni na „Instalovat" a počkej, dokud instalace neskončí.
 
 **iOS:**
-1. Otevři pozvánku do TestFlight na svém iPhonu.
-2. Klepni na "Instalovat". TestFlight je oficiální způsob Applu pro
-   distribuci beta aplikací.
-3. Po instalaci najdeš Cleonu na ploše.
+1. Otevři na svém iPhonu odkaz na pozvánku TestFlight.
+2. Klepni na „Instalovat". TestFlight je oficiální cesta Applu, jak distribuovat
+   beta aplikace.
+3. Po instalaci najdeš Cleonu na domovské obrazovce.
 
 **macOS:**
 1. Stáhni si soubor DMG z webu Cleony nebo z GitHub Releases.
 2. Otevři DMG a přetáhni Cleonu do složky Aplikace.
-3. Při prvním spuštění se macOS možná zeptá, jestli chceš otevřít aplikaci
-   od identifikovaného vývojáře -- potvrď to.
+3. Při prvním spuštění se macOS možná zeptá, zda chceš otevřít aplikaci od
+   identifikovaného vývojáře -- potvrď to.
 
 **Linux (Ubuntu/Debian):**
 1. Stáhni si soubor .deb z webu Cleony nebo z GitHub Releases.
-2. Nainstaluj dvojklikem nebo v terminálu: `sudo dpkg -i cleona-chat_VERSION_amd64.deb`
-3. Spusť Cleonu z nabídky aplikací nebo v terminálu příkazem `cleona-chat`.
+2. Nainstaluj dvojklikem nebo v terminálu: `sudo dpkg -i cleona-chat-beta_VERSION_amd64.deb`
+3. Spusť Cleonu z nabídky aplikací nebo v terminálu příkazem `cleona-chat-beta`.
 
 **Linux (Fedora/openSUSE):**
 1. Stáhni si soubor .rpm z webu Cleony nebo z GitHub Releases.
-2. Nainstaluj příkazem: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
-3. Spusť Cleonu z nabídky aplikací nebo v terminálu příkazem `cleona-chat`.
+2. Nainstaluj příkazem: `sudo dnf install cleona-chat-beta-VERSION-1.x86_64.rpm`
+3. Spusť Cleonu z nabídky aplikací nebo v terminálu příkazem `cleona-chat-beta`.
 
 **Linux (všechny distribuce -- AppImage):**
 1. Stáhni si soubor .AppImage z webu Cleony nebo z GitHub Releases.
-2. Nastav soubor jako spustitelný: pravé tlačítko, Vlastnosti, Spustitelný,
-   nebo v terminálu: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
-3. Spusť dvojklikem nebo v terminálu: `./cleona-chat-VERSION-x86_64.AppImage`
+2. Udělej soubor spustitelný: pravé tlačítko, vlastnosti, spustitelný, nebo v
+   terminálu: `chmod +x cleona-chat-beta-VERSION-x86_64.AppImage`
+3. Spusť dvojklikem nebo v terminálu: `./cleona-chat-beta-VERSION-x86_64.AppImage`
+
+Názvy balíčků platí pro betu, která je zatím jedinou zveřejněnou verzí; jmenují
+se `cleona-chat-beta`.
 
 **Windows:**
 1. Stáhni si instalátor z webu Cleony nebo z GitHub Releases.
 2. Spusť instalační soubor a postupuj podle pokynů.
-3. Spusť Cleonu z nabídky Start nebo pomocí zástupce na ploše.
+3. Spusť Cleonu z nabídky Start nebo ze zástupce na ploše.
 
-### Vytvoření identity
+### Vytvořit identitu
 
-Při prvním spuštění vytvoří Cleona automaticky novou identitu. Můžeš si
-zvolit zobrazované jméno -- to je jméno, které uvidí tvoje kontakty. Toto
-jméno lze kdykoli změnit.
+Při prvním spuštění Cleona automaticky vytvoří novou identitu pro tebe. Můžeš si
+dát zobrazované jméno -- to je jméno, které vidí tví kontakty. Toto jméno lze
+kdykoliv změnit.
 
-### Zapsání Seed-Phrase -- to nejdůležitější ze všeho
+### Zapsat seed frázi -- to nejdůležitější vůbec
 
-Po vytvoření identity ti Cleona zobrazí 24 slov. To je tvá
-**Seed-Phrase** -- tvůj osobní klíč pro obnovení.
+Po vytvoření tvé identity ti Cleona ukáže 24 slov. To je tvá **seed fráze** --
+tvůj osobní klíč pro obnovu.
 
-**Zapiš si těchto 24 slov na papír a bezpečně je ulož.**
+**Zapiš si těchto 24 slov na papír a uschovej je bezpečně.**
 
 Proč je to tak důležité?
 
-- Pokud se tvůj telefon rozbije, ztratí se nebo je ukraden, můžeš pomocí
-  těchto 24 slov obnovit celou svou identitu na novém zařízení.
-- Bez Seed-Phrase neexistuje cesta zpět. Neexistuje tlačítko "zapomenuté
-  heslo" ani podpora, která by ti mohla vrátit účet -- protože žádný účet na
-  serveru vůbec neexistuje.
-- Seed-Phrase nikdy nikomu nesděluj. Kdokoli tato slova zná, se za tebe může
-  vydávat.
+- Když se tvůj telefon rozbije, ztratí nebo ho někdo ukradne, můžeš s těmito 24
+  slovy obnovit celou svou identitu na novém zařízení.
+- Bez seed fráze neexistuje cesta zpět. Neexistuje žádné tlačítko „zapomenuté
+  heslo" a žádná podpora, která by ti mohla vrátit tvůj účet -- protože žádný
+  účet na serveru vůbec neexistuje. Ani tví kontakty nemohou tvou identitu
+  obnovit, ať je jich kolik chce. Druhé zařízení se stejnou identitou přijde
+  s pozdější verzí (viz kapitola 11).
+- Seed frázi nikdy nikomu nepředávej. Kdo tato slova zná, se může vydávat za
+  tebe.
 
-Seed-Phrase najdeš později také v nastavení pod "Zabezpečení", pokud si ji
-budeš chtít znovu přečíst.
+24 slov najdeš později v nastavení pod „Záloha" -> „Zobrazit frázi obnovy",
+kdybys si je chtěl ještě jednou opsat. Na Androidu to potvrdíš svým zámkem
+obrazovky.
 
-### Přidání prvního kontaktu
+### Přidat první kontakt
 
-Aby ses s někým mohl bavit, musíš danou osobu nejprve přidat jako kontakt.
-K tomu vede několik cest -- všechny jsou vysvětleny v následující kapitole.
+Abys s někým mohl chatovat, musíš toho člověka nejprve přidat jako kontakt. K
+tomu vede několik cest -- všechny jsou vysvětleny v dalším oddílu.
 
 ---
 
 ## 3. Kontakty
 
-### Naskenování QR kódu (doporučeno)
+### Tvá pozvánka
 
-Nejjednodušší způsob, jak přidat kontakt:
+Kontakty v Cleoně vznikají jen přes pozvánku. Tvá pozvánka je tu od prvního
+spuštění -- i bez internetu a dřív, než tvé zařízení vůbec našlo souseda. Najdeš
+ji na stránce s detaily identity (klepni na své jméno v horním pruhu).
 
-1. Tvůj protějšek otevře stránku podrobností své identity (klepnutím na
-   vlastní jméno v horní liště) a ukáže ti svůj QR kód.
-2. Klepneš na tlačítko plus a zvolíš "Naskenovat QR kód".
-3. Namiř telefon na QR kód protějšku.
-4. Žádost o kontakt se odešle automaticky. Jakmile ji protějšek přijme,
-   můžete si spolu psát.
+Pozvánka existuje ve dvou formách, které obsahují přesně to samé:
 
-Pokud se setkáte osobně, je QR kód nejbezpečnější metodou, protože přesně
-víš, s kým si kontakt vyměňuješ.
+- jako **QR kód**, když tvůj protějšek stojí vedle tebe, a
+- jako **textový řádek**, který pošleš e-mailem, SMS nebo přes jiný messenger.
 
-### NFC (přiložení telefonů k sobě)
+Pozvánka neobsahuje žádné telefonní číslo a žádné jméno z adresáře. Obsahuje tvé
+veřejné klíče a adresy, přes které tvůj protějšek dosáhne na tebe a na tvé
+sousedy. Pro někoho, kdo si Cleonu právě nainstaloval, je tvá pozvánka proto
+také vstupním bodem do sítě.
 
-Pokud obě zařízení podporují NFC:
+### Naskenovat QR kód (doporučeno)
 
-1. Oba otevřete funkci přidání kontaktu.
-2. Přiložte telefony k sobě zády.
-3. Kontaktní údaje se automaticky vymění.
+Když se potkáte osobně:
 
-NFC nabízí, podobně jako QR kód, vysokou úroveň bezpečnosti, protože výměna
-funguje jen tehdy, když stojíte fyzicky vedle sebe.
+1. Ukaž svému protějšku QR kód své pozvánky.
+2. Tvůj protějšek klepne na tlačítko plus, vybere „Naskenovat QR kód" a namíří
+   kameru na tvou obrazovku. Funguje to i s webkamerou počítače.
+3. Požadavek přijde tobě a je **přijat automaticky** -- protože jsi ten kód
+   přece právě sám ukázal.
 
-### Sdílení odkazu (cleona:// URI)
+QR kód platí jen jednou: první platný požadavek je přijat, poté je pozvánka
+spotřebována. QR kód je nejbezpečnější metoda, protože přesně víte, s kým si
+kontakt vyměňujete.
 
-Svůj kontaktní odkaz můžeš poslat také e-mailem, SMS nebo přes jiný
-messenger:
+### NFC (přiložit telefony k sobě)
 
-1. Otevři stránku podrobností své identity.
-2. Zkopíruj svůj odkaz cleona://.
-3. Pošli odkaz osobě, která tě má přidat.
-4. Druhá osoba odkaz otevře, nebo ho vloží do dialogu pro přidání kontaktu.
+Když obě zařízení podporují NFC:
 
-Pozor: u této metody spoléháš na to, že odkaz nebyl při přenosu pozměněn.
-Pro obzvlášť citlivé kontakty doporučujeme QR kód nebo NFC.
+1. Otevřete u obou funkci přidání kontaktu.
+2. Přiložte své telefony zády k sobě.
+3. Pozvánka se přenese a přijme se automaticky.
 
-### Přijímání žádostí o kontakt
+NFC nabízí jako QR kód vysokou míru zabezpečení, protože výměna funguje jen,
+když stojíte fyzicky vedle sebe.
 
-Když ti někdo pošle žádost o kontakt, objeví se v tvé schránce (poslední
-záložka ve spodní liště). Tam můžeš:
+### Poslat textový řádek
 
-- **Přijmout** -- osoba se přidá mezi tvoje kontakty.
-- **Odmítnout** -- žádost se zamítne.
+Když se nemůžete potkat:
+
+1. Otevři svou pozvánku a zkopíruj textový řádek.
+2. Pošli ho osobě, která tě má přidat -- e-mailem, SMS nebo přes jiný
+   messenger.
+3. Druhá osoba vloží řádek v Cleoně do dialogu přidání kontaktu.
+4. Požadavek se u tebe objeví pod **„Žádosti"**. Tady se **nepřijímá**
+   automaticky: rozhoduješ sám, protože nemůžeš vědět, kdo si řádek cestou ještě
+   přečetl.
+
+### Přijmout žádosti o kontakt
+
+Příchozí požadavek ještě kontakt nevytváří. Klade ti otázku a objeví se v tabu
+**„Žádosti"**. Tam vidíš jméno a stupeň ověření a můžeš si vybrat:
+
+- **Přijmout** -- teprve teď se z osoby stane tvůj kontakt.
+- **Odmítnout** -- požadavek se zahodí.
 - **Blokovat** -- osoba ti nemůže posílat další žádosti.
 
-### Úrovně ověření
+### Nikdy nepoužívat jako pevného souseda
 
-Cleona ti ukazuje, jak spolehlivě je potvrzená identita kontaktu:
+V nabídce kontaktu najdeš přepínač **„Nikdy nepoužívat jako pevného souseda"**
+(výchozí: vypnuto). Je-li zapnutý, tento kontakt pro tebe nepředává zprávy dál a
+proto se také nedozví, kdy odesíláš nebo přijímáš zprávy. Je to myšleno pro
+případ, že ti hrozí nebezpečí z tvého vlastního okolí.
 
-| Úroveň | Význam |
+Od neznámých (ani kontakt, ani člen společné skupiny) Cleona kromě takového
+požadavku nepustí nic -- žádnou zprávu, žádný hovor, žádný soubor. A ani ten
+požadavek projde jen tehdy, když odesílatel předtím vyřešil malou
+výpočetní úlohu. To dělá hromadný spam drahým.
+
+### Stupně ověření
+
+Cleona ti ukazuje, jak spolehlivě je identita kontaktu potvrzena:
+
+| Stupeň | Význam |
 |-------|-----------|
-| Neznámý | Máš pouze Node-ID nebo odkaz. |
-| Viděný | Výměna klíčů proběhla úspěšně, můžete spolu komunikovat šifrovaně. |
-| Ověřený | Setkali jste se osobně a ověřili se přes QR kód nebo NFC. |
-| Důvěryhodný | Tento kontakt jsi výslovně označil jako důvěryhodný. |
+| Neověřeno | Jste propojeni, ale nic nepotvrzuje, že za tím skutečně stojí správná osoba. |
+| Viděno | Výměna klíčů proběhla úspěšně, můžete komunikovat šifrovaně. |
+| Ověřeno | Potkali jste se osobně a spojili se přes sken kamerou nebo NFC. |
+| Důvěryhodný | Tohoto kontaktu jsi výslovně označil jako důvěryhodného. |
 
-Čím vyšší úroveň, tím si můžeš být jistější, že skutečně mluvíš se správnou
-osobou.
+„Ověřeno" existuje jen pro osobní výměnu. Pozvánka, která přišla přes chat nebo
+e-mailem, tento stupeň nikdy nedosáhne -- i když obsahuje stejná data.
+
+Změní-li se klíče kontaktu bez oznámení, Cleona ho vrátí na „Neověřeno". To tě
+chrání před tím, aby se někdo nepozorovaně vydával za tvůj kontakt.
 
 ---
-
 ## 4. Zprávy
 
-### Odesílání a přijímání textu
+### Odeslat a přijímat text
 
-Stačí napsat zprávu do vstupního pole dole a stisknout Enter nebo tlačítko
-odeslat. Tvoje zpráva se automaticky zašifruje, než opustí tvé zařízení.
+Jednoduše napiš svou zprávu do vstupního pole dole a stiskni Enter nebo
+tlačítko Odeslat. Tvá zpráva se automaticky zašifruje dřív, než opustí tvé
+zařízení.
 
-Příchozí zprávy se zobrazují v historii chatu. Zaškrtávátko ti ukáže, zda
-byla tvoje zpráva doručena.
+Příchozí zprávy se objeví v historii chatu.
 
-### Odesílání obrázků, videí a souborů
+### Co znamenají značky u tvé zprávy
+
+| Značka | Význam |
+|---------|-----------|
+| Hodiny | Zpráva je vytvořena, ale ještě ji neunesla žádná cesta. |
+| Jeden háček | Zpráva je na cestě. To platí i, zatímco čeká ve schránce na tvého protějška. |
+| Dva háčky | Doručeno: Zařízení tvého protějška potvrdilo příjem. |
+| Varovný symbol | 14 dní žádná cesta zprávu nenesla. Klepni na ni, abys ji odeslal znovu. |
+
+**Offline není chyba.** Není-li tvůj protějšek dostupný, zpráva zůstává u jednoho
+háčku, dokud si ji nevyzvedne -- není ztracena. Nemá-li tvé zařízení samotné
+připojení, zpráva zůstává u hodin a vyrazí sama, jakmile je zase nějaká cesta.
+Varovný symbol se objeví teprve, když 14 dní nenašla žádnou cestu; tehdy ji
+můžeš odeslat znovu.
+
+To platí i pro iPhone se zavřenou aplikací: zpráva čeká ve schránce, dokud iOS
+aplikaci na chvíli neprobudí nebo dokud ji tvůj protějšek neotevře. To může trvat
+déle než na jiných zařízeních.
+
+Dva háčky existují jen tehdy, když příjemce sám potvrdí příjem. Toto potvrzení o
+přijetí je šifrované a podepsané -- nikdo cestou ho nemůže zfalšovat, aby ti
+předstíral doručení.
+
+### Odesílat obrázky, videa a soubory
 
 Máš několik možností:
 
-- **Ikona sponky** ve vstupním poli: klepni na ni a vyber soubor, obrázek
-  nebo video z galerie nebo souborového systému.
-- **Přetažení (drag and drop)** (desktop): jednoduše přetáhni soubor do okna
-  chatu.
-- **Vložení ze schránky** (desktop): zkopíruj obrázek a vlož ho do chatu.
+- **Ikona sponky** ve vstupním poli: Klepni na ni, abys vybral soubor, obrázek
+  nebo video z galerie nebo ze svého souborového systému.
+- **Drag and Drop** (desktop): Přetáhni soubor jednoduše do okna chatu.
+- **Vložit ze schránky** (desktop): Zkopíruj obrázek a vlož ho v chatu.
 
-Malé soubory (do 256 KB) se posílají přímo. Větší soubory se přenášejí ve
-dvoufázovém postupu: nejdřív se soubor ohlásí, poté se přenese po částech.
+Malé soubory (pod 256 KB) cestují přímo ve zprávě. Větší soubory se rozdělují na
+kousky a opatřují se korekcí chyb, takže jednotlivé ztracené kousky nevadí. Jste-
+li oba online, streamují se přes souseda; jinak se ukládají u zařízení, která jsou
+stále dostupná, dokud si je tvůj protějšek nevyzvedne.
+
+Od 256 KB se tě Cleona zeptá u každého souboru, dřív než ho odešle: Velký
+soubor nemůže vzít cestu tvých zpráv. Jeho obsah zůstává šifrovaný a tvůj
+protějšek se nedozví tvou internetovou adresu. Přenos je ale zvenku vidět jako
+událost a cizí zařízení, které ho předává dál nebo uchovává, vidí, kdo nahrává
+a kdo vyzvedává. Tvůj souhlas platí jen pro tento jeden soubor.
 
 ### Hlasové zprávy
 
 1. Podrž tlačítko mikrofonu ve vstupním poli.
-2. Namluv svou zprávu.
-3. Tlačítko pusť, aby se zpráva odeslala.
+2. Vyslov svou zprávu.
+3. Tlačítko pusť, abys zprávu odeslal.
 
-Pokud máš na svém zařízení aktivované rozpoznávání řeči (viz nastavení),
-tvá hlasová zpráva se automaticky přepíše do textu. Tvůj protějšek pak vidí
-jak nahrávku, tak přepsaný text.
+Je-li na tvém zařízení zapnuté rozpoznávání řeči (viz Nastavení), přepíše se
+tvá hlasová zpráva automaticky do textu. Tvůj protějšek pak vidí nahrávku i
+přepsaný text.
 
-### Odpovídání na zprávy (citace)
+### Odpovídat na zprávy (citovat)
 
-Chceš-li odpovědět na konkrétní zprávu:
+Když chceš odpovědět na konkrétní zprávu:
 
-1. Otevři menu se třemi tečkami vedle zprávy.
-2. Zvol "Odpovědět".
-3. Nad vstupním polem se objeví banner s citovanou zprávou.
+1. Otevři nabídku tří teček vedle zprávy.
+2. Vyber „Odpovědět".
+3. Nad vstupním polem se objeví pruh s citovanou zprávou.
 4. Napiš svou odpověď a odešli ji.
 
-Citovaná zpráva se zobrazí v tvé odpovědi, takže je souvislost jasná.
+Citovaná zpráva se ukáže ve tvé odpovědi, takže je vztah jasný.
 
-### Úprava a mazání zpráv
+### Upravit a mazat zprávy
 
-- **Úprava:** Menu se třemi tečkami u zprávy, poté "Upravit". Změň text a
-  znovu ho odešli. Tvůj protějšek uvidí, že zpráva byla upravena. Úprava je
-  možná do 15 minut od odeslání.
-- **Mazání:** Menu se třemi tečkami u zprávy, poté "Smazat". Zpráva se
-  odstraní u tebe i u tvého protějšku. Vlastní zprávy můžeš smazat kdykoli --
-  pro mazání neexistuje žádné časové omezení.
+- **Upravit:** Nabídka tří teček u zprávy, pak „Upravit". Změň text a odešli ho
+  znovu. Tvůj protějšek vidí, že zpráva byla upravena. Upravit lze do 15 minut po
+  odeslání.
+- **Smazat:** Nabídka tří teček u zprávy, pak „Smazat". Zpráva se odstraní u tebe
+  i u tvého protějška. Své vlastní zprávy můžeš mazat kdykoliv -- pro mazání
+  neexistuje žádný časový rámec.
 
 ### Emoji reakce
 
-Místo psaní odpovědi můžeš na zprávu reagovat emoji:
+Místo toho, aby sis psal odpověď, můžeš na zprávu reagovat emoji:
 
-1. Otevři menu se třemi tečkami nebo podrž zprávu stiskem.
-2. Vyber emoji z rychlého výběru, nebo otevři výběr emoji pro plnou
-   nabídku.
-3. Tvá reakce se zobrazí pod zprávou.
+1. Otevři nabídku tří teček nebo zprávu dlouze podrž.
+2. Vyber emoji z rychlého výběru nebo otevři výběr emoji pro plný sortiment.
+3. Tvá reakce se objeví pod zprávou.
 
-### Kopírování textu
+### Kopírovat text
 
-Přes menu se třemi tečkami u zprávy můžeš zkopírovat text zprávy do
-schránky.
+Přes nabídku tří teček u zprávy můžeš text zprávy zkopírovat do schránky.
 
-### Vyhledávání ve zprávách
+### Hledat zprávy
 
-V horní části okna chatu najdeš vyhledávací funkci. Zadej hledaný výraz a
-Cleona ti zobrazí všechny výskyty v aktuálním chatu. Šipkami se můžeš
-pohybovat mezi výsledky.
+Na horním okraji okna chatu najdeš funkci hledání. Zadej hledaný výraz a Cleona
+ti ukáže všechny shody v aktuálním chatu. Šipkami můžeš mezi shodami
+přeskakovat tam a zpět.
 
-Na úvodní obrazovce je navíc filtr pro vyhledávání napříč záložkami, kterým
-můžeš prohledat všechny konverzace podle zadaného výrazu.
+Na úvodní obrazovce je navíc vyhledávací filtr napříč taby, kterým můžeš
+prohledat všechny konverzace podle jednoho výrazu.
 
 ### Náhled odkazu
 
-Když pošleš odkaz, Cleona automaticky vytvoří náhled (titulek, popis,
-náhledový obrázek). Tento náhled vytváří tvé zařízení a posílá ho spolu se
-zprávou -- tvůj protějšek proto nemusí navazovat spojení s odkazovanou
-webovou stránkou.
+Když pošleš odkaz, Cleona automaticky vytvoří náhled (titulek, popis, náhledový
+obrázek). Tento náhled vzniká na tvém zařízení a odesílá se s ním -- tvůj
+protějšek kvůli tomu nemusí budovat spojení s odkazovaným webem.
 
-Když klepneš na přijatý odkaz, budeš dotázán, zda ho chceš otevřít v
-běžném prohlížeči, v anonymním režimu, nebo vůbec ne.
+Co udělá klepnutí na přijatý odkaz, nastavuješ v nastavení pod „Otevírání
+odkazů": „Normálně", „Upřednostnit anonymní okno" (kde zařízení neumí otevřít
+anonymní okno, odkaz se otevře normálně) nebo „Pokaždé se zeptat".
 
 ---
 
 ## 5. Skupiny
 
-### Vytvoření skupiny
+### Vytvořit skupinu
 
-1. Přepni na záložku "Skupiny".
+1. Přepni na tab „Skupiny".
 2. Klepni na tlačítko plus.
-3. Zadej název skupiny.
+3. Dej skupině jméno.
 4. Vyber kontakty, které chceš pozvat.
-5. Klepni na "Vytvořit".
+5. Klepni na „Vytvořit".
 
-Pozvané kontakty dostanou upozornění a mohou do skupiny vstoupit.
+Pozvané kontakty dostanou oznámení a mohou se ke skupině připojit.
 
-### Zvaní členů
+### Jak jsou skupinové zprávy chráněny
 
-I po vytvoření skupiny můžeš zvát další kontakty:
+Ve skupině s až 16 členy odesílá Cleona každou zprávu každému členovi zvlášť --
+vždy šifrovanou jen pro tohoto člena, jako bys každému napsal vlastní zprávu.
+Háčky u skupinové zprávy ukazují stav člena, u kterého je nejméně daleko.
 
-1. Otevři informace o skupině (menu se třemi tečkami v přehledu skupiny
-   nebo horní lišta v chatu skupiny).
-2. Klepni na "Pozvat".
+Přeroste-li skupina 16 členů, používá společný klíč. Ten se mění každý den a
+vytahuje se znovu, když nějaký člen odejde nebo je odebrán; nový člen čte
+teprve od svého vstupu. Háčky tam už neukazují stav každého člena, ale to, že
+je zpráva uložena v síti. Klesne-li skupina na 12 členů nebo méně, vrací se
+zpět k odesílání jednotlivě.
+
+### Obrázky ve skupinách a kanálech
+
+V nastavení skupiny nebo kanálu určuješ pomocí „Vždy načítat obrázky", zda se
+obrázky načítají hned, nebo až když na jeden klepneš.
+
+### Pozvat členy
+
+I po vytvoření můžeš pozvat další kontakty:
+
+1. Otevři informace o skupině (nabídka tří teček v přehledu skupin nebo horní
+   pruh ve skupinovém chatu).
+2. Klepni na „Pozvat".
 3. Vyber kontakty, které chceš přidat.
 
 ### Role
 
 Každá skupina má tři role:
 
-- **Vlastník (Owner):** Má plnou kontrolu. Může přidávat a odebírat členy,
-  jmenovat administrátory a spravovat skupinu. Vlastník může svůj status
-  přenést i na jiného člena.
-- **Administrátor:** Může odebírat členy a pomáhat se správou.
+- **Majitel (Owner):** Má plnou kontrolu. Může přidávat a odebírat členy, jmenovat
+  správce a skupinu spravovat. Majitel může také svůj status převést na jiného
+  člena.
+- **Správce (Admin):** Může odebírat členy a pomáhat se správou.
 - **Člen:** Může číst a psát zprávy.
 
-### Opuštění skupiny
+### Opustit skupinu
 
-1. Otevři menu se třemi tečkami v přehledu skupiny.
-2. Zvol "Opustit".
+1. Otevři nabídku tří teček v přehledu skupin.
+2. Vyber „Opustit".
 3. Potvrď své rozhodnutí.
 
-Když skupinu opustíš, tvé dosavadní zprávy zůstanou pro ostatní členy
-viditelné.
+Když skupinu opustíš, zůstávají tvé dosavadní zprávy pro ostatní členy viditelné.
 
 ---
 
@@ -339,101 +450,126 @@ viditelné.
 
 ### Co jsou kanály?
 
-Kanály jsou veřejná diskuzní fóra uvnitř sítě Cleona. Na rozdíl od skupin
-zde může kdokoli číst, aniž by musel být pozván. Příspěvky mohou
-zveřejňovat pouze vlastník a administrátoři -- odběratelé pouze čtou.
+Kanály jsou veřejná diskuzní fóra uvnitř sítě Cleony. Na rozdíl od skupin tu
+může každý číst, aniž by musel být pozvaný. Jen majitel a správci mohou
+zveřejňovat příspěvky -- odběratelé čtou.
 
-### Vyhledávání kanálů a přihlášení k odběru
+### Najít kanály a připojit se
 
-1. Přepni na záložku "Kanály".
-2. Otevři záložku "Hledat".
-3. Procházej dostupné kanály podle názvu nebo tématu.
-4. Klepni na kanál a poté na "Odebírat".
+1. Přepni na tab „Kanály".
+2. Otevři záložku „Hledání".
+3. Prohledávej dostupné kanály podle jména nebo tématu.
+4. Klepni na kanál a pak na „Odebírat".
 
-Kanály lze filtrovat podle jazyka. Některé kanály jsou označené jako
-"Nevhodné pro mladistvé" -- ty jsou viditelné pouze tehdy, když jsi ve svém
-profilu potvrdil, že je ti více než 18 let.
+Kanály lze filtrovat podle jazyka. Některé kanály jsou označeny jako „Nevhodné
+pro mládež" -- ty jsou viditelné jen tehdy, když jsi ve svém profilu potvrdil,
+že je ti více než 18.
 
-### Vytvoření vlastního kanálu
+### Vytvořit vlastní kanál
 
-1. Přepni na záložku "Kanály".
+1. Přepni na tab „Kanály".
 2. Klepni na tlačítko plus.
-3. Zadej název kanálu (musí být jedinečný v celé síti).
-4. Vyber jazyk a zda má být kanál veřejný, nebo soukromý.
-5. Volitelně: přidej popis a obrázek.
-6. Klepni na "Vytvořit".
+3. Zadej jméno kanálu (musí být jedinečné v celé síti).
+4. Vyber jazyk a to, zda má být kanál veřejný nebo soukromý.
+5. Volitelné: Přidej popis a obrázek.
+6. Klepni na „Vytvořit".
 
-U veřejných kanálů můžeš určit, zda bude obsah označen jako "Nevhodné pro
-mladistvé".
+U veřejných kanálů můžeš určit, zda má být obsah klasifikován jako „Nevhodné pro
+mládež".
 
-### Nahlašování obsahu
+### Nahlásit obsah
 
-Pokud si ve veřejném kanálu všimneš nevhodného obsahu, můžeš ho nahlásit.
-Cleona využívá decentralizovaný systém moderace: nahlášení vyhodnocují
-náhodně vybraní členové sítě (jakási forma "poroty"). Pokud se zjistí
-porušení, dostane kanál varování. Při opakovaném porušování je kanál v
-indexu vyhledávání znevýhodněn, nebo úplně zablokován.
+Všimneš-li si ve veřejném kanálu nevhodného obsahu, můžeš ho nahlásit. Cleona
+používá decentralizovaný systém moderování: hlášení hodnotí náhodně vybraní
+členové sítě (jakási „porota"). Je-li zjištěn přestupek, dostane kanál
+varování. Při opakovaných přestupcích je ve vyhledávacím indexu degradován nebo
+zablokován.
 
 ### Systémové kanály
 
 Cleona má dva vestavěné systémové kanály:
 
 - **Bug Log:** Když Cleona rozpozná chybu, zeptá se tě, zda chceš odeslat
-  anonymizované hlášení o chybě. Tato hlášení se objeví v kanálu Bug Log,
-  kde je může vidět komunita. Nepřenáší se žádné osobní údaje -- pouze
-  technické popisy chyb. Log-hlášení můžeš odeslat i ručně (s náhledovým
-  dialogem a výslovným souhlasem).
-- **Feature Requests:** Zde mohou uživatelé podávat návrhy na nové funkce a
-  hlasovat pro existující návrhy. Návrhy jsou seřazeny podle počtu hlasů.
+  hlášení o chybě; předtím přesně vidíš, co se zveřejní. Tato hlášení přistanou
+  v kanálu Bug Log, kde si je může komunita prohlédnout. Hlášení nenese žádné
+  jméno ani žádný obsah tvých konverzací, nýbrž pseudonym. V betě navíc uvádí
+  tvou identifikaci (User-ID), aby se tě vývojáři mohli na něco zeptat. Můžeš
+  také ručně odeslat hlášení (s náhledovým dialogem a výslovným souhlasem).
+- **Feature Requests:** Zde mohou uživatelé podávat návrhy na funkce a hlasovat o
+  stávajících návrzích. Návrhy se řadí podle hlasů.
 
-Oba systémové kanály mají limit velikosti 25 MB a jsou sledovány systémem
-porotní moderace.
+Každý počítač drží až 25 MB na systémový kanál, každý mobil až 5 MB; je plno,
+jde nejdřív to nejstarší -- nikdy to, co už jsi sám viděl.
 
 ---
-
 ## 7. Hovory
 
-### Zahájení hlasového hovoru
+### Zahájit hlasový hovor
 
-1. Otevři chat s kontaktem, kterému chceš zavolat.
-2. Klepni na ikonu telefonu v horní liště.
-3. Počkej, až tvůj protějšek hovor přijme.
+1. Otevři chat s kontaktem, kterého chceš zavolat.
+2. Klepni na symbol telefonu v horním pruhu.
+3. Počkej, dokud tvůj protějšek hovor nepřijme.
 
-Během hovoru vidíš časovou osu, dobu trvání hovoru a máš přístup k ztlumení
-mikrofonu a reproduktoru.
+Během hovoru vidíš časovou osu, délku hovoru a máš přístup k ztlumení a
+reproduktoru.
 
-Pro ukončení klepni na červené tlačítko zavěsit.
+K zahájení klepni na červené tlačítko závěru hovoru.
 
-### Zahájení videohovoru
+Pokud vidíš „Nedostupný", zařízení tvého protějška právě teď není dostupné,
+například iPhone se zavřenou aplikací. Napiš místo toho zprávu.
+
+### Zahájit videohovor
 
 1. Otevři chat s kontaktem.
-2. Klepni na ikonu kamery v horní liště.
-3. Tvůj obraz se objeví v malém okně, obraz protějšku ve velké ploše.
+2. Klepni na symbol kamery v horním pruhu.
+3. Tvůj obraz se objeví v malém okně, obraz tvého protějška ve velké oblasti.
 
-Během hovoru můžeš přepínat mezi přední a zadní kamerou.
+Během hovoru můžeš přepínat mezi předním a zadním fotoaparátem.
 
 ### Příchozí hovory
 
-Když ti někdo volá, objeví se okno s upozorněním obsahující jméno
-volajícího. Můžeš:
+Když tě někdo volá, objeví se okno s oznámením se jménem volajícího. Můžeš:
 
-- **Přijmout** -- hovor začne.
-- **Odmítnout** -- volající dostane upozornění.
+- **Přijmout** -- hovor začíná.
+- **Odmítnout** -- volající je upozorněn.
 
-Pokud už v jednom hovoru jsi, nový hovor se automaticky odmítne.
+Jsi-li právě v hovoru, nový hovor nezvoní; dostaneš místo toho zprávu
+„Zmeškaný hovor". Platí totéž pro skupinový hovor, který jsi nepřijal -- zpráva
+pak stojí ve skupinovém chatu.
+
+Zavolá-li někdo na jednu z tvých identit, která se právě nezobrazuje, zazvoní
+to přesto; obrazovka hovoru říká, která z tvých identit je volaná.
+
+Na iPhone zazvoní jen při otevřené aplikaci. Kdo ti volá, když není otevřená,
+vidí po 10 sekundách „Nedostupný". Jakmile aplikaci otevřeš, najdeš zprávu o
+zmeškaném hovoru.
 
 ### Skupinové hovory
 
-Můžeš uskutečňovat i skupinové hovory, kterých se účastní více lidí
-najednou. Hovor je organizován přes inteligentní strom pro předávání dat,
-takže nemusí být každý účastník přímo propojen s každým jiným. Všechny
-hovory jsou po celou dobu šifrované.
+Můžeš také vést skupinové hovory, kterých se současně účastní více osob. Hovor
+je organizován přes inteligentní strom předávání, takže nemusí být každý účastník
+spojen přímo s každým jiným. Všechny hovory jsou po celou dobu šifrované.
 
-### Šifrování hovorů
+Každý člen skupiny může skupinový hovor zahájit. Dva účastníci, kteří nejsou
+navzájem kontakty, nikdy nevidí internetovou adresu toho druhého: Jejich zvuk a
+obraz běží přes účastníka, který je kontaktem s oběma. Není-li takový, ti dva
+nejsou propojeni a dlaždice říká „Žádný společný kontakt v hovoru". Je-li
+nějaké přeposílání vytížené, zvuk zůstává a video tomu páru odpadne.
 
-Všechny hovory jsou šifrovány jednorázovými klíči, které existují pouze po
-dobu hovoru. Po zavěšení jsou tyto klíče okamžitě smazány. Nikdo nemůže
-dodatečně dešifrovat proběhlý hovor.
+### Šifrování u hovorů
+
+Všechny hovory se šifrují jednorázovými klíči, které existují jen po dobu hovoru.
+Po zavěšení se tyto klíče okamžitě smažou. Nikdo nemůže minulý hovor dodatečně
+rozšifrovat.
+
+Upřímně řečeno: Hovory probíhají, kdykoli je to možné, přímo mezi zařízeními,
+protože i malé zpoždění u mluvení vadí. Na rozdíl od zpráv proto může tvůj
+poskytovatel internetu při hovoru vidět, s jakou internetovou adresou jsi
+spojen. Co říkáte, nevidí.
+
+Při hovoru vidí tvůj kontakt také tvou internetovou adresu. Nechceš-li to u
+nějakého kontaktu, vypni v jeho nabídce „Povolit hovory" (výchozí: zapnuto).
+Vypneš-li to později, zůstane mu adresa, kterou už viděl, známá.
 
 ---
 
@@ -444,54 +580,52 @@ decentralizovaně -- bez cloudové služby.
 
 ### Zobrazení
 
-Kalendář nabízí pět zobrazení: den, týden, měsíc, rok a zobrazení úkolů.
-Mezi nimi přepínáš přes záložky v horní části obrazovky kalendáře.
+Kalendář nabízí pět zobrazení: den, týden, měsíc, rok a zobrazení úkolů. Přepínej
+mezi nimi přes taby na horním okraji obrazovky kalendáře.
 
-### Vytváření událostí
+### Vytvářet termíny
 
-Klepni na časový slot nebo použij tlačítko přidat, čímž vytvoříš novou
-událost. Můžeš zadat název, datum, čas, místo a poznámky. Události se
-ukládají na tvém zařízení v šifrované podobě.
+Klepni na časový slot nebo použij tlačítko přidat, abys vytvořil nový termín.
+Můžeš zadat titulek, datum, čas, místo a poznámky. Termíny se ukládají šifrovaně
+na tvém zařízení.
 
-### Opakující se události
+### Opakující se termíny
 
-Události se mohou opakovat denně, týdně, měsíčně nebo ročně. Vzor můžeš
-přizpůsobit (např. každé druhé úterý, každý první den v měsíci) a nastavit
-datum ukončení nebo počet opakování.
+Termíny se mohou opakovat denně, týdně, měsíčně nebo ročně. Vzor můžeš upravit
+(např. každé druhé úterý, každý první v měsíci) a stanovit koncové datum nebo
+počet opakování.
 
-### Zvaní kontaktů
+### Pozvat kontakty
 
-Při vytváření nebo úpravě události můžeš pozvat své kontakty z Cleony.
-Dostanou šifrovanou pozvánku do kalendáře a mohou odpovědět "ano", "ne"
-nebo "možná". Změny v události se automaticky odešlou všem pozvaným.
+Při vytváření nebo úpravě termínu můžeš pozvat své kontakty z Cleony. Dostanou
+šifrovanou pozvánku do kalendáře a mohou odpovědět přislíbením, odmítnutím nebo
+možná. Změny termínu se automaticky odešlou všem pozvaným.
 
 ### Zobrazení volno/obsazeno
 
-Svou dostupnost můžeš sdílet s kontakty, aniž bys odhalil podrobnosti o
-události. Existují tři úrovně ochrany soukromí: plné podrobnosti, pouze
-časové bloky nebo skryto. Můžeš nastavit výchozí hodnotu a přepsat ji
-individuálně pro každý kontakt.
+Své dostupnosti se můžeš sdílet s kontakty, aniž bys prozradil detaily termínu.
+Existují tři úrovně soukromí: plné detaily, jen časové bloky nebo skryté.
+Můžeš stanovit výchozí a u každého kontaktu ho přepsat.
 
-### Připomenutí
+### Připomínky
 
-Události mohou mít připomenutí, které před začátkem spustí systémové
-upozornění. Připomenutí lze podle potřeby odložit.
+Termíny mohou mít připomínky, které před začátkem termínu vyvolají systémové
+oznámení. Připomínky můžeš případně uspat.
 
-### Synchronizace s externím kalendářem
+### Externí synchronizace kalendáře
 
-Cleona se může synchronizovat s externími kalendářovými službami:
+Cleona se umí synchronizovat s externími kalendářovými službami:
 
 - **CalDAV** -- Připoj se k libovolnému serveru kompatibilnímu s CalDAV
   (Nextcloud, Radicale atd.).
-- **Google kalendář** -- Synchronizace přes Google Calendar API se
-  zabezpečeným ověřením OAuth2.
-- **Lokální server CalDAV** -- Cleona umí spustit lokální server CalDAV
-  přímo na tvém zařízení, takže se s tvým kalendářem Cleony mohou
-  synchronizovat desktopové kalendářové aplikace (Thunderbird, Outlook,
-  Apple Kalendář, Evolution).
-- **Systémový kalendář Androidu** -- Události z Cleony lze přenést do
-  vestavěné kalendářové aplikace tvého zařízení Android.
-- **Soubory ICS** -- Importuj a exportuj události ve standardním formátu
+- **Google Kalendář** -- Synchronizace přes Google Calendar API se zabezpečeným
+  ověřením OAuth2.
+- **Lokální server CalDAV** -- Cleona může na tvém zařízení spustit lokální
+  server CalDAV, takže desktopové kalendářové aplikace (Thunderbird, Outlook,
+  Apple Kalendář, Evolution) se mohou synchronizovat s tvým kalendářem Cleony.
+- **Systémový kalendář Android** -- Termíny z Cleony se mohou přenést do
+  vestavěné kalendářové aplikace tvého zařízení s Androidem.
+- **Soubory ICS** -- Importuj a exportuj termíny ve standardním formátu
   iCalendar.
 
 ### Export do PDF
@@ -503,469 +637,584 @@ exportovat jako dokument PDF.
 
 ## 9. Ankety
 
-V každém chatu nebo skupině můžeš vytvářet ankety, abys zjistil názory nebo
-naplánoval termín.
+V každém chatu nebo skupině můžeš vytvářet ankety, abys zjišťoval názory nebo
+plánoval termíny.
 
 ### Typy anket
 
-Cleona podporuje pět typů anket:
+Cleona podporuje pět druhů anket:
 
-- **Jednoduchý výběr** -- účastníci vyberou jednu možnost.
-- **Vícenásobný výběr** -- účastníci mohou vybrat více možností.
-- **Termínová anketa** -- najdi termín, který vyhovuje všem. Každý účastník
-  označí termíny jako dostupné, možná dostupné nebo nedostupné.
-- **Škála** -- ohodnoť něco na číselné škále (např. 1 až 5).
-- **Volný text** -- účastníci napíší vlastní odpověď.
+- **Jednoduchý výběr** -- Účastníci vyberou jednu možnost.
+- **Vícenásobný výběr** -- Účastníci mohou vybrat více možností.
+- **Termínová anketa** -- Najdi termín, který vyhovuje všem. Každý účastník
+  označí termíny jako dostupné, možná nebo nedostupné.
+- **Škála** -- Ohodnoť něco na číselné škále (např. 1 až 5).
+- **Volný text** -- Účastníci napíší vlastní odpověď.
 
-### Vytvoření ankety
+### Vytvořit anketu
 
-Otevři chat a klepni na ikonu ankety (nebo použij menu příloh). Vyber typ
-ankety, zformuluj otázku a možnosti a anketu odešli. Zobrazí se jako zpráva
-v chatu.
+Otevři chat a klepni na symbol ankety (nebo použij nabídku příloh). Vyber typ
+ankety, sformuluj svou otázku a možnosti a odešli anketu. Objeví se jako zpráva v
+chatu.
 
-### Hlasování
+### Hlasovat
 
-Klepnutím na anketu odevzdáš svůj hlas. Svůj hlas můžeš kdykoli změnit
-nebo odvolat.
+Klepni na anketu, abys odevzdal svůj hlas. Hlas můžeš kdykoliv změnit nebo vzít
+zpět.
 
 ### Anonymní hlasování
 
-Ankety lze nastavit pro anonymní hlasování. Pokud je aktivní, jsou hlasy
-kryptograficky anonymní -- nikdo, ani tvůrce ankety, nevidí, kdo pro co
-hlasoval. Počet hlasů přesto zůstává viditelný.
+Ankety lze konfigurovat pro anonymní hlasování. Je-li zapnuté, jsou hlasy
+kryptograficky anonymní -- nikdo, ani tvůrce ankety, nevidí, kdo pro co hlasoval.
+Počet hlasů zůstává přesto viditelný.
 
 ### Termínová anketa do kalendáře
 
-Jakmile je termínová anketa uzavřena, lze vítězný termín jedním klepnutím
-přímo převést na položku v kalendáři.
+Když termínová anketa skončí, lze vítězný termín jedním klepnutím přímo převést
+na záznam v kalendáři.
 
 ---
-
 ## 10. Více identit
 
 ### Proč více identit?
 
-Představ si, že chceš oddělit pracovní a soukromý život -- podobně jako se
-dvěma různými telefonními čísly, ale bez druhého telefonu. V Cleoně můžeš
-na jednom zařízení používat více identit. Každá identita má vlastní jméno,
-vlastní profilový obrázek, vlastní kontakty a vlastní konverzace.
+Představ si, že chceš oddělit svůj pracovní a soukromý život -- podobně jako se
+dvěma různými telefonními čísly, ale bez druhého telefonu. V Cleoně můžeš na
+jednom zařízení používat více identit. Každá identita má vlastní jméno, vlastní
+profilový obrázek, vlastní kontakty a vlastní konverzace.
 
-### Vytvoření nové identity
+### Vytvořit novou identitu
 
-1. V horní liště vidíš svou aktuální identitu jako záložku.
-2. Klepni na znaménko plus (+) vpravo vedle záložek identit.
+1. V horním pruhu vidíš svou aktuální identitu jako tab.
+2. Klepni na znak plus (+) vpravo vedle svých tabů identit.
 3. Zadej jméno pro novou identitu.
 4. Hotovo -- nová identita je okamžitě aktivní.
 
-### Přepínání mezi identitami
+### Přepínat mezi identitami
 
-Stačí klepnout na záložku identity v horní liště. Přepnutí je okamžité --
-žádné čekání, žádné znovunačítání.
+Jednoduše klepni na tab identity v horním pruhu. Přepnutí je okamžité -- žádná
+čekací doba, žádné načítání.
 
-### Všechny běží zároveň
+### Všechny běží současně
 
-Důležitý bod: všechny tvoje identity jsou aktivní současně. I když je
-právě zobrazená identita "Pracovní", tvá identita "Soukromá" nadále přijímá
-zprávy. Nic ti neunikne, ať už máš zrovna vybranou jakoukoli identitu.
+Důležitý bod: Všechny tvé identity jsou současně aktivní. I když se právě
+zobrazuješ jako „Pracovní", nadále přijímá tvá identita „Soukromé" zprávy. Nic ti
+neunikne, ať máš právě vybranou kteroukoliv identitu.
 
-### Stránka podrobností identity
+### Stránka s detaily identity
 
-Když klepneš na záložku právě aktivní identity, otevře se stránka
-podrobností. Zde můžeš:
+Když klepneš na tab své právě aktivní identity, otevře se stránka s detaily. Zde
+můžeš:
 
 - Zobrazit svůj QR kód pro kontakty.
 - Změnit nebo odstranit svůj profilový obrázek.
 - Přidat popis profilu.
 - Změnit své zobrazované jméno.
-- Zvolit design (skin) pro tuto identitu.
-- Smazat identitu, pokud ji už nepotřebuješ.
+- Vybrat design (skin) pro tuto identitu.
+- Identitu smazat, pokud ji už nepotřebuješ.
 
-### Smazání identity
+### Smazat identitu
 
-Když smažeš identitu, budou o tom tvoje kontakty upozorněny. Identita a
-všechna související data se odstraní z tvého zařízení. Tento krok je
-nevratný.
-
----
-
-## 11. Multi-Device
-
-### Používání Cleony na více zařízeních
-
-Stejnou identitu můžeš používat současně až na 5 zařízeních. Jedno
-zařízení je primární (drží Seed-Phrase) a další zařízení se s ním propojí.
-
-### Propojení nového zařízení
-
-1. Otevři nastavení na svém primárním zařízení.
-2. Přejdi na "Propojená zařízení".
-3. Zvol "Propojit nové zařízení".
-4. Na novém zařízení nainstaluj Cleonu a při spuštění zvol "Propojit s
-   existujícím zařízením".
-5. Naskenuj párovací QR kód zobrazený na primárním zařízení, nebo použij
-   párovací odkaz.
-
-Propojené zařízení obdrží delegační certifikát od primárního zařízení.
-Zprávy odeslané z propojeného zařízení jsou kryptograficky podepsány
-delegovaným klíčem, takže kontakty mohou ověřit, že zpráva skutečně
-pochází od tvé identity.
-
-### Jak to funguje
-
-- Primární zařízení drží tvou Seed-Phrase a hlavní klíče.
-- Propojená zařízení obdrží odvozené podpisové klíče a delegační
-  certifikát -- samotnou Seed-Phrase nikdy nezískají.
-- Všechna zařízení sdílejí stejnou identitu a kontakty. Zprávy přicházejí
-  na všechna zařízení.
-- Delegační certifikáty se automaticky obnovují před vypršením platnosti.
-
-### Správa zařízení
-
-Otevři nastavení a přejdi na "Propojená zařízení", kde uvidíš všechna
-propojená zařízení, jejich stav a poslední aktivitu. Propojené zařízení
-můžeš kdykoli odvolat, pokud se ztratí nebo je ukradeno.
-
-### Nouzová rotace klíčů
-
-Pokud máš podezření, že bylo některé zařízení kompromitováno, můžeš
-spustit nouzovou rotaci klíčů. Vygenerují se nové klíče a rotaci musí
-potvrdit většina tvých ostatních zařízení. To zabraňuje tomu, aby jediné
-ukradené zařízení mohlo svévolně rotovat klíče.
+Když identitu smažeš, tví kontakty se o tom dozví. Identita a všechny příslušné
+údaje se odstraní z tvého zařízení. Tento proces nelze vrátit zpět.
 
 ---
 
-## 12. Obnovení
+## 11. Více zařízení
 
-### Použití Seed-Phrase
+### Jedna identita, jedno zařízení -- zatím
 
-Pokud ztratíš zařízení nebo si nastavuješ nové:
+Jedna identita dnes běží na jednom zařízení. Druhé zařízení pro tutéž identitu
+přijde s pozdější verzí; v nastavení pod „Zařízení" -> „Spravovat zařízení"
+proto stojí „Spárovat další zařízení" zatím jako „Zatím nedostupné".
+
+Přijde-li to, platí: Všechna zařízení jsou rovnocenná, neexistuje žádné
+hlavní zařízení. Další zařízení nastavíš svými 24 slovy a jedno z tvých
+dosavadních zařízení to potvrdí. Nejvýše 5 zařízení.
+
+Zadáš-li dnes na novém zařízení svých 24 slov, stěhuješ se: Identita se na
+nové zařízení obnoví a tvé dosavadní zařízení ji poté u sebe odstraní (viz
+kapitola 12).
+
+Na více zařízeních můžeš dnes používat různé identity (kapitola 10).
+
+### Rotovat klíče
+
+Máš-li podezření, že se někdo dostal k tvým klíčům, můžeš pod „Spravovat
+zařízení" -> „Rotovat klíče" vygenerovat nové klíče. Tví kontakty dostanou
+oznámení, tvé otevřené pozvánky se odvolají. Důležité: Potom vytvoří 24 slov
+sama už jen staré klíče. Vytvoř proto přímo poté nový balíček pro obnovu;
+obnovit se pak dá už jen spolu s tímto balíčkem.
+
+---
+
+## 12. Obnova
+
+### Použít seed frázi
+
+Když ztratíš zařízení nebo zakládáš nové:
 
 1. Nainstaluj Cleonu na nové zařízení.
-2. Při spuštění zvol "Obnovit".
+2. Vyber při startu „Obnovit".
 3. Zadej svých 24 slov.
-4. Cleona obnoví tvou identitu a automaticky osloví tvé dosavadní kontakty.
-5. Tvoje kontakty odpoví svými kontaktními údaji, členstvím ve skupinách a
-   historií zpráv.
+4. Cleona z nich vygeneruje všechny tvé identity zpět -- se stejnými klíči jako
+   dřív. Pro tvé kontakty jsi stejný člověk.
 
-Obnovení probíhá ve třech krocích:
-- Nejprve se vrátí tvoje kontakty a skupiny.
-- Poté posledních 50 zpráv z každé konverzace.
-- Nakonec kompletní historie zpráv.
+### Co se vrátí -- a co ne
 
-Stačí, aby byl online jediný z tvých kontaktů, aby obnovení fungovalo.
+Tvoje identita je v těch 24 slovech, tvé kontakty a tvá historie ne. Vrátí se
+tvůj přístup do sítě přes **balíček pro obnovu**: Tvé zařízení ukládá v síti
+malý, šifrovaný balíček. Jen tvých 24 slov ho umí najít a otevřít. Uvnitř stojí,
+co tvé nové zařízení potřebuje, aby znovu dosáhlo na tvé kontakty, a co
+mezitím pro tebe v síti leželo. K tomu nemusí být žádný kontakt online.
 
-### Guardian Recovery (důvěryhodné osoby)
+Dosavadní historii chatu obnova nepřináší zpět.
 
-Můžeš jmenovat až pět důvěryhodných osob jako "Guardians". Tvůj obnovovací
-klíč se přitom rozdělí na pět částí, z nichž každý Guardian obdrží jednu.
-K obnovení tvé identity stačí tři z pěti částí.
+Balíček pro obnovu žije 7 dní a tvé zařízení ho obnovuje, dokud běží; v
+nastavení vidíš, do kdy platí. Neběželo-li žádné z tvých zařízení déle než
+7 dní, propadl. Pak 24 slov tvou identitu přesto obnoví, ale své kontakty
+musíš pozvat znovu; co mezitím pro tebe v síti leželo, je ztraceno.
 
-To znamená: i když ztratíš svou Seed-Phrase, mohou tři z tvých Guardianů
-společně obnovit tvůj účet. Žádný jednotlivý Guardian nemá přístup k tvým
-datům sám -- vždy jsou potřeba minimálně tři.
+### Obnova znamená stěhování
 
-Jak nastavit Guardians:
-1. Otevři nastavení.
-2. Přejdi na "Zabezpečení".
-3. Zvol "Guardian Recovery".
-4. Vyber pět důvěryhodných kontaktů.
+Zjistí-li tvé dosavadní zařízení později, že identita byla obnovena jinde,
+odstraní ji u sebe -- i s její historií. Proto: Kdo má tvých 24 slov, může
+tímto způsobem tvou identitu stáhnout z tvého zařízení. Dokud nejsou zpět
+všechny kontakty, připomíná ti to aplikace; s „Dokončit a obnovit klíče"
+obnovu ukončíš sám.
 
-### Proč jsou tvé kontakty tvou zálohou
+### Co nikdo nemůže obnovit
 
-U běžných messengerů leží tvá data na serverech poskytovatele. U Cleony
-žádný server neexistuje -- ale tuto roli přebírají tvoje kontakty. Když
-odešleš zprávu, uloží si společné kontakty šifrovanou kopii pro případ, že
-je příjemce zrovna offline. Při obnovení ti tvoje kontakty tvá data vrátí
-zpět.
+To je důležité a říkáme to proto zřetelně:
 
-To znamená: čím více aktivních kontaktů máš, tím spolehlivější je tvá
-záloha. Na úspěšné obnovení stačí jediný kontakt, který je pravidelně
-online.
+- **Nikdo kromě tebe nemůže obnovit tvou identitu.** Ne vývojář, ne podpora, a
+  ani tvé kontakty -- ať je jich kolik chce. Neexistuje žádný hlavní klíč a
+  žádná část tvého klíče, která by u jiných ležela v úschově.
+- **Ztratíš-li 24 slov a nemáš už žádné zařízení, je tvá identita ztracena.**
+  Pak zbývá jen založit novou a znovu pozvat své kontakty.
+
+Nejlepší ochrana: Zapiš si 24 slov na papír a uschovej je bezpečně.
 
 ---
-
 ## 13. Nastavení
 
-Do nastavení se dostaneš přes ikonu ozubeného kola v pravém horním rohu.
+Nastavení otevřeš přes symbol ozubeného kola v horním pravém rohu.
 
-### Upozornění a vyzváněcí tóny
+### Oznámení a vyzváněcí tóny
 
-- Vyber si z šesti různých vyzváněcích tónů pro příchozí hovory.
-- Nastav si tón pro zprávy.
-- Na zařízeních Android můžeš navíc zapnout nebo vypnout vibrace.
+- Vyber jeden ze šesti různých vyzváněcích tónů pro příchozí hovory.
+- Nastav tón zpráv.
+- Na zařízeních s Androidem můžeš navíc zapnout nebo vypnout vibrace.
+- **„Ztlumit vše"** nedovolí na tomto zařízení žádné zprávě zazvonit,
+  zavibrovat ani se nahlásit -- pro všechny identity. Hovory dál zvoní.
+- **„Dobu klidu"** nastavuješ pro každou identitu s od/do. V této době
+  nezvoní, nezavibruje ani se neohlásí žádná zpráva této identity; zprávy
+  přesto dorazí.
+- **„Oznámení bez obsahu"** (výchozí: vypnuto) ukazuje jen to, že přišla
+  zpráva, pozvánka nebo připomínka -- bez odesílatele, jména a textu. Hovory
+  dál ukazují jméno.
+- Co po startu přijde najednou, to Cleona ohlásí v jednom souhrnném oznámení
+  („5 nových zpráv ve 2 konverzacích"); všechno pozdější zvlášť. Klepnutí na
+  oznámení o zprávě otevře konverzaci, i v jiné identitě.
 
 ### Designy (skiny)
 
 Cleona nabízí deset různých designů: Teal, Ocean, Sunset, Forest, Amethyst,
-Fire, Storm, Slate, Gold a Contrast. Design Contrast splňuje nejvyšší
-úroveň přístupnosti (WCAG AAA) a je obzvlášť dobře čitelný při omezeném
-zraku.
+Fire, Storm, Slate, Gold a Contrast. Design Contrast splňuje nejvyšší úroveň
+přístupnosti (WCAG AAA) a je při omezeném zraku obzvlášť dobře čitelný.
 
-Každá identita může mít vlastní design. Design měníš na stránce
-podrobností identity (klepnutím na aktivní záložku identity).
+Každá identita může mít svůj vlastní design. Design měníš na stránce s detaily
+identity (klepni na tab aktivní identity).
 
-Navíc můžeš v nastavení pod "Vzhled" přepínat mezi světlým, tmavým a
-systémovým motivem.
+Navíc můžeš v nastavení pod „Vzhled" přepínat mezi světlým, tmavým a motivem
+systému.
 
-### Změna jazyka
+### Změnit jazyk
 
-Cleona je dostupná v 33 jazycích, včetně jazyků psaných zprava doleva
-(např. arabština, hebrejština). Jazyk změníš v nastavení pod "Jazyk".
-
-### Limit úložiště
-
-Můžeš nastavit, kolik místa na zařízení může Cleona využívat (mezi 100 MB a
-2 GB). Jakmile je limit dosažen, starší média se automaticky přesunou
-jinam nebo smažou -- textové zprávy zůstávají vždy zachovány.
+Cleona je dostupná ve 34 jazycích, včetně jazyků s písmem zprava doleva (např.
+arabština, hebrejština). Jazyk změníš v nastavení pod „Jazyk".
 
 ### Archivace médií
 
-Pokud máš doma síťové úložiště (NAS) nebo sdílenou složku, může tam Cleona
-automaticky přesouvat tvá média. Podporovány jsou SMB, SFTP, FTPS a WebDAV.
+Máš-li doma síťové úložiště (NAS) nebo sdílenou složku, může Cleona tvá média
+automaticky odložit tam. Podporovány jsou SMB, SFTP, FTPS a WebDAV.
 
-Jak funguje stupňované ukládání:
-- Prvních 30 dní: vše zůstává na zařízení.
-- Po 30 dnech: náhledový obrázek zůstává na zařízení, originál se
-  archivuje.
-- Po 90 dnech: na zařízení zůstane už jen malý náhled.
-- Po roce: zůstane už jen zástupný symbol, originál je bezpečně uložen v
-  archivu.
+Tak funguje stupňovité ukládání:
+- Prvních 30 dní: Vše zůstává na tvém zařízení.
+- Po 30 dnech: Na zařízení zůstává náhledový obrázek, originál se archivuje.
+- Po 90 dnech: Na zařízení zůstává už jen malý náhledový obrázek.
+- Po roce: Zůstává už jen zástupný symbol, originál leží bezpečně v archivu.
 
-Na archivované médium můžeš kdykoli klepnout, aby se stáhlo zpět -- za
-předpokladu, že jsi připojen ke své domácí síti. Obzvlášť důležitá média
-lze připnout, aby nikdy nebyla přesunuta.
+Na archivované médium můžeš kdykoliv klepnout, abys ho stáhl zpět -- za
+předpokladu, že jsi připojen ke své domácí síti. Obzvlášť důležitá média lze
+připnout, aby se nikdy neodložila.
 
-### Přepis hlasových zpráv
+Pod „Rozpočet úložiště" určuješ, kolik MB médií zůstane na zařízení (výchozí:
+100 MB na mobilu, 2 GB na počítači). Je-li plno, archivuje se nejdřív
+nejstarší nepřipnuté médium. Originál se smaže jen tehdy, když bezpečně leží
+v archivu -- textové zprávy zůstávají vždy zachovány.
 
-Pokud je aktivní, tvé hlasové zprávy se lokálně na tvém zařízení převádějí
-na text (pomocí open-source modelu Whisper). Přepsaný text se posílá
-spolu s nahrávkou protějšku. Přepis probíhá zcela na tvém zařízení --
-žádná data se neposílají do externích služeb.
+### Přepis pro hlasové zprávy
+
+Je-li zapnuté, převádí se tvé hlasové zprávy lokálně na tvém zařízení na text (s
+modelem Whisper s otevřeným zdrojovým kódem). Přepsaný text se společně s
+nahrávkou pošle tvému protějškovi. Přepis probíhá kompletně na tvém zařízení --
+žádná data nejdou k externím službám.
+
+Který model (tiny, base, small) se stáhne, nastavuješ jednou pro zařízení; jazyk
+(automaticky nebo pevně) pro každou identitu.
 
 ### Automatické stahování
 
-Můžeš nastavit, od jaké velikosti se mají média stahovat automaticky.
-Můžeš si tak nechat například automaticky stahovat obrázky, ale u velkých
-videí rozhodovat ručně.
+Můžeš nastavit, od jaké velikosti se mají média automaticky stahovat. Tak můžeš
+například nechat obrázky stahovat automaticky, ale u velkých videí rozhodnout
+ručně.
 
-### Propojená zařízení
+### Zařízení
 
-Svá propojená zařízení spravuj v této části nastavení. Podrobnosti najdeš
-v kapitole Multi-Device.
+Pod „Zařízení" -> „Spravovat zařízení" vidíš toto zařízení. Spárovat další
+zařízení přijde s pozdější verzí (kapitola 11).
+
+### Síť
+
+Cleona nepotřebuje žádné nastavení sítě, aby fungovala. Existují tři síťové
+přepínače:
+
+- **Otevření portu na routeru** (výchozí: zapnuto). Cleona požádá tvůj vlastní
+  router, aby pro Cleonu otevřel dveře. Funguje-li to, je tvé zařízení pro ostatní
+  lépe dostupné a síti pomáhá. Cleona přitom mluví jen s tvým routerem, ne s
+  internetem.
+- **Veřejné záznamy adres** (výchozí: zapnuto). Má-li tvé zařízení ještě příliš
+  málo sousedů, podívá se ve veřejném adresáři (Nostr) po dalších vstupních bodech
+  a je-li samo dobře dostupné, sám se tam zapíše. Záznam obsahuje adresu, žádné
+  jméno a žádný kontakt. Vypneš-li ho, najde tvé zařízení sousedy už jen přes
+  pozvánky, místní síť a sousedy, které už zná.
+- **Méně krycích paketů ve Wi-Fi** (výchozí: vypnuto). Ve Wi-Fi nebo na kabelu
+  můžeš vypnout prázdné krycí pakety. Pak je tam ale zas vidět, kdy píšeš. V
+  mobilních datech tento přepínač neexistuje -- tam Cleona stejně posílá jen jeden
+  krycí paket za minutu.
+
+Krycí provoz jako celek nelze vypnout. To je záměr: Jen když běží pořád, neříká
+aktivita tvého zařízení nic o tom, zda právě píšeš.
+
+Nad třemi přepínači stojí **Režim úspory dat**: V mobilních datech ho Cleona
+navrhuje, ale nikdy ho sama nezapne. Šetří data, ale tvé zařízení je zvenku
+snáze poznatelné.
+
+Pod nimi nastavuješ **„Mezipaměť pro média ostatních"**: Tvé zařízení drží
+šifrované kousky médií ostatních až 7 dní, aby dorazily k příjemcům (výchozí:
+100 MB na mobilu, 1 GB na počítači). Menší velikost uvolní místo okamžitě --
+nejdřív nejstarší kousky.
 
 ---
 
 ## 14. Zabezpečení
 
-### Co znamená postkvantové šifrování?
+### Co znamená post-kvantové šifrování?
 
-Dnešní šifrování je založeno na matematických problémech, které jsou pro
-běžné počítače extrémně obtížné vyřešit. Kvantové počítače by v budoucnu
-mohly některé z těchto problémů řešit rychle. Postkvantové šifrování
-používá dodatečné metody, které odolávají i kvantovým počítačům.
+Dnešní šifrování vychází z matematických problémů, které jsou pro normální
+počítače extrémně těžké na řešení. Kvantové počítače by mohly některé z těchto
+problemů v budoucnu rychle vyřešit. Post-kvantové šifrování používá další
+postupy, které odolají i kvantovým počítačům.
 
 Cleona kombinuje oba přístupy: klasické šifrování pro spolehlivost a
-postkvantové postupy pro odolnost do budoucna. Jsi tak chráněn zároveň
-proti dnešním i budoucím hrozbám.
+post-kvantové postupy pro odolnost vůči budoucnosti. Tak jsi chráněn před
+dnešními i budoucími hrozbami současně.
 
-Pro každou jednotlivou zprávu se vytváří vlastní klíč. I kdyby útočník
-prolomil klíč jedné zprávy, nemohl by s ním přečíst žádnou jinou zprávu.
+Pro každou jednotlivou zprávu se vygeneruje vlastní klíč. I kdyby útočník
+rozluštil klíč jedné zprávy, nemohl by s ním přečíst žádnou jinou zprávu.
 
 ### Proč je absence serveru bezpečnější
 
-U běžných messengerů procházejí tvé zprávy servery poskytovatele. I když
-tam mohou být šifrované, poskytovatel má přístup k metadatům (kdo s kým kdy
-komunikuje, jak často, odkud) a za určitých okolností je musí na soudní
-příkaz vydat.
+U běžných messengerů tvé zprávy cestují přes servery poskytovatele. I kdyby tam
+byly šifrované: Poskytovatel má přístup k metadatům (kdo s kým komunikuje, kdy,
+jak často, odkud) a musí je případně na soudní příkaz vydat.
 
-U Cleony žádný takový centrální bod neexistuje. Tvé zprávy putují přímo ze
-zařízení na zařízení. Neexistuje žádné místo, kde by se sbíhala všechna
-metadata. Nikdo nemůže na základě jediného datového bodu rekonstruovat tvé
-komunikační chování.
+U Cleony takový centrální bod neexistuje. Neexistuje žádné místo, kde by se
+scházela všechna metadata, a žádný adresář, ve kterém by šlo dohledat, kdo jsi
+nebo koho znáš.
 
-### Co se stane, když jsi offline?
+### Kdo vidí, že s někým píšeš?
 
-Když odešleš zprávu a příjemce je offline:
+Šifrování chrání, **co** píšeš. Stejně důležité je, aby se žádný jediný
+pozorovatel nedozvěděl, **s kým** a **kdy** píšeš. O to se Cleona postará takto:
 
-1. Cleona se nejprve pokusí doručit zprávu přímo.
-2. Pokud se to nepodaří, přeposílá se přes společné kontakty.
-3. Zároveň se zpráva rozdělí na šifrované kusy a distribuuje na více uzlů
-   v síti (podobně jako puzzle o 10 dílcích, z nichž 7 stačí k sestavení
-   obrázku).
-4. Zpráva se uchovává až 7 dní.
+- **Na internetu nikdy ne přímo.** Poslalo-li by tvé zařízení zprávu přímo na
+  internetovou adresu tvého protějška, mohl by tvůj poskytovatel vidět, s kým
+  píšeš. Proto jde zpráva na internetu vždy přes vaše pevné sousedy: tvého a
+  toho tvého protějška.
+- **Sousedi, kterým věříš.** Tvoji pevní sousedi jsou, kdykoli je to možné,
+  zařízení tvých vlastních kontaktů -- až tři, kteří jsou právě zvenku
+  dostupní. Padne-li jeden, nastupuje jiný kontakt. Kontakt se nedá koupit
+  servery; libovolný uzel v síti ano. Nemáš-li ještě žádný dostupný kontakt,
+  vezme Cleona jiného souseda. Tvá pozvánka nikdy nejmenuje žádného z tvých
+  kontaktů, aby přes ně nikdo nezedhal adresu přítele.
+- **Kódy místo jmen.** Sousedé nevidí jména a žádné identifikátory, jen kód.
+  Platí přesně pro vás dva, v jednom směru, na jeden den -- další den je to
+  jiný. Tvůj soused ví, odkud paket přichází, ale ne, kam nakonec jde. Soused
+  tvého protějška ví, kam jde, ale ne, odkud přišel. Normálně nikdo cestou
+  nevidí oba konce.
+- **Krycí provoz.** Tvé zařízení neustále odesílá v nepravidelných intervalech
+  krycí pakety svým sousedům. Jsou stejně velké jako skutečné pakety, jdou přes
+  stejný port a zvenku jsou od nich k nerozeznání. Zda právě píše člověk nebo
+  zařízení jen běží, tak není poznat. Tvé zprávy nikdy nečekají na krycí provoz
+  -- jdou hned, on jen běží vedle.
 
-Jakmile se příjemce znovu připojí, zprávy se doručí. Dostaneš potvrzení,
-jakmile tvá zpráva dorazí.
+**Co krycí provoz stojí:** Ve Wi-Fi asi 13 MB za den. V mobilních datech posílá
+Cleona jen jeden krycí paket za minutu, to je asi 1,7 MB za den. Důvodem pro
+omezení v mobilních datech není objem dat, ale baterie: Každý paket probudí
+rádiový modul.
 
-### Ochrana proti cenzuře
+**Co Cleona nedokáže skrýt** -- upřímně řečeno:
 
-Pokud tvá síť blokuje standardní způsob spojení (UDP), přepne se Cleona
-automaticky na alternativní přenos (TLS), který je obtížnější rozpoznat a
-zablokovat. Děje se to transparentně -- nic nastavovat nemusíš.
+- Žádný **jediný** pozorovatel nevidí, kdo s kým píše -- ani tvůj poskytovatel,
+  ani uzly cestou. Kdo ale **oba konce současně** sleduje, například stát, který
+  sleduje tvůj přípojný bod i ten tvého protějška, nebo zadrží oba sousedy, může
+  v průběhu času přiřadit: Paket odejde u tebe, krátce nato paket přijde u tvého
+  protějška. Často se to opakuje, a vzniká spojení.
+- Krycí provoz toto přiřazení ztíží, ale nezabrání mu. Skrývá jednotlivé zprávy,
+  ne objem: Kdo velmi mnoho odesílá, zvyšuje celkový provoz svého zařízení.
+- Kontakt, který je tvým pevným sousedem, se dozví, **kdy** a **kolik**
+  odesíláš a přijímáš -- ne s kým a ne co. Hrozí-li nebezpečí z tvého vlastního
+  okolí, můžeš každého kontaktu to vyjmout (viz kapitola 3, „Nikdy nepoužívat
+  jako pevného souseda").
+- Mají-li dva noví uživatelé jen téhož jednoho souseda, jde jejich zpráva přes
+  přesně tento uzel a on vidí oba konce. Jakmile má jeden z nich další sousedy,
+  je to u konce.
+- Tvá pozvánka obsahuje tvé internetové adresy. Kdo má textový řádek, vidí, kde
+  jsi online -- dej ho jen lidem, kterým to důvěřuješ.
+- Soused, který předává dál, vidí, že si dva kódy vyměňují pakety -- ne, kdo za
+  tím stojí, a ne, co je uvnitř.
+- Signál běžícího hovoru může, když první soused zrovna neodpovídá, jít přes
+  uzel, který vidí oba konce; dozví se, že spolu telefonujete.
+- Velký soubor, se kterým jsi souhlasil, vidí počítač, který ho předává dál
+  nebo uchovává, na obou koncích (viz kapitola 4).
+- U hovorů ochrana před poskytovatelem neplatí a tvůj kontakt vidí tvou
+  internetovou adresu (viz kapitola 7).
 
-### Bezpečné uložení klíčů
+### Co se stane, když je tvůj protějšek offline?
 
-Na podporovaných platformách ukládá Cleona tvé šifrovací klíče do bezpečné
-klíčenky operačního systému (Android Keystore, iOS Keychain, macOS
-Keychain). Tam, kde je to dostupné, poskytuje hardwarově podporovanou
-ochranu tvých klíčů.
+1. Cleona spustí všechny vhodné cesty současně: ve stejné Wi-Fi přímo, na
+   internetu přes dva sousedy -- a navíc schránku.
+2. Pro schránku uloží Cleona šifrovanou zprávu u tří sousedů. Jakmile dva
+   potvrdí přijetí, platí za uloženou.
+3. Cleona k tomu preferuje sousedy, u kterých se tvůj protějšek také
+   rozhlíží -- nejprve souseda, kterého jmenuje jeho pozvánka.
+4. Zpráva tam čeká až 7 dní. Vrátí-li se tvůj protějšek, vyzvedne si ji a
+   potvrdí ti přijetí. Teprve pak vidíš dva háčky.
+
+Schránku může vyprázdnit jen tvůj protějšek: Vyzvednutí a mazání jde jen s
+klíčem, který má jen on, a smaže se teprve, když potvrdí přijetí. Sousedé vidí
+jen šifrované pakety pod hodnotou, která se každý den mění.
+
+### Cizí se neprobojí
+
+Od někoho, kdo není tvůj kontakt ani člen společné skupiny, Cleona přijme
+přesně dvě věci: dotaz na tvé veřejné klíče, dokud je jedna z tvých pozvánek
+otevřená, a žádost o kontakt.
+Žádost musí nést platnou pozvánku od tebe a odesílatel musí předtím vyřešit
+výpočetní úlohu. Všechno ostatní -- zprávy, hovory, soubory -- se zahodí, dřív
+než to vůbec dosáhne aplikace. Kdo má jen tištěnou vizitku, tě tedy prostě
+nezavolá. Člen společné skupiny tě dosáhne jen v této skupině -- se
+skupinovými zprávami a skupinovými hovory, nikdy mimo ni.
+
+### Anticenzura
+
+Cleona je postavena tak, aby se těžko blokovala:
+
+- **Žádný server, žádná pevná adresa.** V aplikaci nestojí žádná adresa, kterou by
+  šlo zablokovat, a síť nezávisí na žádném jediném uzlu.
+- **Žádný pevný port.** Každé zařízení si při prvním spuštění vybere náhodný
+  port. Neexistuje žádné známé číslo portu, na kterém by šlo rozpoznat provoz
+  Cleony.
+- **Jako náhodná data.** Navázání spojení mezi dvěma zařízeními je tak kódované,
+  že ho nelze od náhodných dat rozeznat.
+- **Mnoho vstupů.** Každá pozvánka, každý soused a každé zařízení ve stejné Wi-Fi
+  je možnou cestou zpět do sítě.
+
+### Bezpečné ukládání klíčů
+
+Na podporovaných platformách ukládá Cleona tvé šifrovací klíče v bezpečném
+klíčenku operačního systému (Android Keystore, iOS Keychain, macOS Keychain). Je-
+li k dispozici, nabízí to hardwarovou podporu pro tvé klíče.
 
 ### Šifrování databáze
 
-Všechny tvé zprávy, kontakty a nastavení jsou na tvém zařízení uloženy v
-šifrované podobě. I kdyby někdo získal přístup k tvému souborovému systému,
-nemohl by bez tvého kryptografického klíče nic přečíst. Tento klíč je
-odvozen z tvé identity a existuje pouze na tvém zařízení.
+Tvé zprávy a konverzace leží v šifrované databázi -- vlastní pro každou
+identitu, každá s vlastním klíčem. Šifrovaná není jen databáze samotná, ale i její
+dočasné soubory; nic se nezapíše nešifrovaně na disk, ani krátce. Nastavení,
+kontakty a média jsou také uloženy šifrovaně.
 
-### Uzavřená síť
+Klíče se odvozují z tvých 24 slov a existují jen na tvém zařízení. I když se
+někdo dostane k tvému zařízení a data si přečte, najde bez těchto klíčů jen
+nečitelná data.
 
-Cleona funguje jako uzavřená síť. Každý síťový paket je autentizován, takže
-se sítě mohou účastnit pouze legitimní zařízení Cleona. To brání tomu, aby
-cizí subjekty vpašovali padělané zprávy nebo odposlouchávali síťový
-provoz.
+Nešifrované je to jen tam, kde sám vydáváš obsah z Cleony ven:
+- když uložíš soubor z chatu na své zařízení,
+- když tlačítkem snímku obrazovky uložíš obrázek do svých obrázků,
+- když něco sdílíš do jiné aplikace,
+- když nastavíš archivaci médií (kapitola 13): Archivované originály leží
+  nešifrovaně na tvém síťovém úložišti doma, abys je tam mohl otevřít i bez
+  Cleony,
+- když zrcadlíš termíny do systémového kalendáře Androidu: Tam je mohou číst
+  jiné aplikace s přístupem ke kalendáři.
+
+Co takhle vyšlo ven, nemaže se se zprávou a nevyprší s ní.
+
+### Ochrana na obrazovce
+
+Na Androidu, Windows a macOS Cleona nedovolí jiným aplikacím nahrávat
+obrazovku. Potřebuješ-li obrázek, použij tlačítko snímku obrazovky v horním
+pruhu: Uloží obrázek do tvých obrázků -- nešifrovaný. V konverzaci, ve které
+není povoleno přeposílání, snímek obrazovky neexistuje.
 
 ---
 
 ## 15. Aktualizace softwaru
 
-### Jak získám aktualizace?
+### Jak dostanu aktualizace?
 
-Cleonu lze aktualizovat několika způsoby. Cílem je, abys mohl získávat
-aktualizace i tehdy, když některé distribuční kanály selžou nebo jsou
-zablokovány:
+Cleona se dá aktualizovat různými cestami. Cílem je, aby ses dostal k aktualizacím
+i tehdy, když jednotlivé distribuční cesty selžou nebo se zablokují:
 
-1. **App Store / Play Store:** Pokud sis Cleonu nainstaloval z app storu,
-   dostáváš aktualizace obvyklým způsobem přes obchod.
-2. **GitHub Releases:** Na stránce projektu na GitHubu najdeš podepsané
+1. **App Store / Play Store:** Jakmile Cleona ve store vyjde a nainstaloval
+   jsi ji přes store, dostáváš aktualizace jako obvykle přes store. Na iPhonu
+   přicházejí aktualizace přes TestFlight.
+2. **GitHub Releases:** Na GitHubové stránce projektu najdeš podepsané
    instalační balíčky pro všechny platformy.
-3. **Aktualizace v rámci sítě (In-Network):** Pokud má jiný uživatel
-   Cleony ve tvé síti již nejnovější verzi, může Cleona získat aktualizaci
-   přímo přes síť P2P -- bez externího serveru. Nová verze se přitom
-   rozloží na fragmenty s korekcí chyb a rozdistribuuje přes více uzlů.
-   Tvé zařízení nasbírá dostatek fragmentů a sestaví aktualizaci dohromady.
-   Pravost se ověřuje pomocí podpisu Ed25519 od vývojáře.
-4. **Pozvánkové odkazy:** Můžeš vytvářet pozvánkové odkazy, které obsahují
-   vše, co nový uživatel potřebuje k instalaci Cleony a připojení k síti.
-5. **Fyzický přenos:** V prostředích bez internetu můžeš Cleonu předat
-   dalším lidem přes USB flash disk nebo v lokální síti.
+3. **Aktualizace přes síť:** Cleona může aktualizaci stáhnout přímo přes síť --
+   bez serveru ke stažení. Nová verze je rozdělena na kousky s korekcí chyb, které
+   se rozprostřou v síti; část z nich cestuje dokonce i v krycím provozu. Tvé
+   zařízení posbírá dost kousků a sestaví aktualizaci. Přenáší se většinou jen
+   změna -- pár MB místo celé aplikace. Platí to pro Linux, Windows a Android;
+   na macOS stahuješ nové verze z webu nebo z GitHubu.
+4. **Pozvánkové odkazy:** Můžeš vytvořit pozvánkové odkazy, které obsahují vše,
+   co nový uživatel potřebuje, aby nainstaloval Cleonu a připojil se k síti.
+5. **Fyzický přenos:** V prostředích bez internetu můžeš Cleonu předat dál přes
+   USB klíčenku nebo v místní síti.
 
-### Upozornění na aktualizaci
+### Jak probíhá aktualizace
 
-Když je k dispozici nová aktualizace, zobrazí ti Cleona upozornění na
-úvodní obrazovce. Pokud je aktualizace dostupná i přes síť (In-Network
-Update), máš možnost stáhnout ji přímo ze sítě.
+1. Cleona automaticky na pozadí posbírá kousky nové aktualizace a sestaví je.
+2. Teprve když je aktualizace **kompletní** a její **podpis ověřen**, nabídne ti
+   ji Cleona. Nedostaneš tedy nikdy poloviční nebo neověřenou aktualizaci.
+3. Klepneš-li na „Instalovat", spustí se instalace bez dalšího dotazu. Na
+   Androidu navíc systém ukáže svůj instalační dialog.
 
-### Binární distribuce
+Starší verze se nenabízejí -- aktualizace jde vždy jen dopředu. Je-li verze tak
+stará, že už nedokáže se sítí spolupracovat, Cleona to zřetelně ukáže a poprosí
+tě o aktualizaci.
 
-Ve výchozím nastavení tvé zařízení pomáhá šířit aktualizace dalším
-uživatelům v síti. Pokud si to nepřeješ, můžeš tuto funkci vypnout v
-nastavení pod "Síť". Využití úložiště pro fragmenty aktualizací je omezené
-(5 MB na mobilních zařízeních, 20 MB na desktopových zařízeních) a
-pravidelně se čistí.
+### Ověření podpisu
 
-### Kontrola podpisu
-
-Každá aktualizace je kryptograficky podepsána. Cleona automaticky ověří
-podpis, než se aktualizace nainstaluje. Tím je zajištěno, že se přijmou
-pouze aktualizace od oficiálního vývojáře -- i když byla aktualizace
-získána přes síť P2P.
+Každá aktualizace je dvojitě podepsaná: klasickým a post-kvantovým postupem.
+Cleona automaticky ověřuje oba podpisy. Tak je zajištěno, že se přijímají jen
+aktualizace od oficiálního vývojáře -- i když aktualizace přišla přes síť od
+cizích zařízení. Aktualizace nikdy nevzniká automaticky z vývoje, ale jen tehdy,
+když ji vývojář podepíše ručně.
 
 ---
+## 16. Časté otázky
 
-## 16. Časté dotazy
+### „Můžu Cleonu používat bez internetu?"
 
-### "Můžu Cleonu používat bez internetu?"
+Cleona potřebuje síťové spojení, ale ne nutně internet: Ve stejné Wi-Fi se
+zařízení Cleony najdou sama a můžou si zcela bez přístupu k internetu psát.
+Současně online s tvým protějškem být nemusíš: Je offline, čeká zpráva až 7
+dní ve schránce u tří sousedů, dokud si ji nevyzvedne.
 
-Ne, Cleona potřebuje síťové připojení k odesílání a přijímání zpráv.
-Nemusíš však být online zároveň se svým protějškem: zprávy odeslané v
-době, kdy je příjemce offline, se dočasně uloží a automaticky doručí,
-jakmile jsou obě strany znovu připojeny. V lokální síti (např. ve stejné
-WLAN) můžete spolu komunikovat i úplně bez přístupu k internetu.
+### „Co když ztratím svou seed frázi?"
 
-### "Co když ztratím svou Seed-Phrase?"
+Dokud ještě běží nějaké zařízení s tvou identitou, není nic ztraceno -- tam
+prostě píšeš dál. Na zařízení, na kterém jsi identitu založil, můžeš 24 slov
+zpravidla znovu opsat (viz kapitola 2). Nespoléhej se na to: Nová instalace
+tuto kopii odstraní a na Androidu ji zničí i odebrání nebo změna zámku
+obrazovky. Nemáš-li ani slova ani zařízení, neexistuje cesta zpět -- ani přes
+tvé kontakty, vývojáře nebo kohokoliv jiného. Proto je tak důležité 24 slov
+bezpečně uschovat.
 
-Pokud máš nastavené Guardians, mohou tři z pěti důvěryhodných osob
-společně obnovit tvůj přístup. Bez Guardianů a bez Seed-Phrase bohužel
-neexistuje způsob, jak svou identitu získat zpět. Proto je tak důležité
-bezpečně uchovávat těch 24 slov.
+### „Může někdo číst moje zprávy?"
 
-### "Může někdo číst mé zprávy?"
+Ne. Každá zpráva se šifruje jednorázovým klíčem, který platí jen pro tuto jednu
+zprávu. Jen ty a tvůj protějšek můžete zprávu rozšifrovat. Neexistuje žádný
+centrální server, žádný hlavní klíč a žádný přístup pro vývojáře. I když nějaké
+zařízení na trase zprávu předává dál, vidí jen šifrovanou kaši a kód. Tvůj
+soused ví, že paket přichází od tebe, ale ne, komu jde; soused tvého protějška
+ví, komu jde, ale ne, od koho.
 
-Ne. Každá zpráva je šifrována jednorázovým klíčem, který platí pouze pro
-tuto jednu zprávu. Zprávu může dešifrovat pouze ty a tvůj protějšek.
-Neexistuje žádný centrální server, žádný univerzální klíč a žádný přístup
-pro vývojáře. I kdyby zprávu na cestě přeposílalo nějaké zařízení, vidělo
-by pouze zašifrovanou změť dat.
-
-### "Proč nepotřebuji telefonní číslo?"
+### „Proč nepotřebuji telefonní číslo?"
 
 Protože tvá identita je čistě kryptografická. Místo telefonního čísla nebo
-e-mailové adresy spojené s tvým skutečným jménem tě identifikuje pár klíčů
-vygenerovaný na tvém zařízení. Kontakty přidáváš přes QR kód, NFC nebo
-odkaz -- nikoli přes telefonní seznam. To znamená více soukromí, protože
-tvůj účet v messengeru není vázán na tvou reálnou identitu.
+e-mailové adresy, které jsou svázané s tvým skutečným jménem, tě identifikuje
+klíčový pár, který se vygeneroval na tvém zařízení. Kontakty přidáváš přes QR
+kód, NFC nebo textový řádek své pozvánky -- ne přes telefonní seznam. To znamená
+více soukromí, protože tvůj účet u messengeru není vázaný na tvou skutečnou
+identitu.
 
-### "Jak najdu lidi na Cleoně?"
+### „Jak na Cleoně najdu lidi?"
 
-Cleona záměrně nemá vyhledávání kontaktů podle telefonního čísla nebo
-jména -- to by byl problém pro soukromí. Místo toho si kontaktní údaje
-vyměňuješ přímo: přes QR kód, NFC, odkaz cleona:// nebo ve veřejných
-kanálech. Je to jako výměna vizitek místo vyhledávání v telefonním
-seznamu.
+Cleona úmyslně nemá vyhledávání kontaktů podle telefonního čísla nebo jména --
+to by byl problém se soukromím. Místo toho si pozvánky vyměňuješ přímo: přes QR
+kód, NFC nebo jako textový řádek přes jinou cestu. To je jako vyměňovat si
+vizitky místo listování telefonním seznamem.
 
-### "Funguje Cleona i v zahraničí?"
+### „Funguje Cleona i v zahraničí?"
 
-Ano. Dokud máš připojení k internetu, funguje Cleona kdekoli na světě.
-Protože neexistuje žádný centrální server, nemůže být služba zablokována
-pro konkrétní země. Cleona navíc disponuje ochranou proti cenzuře: pokud
-je běžné spojení (UDP) blokováno, přepne se Cleona automaticky na
-alternativní přenos (TLS), který je obtížnější rozpoznat a zablokovat.
+Ano. Dokud máš připojení k internetu, funguje Cleona všude na světě. Protože
+neexistuje žádný centrální server a žádná pevná adresa, nedá se služba prostě
+pro určité země vypnout. Jak Cleona ztěžuje blokování, stojí v kapitole
+„Zabezpečení" pod „Anticenzura". Země, která na hranici blokuje každý neznámý
+provoz, však dokáže Cleonu také zastavit.
 
-### "Je Cleona zdarma?"
+### „Je Cleona zdarma?"
 
-Ano. Cleona je zdarma a bez reklam. Protože neexistuje centrální server,
-nevznikají ani žádné náklady na jeho provoz. V aplikaci pod "Darovat"
-najdeš možnost dobrovolně podpořit vývoj.
+Ano. Cleona je použitelná zdarma a bez reklamy. Protože neexistuje žádný
+centrální server, nevznikají ani žádné náklady na servery pro provoz. V nastavení
+pod „Podpoř Cleona" -> „Darovat" můžeš dobrovolně podpořit vývoj.
 
-### "Moje zpráva má symbol hodin -- co to znamená?"
+### „Moje zpráva má jen jeden háček -- co to znamená?"
 
-To znamená, že zpráva ještě nebyla doručena. Tvůj protějšek je
-pravděpodobně zrovna offline. Jakmile je zpráva doručena, symbol se změní.
-Zprávy se uchovávají k doručení až 7 dní.
+Zpráva je na cestě, ale tvůj protějšek ještě nepotvrdil přijetí -- většinou
+proto, že je právě offline. To není chyba: Zpráva čeká až 7 dní ve schránce.
+Jakmile si ji vyzvedne, vidíš dva háčky. Hodiny znamenají, že dosud žádná cesta
+zprávu nenesla -- vyrazí sama, jakmile nějaká bude; varovný symbol, že 14 dní
+nenašla žádnou cestu a můžeš ji odeslat znovu.
 
-### "Můžu přejít z WhatsApp na Cleonu?"
+### „Proč zprávy přicházejí pozdě na mém iPhonu?"
 
-Ano, ale své konverzace z WhatsApp nemůžeš přenést. Cleona a WhatsApp jsou
-zcela odlišné systémy. Své kontakty musíš do Cleony přidat jednotlivě.
-Nejjednodušší je vložit svůj odkaz cleona:// do skupiny na WhatsApp a
-požádat ostatní, aby tě tam přidali.
+iOS nedovoluje aplikacím trvale běžet na pozadí. Cleona je probouzena jen občas a
+jen krátce; kdy, to rozhoduje iOS. Pak vyzvedne všechno. Jakmile aplikaci
+otevřeš, Cleona vyzvedne, co pro tebe bylo schováno.
 
-### "Můžu Cleonu používat na více zařízeních současně?"
+### „Můžu přejít z WhatsAppu na Cleonu?"
 
-Ano. Se stejnou identitou můžeš propojit až 5 zařízení. Jedno zařízení je
-primární (drží Seed-Phrase) a další zařízení se propojí přes bezpečný
-párovací proces. Všechna zařízení sdílejí stejnou identitu, kontakty a
-konverzace. Podrobnosti najdeš v kapitole Multi-Device.
+Ano, ale své chaty z WhatsAppu nepřeneseš. Cleona a WhatsApp jsou zásadně
+různé systémy. Své kontakty musíš v Cleoně přidávat jednotlivě. Nejjednodušší
+to je, když svým kontaktům pošleš textový řádek své pozvánky. Každou žádost,
+která tak dorazí, potvrzuješ sám pod „Žádosti".
 
-### "Jak získám aktualizace, když je app store zablokovaný?"
+### „Můžu Cleonu používat na více zařízeních současně?"
 
-Cleona umí získávat aktualizace přímo přes síť P2P, aniž by byla odkázána
-na app store, webovou stránku nebo stahovací server. Pokud má jiný
-uživatel v síti nejnovější verzi, může si tvé zařízení aktualizaci
-stáhnout odtud. Pravost se ověřuje digitálním podpisem vývojáře.
-Alternativně ti může kontakt aplikaci předat přes pozvánkový odkaz nebo
-USB flash disk. Více v kapitole "Aktualizace softwaru".
+Zatím ne. Druhé zařízení pro tutéž identitu přijde s pozdější verzí
+(kapitola 11). Na více zařízeních můžeš dnes používat různé identity.
+
+### „Jak dostanu aktualizace, když je App Store zablokovaný?"
+
+Cleona může stahovat aktualizace přímo přes síť, bez závislosti na App Storu,
+webu nebo serveru ke stažení. Má-li jiné zařízení v síti nejnovější verzi, může
+tvé zařízení aktualizaci stáhnout od něj. Pravost se ověřuje digitálním podpisem
+vývojáře. Alternativně ti může kontakt předat aplikaci přes pozvánkový odkaz
+nebo USB klíčenku. Více v kapitole „Aktualizace softwaru".
 
 ---
 
 ## Pomoc a kontakt
 
-Pokud máš otázky nebo narazíš na problém, aktuální informace najdeš na
-webu Cleony a na GitHubu. Protože je Cleona decentralizovaný projekt,
-neexistuje klasická zákaznická podpora -- ale aktivní komunita, která ráda
-pomůže.
+Máš-li otázky nebo narazíš-li na problém, najdeš aktuální informace na webu
+Cleony a na GitHubu. Protože je Cleona decentralizovaný projekt, neexistuje
+klasická zákaznická podpora -- ale aktivní komunita, která ráda pomůže.
 
 ---
 
-*Tato příručka popisuje Cleona Chat verzi 3.1.125. Jednotlivé funkce se
-mohou v novějších verzích měnit nebo rozšiřovat.*
+*Tato příručka popisuje Cleona Chat verze 4.2. Jednotlivé funkce se v novějších
+verzích mohou měnit nebo rozšiřovat.*

@@ -241,7 +241,8 @@ static int32_t cvl_estimate_keyframe_bytes(int32_t width, int32_t height, int32_
  * ==========================================================================
  * Mirrors cleona_video_mock.c's own negotiate(): one code path so open() and
  * a later reconfigure() cannot disagree about what this backend supports.
- * Returns CLEONA_VIDEO_OK, CLEONA_VIDEO_ERR_INVALID or
+ * Returns CLEONA_VIDEO_OK, CLEONA_VIDEO_ERR_INVALID,
+ * CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM (Erratum 8, below one macroblock) or
  * CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE. native_w/native_h are the camera's
  * queried capture size (the hard ceiling on capture resolution -- see the
  * file doc on why MJPG/larger modes are out of scope for V1.13).
@@ -260,6 +261,12 @@ static int32_t cvl_negotiate(const cleona_video_config_t* cfg,
     if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
         cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY) {
         return CLEONA_VIDEO_ERR_INVALID;
+    }
+    /* Erratum 8: below one macroblock the encoder cannot go; never round up.
+     * Decided after validity and before any rate question. The camera itself
+     * sets no floor here -- this backend scales below it in software. */
+    if (cfg->width < CVL_MB_SIZE || cfg->height < CVL_MB_SIZE) {
+        return CLEONA_VIDEO_ERR_BELOW_DEVICE_MINIMUM;
     }
 
     int32_t codec = cfg->codec;

@@ -98,6 +98,9 @@ class KeepAlive {
   /// answer in operation, different only for probes.
   final bool Function() ipv6Socket;
 
+  /// The same for IPv4 (S427: a host may have no IPv4 address, §11.1).
+  final bool Function() ipv4Socket;
+
   /// Sends ONE keep-alive with [content] (device code + token); in
   /// operation `CoverStream.keepAliveSend`.
   final bool Function((InternetAddress, int) target, Uint8List content) _send;
@@ -123,6 +126,7 @@ class KeepAlive {
   KeepAlive(this._k,
       {List<InternetAddress> Function()? ownAddresses,
       bool Function()? ipv6Socket,
+      bool Function()? ipv4Socket,
       bool Function((InternetAddress, int) target)? send})
       : ownAddresses = ownAddresses ??
             (() => [
@@ -131,6 +135,8 @@ class KeepAlive {
                 ]),
         ipv6Socket =
             ipv6Socket ?? (() => _k.speaks(InternetAddress.loopbackIPv6)),
+        ipv4Socket =
+            ipv4Socket ?? (() => _k.speaks(InternetAddress.loopbackIPv4)),
         _send = send != null
             ? ((t, _) => send(t))
             : ((t, c) => _k.coverStream.keepAliveSend(t, c));
@@ -265,6 +271,7 @@ class KeepAlive {
       public: _k.neighbourhood.openNetwork);
 
   bool _needsV4(List<InternetAddress> own) =>  // version-name-ok: IP address family
+      ipv4Socket() && // §11.1, S427: IPv4 only with an IPv4 socket
       !ipv4Mapped() &&
       !own.any((a) =>
           a.type == InternetAddressType.IPv4 && fromOutsideReachable(a));

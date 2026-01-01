@@ -60,12 +60,8 @@ extension StateSnapshotOps on CleonaService {
       // §24.4.2/§25.4: the data saver mode is a metric of the readiness
       // section and must cross the IPC boundary — otherwise the GUI on
       // daemon platforms would show a state that the daemon keeps and that
-      // it never sees. BOTH fields: the effective state AND the reason for
-      // the lock. Without the second the UI cannot distinguish "off" from
-      // "locked", and §24.4.2 explicitly requires that the lock appears
-      // "with its reason named".
+      // it never sees.
       'dataSaverActive': dataSaverActive,
-      'dataSaverLockedBySecure': dataSaverLockedBySecure,
       // The device switches (§11.9 source 4, §12.7) and the bulk-cache size
       // (§21.3.3 item 3) — in the snapshot, not only in `state_changed`: a
       // GUI that connects reads them from here (`IpcClient

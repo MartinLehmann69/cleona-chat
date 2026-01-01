@@ -21,6 +21,7 @@
 /// did not take, a re-request round, a request for an unknown transmission,
 /// an end that is not a delivery without any request. The forwarder's line
 /// belongs to the step-3 layer, which writes per packet anyway (`TRACE step3`).
+/// Set aside for now by the TEMPORARY measurement [kTraceEveryEnd] (S427).
 ///
 /// **The handle across nodes** is the first 4 B of the transmission
 /// identifier (hex, as in `TRACE split … FAILED`) and the packet id
@@ -37,6 +38,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/split.dart' show kHeader;
 import 'package:mycelium/split_flow.dart' show SendEnd, Transmission;
 import 'package:mycelium/trace.dart' show hexShort, packetDescribe, packetId, traceOn;
@@ -81,11 +83,22 @@ void traceSplitUnknownRequest(void Function(String) say, Uint8List identifier,
       'this node does not run (any more) — discarded (§11.3)');
 }
 
+/// TEMPORARY measurement (S427, owner 18.11.2026 F2 "A", case AVM 4.07: a
+/// transmission Node1 → bootstrap left no line on either side). While `true`
+/// every end at the sender writes, a clean one too, and every whole packet of
+/// two or more parts at the recipient ([traceSplitWhole]) — the packet id joins
+/// the two logs. It sets aside owner decision 07.10.2026 "A" (nothing per
+/// packet on the transport path) for this measurement only, with the owner's
+/// consent ("weil das bleibt ja nicht dauerhaft und ist nur für die Messung"). german-ok
+/// It is REMOVED once the cause is proven — the constant, its two uses and
+/// [traceSplitWhole].
+const bool kTraceEveryEnd = true;
+
 /// Station 4: [t] ended [how]. Written unless it was a delivery without
-/// any request and with every part taken by the socket.
+/// any request and with every part taken by the socket ([kTraceEveryEnd]).
 void traceSplitEnd(void Function(String) say, Transmission t, SendEnd how) {
   if (!traceOn) return;
-  if (how == SendEnd.delivered && t.requests == 0 && t.notTaken == 0) return;
+  if (!kTraceEveryEnd && how == SendEnd.delivered && t.requests == 0 && t.notTaken == 0) return;
   final now = DateTime.now();
   final whole = BytesBuilder(copy: false);
   for (final p in t.parts) {
@@ -97,6 +110,34 @@ void traceSplitEnd(void Function(String) say, Transmission t, SendEnd how) {
       '${now.difference(t.lastOut).inMilliseconds} ms before, ${t.parts.length} '
       'part(s), ${t.requests} request(s) answered with ${t.again} part(s) again, '
       '${t.notTaken} not taken by the socket${t.cut ? ", cut at the drop deadline" : ""}');
+}
+
+/// TEMPORARY ([kTraceEveryEnd]): the recipient holds [whole], [count] parts of
+/// [identifier] from [from]:[port], and hands it up — to the receiver its kind
+/// names (the dispatch `node_helpers.dart` `assign`). Written before the hand-up,
+/// so it stands even when the receiver throws.
+void traceSplitWhole(void Function(String) say, Uint8List identifier, int count,
+    Uint8List whole, InternetAddress from, int port) {
+  if (!traceOn || !kTraceEveryEnd || count < 2) return;
+  say('TRACE split in from ${from.address}:$port transmission ${hexShort(identifier)} '
+      'whole ($count parts): ${packetDescribe(whole)} — handed up to ${_takerOf(whole)}');
+}
+
+String _takerOf(Uint8List p) {
+  final s = p.isEmpty ? -1 : p[0];
+  if (kinds.isFirstContact(s)) return 'first contact';
+  if (kinds.isMessage(s)) return 'an identity (message)';
+  if (kinds.isAmendment(s)) return 'an identity (amendment)';
+  if (kinds.isForward(s)) return 'step 3 (forwarder)';
+  if (kinds.isPostBox(s)) return 'the post box';
+  if (kinds.isBoard(s)) return 'the board';
+  if (kinds.isWho(s) || kinds.isOutsideRoute(s)) return 'the outside route';
+  if (kinds.isMedia(s)) return 'media';
+  if (kinds.isGroup(s)) return 'groups';
+  if (kinds.isUpdate(s)) return 'update';
+  if (kinds.isEnrolment(s)) return 'enrolment';
+  if (kinds.isDurable(s)) return 'durable';
+  return 'nobody (unknown kind)';
 }
 
 /// Station 4, continued (D-90): [t] ended unconfirmed for its flow, was kept

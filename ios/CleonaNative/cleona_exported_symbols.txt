@@ -21,6 +21,7 @@ _crypto_scalarmult
 _crypto_aead_aes256gcm_encrypt
 _crypto_aead_aes256gcm_decrypt
 _crypto_aead_aes256gcm_keygen
+_crypto_aead_aes256gcm_is_available
 _crypto_hash_sha256
 _crypto_auth_hmacsha256
 _crypto_secretbox_easy
@@ -96,6 +97,10 @@ _cleona_pow_find_nonce
 _cleona_link_elligator_map
 _cleona_link_elligator_rev
 _cleona_link_elligator_key_pair
+# AES-256-GCM in software (S430, v4_2 §4.2, D-130; vendored BearSSL 0.6) —
+# used where libsodium's crypto_aead_aes256gcm_is_available() is 0.
+_cleona_link_aes256gcm_encrypt
+_cleona_link_aes256gcm_decrypt
 
 # libcleona_voice — native OS voice session (ABI: native/cleona_voice/cleona_voice.h, §10.4)
 # Wildcard on purpose: preflight Check 12 part B iterates only over explicit

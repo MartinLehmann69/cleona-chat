@@ -302,7 +302,6 @@ class IpcServer {
           // after flipping it — and "a visible state" would be a delayed
           // one.
           'dataSaverActive': service.dataSaverActive,
-          'dataSaverLockedBySecure': service.dataSaverLockedBySecure,
           // S388, §11.9: the switch of source 4 — the same reasoning.
           'externalRecordsEnabled': service.externalRecordsEnabled,
           // §12.7 (S398-W4): the other two network switches — the same
@@ -1774,7 +1773,6 @@ class IpcServer {
               data: {
                 'reason': saverReason,
                 'active': service.dataSaverActive,
-                'lockedBySecure': service.dataSaverLockedBySecure,
               }));
           break;
 

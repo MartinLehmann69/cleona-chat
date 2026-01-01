@@ -20,6 +20,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/save_text_file.dart';
+import 'package:cleona/ui/components/leaves_protection_notice.dart';
 
 /// Calendar Sync settings screen (§23.8).
 ///
@@ -2161,6 +2162,11 @@ class _AndroidCalendarBridgeCardState
 
   Future<void> _syncNow() async {
     if (_busy) return;
+    // §21.4.2 / D-49 (S432): mirrored events are readable by every app with
+    // calendar access — said once per device, before the first mirroring.
+    await LeavesProtectionNotice.showOnce(
+        context, LeavesProtectionKind.calendar);
+    if (!mounted) return;
     setState(() {
       _busy = true;
       _status = null;

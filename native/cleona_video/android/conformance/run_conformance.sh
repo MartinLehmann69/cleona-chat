@@ -50,6 +50,9 @@
 #                     one delivered frame by 4 bytes before it reaches the
 #                     harness -- corrupts the size/guard-zone bookkeeping V7
 #                     asserts on every frame.
+#   below-minimum-swap  Erratum 8: choosePreset() answers a request below the
+#                     camera's smallest size with RateUnachievable instead of
+#                     BelowDeviceMinimum. V35 must fail, and only V35.
 #
 # USAGE
 #   run_conformance.sh [--serial S] [--variant V] [--expect-fail IDS]
@@ -224,7 +227,14 @@ case "$VARIANT" in
         patch_file "$STAGE/kotlin/VideoSession.kt" \
             's|buf.put(frame.data)|buf.put(frame.data, 0, frame.data.size - 4)|' \
             "readEncoded copies four bytes less than the frame it reports" ;;
-    *) echo "unknown variant: $VARIANT (default|open-err-swap|short-frame)" >&2
+    below-minimum-swap)
+        # Erratum 8: "the camera cannot go this small" reported as "the link
+        # cannot carry video". V35 asks for 16x16, below every real camera, and
+        # must fail; it must be the ONLY check that fails.
+        patch_file "$STAGE/kotlin/VideoSession.kt" \
+            's|return PresetChoice.BelowDeviceMinimum(smallest.width, smallest.height)|return PresetChoice.RateUnachievable|' \
+            "choosePreset() reports RateUnachievable instead of BelowDeviceMinimum below the camera's smallest size" ;;
+    *) echo "unknown variant: $VARIANT (default|open-err-swap|short-frame|below-minimum-swap)" >&2
        exit 2 ;;
 esac
 

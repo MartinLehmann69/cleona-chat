@@ -125,13 +125,13 @@ class SystemChannelHub {
   /// The hub of the device database [db] (one per process and database).
   /// Without a database (no master seed) one in memory.
   static SystemChannelHub forDevice(DeviceStore? db,
-      {required bool holds, String? profileDir}) {
+      {required bool phone, String? profileDir}) {
     if (db == null) {
       return _memory ??= SystemChannelHub(
-          store: SystemObjectStore(holds: holds, profileDir: profileDir));
+          store: SystemObjectStore(phone: phone, profileDir: profileDir));
     }
     return _byDb[db] ??= SystemChannelHub(
-        store: SystemObjectStore(store: db, holds: holds, profileDir: profileDir)
+        store: SystemObjectStore(store: db, phone: phone, profileDir: profileDir)
           ..load(),
         db: db,
         profileDir: profileDir);
