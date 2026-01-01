@@ -153,9 +153,8 @@ build_libsodium() {
     setup_env "$platform"
     local src="$BUILD_DIR/libsodium"
     if [ ! -d "$src" ]; then
-        curl -fsSL "https://download.libsodium.org/libsodium/releases/libsodium-$LIBSODIUM_VERSION.tar.gz" \
-            | tar xz -C "$BUILD_DIR"
-        mv "$BUILD_DIR/libsodium-$LIBSODIUM_VERSION" "$src"
+        git clone --depth 1 --branch "$LIBSODIUM_VERSION-RELEASE" \
+            https://github.com/jedisct1/libsodium.git "$src"
     fi
     cd "$src"
     make distclean 2>/dev/null || true
