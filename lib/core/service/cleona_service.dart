@@ -477,7 +477,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.150';
+  static const String kCurrentAppVersion = '3.1.151';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1713,9 +1713,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Re-arm proactive push for stalled fragments (never started,
   /// stranded mid-chain, or budget exhausted) whose owners are now reachable.
+  /// Also picks up post-restart orphans: fragments loaded from disk that
+  /// lost their in-memory push state (§5.4 restart budget reset).
   void _rearmExpiredPushes() {
     final exhausted = mailboxStore.rearmablePushEntries();
-    if (exhausted.isEmpty) return;
+    final orphaned = mailboxStore.orphanedFragmentKeys();
+    if (exhausted.isEmpty && orphaned.isEmpty) return;
     var rearmed = 0;
     for (final entry in exhausted) {
       final frag = mailboxStore.retrieveByKey(entry.key);
@@ -1726,6 +1729,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final peer = node.routingTable.getPeer(ownerNodeId);
       if (peer == null) continue;
       mailboxStore.resetPushBudget(entry.key);
+      final fragStore = proto.FragmentStore()
+        ..mailboxId = frag.mailboxId
+        ..messageId = frag.messageId
+        ..fragmentIndex = frag.fragmentIndex
+        ..totalFragments = frag.totalFragments
+        ..fragmentData = frag.data;
+      _attemptPush(fragStore, mailboxId, ownerNodeId);
+      rearmed++;
+    }
+    for (final storeKey in orphaned) {
+      final frag = mailboxStore.retrieveByKey(storeKey);
+      if (frag == null) continue;
+      final mailboxId = Uint8List.fromList(frag.mailboxId);
+      final ownerNodeId = _findMailboxOwner(mailboxId);
+      if (ownerNodeId == null) continue;
+      final peer = node.routingTable.getPeer(ownerNodeId);
+      if (peer == null) continue;
       final fragStore = proto.FragmentStore()
         ..mailboxId = frag.mailboxId
         ..messageId = frag.messageId
@@ -4361,14 +4381,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
               '${recipientUserIdHex.substring(0, 8)} — no RUDP-Light confirmation '
               'received. CR stays pending_outgoing for background retry '
               '(exponential backoff).');
-          return false;
+          return true;
         }
       } else {
         _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
             'no DeviceKemRecord in DHT for '
             '${recipientUserIdHex.substring(0, 8)} and no ep+seedDeviceId for '
-            'the step-1b fallback. CR queued for retry (exponential backoff).');
-        return false;
+            'the step-1b fallback. CR stays pending_outgoing for '
+            'background DHT re-resolve (backoff capped at 1200s).');
+        return true;
       }
     }
 
@@ -4945,15 +4966,34 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     for (final entry in pending) {
       final recipientUserId = entry.value.nodeId;
-      // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 320s, capped at 600s.
-      // ML-DSA signing + erasure-coded backup per retry is expensive — without
-      // backoff we'd flood unreachable contacts with CR + erasure writes every 10s
-      // indefinitely.
+      final ci = entry.value;
+      final hasV1Seed = ci.seedDxkB64 != null && ci.seedDmkB64 != null;
+      final hasV2Seed = ci.seedEpB64 != null;
+      final isSeedless = ci.seedDeviceIdHex == null ||
+          (!hasV1Seed && !hasV2Seed);
+
+      // Exponential backoff: 10s, 20s, 40s, …, capped at 600s (seed) or
+      // 1200s (seedless DHT re-resolve — cheaper per attempt, longer tail).
       final count = _crRetryCountPerContact[entry.key] ?? 0;
       final shift = count > 6 ? 6 : count;
-      final backoffSec = 10 * (1 << shift) > 600 ? 600 : 10 * (1 << shift);
+      final capSec = isSeedless ? 1200 : 600;
+      final uncapped = 10 * (1 << shift);
+      final backoffSec = uncapped > capSec ? capSec : uncapped;
       final lastRetry = _lastCrRetryPerContact[entry.key];
       if (lastRetry != null && now.difference(lastRetry).inSeconds < backoffSec) continue;
+
+      // Seedless First-CR (§4.3): re-resolve DeviceKemRecord via DHT.
+      // No routing-table gate — FIND_VALUE goes through any reachable DHT
+      // peer, not directly to the target.
+      if (isSeedless) {
+        _lastCrRetryPerContact[entry.key] = now;
+        _crRetryCountPerContact[entry.key] = count + 1;
+        unawaited(sendContactRequest(entry.key, message: ci.message ?? ''));
+        _log.info('CR retry (seedless, DHT re-resolve) for '
+            '${entry.key.substring(0, 8)} (attempt ${count + 1}, '
+            'backoff ${backoffSec}s)');
+        continue;
+      }
 
       // Only retry if peer is in routing table (known peer).
       // DV routing only carries deviceNodeIds — the userId secondary index
@@ -4966,23 +5006,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         continue;
       }
 
-      // Welle 5 Teil 4 Wave 2: First-CR retry replays sendContactRequest with
-      // the persisted ContactSeed bundle (§8.1.1). Without seed (legacy
-      // pre-Wave-2 contacts) the retry stays a no-op and the user has to
-      // re-scan the QR.
-      final ci = entry.value;
       _lastCrRetryPerContact[entry.key] = now;
       _crRetryCountPerContact[entry.key] = count + 1;
-      // v2 seeds have ep but no dxk/dmk — Deferred Key Exchange via DHT.
-      // v1 seeds have dxk+dmk. Both need seedDeviceIdHex.
-      final hasV1Seed = ci.seedDxkB64 != null && ci.seedDmkB64 != null;
-      final hasV2Seed = ci.seedEpB64 != null;
-      if (ci.seedDeviceIdHex == null || (!hasV1Seed && !hasV2Seed)) {
-        _log.debug(
-            'CR retry skipped for ${entry.key.substring(0, 8)} (attempt '
-            '${count + 1}): no persisted ContactSeed — re-scan QR to resend');
-        continue;
-      }
       // §4.11.10: before each CR retry, re-resolve the owner-tag of an
       // active First-Contact rendezvous session (fresher owner addresses
       // than the URI's `a=`). Fire-and-forget + rate-limited inside the
@@ -7224,6 +7249,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             .resolve(recipientUserId);
         if (devices.isNotEmpty) {
           final packet = proto.NetworkPacketV3.fromBuffer(canonicalBytes);
+          // Refresh timestamp so the receiver's ±60s replay-protection
+          // window accepts the re-sent packet (HMAC is recomputed by
+          // Transport.serializeWithTag on the wire path).
+          packet.timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
           for (final dev in devices) {
             final ok = await node.sendToDevice(
               packet, dev.deviceNodeId);
@@ -8106,17 +8135,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void _sysChanPushTo(Uint8List recipientDeviceId, String channelIdHex,
       List<StoredSysChanRecord> records, {required int ttl}) {
     if (records.isEmpty) return;
+    final recipHex = bytesToHex(recipientDeviceId).substring(0, 8);
     var batch = proto.SysChanPush()
       ..channelId = hexToBytes(channelIdHex)
       ..ttl = ttl;
     var batchBytes = 0;
     void flush() {
       if (batch.records.isEmpty) return;
-      unawaited(node.sendInfraTo(
+      final payload = Uint8List.fromList(batch.writeToBuffer());
+      node.sendInfraTo(
         messageType: proto.MessageTypeV3.MTV3_SYSCHAN_PUSH,
-        innerPayload: Uint8List.fromList(batch.writeToBuffer()),
+        innerPayload: payload,
         recipientDeviceId: recipientDeviceId,
-      ));
+      ).then((ok) {
+        if (!ok) {
+          _log.debug('syschan: push to $recipHex failed (${records.length} records, ttl=$ttl)');
+        }
+      });
       batch = proto.SysChanPush()
         ..channelId = hexToBytes(channelIdHex)
         ..ttl = ttl;
@@ -8140,15 +8175,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       String channelIdHex, List<StoredSysChanRecord> records,
       {required int ttl, String? excludeDeviceHex}) {
     if (records.isEmpty || ttl <= 0) return;
-    final peers = List<PeerInfo>.from(node.routingTable.allPeers)
-      ..removeWhere((p) =>
-          p.nodeIdHex == excludeDeviceHex ||
-          p.nodeIdHex == identity.nodeIdHex)
-      ..shuffle();
-    for (final peer in peers.take(_sysChanFanout)) {
+    final targets = _sysChanPickReachablePeers(
+        _sysChanFanout, excludeDeviceHex: excludeDeviceHex);
+    for (final peer in targets) {
       _sysChanPushTo(Uint8List.fromList(peer.nodeId), channelIdHex, records,
           ttl: ttl);
     }
+  }
+
+  /// Pick up to [count] peers that are likely reachable (seen within the last
+  /// 5 minutes). Falls back to all peers when fewer than [count] are recent.
+  List<PeerInfo> _sysChanPickReachablePeers(int count,
+      {String? excludeDeviceHex}) {
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    final all = List<PeerInfo>.from(node.routingTable.allPeers)
+      ..removeWhere((p) =>
+          p.nodeIdHex == excludeDeviceHex ||
+          p.nodeIdHex == identity.nodeIdHex);
+    final recent = all.where((p) => p.lastSeen.isAfter(cutoff)).toList()
+      ..shuffle();
+    if (recent.length >= count) return recent.take(count).toList();
+    final stale = all.where((p) => !p.lastSeen.isAfter(cutoff)).toList()
+      ..shuffle();
+    return [...recent, ...stale.take(count - recent.length)];
   }
 
   /// Hourly anti-entropy digest (piggy-backed on the channel-index gossip
@@ -8166,11 +8215,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         ..setHash = _sysChanStore.setHash(chHex);
       final payload = Uint8List.fromList(digest.writeToBuffer());
       for (final peer in targetList) {
-        unawaited(node.sendInfraTo(
+        node.sendInfraTo(
           messageType: proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST,
           innerPayload: payload,
           recipientDeviceId: Uint8List.fromList(peer.nodeId),
-        ));
+        ).then((ok) {
+          if (!ok) {
+            _log.debug('syschan: digest to ${peer.nodeIdHex.substring(0, 8)} failed');
+          }
+        });
       }
     }
   }

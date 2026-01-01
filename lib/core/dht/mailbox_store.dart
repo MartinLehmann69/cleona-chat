@@ -463,6 +463,14 @@ class MailboxStore {
         .toList();
   }
 
+  /// Fragment storeKeys loaded from disk that lost their push state on restart.
+  /// These need a fresh push cycle when the owner appears (§5.4).
+  List<String> orphanedFragmentKeys() {
+    return _fragments.keys
+        .where((k) => !_pushState.containsKey(k))
+        .toList();
+  }
+
   /// Pending pushes (not acked, attempts < max) for a specific owner.
   /// Diagnostic / test inspection only — production wiring no longer triggers
   /// re-pushes on reachability changes (V3.1.75 §3.5).

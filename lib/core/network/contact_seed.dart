@@ -697,20 +697,17 @@ class ContactSeedBuilder {
   /// Relaxed gate (§8.1.1): a single publicly reachable own address
   /// (public IPv4 via STUN or a global IPv6) is sufficient on its own —
   /// the target can reach us directly, seed peers are a bonus (`s=` may
-  /// be empty). Only the LAN-only case (no public address at all) still
-  /// requires at least one session-confirmed peer so the seed carries
-  /// usable relay candidates.
+  /// be empty). Without a public address, any session-confirmed peer
+  /// (LAN or WAN) suffices — the seed carries those peers as relay
+  /// candidates and the DV relay cascade (§5) handles delivery.
   bool get isReady =>
       _source.publicIp != null ||
       _hasGlobalIpv6 ||
-      (_source.hasSessionConfirmedPeers && _hasOnlyLanPeers);
+      _source.hasSessionConfirmedPeers;
 
   bool get _hasGlobalIpv6 => _source.localIps.any((ip) =>
       ip.contains(':') && !ip.startsWith('fe80:') &&
       !ip.startsWith('fd') && !ip.startsWith('fc'));
-
-  bool get _hasOnlyLanPeers =>
-      _source.peerSummaries.every((p) => _isPrivateIp(p.address));
 
   /// Build a stable ContactSeed for the given identity.
   /// Returns null if the network isn't ready yet.

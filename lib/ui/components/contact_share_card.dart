@@ -126,7 +126,7 @@ class _ContactShareCardState extends State<ContactShareCard> {
             children: [
               SelectableText(
                 'Node-ID: ${nodeIdHex.substring(0, 16)}...',
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
               ),
               const SizedBox(width: 8),
               IconButton(

@@ -95,6 +95,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     if (identical(_natWizardWiredService, service)) return;
     _natWizardWiredService = service;
     service.onNatWizardTriggered = () {
+      // Consume any pending latch-reset before evaluating the guard —
+      // the counter bump (from gui_action('reset_nat_wizard_latch'))
+      // and this callback can race when both fire between two build()s.
+      if (mounted) {
+        final appState = context.read<CleonaAppState>();
+        if (appState.natWizardResetCounter != _lastNatWizardResetCounter) {
+          _lastNatWizardResetCounter = appState.natWizardResetCounter;
+          _natWizardShown = false;
+        }
+      }
       if (_natWizardShown) return;
       _natWizardShown = true;
       if (!mounted) return;
@@ -443,43 +453,45 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           title: Text(locale.get('create_group')),
           content: SizedBox(
             width: 300,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: nameController,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    labelText: locale.get('group_name_label'),
-                    border: const OutlineInputBorder(),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: locale.get('group_name_label'),
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                Text(locale.get('select_members'),
-                    style: const TextStyle(fontWeight: FontWeight.w500)),
-                const SizedBox(height: 8),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 300),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: contacts.length,
-                    itemBuilder: (_, i) {
-                      final c = contacts[i];
-                      return CheckboxListTile(
-                        title: Text(c.displayName),
-                        value: selected.contains(c.nodeIdHex),
-                        onChanged: (v) => setDialogState(() {
-                          if (v == true) {
-                            selected.add(c.nodeIdHex);
-                          } else {
-                            selected.remove(c.nodeIdHex);
-                          }
-                        }),
-                      );
-                    },
+                  const SizedBox(height: 12),
+                  Text(locale.get('select_members'),
+                      style: const TextStyle(fontWeight: FontWeight.w500)),
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 300),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: contacts.length,
+                      itemBuilder: (_, i) {
+                        final c = contacts[i];
+                        return CheckboxListTile(
+                          title: Text(c.displayName),
+                          value: selected.contains(c.nodeIdHex),
+                          onChanged: (v) => setDialogState(() {
+                            if (v == true) {
+                              selected.add(c.nodeIdHex);
+                            } else {
+                              selected.remove(c.nodeIdHex);
+                            }
+                          }),
+                        );
+                      },
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [

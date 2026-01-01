@@ -436,14 +436,22 @@ class ChannelModerationService {
   /// (no new timer, no new periodicity).
   void Function(List<PeerInfo> targets)? onGossipTargets;
 
-  /// Send channel index to up to 3 random connected peers.
+  /// Send channel index to up to 3 random recently-seen peers.
   void doChannelIndexGossip() {
-    // Pick up to 3 random peers from routing table
     final allPeers = _ctx.node.routingTable.allPeers;
     if (allPeers.isEmpty) return;
 
-    final shuffled = List<PeerInfo>.from(allPeers)..shuffle();
-    final targets = shuffled.take(3).toList();
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
+    final recent = allPeers.where((p) => p.lastSeen.isAfter(cutoff)).toList()
+      ..shuffle();
+    final List<PeerInfo> targets;
+    if (recent.length >= 3) {
+      targets = recent.take(3).toList();
+    } else {
+      final stale = allPeers.where((p) => !p.lastSeen.isAfter(cutoff)).toList()
+        ..shuffle();
+      targets = [...recent, ...stale.take(3 - recent.length)];
+    }
 
     // §9.5.7 anti-entropy piggyback — runs even when the channel index
     // itself is empty (system-channel records exist independently).

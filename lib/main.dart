@@ -18,6 +18,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/ipc/ipc_client.dart';
+import 'package:collection/collection.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
@@ -2410,7 +2411,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
     switch (action) {
       case 'open_identity_detail':
-        final identity = IdentityManager().getActiveIdentity();
+        final idParam = data['identityId'] as String?;
+        final identity = idParam != null
+            ? IdentityManager().loadIdentities().firstWhereOrNull(
+                (i) => i.nodeIdHex == idParam || i.id == idParam)
+            : IdentityManager().getActiveIdentity();
         if (identity != null && _service != null) {
           nav.push(MaterialPageRoute(
             builder: (_) => MultiProvider(
