@@ -839,12 +839,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Restore persisted theme mode (call early, before first build).
   Future<void> _restoreThemeMode() async {
-    final prefs = await SharedPreferences.getInstance();
-    final idx = prefs.getInt('cleona_theme_mode');
-    if (idx != null && idx >= 0 && idx < ThemeMode.values.length) {
-      _themeMode = ThemeMode.values[idx];
-      notifyListeners();
-    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final idx = prefs.getInt('cleona_theme_mode');
+      if (idx != null && idx >= 0 && idx < ThemeMode.values.length) {
+        _themeMode = ThemeMode.values[idx];
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   /// Boot: check profile SYNCHRONOUSLY, then connect async.

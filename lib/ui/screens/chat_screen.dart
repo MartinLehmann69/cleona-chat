@@ -116,16 +116,19 @@ class _ChatScreenState extends State<ChatScreen> {
   DateTime? _lastTypingSent;
   ICleonaService? _cachedService;
 
-  // EmojiPicker Config cache — rebuilt only when Brightness changes (discrete),
-  // not on every frame of the 400ms theme animation (continuous color lerp
-  // triggers ~24 concurrent _updateEmojis() calls in the package → TabBar crash).
+  // EmojiPicker Config cache — keyed on PLATFORM brightness (instant, single
+  // flip per OS event) instead of ColorScheme.brightness (which hard-flips at
+  // t=0.5 inside the 400ms AnimatedTheme transition, triggering a second
+  // _updateEmojis() call in the package that races on the shared mutable
+  // _categoryEmoji list → TabBar length mismatch → crash).
   Brightness? _emojiCfgBrightness;
   Config? _emojiCfgInput;
   Config? _emojiCfgReaction;
 
   Config _emojiConfig(ColorScheme cs, double height) {
-    if (cs.brightness != _emojiCfgBrightness) {
-      _emojiCfgBrightness = cs.brightness;
+    final platformBrightness = MediaQuery.platformBrightnessOf(context);
+    if (platformBrightness != _emojiCfgBrightness) {
+      _emojiCfgBrightness = platformBrightness;
       _emojiCfgInput = null;
       _emojiCfgReaction = null;
     }

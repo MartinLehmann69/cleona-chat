@@ -721,6 +721,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Load conversations
     _loadConversations();
     _recoverStuckMedia();
+    _loadPendingMediaSends();
 
     // Seed system channels (§9.5) — MUST run after _loadConversations() so the
     // real chats are already in `conversations`; seeding then only adds the two
@@ -1371,7 +1372,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     } catch (_) {}
   }
 
-  // Pending media: maps messageIdHex -> local file path (sender keeps file until accepted)
+  // Pending media: maps messageIdHex -> local file path (sender keeps file until accepted).
+  // Persisted to $profileDir/pending_media_sends.json so Two-Stage transfers
+  // survive app restarts (the receiver's MEDIA_REQUEST may arrive hours later
+  // via S&F, and the in-memory map would be empty after a restart).
   final Map<String, String> _pendingMediaSends = {};
 
   // Receiver-side Stage-2 reassembly buffer. Keyed by mediaIdHex (the original
@@ -1611,6 +1615,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // when the receiver sends MEDIA_REQUEST).
     if (twoStage) {
       _pendingMediaSends[firstMsgId] = persistentPath;
+      _savePendingMediaSends();
     }
 
     // Update message with final ID and status
@@ -6703,6 +6708,51 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (resetCount > 0) {
       _log.info('Media recovery: reset $resetCount stuck downloads to announced');
       _saveConversations();
+    }
+  }
+
+  void _loadPendingMediaSends() {
+    final path = '$profileDir/pending_media_sends.json';
+    final file = File(path);
+    if (!file.existsSync()) return;
+    try {
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      for (final entry in json.entries) {
+        final filePath = entry.value as String;
+        if (File(filePath).existsSync()) {
+          _pendingMediaSends[entry.key] = filePath;
+        }
+      }
+      if (_pendingMediaSends.isNotEmpty) {
+        _log.info('Loaded ${_pendingMediaSends.length} pending media sends');
+      }
+    } catch (e) {
+      _log.warn('Failed to load pending media sends: $e');
+    }
+  }
+
+  String? _recoverPendingMediaPath(String messageId) {
+    for (final conv in conversations.values) {
+      for (final msg in conv.messages) {
+        if (msg.id == messageId && msg.filePath != null && File(msg.filePath!).existsSync()) {
+          return msg.filePath;
+        }
+      }
+    }
+    return null;
+  }
+
+  void _savePendingMediaSends() {
+    final path = '$profileDir/pending_media_sends.json';
+    try {
+      if (_pendingMediaSends.isEmpty) {
+        final file = File(path);
+        if (file.existsSync()) file.deleteSync();
+        return;
+      }
+      File(path).writeAsStringSync(jsonEncode(_pendingMediaSends));
+    } catch (e) {
+      _log.warn('Failed to save pending media sends: $e');
     }
   }
 
@@ -12283,14 +12333,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           'wantsMsgId=${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId} '
           'pending=${filePath != null}');
       if (filePath == null) {
-        _log.warn(
-            'media-request-v3: no pending media for ${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId}');
-        return;
+        final recovered = _recoverPendingMediaPath(originalMsgId);
+        if (recovered == null) {
+          _log.warn(
+              'media-request-v3: no pending media for ${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId}');
+          return;
+        }
+        _pendingMediaSends[originalMsgId] = recovered;
+        _savePendingMediaSends();
+        _log.info('media-request-v3: recovered pending path from conversation history');
       }
-      final file = File(filePath);
+      final resolvedPath = _pendingMediaSends[originalMsgId]!;
+      final file = File(resolvedPath);
       if (!file.existsSync()) {
-        _log.warn('media-request-v3: pending file vanished: $filePath');
+        _log.warn('media-request-v3: pending file vanished: $resolvedPath');
         _pendingMediaSends.remove(originalMsgId);
+        _savePendingMediaSends();
         return;
       }
 
@@ -12346,7 +12404,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       // Sender finished — clear pending entry. (Receiver-side hash-check
       // protects against truncation; we don't keep retries here.)
-      if (okComplete) _pendingMediaSends.remove(originalMsgId);
+      if (okComplete) {
+        _pendingMediaSends.remove(originalMsgId);
+        _savePendingMediaSends();
+      }
     } catch (e, st) {
       _log.warn('handleMediaRequestV3: failed: $e\n$st '
           '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
@@ -13136,11 +13197,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           if (picBase64 != null) existing.profilePictureBase64 = picBase64;
           existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
 
+          final conv = conversations[senderHex];
+          if (conv != null && resp.displayName.isNotEmpty) {
+            conv.displayName = resp.displayName;
+            if (picBase64 != null) conv.profilePictureBase64 = picBase64;
+          }
+
           if (identityKeyChanged) {
             final prevLevel = existing.verificationLevel;
             final keyChange = onIdentityRotation(prevLevel);
             existing.verificationLevel = keyChange.newLevel;
             _saveContacts();
+            _saveConversations();
             _log.info('RC-1: CRR retry from ${senderHex.substring(0, 8)} with CHANGED keys — '
                 '§8.3 reset $prevLevel→${keyChange.newLevel}');
             try {
@@ -13153,6 +13221,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           }
 
           _saveContacts();
+          _saveConversations();
           _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
           onStateChanged?.call();
           return;
@@ -13185,6 +13254,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
 
         _saveContacts();
+
+        // Sync conversation displayName — the conversation may already exist
+        // (e.g. text arrived before CRR) with a truncated-hash placeholder.
+        final conv = conversations[senderHex];
+        if (conv != null && resp.displayName.isNotEmpty) {
+          conv.displayName = resp.displayName;
+          if (picBase64 != null) conv.profilePictureBase64 = picBase64;
+        }
 
         // Create conversation with system message so the contact appears
         // immediately in the "Aktuell" tab (not only in "Kontakte" tab).

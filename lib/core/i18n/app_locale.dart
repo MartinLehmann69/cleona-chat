@@ -79,12 +79,14 @@ class AppLocale extends ChangeNotifier {
 
   /// Load saved locale from SharedPreferences (call once at startup).
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_prefsKey);
-    if (saved != null && supportedLocales.any((l) => l.code == saved)) {
-      _locale = saved;
-      notifyListeners();
-    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString(_prefsKey);
+      if (saved != null && supportedLocales.any((l) => l.code == saved)) {
+        _locale = saved;
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   String get currentLocale => _locale;
