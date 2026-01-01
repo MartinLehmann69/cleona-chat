@@ -92,7 +92,7 @@ setup_env() {
     AR="$(xcrun --sdk "$platform" -f ar)"
     RANLIB="$(xcrun --sdk "$platform" -f ranlib)"
 
-    CFLAGS_BASE="-arch $ARCH -isysroot $SDK_PATH -m${platform/#iphone/iphone}-version-min=$IOS_DEPLOYMENT_TARGET -target $TARGET_TRIPLE -O2 -fembed-bitcode-marker -fPIC"
+    CFLAGS_BASE="-arch $ARCH -isysroot $SDK_PATH -target $TARGET_TRIPLE -O2 -fPIC"
     export CC CXX AR RANLIB
     export CFLAGS="$CFLAGS_BASE"
     export CXXFLAGS="$CFLAGS_BASE"
@@ -185,6 +185,7 @@ build_liboqs() {
         -DOQS_USE_OPENSSL=OFF \
         -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65" \
         -DOQS_DIST_BUILD=ON \
+        -DOQS_PERMIT_UNSUPPORTED_ARCHITECTURE=ON \
         ..
     ninja -j"$NPROC" install
     cd "$PROJECT_DIR"
