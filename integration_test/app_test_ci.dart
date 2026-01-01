@@ -70,16 +70,28 @@ void main() {
     }
 
     // ── 1.2 Home Screen ───────────────────────────────────────────
+    // In-process init is async (deferred via Future()) — wait for settings icon
+    // and cell_tower chip to appear as the service initializes.
+    for (var i = 0; i < 30; i++) {
+      await tester.pump(const Duration(seconds: 1));
+      if (find.byIcon(Icons.settings).evaluate().isNotEmpty &&
+          find.byIcon(Icons.cell_tower).evaluate().isNotEmpty) {
+        break;
+      }
+    }
+
     expect(find.byIcon(Icons.settings), findsOneWidget,
         reason: '1.2 Settings-Button existiert');
 
-    // Cell-tower icon (peer count chip)
     expect(find.byIcon(Icons.cell_tower), findsOneWidget,
         reason: '1.2 Peer-Count Chip sichtbar');
 
     // ── 1.3 Settings Screen ───────────────────────────────────────
     await tester.tap(find.byIcon(Icons.settings));
-    await tester.pumpAndSettle(const Duration(seconds: 3));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(seconds: 1));
+      if (find.textContaining('Node-ID').evaluate().isNotEmpty) break;
+    }
 
     expect(find.textContaining('Node-ID'), findsWidgets,
         reason: '1.3 Node-ID sichtbar');
