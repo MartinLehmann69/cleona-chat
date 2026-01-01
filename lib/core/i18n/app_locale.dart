@@ -34,6 +34,7 @@ const supportedLocales = [
   LocaleInfo('cs', '\u{1F1E8}\u{1F1FF}', '\u010Ce\u0161tina'),
   LocaleInfo('sk', '\u{1F1F8}\u{1F1F0}', 'Sloven\u010Dina'),
   LocaleInfo('hr', '\u{1F1ED}\u{1F1F7}', 'Hrvatski'),
+  LocaleInfo('sr', '\u{1F1F7}\u{1F1F8}', 'Српски'),
   LocaleInfo('bg', '\u{1F1E7}\u{1F1EC}', '\u0411\u044A\u043B\u0433\u0430\u0440\u0441\u043A\u0438'),
   LocaleInfo('el', '\u{1F1EC}\u{1F1F7}', '\u0395\u03BB\u03BB\u03B7\u03BD\u03B9\u03BA\u03AC'),
   LocaleInfo('da', '\u{1F1E9}\u{1F1F0}', 'Dansk'),

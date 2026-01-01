@@ -25,6 +25,13 @@ class IosBackgroundFetch {
   /// Whether a background fetch is currently in progress.
   static bool _isFetching = false;
 
+  /// Public accessor so _initInProcess can wait for a running fetch to finish.
+  static bool get isFetching => _isFetching;
+
+  /// Set by _initInProcess BEFORE init() to block BG-fetch from creating a
+  /// second node on the same port (EADDRINUSE race).
+  static bool foregroundInitInProgress = false;
+
   /// Initialize the MethodChannel handler. Called once during app startup
   /// from `_initAndroidInProcess()` (which also handles iOS). Sets up the
   /// handler for incoming `performBackgroundFetch` calls from the native side.
@@ -87,8 +94,9 @@ class IosBackgroundFetch {
   static Future<Map<String, dynamic>> _performBackgroundFetch({
     String taskType = 'refresh',
   }) async {
-    if (_isFetching) {
-      debugPrint('[ios-bg-fetch] Already fetching, returning empty');
+    if (_isFetching || foregroundInitInProgress) {
+      debugPrint('[ios-bg-fetch] Skipping: _isFetching=$_isFetching, '
+          'foregroundInit=$foregroundInitInProgress');
       return {'messageCount': 0, 'senderNames': <String>[], 'previews': <String>[]};
     }
 

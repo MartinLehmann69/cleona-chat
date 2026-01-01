@@ -1568,11 +1568,36 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Must happen before startQuick so the native side can call into Dart
     // during background wakeups.
     if (Platform.isIOS) {
+      IosBackgroundFetch.foregroundInitInProgress = true;
+      if (IosBackgroundFetch.isFetching) {
+        debugPrint('[main] BG-fetch running — waiting for port release...');
+        for (var i = 0; i < 60 && IosBackgroundFetch.isFetching; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+      }
       IosBackgroundFetch.init();
     }
 
     // Start node (UDP listener active → messages can arrive)
-    await node.startQuick();
+    // Retry on EADDRINUSE (errno 48): a background fetch node may still
+    // hold the port briefly after shutdown.
+    for (var attempt = 0;; attempt++) {
+      try {
+        await node.startQuick();
+        break;
+      } on SocketException catch (e) {
+        if (attempt < 2 && '$e'.contains('errno = 48')) {
+          debugPrint('[main] Port in use (attempt ${attempt + 1}/3), '
+              'retrying in 2s...');
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        rethrow;
+      }
+    }
+    if (Platform.isIOS) {
+      IosBackgroundFetch.foregroundInitInProgress = false;
+    }
 
     // Mobile fallback state → icon update (AFTER startQuick — transport is late-initialized)
     node.transport.onMobileFallbackChanged = (active) {

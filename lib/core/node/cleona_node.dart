@@ -2526,7 +2526,7 @@ class CleonaNode {
     try {
       final find = proto.DhtFindNode.fromBuffer(frame.payload);
       final targetId = Uint8List.fromList(find.targetId);
-      final closest = routingTable.findClosestPeers(targetId, count: kBucketSize);
+      final closest = routingTable.findClosestPeers(targetId, count: 20);
       final response = proto.DhtFindNodeResponse();
       for (final peer in closest) {
         response.closestPeers.add(peer.toProto(gossipFilter: true));

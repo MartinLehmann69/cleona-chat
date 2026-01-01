@@ -689,6 +689,10 @@ class _MultiServiceDaemon {
         node: node,
         displayName: ctx.displayName,
       );
+      // §4.8 / §5.5 F4: bootstrap nodes accept S&F stores for any recipient.
+      if (config.bootstrapMode) {
+        service.acceptAnyPeerStore = true;
+      }
       // Wire badge count to tray icon
       service.onBadgeCountChanged = (count) => _updateTrayBadge();
       // §19.6: wire auto-download BEFORE startService() so the callback is
@@ -1527,6 +1531,9 @@ class _DaemonConfig {
   /// Beta-only: skip the machine-global single-instance guard (§15.1).
   /// Used by lab tooling (jury-swarm) to run N daemons on one host.
   final bool ignoreSingleInstance;
+  /// Infrastructure mode (§4.8 / §5.5 F4): accept PEER_STORE for any
+  /// recipient within budgets, not just own contacts. Used on bootstrap nodes.
+  final bool bootstrapMode;
 
   _DaemonConfig({
     required this.baseDir,
@@ -1534,6 +1541,7 @@ class _DaemonConfig {
     this.iconPath,
     this.publicIp,
     this.ignoreSingleInstance = false,
+    this.bootstrapMode = false,
   });
 }
 
@@ -1543,6 +1551,7 @@ _DaemonConfig _parseArgs(List<String> args) {
   String? iconPath;
   String? publicIp;
   bool ignoreSingleInstance = false;
+  bool bootstrapMode = false;
 
   // Legacy: --profile and --name still accepted for compatibility
   String? legacyProfile;
@@ -1587,6 +1596,9 @@ _DaemonConfig _parseArgs(List<String> args) {
         // (lab/jury-swarm multi-instance). Honored only in beta builds.
         ignoreSingleInstance = true;
         break;
+      case '--bootstrap':
+        bootstrapMode = true;
+        break;
     }
   }
 
@@ -1609,5 +1621,6 @@ _DaemonConfig _parseArgs(List<String> args) {
     iconPath: iconPath,
     publicIp: publicIp,
     ignoreSingleInstance: ignoreSingleInstance,
+    bootstrapMode: bootstrapMode,
   );
 }

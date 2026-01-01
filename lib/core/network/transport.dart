@@ -1281,18 +1281,27 @@ class Transport {
     _log.debug('TLS connection from $key');
 
     final buffer = BytesBuilder();
-    client.listen(
-      (data) {
-        onBytesReceived?.call(data.length);
-        buffer.add(data);
-        _tryParseTlsBuffer(buffer, client);
-      },
-      onDone: () => client.destroy(),
-      onError: (e) {
-        _log.debug('TLS error from $key: $e');
-        client.destroy();
-      },
-    );
+    // TLS close-race guard (§4.1): _RawSecureSocket.read() throws
+    // SocketException synchronously inside the data callback when the
+    // TLS layer has already closed but raw TCP events are still enqueued.
+    // That throw bypasses the stream's onError — runZonedGuarded catches it.
+    runZonedGuarded(() {
+      client.listen(
+        (data) {
+          onBytesReceived?.call(data.length);
+          buffer.add(data);
+          _tryParseTlsBuffer(buffer, client);
+        },
+        onDone: () => client.destroy(),
+        onError: (e) {
+          _log.debug('TLS error from $key: $e');
+          client.destroy();
+        },
+      );
+    }, (e, st) {
+      _log.debug('TLS zone error from $key: $e');
+      try { client.destroy(); } catch (_) {}
+    });
   }
 
   void _tryParseTlsBuffer(BytesBuilder buffer, Socket client) {

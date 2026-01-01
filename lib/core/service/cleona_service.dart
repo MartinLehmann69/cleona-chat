@@ -473,7 +473,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.136';
+  static const String kCurrentAppVersion = '3.1.137';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -846,6 +846,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
               .any((p) => _binaryFragmentStore!.storedVersionsSync(p).isNotEmpty);
       if (node.binaryHasContentToShare) {
         _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
+        _binaryRendezvousManager!.publishAll(_buildBinaryAvailabilityRecords());
       }
 
       // Self-seed: encode the running binary into RS fragments so this node
@@ -8509,9 +8510,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       rttMap: node.dhtRpc.rttMap,
       isRunning: isRunning,
       profileDir: profileDir,
-      // S119 B (Problem 2): "Aktive Peers" counter must equal the
-      // connection-sheet list — both come from peerSummaries now.
-      reachablePeerCount: peerSummaries.length,
+      reachablePeerCount: node.confirmedPeerIds.length,
       // D5 (§13.1.3): collective-quota observability.
       poolDropsRate: node.rateLimiter.poolDroppedPackets,
       poolDropsRelay: node.relayPoolDrops,

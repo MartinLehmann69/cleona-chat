@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:9457c3027fd1, 2026-07-12). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8246a5bbd760, 2026-07-12). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -81,7 +81,7 @@ These principles are non-negotiable and govern all architectural decisions:
 
 10. **Cross-platform consistency.** One Dart codebase, one wire format, identical crypto paths on all platforms. Platform specifics (Android Foreground Service, Linux tray, macOS bundle) are UI/lifecycle adaptations, not architectural variations. See §15.2.
 
-11. **Complete i18n, no EN fallback in the code pipeline.** Every new i18n key exists in all 33 locales before it is referenced in UI code. The linter `dart scripts/check_i18n_complete.dart` is an exit-1 gate before commit. The runtime fallback EN→DE→key exists only as defence in depth. See §17.
+11. **Complete i18n, no EN fallback in the code pipeline.** Every new i18n key exists in all 34 locales before it is referenced in UI code. The linter `dart scripts/check_i18n_complete.dart` is an exit-1 gate before commit. The runtime fallback EN→DE→key exists only as defence in depth. See §17.
 
 ### 1.2 V3.0 Architecture Highlights
 
@@ -1323,7 +1323,7 @@ Cleona nodes communicate over **a single UDP port per daemon** that additionally
 3. **TLS on the same port** (fallback): after 15 consecutive UDP failures or on anti-censorship indicators → TLS frame instead of UDP datagram
 4. **HTTP on the same TCP port** (binary distribution only): First-Byte-Sniffing multiplexes `GET` → embedded HTTP server (§19.6.6) vs. `0x16 0x03` → TLS handshake on the same listener
 
-TLS serves exclusively as a **transport fallback** for reachability — the end-to-end encryption (KEM layer) is unaffected. TLS provides no additional security, only additional reachability against operator DPI filters. **Socket lifecycle:** inbound TLS connections that send an invalid or unparseable frame are immediately destroyed (`client.destroy()`) to prevent socket leaks from malformed or probing connections. **TLS capability cache:** per-peer tristate (capable / incapable / unknown) with 24h TTL eviction and 1000-entry hard cap. Eviction causes a re-probe on next bulk send (graceful: unknown defaults to "try TLS"); no mid-transfer impact since entries are written after the send completes.
+TLS serves exclusively as a **transport fallback** for reachability — the end-to-end encryption (KEM layer) is unaffected. TLS provides no additional security, only additional reachability against operator DPI filters. **Socket lifecycle:** inbound TLS connections that send an invalid or unparseable frame are immediately destroyed (`client.destroy()`) to prevent socket leaks from malformed or probing connections. **TLS close-race guard:** Dart's `SecureSocket` can throw `SocketException("Reading from a closed socket")` when the TLS layer has already closed (TCP RST, mobile network switch) but raw TCP data events are still enqueued in the event loop — the throw occurs inside `_RawSecureSocket.read()` within the data callback and bypasses the stream's `onError` handler. `_onTlsConnection` wraps its `listen()` call in `runZonedGuarded` to catch this Dart-VM-internal race and cleanly destroy the socket (analogous to the UDP async error propagation pattern in §24.2). This is a targeted transport-level guard, not a service-level zone — the §16.2 invariant (`PlatformDispatcher.onError` as single global error sink) is unaffected. **TLS capability cache:** per-peer tristate (capable / incapable / unknown) with 24h TTL eviction and 1000-entry hard cap. Eviction causes a re-probe on next bulk send (graceful: unknown defaults to "try TLS"); no mid-transfer impact since entries are written after the send completes.
 
 ### 4.2 DHT (Kademlia, Closed Network)
 
@@ -1331,7 +1331,7 @@ Cleona uses a Kademlia DHT as the backbone for peer discovery, mailbox lookup, e
 
 **DHT address space**: 256-bit, identical key space as DeviceIDs and Mailbox IDs.
 
-**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with 200 entries per bucket. Standard Kademlia uses k=20, designed for networks with millions of nodes. Cleona operates in the 10–500 node range, where SHA-256-based Node-IDs cause ~50% of peers to land in bucket 255 — a k=20 bucket overflows at just ~40 peers, causing routing-table rejections and DV-routing desync (3,400+ failed sends/day observed on a mobile node, 2026-06-20). k=200 eliminates this failure mode with negligible memory overhead (~200 PeerInfo × ~1KB ≈ 200KB per bucket worst case).
+**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with 200 entries per bucket. Standard Kademlia uses k=20, designed for networks with millions of nodes. Cleona operates in the 10–500 node range, where SHA-256-based Node-IDs cause ~50% of peers to land in bucket 255 — a k=20 bucket overflows at just ~40 peers, causing routing-table rejections and DV-routing desync (3,400+ failed sends/day observed on a mobile node, 2026-06-20). k=200 eliminates this failure mode with negligible memory overhead (~200 PeerInfo × ~1KB ≈ 200KB per bucket worst case). **FIND_NODE response count**: 20 (standard Kademlia K), not the bucket capacity — each PeerInfoProto with PQ key material is ~8,800B; returning 200 peers would produce ~1.76MB, far exceeding the 255-fragment UDP limit (306KB). The iterative lookup merges multiple 20-peer responses to converge on the true K-closest set.
 
 **Closed Network authentication**: every DHT operation is authenticated by the HMAC in the outer frame (§4.10). Nodes without the `network_secret` can neither perform DHT operations nor interpret responses.
 
@@ -6704,7 +6704,7 @@ Flutter UI with ThemeExtensions, 5 token primitives, 6 component classes, 10 Ski
 
 **Conversation-list timestamps**: today shows `HH:MM`, yesterday shows localized "Yesterday" label, 2-6 days shows short weekday abbreviation (Mo/Di/...), same year shows `d.M.`, older shows `d.M.YY`.
 
-**Chat date separators**: a centered date label is inserted between messages from different calendar days. Labels: today = "Heute"/"Today"/..., yesterday = "Gestern"/"Yesterday"/..., 2-6 days = full weekday name, same year = "d. Month", older = "d. Month YYYY". Skipped for vote-sorted channels (Feature Requests). Individual message bubbles continue to show only `HH:MM` — the separator provides the date context. i18n keys: `date_today`, `date_yesterday`, `weekday_1`-`weekday_7` (full), `weekday_short_1`-`weekday_short_7`, `month_1`-`month_12` (all 33 locales).
+**Chat date separators**: a centered date label is inserted between messages from different calendar days. Labels: today = "Heute"/"Today"/..., yesterday = "Gestern"/"Yesterday"/..., 2-6 days = full weekday name, same year = "d. Month", older = "d. Month YYYY". Skipped for vote-sorted channels (Feature Requests). Individual message bubbles continue to show only `HH:MM` — the separator provides the date context. i18n keys: `date_today`, `date_yesterday`, `weekday_1`-`weekday_7` (full), `weekday_short_1`-`weekday_short_7`, `month_1`-`month_12` (all 34 locales).
 
 **Inbox tab** (contact requests and invites): pending CR + GROUP_INVITE + CHANNEL_INVITE listed. Accept/Reject per item.
 
@@ -6800,7 +6800,7 @@ Cleona follows a strict minimum-permissions approach. No permission is requested
 
 **Hardware feature:** `android.hardware.nfc` is declared as `required="false"` — Cleona installs and runs on devices without NFC. The NFC contact exchange button is hidden on devices without NFC hardware.
 
-**Foreground service (canonical background-delivery path):** `CleonaForegroundService` boots as type `dataSync` and keeps the UDP socket alive for incoming message and call delivery. This is the **only** mechanism Cleona uses for background delivery on Android — push wake-up via FCM, UnifiedPush, WebPush or per-peer rotation has been architecturally evaluated and rejected (see §12.4 / ADR "Push Wake-Up Rejected"). During an active voice/video call the service is runtime-promoted to `dataSync|microphone` via the 3-arg `startForeground()` overload, after `RECORD_AUDIO` has been granted; it is demoted back to `dataSync` when the call ends. The manifest declares `foregroundServiceType="dataSync|microphone"` so the runtime promotion is permitted; calling `startForeground()` with the 2-arg overload at boot would implicitly inherit the `microphone` type and crash on freshly installed apps that have never granted `RECORD_AUDIO`. The persistent notification shows live connection status, e.g. "Connected — X peers", "Mobile — X peers", "Searching for peers…", or "Offline — no network" (actual strings come from i18n in 33 languages — see §17). Updated dynamically via MethodChannel (`updateServiceNotification`) on every state change, with dedup to avoid redundant updates. Channel importance: `IMPORTANCE_LOW` (no sound, no vibration, no badge).
+**Foreground service (canonical background-delivery path):** `CleonaForegroundService` boots as type `dataSync` and keeps the UDP socket alive for incoming message and call delivery. This is the **only** mechanism Cleona uses for background delivery on Android — push wake-up via FCM, UnifiedPush, WebPush or per-peer rotation has been architecturally evaluated and rejected (see §12.4 / ADR "Push Wake-Up Rejected"). During an active voice/video call the service is runtime-promoted to `dataSync|microphone` via the 3-arg `startForeground()` overload, after `RECORD_AUDIO` has been granted; it is demoted back to `dataSync` when the call ends. The manifest declares `foregroundServiceType="dataSync|microphone"` so the runtime promotion is permitted; calling `startForeground()` with the 2-arg overload at boot would implicitly inherit the `microphone` type and crash on freshly installed apps that have never granted `RECORD_AUDIO`. The persistent notification shows live connection status, e.g. "Connected — X peers", "Mobile — X peers", "Searching for peers…", or "Offline — no network" (actual strings come from i18n in 34 languages — see §17). Updated dynamically via MethodChannel (`updateServiceNotification`) on every state change, with dedup to avoid redundant updates. Channel importance: `IMPORTANCE_LOW` (no sound, no vibration, no badge).
 
 **Lifecycle invariants (Problem-10 hardening, V3.1.117):**
 - `startForeground` is idempotent in `onStartCommand` (re-issued on every entry; no "already running" short-circuit that could skip a needed re-promotion after an OS kill).
@@ -6855,7 +6855,7 @@ Beyond permissions, Cleona's architecture enforces privacy at the protocol level
 
 ## 17. Internationalization
 
-Cleona supports 33 languages including 3 RTL scripts. The localization system is built entirely in Dart — no platform-specific resource files (no Android `strings.xml`, no iOS `Localizable.strings`). All translations live in a single compile-time constant map, enabling instant language switching without app restart.
+Cleona supports 34 languages including 3 RTL scripts. The localization system is built entirely in Dart — no platform-specific resource files (no Android `strings.xml`, no iOS `Localizable.strings`). All translations live in a single compile-time constant map, enabling instant language switching without app restart.
 
 ### 17.1 Design Principles
 
@@ -6863,16 +6863,16 @@ Cleona supports 33 languages including 3 RTL scripts. The localization system is
 2. **Instant switching:** Language changes take effect immediately via `ChangeNotifier`. No restart, no page reload. The user sees the entire UI update in real time.
 3. **System language detection:** On first launch, Cleona reads `Platform.localeName` and auto-selects the matching language. English is the fallback if the system locale is not supported.
 4. **RTL-first:** RTL is not an afterthought. The entire widget tree is wrapped in a `Directionality` widget that switches between `TextDirection.ltr` and `TextDirection.rtl` based on the active locale.
-5. **Full coverage policy:** Every translation key must carry a real string in all 33 supported locales. English-fallback at key-addition time ("`ar`, `he`, `fa` will pick up `en` via the runtime fallback chain") is not permitted. Any remaining gap is treated as a bug. The enforcement is `scripts/check_i18n_complete.dart`, run as a pre-commit / pre-push hook and a CI gate on every change that touches `translations.dart`. The runtime fallback chain in `AppLocale.get` remains as a defence-in-depth safety net against emergency misses (missing key after a refactor, new key referenced before translation), but it is not the expected path.
+5. **Full coverage policy:** Every translation key must carry a real string in all 34 supported locales. English-fallback at key-addition time ("`ar`, `he`, `fa` will pick up `en` via the runtime fallback chain") is not permitted. Any remaining gap is treated as a bug. The enforcement is `scripts/check_i18n_complete.dart`, run as a pre-commit / pre-push hook and a CI gate on every change that touches `translations.dart`. The runtime fallback chain in `AppLocale.get` remains as a defence-in-depth safety net against emergency misses (missing key after a refactor, new key referenced before translation), but it is not the expected path.
 
-### 17.2 Supported Languages (33)
+### 17.2 Supported Languages (34)
 
 | Group | Languages |
 |-------|-----------|
 | Original 5 | German (de), English (en), Spanish (es), Hungarian (hu), Swedish (sv) |
 | RTL (3) | Arabic (ar), Hebrew (he), Farsi/Persian (fa) |
 | Western Europe (7) | French (fr), Italian (it), Portuguese (pt), Dutch (nl), Danish (da), Finnish (fi), Norwegian (no) |
-| Eastern Europe (8) | Polish (pl), Romanian (ro), Czech (cs), Slovak (sk), Croatian (hr), Bulgarian (bg), Greek (el), Turkish (tr) |
+| Eastern Europe (9) | Polish (pl), Romanian (ro), Czech (cs), Slovak (sk), Croatian (hr), Serbian (sr), Bulgarian (bg), Greek (el), Turkish (tr) |
 | Slavic (2) | Ukrainian (uk), Russian (ru) |
 | East Asia (3) | Chinese Simplified (zh), Japanese (ja), Korean (ko) |
 | South/Southeast Asia (5) | Hindi (hi), Thai (th), Vietnamese (vi), Indonesian (id), Malay (ms) |
@@ -6887,7 +6887,7 @@ translations['message_sent'] = {
   'en': 'Message sent',
   'ar': 'تم إرسال الرسالة',
   'ja': 'メッセージ送信済み',
-  ...  // 33 locales
+  ...  // 34 locales
 };
 ```
 
@@ -6903,7 +6903,7 @@ class AppLocale extends ChangeNotifier {
 }
 ```
 
-**Fallback chain (defence-in-depth, not the expected path):** Current locale → `en` → `de` → key itself (raw key name as last resort). Per §17.1-5, every new key is expected to have a real translation in all 33 locales — `scripts/check_i18n_complete.dart` enforces this in CI. The runtime fallback chain exists only to avoid a crash in the edge case where coverage check was bypassed or a new key was referenced before being translated.
+**Fallback chain (defence-in-depth, not the expected path):** Current locale → `en` → `de` → key itself (raw key name as last resort). Per §17.1-5, every new key is expected to have a real translation in all 34 locales — `scripts/check_i18n_complete.dart` enforces this in CI. The runtime fallback chain exists only to avoid a crash in the edge case where coverage check was bypassed or a new key was referenced before being translated.
 
 **Persistence:** Selected locale is stored in `SharedPreferences` with key `'cleona_locale'`. On app start, the saved locale is loaded; if none saved, system language detection runs.
 
@@ -6929,7 +6929,7 @@ Language codes appear in three protocol contexts:
 
 ## 18. Network Statistics Dashboard
 
-Cleona provides a dedicated, scrollable statistics page accessible from the sidebar or settings. This dashboard embodies Cleona's transparency philosophy by giving users real-time insight into the P2P network's health and their own contribution. The dashboard auto-refreshes every 5 seconds. All UI strings are fully localized (33 languages — see §17).
+Cleona provides a dedicated, scrollable statistics page accessible from the sidebar or settings. This dashboard embodies Cleona's transparency philosophy by giving users real-time insight into the P2P network's health and their own contribution. The dashboard auto-refreshes every 5 seconds. All UI strings are fully localized (34 languages — see §17).
 
 > **Layer note (v3.0):** The Network Statistics subsystem operates at the **routing layer** (DeviceID), **not** at the identity layer (UserID). Every connection-, latency-, NAT- and routing-table metric is intrinsically a per-Device measurement: a single device can host multiple user identities, and a single user identity can be reachable on multiple devices. The dashboard makes this distinction explicit wherever per-peer detail is shown — see §2 for the layered-frame model and §3.1 / §3.5 for the UserID/DeviceID split.
 
@@ -7061,7 +7061,7 @@ Development uses a three-directory model to separate working code from secrets a
 
 **Commit date neutralization:** All commits pushed to GitHub use a fixed neutral date (`2026-01-01T12:00:00+00:00`) to hide the development timeline. Push timestamps (set by GitHub server-side) are accepted as unavoidable.
 
-**Published content:** Source code (`lib/`, `proto/`, `assets/`), public architecture document, security whitepaper, user manual (33 languages), changelog (sanitized), signed release artifacts (Linux/Windows/Android/iOS/macOS + SHA256SUMS).
+**Published content:** Source code (`lib/`, `proto/`, `assets/`), public architecture document, security whitepaper, user manual (34 languages), changelog (sanitized), signed release artifacts (Linux/Windows/Android/iOS/macOS + SHA256SUMS).
 
 **Not published:** Private keys, test infrastructure (`test/`, `scripts/vm/`), internal docs (`CLAUDE.md`, `HANDOVER.md`, `BUGFIX_*.md`), internal tooling (`headless.dart`, `init_profile.dart`), debug builds, VM credentials.
 
@@ -7159,7 +7159,7 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 2. `UpdateChecker.isHardBlocked(manifest, currentVersion)` compares versions.
 3. If true, `UpdateRequiredScreen` is rendered as the initial route, before the normal `MaterialApp` shell. The screen shows:
    - Title: `t('update_required_title')`
-   - Body: `t(manifest.minRequiredReason)` (i18n in 33 locales)
+   - Body: `t(manifest.minRequiredReason)` (i18n in 34 locales)
    - Primary button: attempts In-Network Update first (§19.6.2), falls back to `manifest.downloadUrl` externally (browser / Play Store)
    - Secondary link: "Open anyway (limited)" → enters Reduced-Mode
 

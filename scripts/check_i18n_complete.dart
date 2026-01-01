@@ -1,6 +1,6 @@
 #!/usr/bin/env dart
 // Verifies that every translation key in lib/core/i18n/translations.dart
-// covers all 33 supported locales. Exits 1 on the first missing coverage.
+// covers all 34 supported locales. Exits 1 on the first missing coverage.
 //
 // Usage:
 //   dart scripts/check_i18n_complete.dart
@@ -16,7 +16,7 @@ import 'dart:io';
 
 const List<String> expectedLocales = [
   'de', 'en', 'es', 'hu', 'sv', 'ar', 'he', 'fa', 'fr', 'it', 'pt', 'nl',
-  'pl', 'ro', 'cs', 'sk', 'hr', 'bg', 'el', 'da', 'fi', 'no', 'uk', 'ru',
+  'pl', 'ro', 'cs', 'sk', 'hr', 'sr', 'bg', 'el', 'da', 'fi', 'no', 'uk', 'ru',
   'tr', 'zh', 'ja', 'ko', 'hi', 'th', 'vi', 'id', 'ms',
 ];
 

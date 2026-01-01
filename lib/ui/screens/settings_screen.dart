@@ -264,10 +264,7 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.people),
                 title: Text(locale.get('connected_peers')),
-                // S119 B (Problem 2): same source as the connection sheet
-                // and the stats counter — peerCount (= all known routing-
-                // table entries) showed a third, larger number.
-                subtitle: Text('${service.peerSummaries.length}'),
+                subtitle: Text('${service.confirmedPeerCount}'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showConnectionSheet(context, service),
               ),
