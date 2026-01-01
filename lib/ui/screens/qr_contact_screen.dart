@@ -116,103 +116,116 @@ class _QrShowScreenState extends State<QrShowScreen> {
       errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
     );
 
+    final screenWidth = MediaQuery.of(context).size.width;
+    final qrSize = (screenWidth * 0.55).clamp(180.0, 400.0);
+
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('qr_my_code'))),
       body: SafeArea(top: false, child: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Text(
                 qrDisplayName,
-                style: Theme.of(context).textTheme.headlineSmall,
+                style: Theme.of(context).textTheme.titleLarge,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               Text(
                 locale.get('qr_show_instruction'),
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 12),
               Container(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: QrImageView.withQr(
                   qr: qrCode,
-                  size: 400,
+                  size: qrSize,
                   backgroundColor: Colors.white,
                 ),
               ),
-              const SizedBox(height: 16),
-              Text(
-                'Node-ID: ${qrNodeIdHex.substring(0, 16)}...',
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
-              ),
-              const SizedBox(height: 16),
-              TextButton.icon(
-                icon: const Icon(Icons.copy, size: 16),
-                label: Text(locale.get('copy')),
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: shareUri));
-                  // §4.11.10: start the owner-side First-Contact rendezvous
-                  // session for the copied URI (transport-side, no UI).
-                  final rn = seed.rendezvousNonce;
-                  if (rn != null) {
-                    service.notifyContactSeedUriShared(
-                        base64Url.encode(rn).replaceAll('=', ''));
-                  }
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-                  );
-                },
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    'Node-ID: ${qrNodeIdHex.substring(0, 16)}...',
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    icon: const Icon(Icons.copy, size: 16),
+                    tooltip: locale.get('copy'),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: shareUri));
+                      final rn = seed.rendezvousNonce;
+                      if (rn != null) {
+                        service.notifyContactSeedUriShared(
+                            base64Url.encode(rn).replaceAll('=', ''));
+                      }
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+                      );
+                    },
+                  ),
+                ],
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 12),
               const Divider(),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
               Text(
                 locale.get('share_cleona'),
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.link, size: 18),
-                  label: Text(locale.get('share_cleona_download_link')),
-                  onPressed: () {
-                    Clipboard.setData(const ClipboardData(
-                      text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
-                    ));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-                    );
-                  },
-                ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.link, size: 18),
+                      label: Text(locale.get('share_cleona_download_link')),
+                      onPressed: () {
+                        Clipboard.setData(const ClipboardData(
+                          text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
+                        ));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               FutureBuilder<String?>(
                 future: _getLanUrl(service.port),
                 builder: (context, snap) {
                   if (snap.data == null) return const SizedBox.shrink();
-                  return SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.wifi, size: 18),
-                      label: Text(locale.get('share_cleona_lan_url')),
-                      onPressed: () {
-                        Clipboard.setData(ClipboardData(text: snap.data!));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('${locale.get('copied_to_clipboard')}\n${snap.data}')),
-                        );
-                      },
-                    ),
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.wifi, size: 18),
+                          label: Text(locale.get('share_cleona_lan_url')),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: snap.data!));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('${locale.get('copied_to_clipboard')}\n${snap.data}')),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
                   );
                 },
               ),

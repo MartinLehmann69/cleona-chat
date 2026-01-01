@@ -82,6 +82,12 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
 
             const Divider(height: 32),
 
+            // ── 1b. Cleona teilen ─────────────────────────────────
+            _SectionHeader(locale.get('share_cleona')),
+            _buildShareSection(context),
+
+            const Divider(height: 32),
+
             // ── 2. Profile Picture ─────────────────────────────────
             _SectionHeader(locale.get('section_profile_picture')),
             _buildProfilePictureSection(context),
@@ -214,6 +220,76 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
         ],
       ),
     );
+  }
+
+  // ── Share Cleona Section ─────────────────────────────────────────────
+
+  Widget _buildShareSection(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final service = widget.service;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          OutlinedButton.icon(
+            icon: const Icon(Icons.link, size: 18),
+            label: Text(locale.get('share_cleona_download_link')),
+            onPressed: () {
+              Clipboard.setData(const ClipboardData(
+                text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
+              ));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          FutureBuilder<String?>(
+            future: _getLanUrl(service.port),
+            builder: (context, snap) {
+              if (snap.data == null) return const SizedBox.shrink();
+              return OutlinedButton.icon(
+                icon: const Icon(Icons.wifi, size: 18),
+                label: Text(locale.get('share_cleona_lan_url')),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: snap.data!));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('${locale.get('copied_to_clipboard')}\n${snap.data}')),
+                  );
+                },
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Future<String?> _getLanUrl(int port) async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          final ip = addr.address;
+          if (ip.startsWith('10.') ||
+              ip.startsWith('192.168.') ||
+              (ip.startsWith('172.') && _isPrivate172(ip))) {
+            return 'http://$ip:$port/cleona/binary/${Platform.operatingSystem}';
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static bool _isPrivate172(String ip) {
+    final parts = ip.split('.');
+    if (parts.length < 2) return false;
+    final second = int.tryParse(parts[1]) ?? 0;
+    return second >= 16 && second <= 31;
   }
 
   // ── Profile Picture Section ──────────────��────────────────────���──────

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -690,6 +691,23 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   ),
                 );
               },
+            ),
+            // ── Cleona teilen ──────────────────────────────────
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.share, size: 18),
+                label: Text(locale.get('share_cleona')),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Clipboard.setData(const ClipboardData(
+                    text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
+                  ));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+                  );
+                },
+              ),
             ),
             const Divider(),
             const SizedBox(height: 8),
