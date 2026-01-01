@@ -28,7 +28,9 @@
 /// in its place stands the one question "is there a reachable address"
 /// (`outside_address.dart`), and it decides BOTH branches — the
 /// confirmed public address as well as that of an own interface
-/// (D2-7).
+/// (D2-7). S410 A: the confirmed (seen) one counts only with its family
+/// evidenced open ([familyEvidenced]) — the jurors behind NAT wrote theirs and
+/// pushed the one reachable node's record out of the newest 32.
 ///
 /// ── THE REFRESH, AND WHY IT MOSTLY DOES NOTHING ─────────────────────
 ///
@@ -71,6 +73,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:mycelium/outside_address.dart';
+import 'package:mycelium/outside_check.dart';
 import 'package:mycelium/outside_entry.dart';
 import 'package:mycelium/outside_relay.dart';
 import 'package:mycelium/outside_state.dart';
@@ -110,6 +113,11 @@ class OutsideSource {
 
   /// §11.9: on, or switched off by the user.
   bool to;
+
+  /// Whether a family of this node is evidenced open from outside (§8.1
+  /// open check, §7.3 mapping, §11.8a unsolicited packet) — set by
+  /// `HostNetwork`; unset nothing is evidenced.
+  bool Function(InternetAddressType family) familyEvidenced = (_) => false;
 
   Timer? _clock;
   DateTime _roundsStart;
@@ -229,10 +237,10 @@ class OutsideSource {
   /// Writes the own entry — if there is a reachable address
   /// AND the gate of §11.9 does not suppress it. Does not throw.
   ///
-  /// Called at three places, and none of them is a clock on the
-  /// data port: at the end of a round ([afterSources]), at the edge "own
-  /// public address learned" (`Host.addressLearned`) and from the clock
-  /// of §5.4 ([auffrischungStarten]).
+  /// Never from a clock on the data port: at the end of a round
+  /// ([afterSources]), at the edges "own public address learned"
+  /// (`Host.addressLearned`), "mapping granted", "family evidenced open"
+  /// (`HostNetwork`) and from the clock of §5.4.
   Future<void> write() async {
     if (!to) return;
     try {
@@ -296,10 +304,15 @@ class OutsideSource {
 
   /// The addresses under which this node is reachable from outside — up to
   /// three, confirmed public ones first (§11.9, D2-8), own address family only (V1).
+  /// The SEEN address only with its family evidenced open (S410 A): behind a
+  /// translator it answers only whom it asked; interface addresses stay.
   List<CardAddress> _addresses() {
     final o = _k.publicAddress;
+    final seen = identical(o, _publicBeforeRound) ? null : o;
+    final open = seen != null &&
+        familyEvidenced(InternetAddress.fromRawAddress(seen.address).type);
     return outsideAddresses(
-            confirmed: identical(o, _publicBeforeRound) ? null : o,
+            confirmed: open ? seen : null,
             port: _k.port,
             interfaces: interfaces)
         .where((a) => _k.speaks(InternetAddress.fromRawAddress(a.address)))
@@ -329,6 +342,7 @@ class OutsideSource {
     ]);
     final finds = <String, (CardAddress, DateTime)>{}; // S406: newest creation
     var own = 0;
+    final foreign = <Map<String, dynamic>>[];
     for (final ev in answers.expand((x) => x)) {
       // D2-6: the OWN entry still lies in the relay at the next start.
       // Behind NAT the published address stands on no own
@@ -341,7 +355,14 @@ class OutsideSource {
         own++;
         continue;
       }
-      final e = eventCheck(ev, cardChannel);
+      foreign.add(ev);
+    }
+    // S409: the signature checks off the event loop, identical records once
+    // (`outside_check.dart`) — they held the node for seconds.
+    final checked = await eventsCheck(foreign, cardChannel);
+    for (var i = 0; i < foreign.length; i++) {
+      final ev = foreign[i];
+      final e = checked[i];
       if (e == null) continue;
       final c = DateTime.fromMillisecondsSinceEpoch((ev['created_at'] as int) * 1000);
       for (final a in e.addresses) {

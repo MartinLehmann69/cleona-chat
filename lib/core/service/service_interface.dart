@@ -1,12 +1,16 @@
 import 'dart:typed_data';
+import 'package:cleona/core/archive/archive_config.dart'
+    show ArchiveConfig, ArchiveSettingsView;
 import 'package:cleona/core/archive/archive_types.dart'
     show ArchiveRetrievalStart;
+import 'package:cleona/core/archive/share_identity.dart'
+    show ShareIdentityState;
 import 'package:cleona/core/archive/voice_transcription_config.dart'
     show TranscriptionStatus;
 export 'package:cleona/core/archive/voice_transcription_config.dart'
     show TranscriptionStatus;
 import 'package:cleona/core/channels/system_channels.dart';
-import 'package:cleona/core/service/multi_interface_mode.dart';
+import 'package:cleona/core/channels/system_channel_api.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/stats/network_stats.dart';
 import 'package:cleona/core/contact/contact_seed.dart' show ContactSeedBuilder;
@@ -36,7 +40,7 @@ export 'package:cleona/core/service/invitation_card_types.dart';
 /// from your identity". Without this discriminator a Linked Device announces
 /// every request as an Emergency Key Rotation, so a device-set change would be
 /// confirmed under a false description — a genuine signature for something the
-/// user was never asked about. Mirrors `proto.ApprovalKindV3`.
+/// user was never asked about. Mirrors `proto.ApprovalKind`.
 enum RotationApprovalKind {
   /// Emergency Key Rotation. The hash is `computeRotationHash(...)` over the
   /// new User pubkeys.
@@ -282,19 +286,6 @@ abstract class ICleonaService {
   /// independence criterion by network block.
   int get independentSyncPartners;
 
-  /// §9.2 — how many responsible relays a Secure placement reaches TODAY.
-  ///
-  /// The number from which the consent dialog computes its TIME SPAN
-  /// (`media_send_estimate.dart`). It must go over this interface
-  /// and not be estimated from [syncPartnersOutbound] as a substitute:
-  /// those are two different sets (session partners versus
-  /// the responsible ones of a tag), and the full reasoning is at
-  /// `V41Delivery.reachableResponsibleRelays`.
-  ///
-  /// `0` means "none known" — then no estimate is possible, and
-  /// the dialog says so instead of showing a number from an empty
-  /// set.
-  int get reachableResponsibleRelays;
 
   /// §24.4.2 — DATA SAVER MODE: whether it is IN EFFECT.
   ///
@@ -359,6 +350,21 @@ abstract class ICleonaService {
   /// pinhole down at once; on asks the router at once.
   Future<bool> setPortMappingEnabled(bool on);
 
+  // ── §21.3.3 item 3: THE SIZE OF THE BULK CACHE (S407-MASSENCACHE) ────
+  //
+  // What this device holds of lane 3 for others (§9.4). A DEVICE value like
+  // the switches above; the tiers and defaults stand in
+  // `bulk_cache_setting.dart`.
+
+  /// The size of the running bulk cache in MB; without a started host the
+  /// platform default of D-32.
+  int get bulkCacheMb;
+
+  /// The setter, ONLY from a user action; [mb] must be one of
+  /// `kBulkCacheTiersMb`. A smaller size frees the space at once. `false`
+  /// without a started host or for a size that is no tier.
+  Future<bool> setBulkCacheMb(int mb);
+
   // ── THREE GETTERS, ONE NUMBER — AND NO RECONCILIATION WITH THE STATS ──
   //
   // Until 01.09.2026 (S360) the constraint "Must match
@@ -383,7 +389,7 @@ abstract class ICleonaService {
   // V3 distinguished routing table / bidirectionally confirmed / reachable via a
   // live relay. This distinction presupposes a
   // routing table, and that no longer exists (reasoning at
-  // `CleonaService._v41SessionPartner`). Inventing three different numbers
+  // `CleonaService._sessionPartnerCount`). Inventing three different numbers
   // would be the worse answer.
   //
   // WHAT IT STANDS FOR IN THE UI: home badge, settings,
@@ -415,7 +421,6 @@ abstract class ICleonaService {
   List<String> get localIps;
   String? get publicIp;
   int? get publicPort;
-  int get fragmentCount;
   bool get isRunning;
   String get displayName;
   /// True when the user clicked "Open anyway (limited)" on the
@@ -457,9 +462,20 @@ abstract class ICleonaService {
   /// left channel) of [conversationId] by an owner or an admin. The
   /// conversation stays readable, marked as removed; writing is blocked.
   bool isRemovedFromGroup(String conversationId);
+
+  /// §16.2.1, §18.4.3 (S407 group list): whether an anonymous poll can be
+  /// created in the group or channel [conversationId] — not on the shared
+  /// key, not from 17 members on. The poll editor disables the switch.
+  bool anonymousPollPossible(String conversationId);
   Future<String?> createGroup(String name, List<String> memberNodeIdHexList);
   Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
   Future<bool> leaveGroup(String groupIdHex);
+  /// §16.2.2: the answer to the question asked once when the own identity is
+  /// the only member left ([GroupInfo.aloneQuestionDue]). [delete] removes
+  /// the group as leaving does; otherwise the group is kept and never asked
+  /// about again. `false` when no question waits for [groupIdHex].
+  Future<bool> answerGroupAloneQuestion(String groupIdHex,
+      {required bool delete});
   /// B-3 (v4_2 §16.2.2): joining an invited group is an explicit act of the
   /// user; only then are its group pairs formed ([GroupInfo.joined]).
   Future<bool> joinGroup(String groupIdHex);
@@ -479,18 +495,6 @@ abstract class ICleonaService {
     String? pictureBase64,
   });
   Future<UiMessage?> sendChannelPost(String channelIdHex, String text);
-
-  /// §9.5.3 D3 (S119): Feature-Request submission — SystemChannelRecord
-  /// with embedded auto-poll + implicit "Ja" vote of the submitter.
-  Future<UiMessage?> submitFeatureRequest(String title, String body);
-
-  /// §9.5.3 D3: open vote record on an FR post (0="Ja" (yes), 1="Nein" (no), 2="Egal" (don't care)).
-  /// LWW per author — voting again changes the vote.
-  Future<bool> voteFeatureRequest(String recordIdHex, int option);
-
-  /// §9.5.3 D3: local tally over the open vote records. Keys: `ja`,
-  /// `nein`, `egal`, `net`, `own` (-1 when the caller has not voted).
-  Future<Map<String, int>> featureRequestTally(String recordIdHex);
 
   Future<bool> leaveChannel(String channelIdHex);
   Future<bool> inviteToChannel(String channelIdHex, String memberNodeIdHex);
@@ -574,6 +578,20 @@ abstract class ICleonaService {
   Future<UiMessage?> resendFailedMessage(String conversationId, String messageId);
   Future<void> sendReaction({required String conversationId, required String messageId, required String emoji, required bool remove});
   Future<bool> updateChatConfig(String conversationId, ChatConfig config);
+
+  /// §16.2.2: the owner or an admin changes the name, the description or
+  /// the image of the group or private channel [conversationId]; the change
+  /// goes to every member. `null` leaves a field as it is, an empty
+  /// [description] removes it, [setPicture] with [pictureBase64] `null`
+  /// removes the image. `false` when this identity may not change it, the
+  /// name is empty, the description is longer than
+  /// [kGroupDescriptionAtMost] characters or the image larger than
+  /// [kGroupPictureAtMost] bytes.
+  Future<bool> updateGroupProfile(String conversationId,
+      {String? name,
+      String? description,
+      bool setPicture = false,
+      String? pictureBase64});
   void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName});
   Future<bool> acceptConfigProposal(String conversationId);
   Future<bool> rejectConfigProposal(String conversationId);
@@ -617,7 +635,8 @@ abstract class ICleonaService {
   /// a loop over several identities passes `false` and
   /// runs the node part itself exactly once — otherwise the one
   /// node harvests N times for a single event (S376, P5 finding 5).
-  /// The same separation as [triggerNodeReset] in [onNetworkChanged].
+  /// (The network change had the same separation until S407-LB-P12; there
+  /// the one entry `networkChangeEdge` replaced it.)
   void setAppResumed(bool isResumed, {bool triggerNodeHarvest = true});
   void sendTypingIndicator(String conversationId);
   void toggleFavorite(String conversationId);
@@ -756,6 +775,12 @@ abstract class ICleonaService {
   /// Returns false when [entityIdHex] is neither (e.g. a channel).
   bool setWithholdDeliveryStatus(String entityIdHex, bool withhold);
 
+  /// §9.4 "Loading images in a group or channel" (§24.4.5): "always load
+  /// images" of a group or channel — on, every image is collected as it
+  /// arrives; off, an image shows as not loaded and loads on a tap. Local,
+  /// changeable at any time. Returns false when [entityIdHex] is neither.
+  bool setAlwaysLoadImages(String entityIdHex, bool on);
+
   // NO SETTER FOR A SEND MODE. Until S389 this held
   // `setSecureMode` — the write side of the switch from the
   // chat settings dialog. §12.1: "The interface offers no
@@ -771,6 +796,25 @@ abstract class ICleonaService {
   /// neighbour seat (§5.2). A property of the contact, not a send mode
   /// (§3.3); local, never distributed. Returns false for an unknown contact.
   bool setContactNeverFixedNeighbour(String nodeIdHex, bool never);
+
+  /// §17 principle, RL-7, D-69: switch "allow calls = disclose IP" for one
+  /// contact (on unless switched off, revocable). Held on every own device
+  /// (§14.7 Type 8, D-71), never sent to a contact. Returns false for an
+  /// unknown contact.
+  bool setContactCallsAllowed(String nodeIdHex, bool allowed);
+
+  /// §15.10, §14.7 Type 8 (D-72): the self-declaration `isAdult` of the
+  /// identity, held on every own device. Switching it off switches the
+  /// opt-in "evaluate channel reports" off too.
+  bool setIsAdult(bool adult);
+
+  /// §15.10, §16.5, §14.7 Type 8 (D-72): the opt-in "evaluate channel
+  /// reports" of the identity, held on every own device.
+  bool setReviewEnabled(bool enabled);
+
+  /// Whether this device may call [nodeIdHex] and ring for it: an accepted
+  /// contact with "allow calls" on (`callsAllowedWith`, `call_consent.dart`).
+  bool contactCallsAllowed(String nodeIdHex);
   void acceptContactNameChange(String nodeIdHex, bool accept);
 
   // Group Call state
@@ -780,15 +824,18 @@ abstract class ICleonaService {
   void Function(GroupCallInfo info)? onGroupCallEnded;
 
   // Group Call actions
-  Future<GroupCallInfo?> startGroupCall(String groupIdHex);
+  /// [invitees]: ring only these members (§18.1.7, the event card's
+  /// "everyone who accepted"); `null` rings every member.
+  Future<GroupCallInfo?> startGroupCall(String groupIdHex,
+      {Set<String>? invitees});
   Future<void> acceptGroupCall();
-  Future<void> rejectGroupCall({String reason = 'busy'});
+  Future<void> rejectGroupCall({String reason = 'declined'});
   Future<void> leaveGroupCall();
 
   // Call actions
   Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false});
   Future<void> acceptCall();
-  Future<void> rejectCall({String reason = 'busy'});
+  Future<void> rejectCall({String reason = 'declined'});
   Future<void> hangup();
   bool get isMuted;
   void toggleMute();
@@ -807,7 +854,6 @@ abstract class ICleonaService {
 
   // Contact issue reporting
   Future<ContactIssueReport?> buildContactIssueReport(String contactNodeIdHex);
-  Future<bool> publishContactIssueReport(String contactNodeIdHex);
 
   // Manual log report (Bug Log)
   //
@@ -820,7 +866,12 @@ abstract class ICleonaService {
   // what was sent. A Future forces every implementation to obtain the real
   // report — or to throw.
   Future<LogReport> buildLogReport();
-  Future<bool> publishLogReport();
+
+  /// §16.7 (S407 SK-3): what the system-channel screens, the crash popup,
+  /// the log-report and the contact-issue dialog use — four states,
+  /// preview, fingerprint question, +1, votes, retraction (S407 SK-4:
+  /// `system_channel_service.dart`, over IPC `ipc_system_channels.dart`).
+  SystemChannelApi get systemChannelApi;
 
   // ── NAT-Troubleshooting-Wizard (§27.9) ─────────────────────────────
   /// Fired when the 10-min trigger (0 direct + UPnP fail + PCP fail +
@@ -837,19 +888,12 @@ abstract class ICleonaService {
   /// any positive value delays re-trigger by that many seconds (typically
   /// 7 days = 604800).
   Future<void> dismissNatWizard({required int durationSeconds});
-  /// Searches the port mapping anew (UPnP/IGD + NAT-PMP/PCP) and observes
-  /// for 30 s whether an INBOUND sync partner comes about. §27.9.2
-  /// step 3, the button "Check now".
-  ///
-  /// The return value is the observation, not the mapping: §25.4
-  /// lists inbound sync partners as "a precondition for inbound calls
-  /// (§17)" — i.e. exactly "does someone reach me from outside", and that is
-  /// the question a port forwarding answers. The new search runs
-  /// alongside; it can take longer than the observation window.
-  ///
-  /// UNTIL S373 THIS SAID "Re-run UPnP discovery + hole-punch round". The
-  /// sentence was outdated between the CUT (31.08.2026) and 07.09.: the
-  /// implementation only observed. Both are back now.
+  /// Asks the own router anew for a mapping and a pinhole (§7.3) — the
+  /// NAT assistant's button "Check now", pressed after the user changed
+  /// something at the router — and answers whether this node is reachable
+  /// from outside by the delivery layer's evidence: a granted mapping or
+  /// pinhole, the open check of §8.1, or a passive proof (§11.8a). Waits
+  /// for the router's answer at most 30 s; no loop (S408-LEBENSLAUF P16).
   Future<bool> recheckNatWizard();
   /// Test-only (E2E gui-53): fire [onNatWizardTriggered] directly, bypassing
   /// the 10-min uptime gate, network-condition checks, and the dismissed-flag
@@ -902,9 +946,19 @@ abstract class ICleonaService {
   LinkPreviewSettings get linkPreviewSettings;
   void updateLinkPreviewSettings(LinkPreviewSettings settings);
 
-  // Multi-interface send (Architecture §23.2)
-  MultiInterfaceMode get multiInterfaceMode;
-  Future<void> setMultiInterfaceMode(MultiInterfaceMode mode);
+  /// The device's master mute (§22.8): no message rings, vibrates or shows a
+  /// system notification on this device, for any identity. Stored in the
+  /// device database (`notification_silence.dart`).
+  bool get masterMute;
+  Future<bool> setMasterMute(bool on);
+
+  /// The GUI's device-wide choices (appearance, language, donation banner),
+  /// stored in the device database (`gui_device_setting.dart`, §4.5.3).
+  Map<String, dynamic> get guiDeviceSettings;
+
+  /// Sets one of them; returns false when nothing could be stored (unknown
+  /// field, or no device database yet — first setup).
+  Future<bool> setGuiDeviceSetting(String field, Object? value);
 
   bool get serveBinaryUpdates => true;
 
@@ -989,8 +1043,9 @@ abstract class ICleonaService {
   void injectTestDevice(String deviceId, String name, String platform);
   /// Test-only (E2E gui-52): snapshot of §26.6.2 package C retry-manager state.
   Map<String, dynamic> testGetKeyRotationRetryState();
-  /// Test-only (E2E gui-52): bypass the 24h retry-interval and force a retry
-  /// of all pending contacts now.
+  /// Test-only (E2E gui-52): read the delivery state of the rotation
+  /// broadcasts now instead of at the next edge (S408-LEBENSLAUF P20: there
+  /// is no retry of the app any more; the delivery layer sends again).
   void testForceKeyRotationRetry();
 
   // Calendar (§23)
@@ -1098,7 +1153,7 @@ abstract class ICleonaService {
       int tokensPresent, int tokensRequired)? onRotationCoAuthWarning;
 
   /// §7.5: fired when a Linked Device actively rejects a rotation via
-  /// MTV3_ROTATION_REJECTION_ALERT. Strongest possible theft signal.
+  /// MT_ROTATION_REJECTION_ALERT. Strongest possible theft signal.
   void Function(String contactNodeIdHex, String displayName)?
       onRotationRejectionAlert;
 
@@ -1162,11 +1217,6 @@ abstract class ICleonaService {
   ///                             not a rejection.
   Future<List<Map<String, dynamic>>> getPendingRotationApprovals();
 
-  /// [triggerNodeReset] (default `true`): forwards to `node.onNetworkChanged()`
-  /// before running service-side cleanup (mailbox poll, identity-publisher
-  /// re-publish). Daemon-style callers that already invoke `node.onNetworkChanged()`
-  /// once for all identities should pass `false` to avoid the N+1 multiplication
-  /// (one node-reset per identity on top of the direct one).
   // Media archive — share identity and narrowing (§21.6, S394). The
   // status map carries no secret: identity state, the pin SHORTENED, the
   // captured networks, and whether this platform reads the SSID for free.
@@ -1181,6 +1231,31 @@ abstract class ICleonaService {
 
   /// Removes the network narrowing.
   Future<bool> clearArchiveNetworks();
+
+  // Media archive — the setting itself (§21.6, S410 E10). The service holds
+  // it in the identity's store, per identity (S407-E9); on Linux/Windows the
+  // settings screen reaches it only through these three. The share password
+  // crosses ONE way: typed by the user, handed to the service; it is never
+  // handed back — not in [getArchiveSettings], not in a test answer.
+
+  /// The stored setting without password and pin, or the defaults if none
+  /// is stored; `null` if it cannot be read (IPC down, store unreadable) —
+  /// the screen then writes nothing, so that defaults never overwrite a
+  /// setting that exists.
+  Future<ArchiveSettingsView?> getArchiveSettings();
+
+  /// Stores [config] as this identity's archive setting. [password]:
+  /// `null` keeps the stored password, `''` removes it, anything else
+  /// replaces it. The pin and "only in this network" are the service's own
+  /// and are kept from the store, whatever [config] carries. The setting
+  /// takes effect when this returns (S410 follow-up): switched on or off,
+  /// new ages, budget and interval at once; another share at the end of a
+  /// running archive run or retrieval. `false` if nothing could be written.
+  Future<bool> setArchiveSettings(ArchiveConfig config, {String? password});
+
+  /// "Test connection" with the STORED setting, run where the password
+  /// lies. `null` if no share is configured or nothing could be asked.
+  Future<({bool reachable, ShareIdentityState? identity})?> testArchiveShare();
 
   // Retrieval of an archived original (§21.6, S398-W4). FROM THE SHARE,
   // never via the network: no packet, no receipt, no post box entry. The
@@ -1200,6 +1275,12 @@ abstract class ICleonaService {
   /// The run for [messageId] ended ([ok] = the original is back). Fired
   /// once per run, not once per request.
   void Function(String messageId, bool ok)? onArchiveRetrieveDone;
+
+  /// The tier-2 preview (§21.6, up to 50 KB) of [messageId], or `null` when
+  /// the medium is on another tier or has none (video). Asked by the
+  /// placeholder tile when it draws; the mini travels with the message
+  /// (`UiMessage.archiveMiniBase64`), the preview does not (S407-VORSCHAU).
+  Future<Uint8List?> getArchivePreview(String messageId);
 
   // Voice transcription (§21.7, S405 A-6). The service that transcribes
   // holds the settings and the model files; on Linux/Windows that is the
@@ -1229,7 +1310,13 @@ abstract class ICleonaService {
   /// The status changed while a download runs (status or a whole percent).
   void Function(TranscriptionStatus status)? onTranscriptionStatusChanged;
 
-  Future<void> onNetworkChanged({bool triggerNodeReset = true});
+  /// The user's "reconnect" of the connection sheet (v4_2 §25.7): the edge
+  /// "network change" of §11.8.2, through its one entry
+  /// (`networkChangeEdge`, `mycelium_seam.dart`) — for the whole host, with
+  /// the router mapping (§7.3). Answers `debounced` (bool),
+  /// `remainingSeconds` (int, only when debounced) and `peersFound` (int).
+  Future<Map<String, dynamic>> reconnect();
+
   Future<void> stop();
 }
 

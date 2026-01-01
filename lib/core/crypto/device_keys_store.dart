@@ -91,11 +91,11 @@ class DeviceKeysStore {
   static const int _nonceLength = 8;
 
   /// v2 container length (header + Sig + KEM).
-  static int get _v2Length =>
+  static int get _v2Length =>  // version-name-ok: format version of a stored container
       _magic.length + 4 + DeviceKeyPair.serializedLength + DeviceKemKeyPair.serializedLength;
 
   /// v3 container length (v2 + admission nonce).
-  static int get _v3Length => _v2Length + _nonceLength;
+  static int get _v3Length => _v2Length + _nonceLength;  // version-name-ok: format version of a stored container
 
   /// Loads the device's Device-Sig + Device-KEM keypair bundle from the
   /// device database of [baseDir], or generates and stores a fresh one if

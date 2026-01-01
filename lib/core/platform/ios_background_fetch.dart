@@ -326,6 +326,7 @@ class IosBackgroundFetch {
           masterSeed: masterSeed,
           createdAt: id.createdAt,
           isAdult: id.isAdult,
+          reviewEnabled: id.reviewEnabled,
         );
         await ctx.initKeys();
         id.nodeIdHex = ctx.userIdHex;
@@ -358,18 +359,22 @@ class IosBackgroundFetch {
       // acknowledged but lost message. If one forgot this
       // step, the wake-up would run through and report zero messages
       // — the most expensive outcome this function can have.
+      final deviceKey = hostKey(baseDir, masterSeed);
       host = await hostStart(
         services: services,
         baseDir: baseDir,
-        key: hostKey(baseDir, masterSeed),
+        key: deviceKey,
         port: devicesPort,
         // Lane 3 (D-32): the SAME bulk cache as the app — it lies in the
-        // same device folder. With 0 the wake-up would not load the held
-        // pieces and answer every 0x54 with "nothing here" (0x55), which
-        // ends a recipient's collection although the pieces are on disk.
-        bulkCacheBytes: bulkCacheBytesForPlatform(),
+        // same device folder, and its size is the user's tier read from
+        // the same device database. With 0 the wake-up would not load the
+        // held pieces and answer every 0x54 with "nothing here" (0x55),
+        // which ends a recipient's collection although the pieces are on
+        // disk; with a size other than the app's it would trim them.
+        bulkCacheBytes: bulkCacheBytesConfigured(baseDir, deviceKey),
         bulkClass: bulkClassForPlatform(),
         bulkServeAllowed: bulkServeAllowedNow,
+        askRouter: true, // §7.3: the host asks the router at its edges
         report: (m) => debugPrint('[ios-bg-fetch][mycelium] $m'),
         // No `traceReport`: this wake-up has no log file — every line, the
         // diagnosis included, goes to `debugPrint`, none into the
@@ -377,22 +382,8 @@ class IosBackgroundFetch {
       );
       debugPrint('[ios-bg-fetch] mycelium host on port ${host.port}');
 
-      // The port mapping (task D, §7.3): triggered, NOT
-      // awaited — the 20/120 s window of this wake-up is far
-      // shorter than the worst RFC 6886 backoff (eight and a half
-      // minutes); [step 7] tears it down below nonetheless.
-      unawaited(() async {
-        try {
-          await portMappingToEdge(
-            host!,
-            baseDir: baseDir,
-            key: hostKey(baseDir, masterSeed),
-            report: (m) => debugPrint('[ios-bg-fetch][mycelium] $m'),
-          );
-        } catch (e) {
-          debugPrint('[ios-bg-fetch] port mapping: $e');
-        }
-      }());
+      // The port mapping (task D, §7.3) is the host's own since S408 P15
+      // (A-4): asked inside `hostStart`, laid down by `Host.stop` ([step 7]).
 
       // Record baseline unread counts per conversation
       final baselineUnread = <String, Map<String, int>>{};
@@ -463,16 +454,8 @@ class IosBackgroundFetch {
       // saves the neighbours and closes the wire; an open wire
       // or state checker would keep the Dart VM alive, and iOS only ends
       // the run when it reports.
-      // The port mapping torn down FIRST (task D): its own
-      // renewal timer otherwise keeps the Dart VM alive, independently
-      // of the wire that `stop()` closes right away — the same
-      // consideration as for the wire itself, two lines below.
-      final hostBeforeTheStop = host;
-      if (hostBeforeTheStop != null) {
-        try {
-          await portMappingLayDown(hostBeforeTheStop);
-        } catch (_) {}
-      }
+      // `Host.stop` lays the port mapping down first (S408 P15): its
+      // renewal timer would otherwise keep the Dart VM alive.
       try {
         if (host != null) await hostStop(host); // lane 2 clocks, then the host
       } on SocketException catch (_) {}
@@ -497,7 +480,7 @@ class IosBackgroundFetch {
 
   // ── `_routeInfraFrame` HAS BEEN REMOVED (CUT, 31.08.) ─────────────────
   //
-  // It was a switch over four `MessageTypeV3` selectors
+  // It was a switch over four `MessageType` selectors
   // (FRAGMENT_RETRIEVE_RESPONSE, PEER_RETRIEVE_RESPONSE, FRAGMENT_STORE,
   // PEER_STORE) to four `CleonaService` handlers, all of which lay in
   // `cleona_service_v3_fragments.dart` or `_sf.dart`. Caller

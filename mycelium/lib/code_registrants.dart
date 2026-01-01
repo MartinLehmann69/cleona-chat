@@ -23,9 +23,11 @@ import 'dart:typed_data';
 import 'package:mycelium/code_registration.dart';
 import 'package:mycelium/neighbour.dart';
 
-/// One [Registrant] per fixed neighbour, kept by [Neighbour.id].
+/// One [Registrant] per fixed neighbour, kept by [Neighbour.id] — and per
+/// former fixed neighbour after a recovery (`code_registration_former.dart`),
+/// which is why the registrant is made for its neighbour.
 class Registrants {
-  final Registrant Function() _make;
+  final Registrant Function(Neighbour n) _make;
   final Map<int, Registrant> _by = {};
 
   /// The registrant that handed out the last piece — the one [sent] counts.
@@ -45,7 +47,7 @@ class Registrants {
     _by.removeWhere((id, _) => !fixed.any((n) => n.id == id));
     for (final n in fixed) {
       if (!n.has(target.$1, target.$2)) continue;
-      final r = _last = _by.putIfAbsent(n.id, _make);
+      final r = _last = _by.putIfAbsent(n.id, () => _make(n));
       return r.next('${n.id}', today);
     }
     _last = null;

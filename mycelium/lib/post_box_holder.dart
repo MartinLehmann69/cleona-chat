@@ -1,26 +1,28 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/device_records.dart' show DeviceRecords;
-import 'package:mycelium/split_flow.dart' show SendEnd;
+import 'package:mycelium/post_box_hand_out.dart';
+import 'package:mycelium/silence.dart' show Silence;
 import 'package:mycelium/post_box_proof.dart';
 import 'package:mycelium/post_box_proof_of_work.dart';
 import 'package:mycelium/post_box_disk.dart';
+import 'package:mycelium/post_box_holder_answers.dart';
 import 'package:mycelium/kinds.dart' as kinds;
-import 'package:mycelium/update_manifest_compartment.dart'
-    show isManifestValue, kManifestAtMost, manifestVerifier;
+import 'package:mycelium/update_manifest_compartment.dart' show isManifestValue, kManifestAtMost;
+
+export 'package:mycelium/post_box_holder_answers.dart'
+    show Neighbour, Send, kDepositHeader, kHereItIsHeader, kNodeIdentifierLength,
+        receiptPacket;
 
 /// The holder role of the post box: what I hold for others.
 ///
-/// Split off from `post_box_deposit.dart` (S385) for the line budget. The
-/// cut follows the question WHO processes a packet:
-///
+/// Split off from `post_box_deposit.dart` (S385); the cut follows WHO processes a packet:
 /// | Role | Packets | File |
 /// |---|---|---|
 /// | holder | accept 0x30, 0x32 → 0x35, 0x36 → 0x33/0x34, delete receipt | here |
-/// | sender | send 0x30, count deposited receipt (0x31) | `post_box_deposit.dart` |
+/// | sender | send 0x30, count deposited receipt (0x31) | `post_box_place.dart` |
 /// | collector | send 0x32, 0x35 → 0x36, accept 0x33/0x34/0x37, send 0x31 | `post_box_collect.dart` |
 ///
 /// **Handed out and deleted only against a proof** (S385, B1/B2):
@@ -35,26 +37,9 @@ import 'package:mycelium/update_manifest_compartment.dart'
 /// 0x31 carries two roles; the switch is in the deposit, which knows its own
 /// running deposits — only the rest arrives here. [_Entry.content] stays opaque.
 
-/// A neighbour: only its network address — the neighbour sees only day values
-/// and opaque bytes, the caller does not need more here either.
-typedef Neighbour = (InternetAddress address, int port);
-
-/// Sends [packet] to [target]. What it returns — in the node the splitter's
-/// [SendEnd] — only the hand-out waits for (§8.2); everybody else fires and
-/// forgets.
-typedef Send = FutureOr<void> Function(Uint8List packet, Neighbour target);
-
 /// The cap per day value (§8.2: 100 packets).
 const int kAtMostProValue = 100;
 const Duration kAtMostAge = Duration(days: 7);
-
-/// Header of a 0x30 before the content: kind 1 + id 8 + day value 16 +
-/// proof of computation 16 = 41 B. The one place where that is written.
-const int kDepositHeader = 1 + kIdLength + kValueLength + kProofOfWorkLength;
-
-/// Header of a 0x33 before the content: kind 1 + day value 16 + id 8 + count 1
-/// + request identifier 8.
-const int kHereItIsHeader = 1 + kValueLength + kIdLength + 1 + kRequestIdLength;
 
 /// How long a task stays open and a proven collection stays entitled to
 /// delete: room for a hand-out entry by entry and late delete receipts. A
@@ -118,10 +103,16 @@ class PostBoxHolder {
   /// the network statistics (§25). Expiry by age is not counted.
   int evicted = 0;
 
+  /// Packets held right now, over every value (§25.6 "post-box packets held").
+  int get held => _storage.values.fold(0, (a, l) => a + l.length);
+
   /// The same, summed over every holder of this process: the app reads it
   /// (one host per device, §4.5.1), because the holder instance sits behind
   /// the node's deposit and has no outside reader.
   static int evictedInProcess = 0;
+
+  /// What this holder did not take, counted and named ([HolderLog]).
+  final HolderLog log;
 
   /// Without [records] everything stays in memory. With them (in the app
   /// the device database, `device_records.dart`) the constructor READS and
@@ -131,11 +122,13 @@ class PostBoxHolder {
     required this.now,
     required this.nodeIdentifier,
     DeviceRecords? records,
-  }) {
+    void Function(String)? report,
+    Silence? silence,
+  })  : log = HolderLog(report),
+        _silent = HandOutSilence(silence ?? Silence()) {
     if (records == null) return;
     final p = PostBoxDisk.on(records);
-    // The deadline already applies HERE: otherwise an entry would become
-    // immortal because the holder restarts often.
+    // The deadline applies HERE too: a holder that restarts keeps nothing forever.
     for (final s in p.load(limit: now().subtract(kAtMostAge))) {
       final valueHex = _hex(s.value);
       _storage
@@ -146,84 +139,104 @@ class PostBoxHolder {
     _disk = p; // only now: an error while loading must not overwrite anything
   }
 
-  /// The node identifier of this holder ([kNodeIdentifierLength] B) — stands in
-  /// every answer to a question (`0x31`, `0x35`), B1.
+  /// The node identifier ([kNodeIdentifierLength] B) in every answer (`0x31`, `0x35`), B1.
   final Uint8List nodeIdentifier;
+  final HandOutSilence _silent; // §11.3a for the hand-out
 
-  /// Writes away the WHOLE held stock; without disk a no-op.
-  void _save() {
+  /// One row per held packet (v4_2 §4.5.3): a change touches only its own
+  /// row, never the stock (S407-BOOTSTRAPSPEICHER); without disk a no-op. A
+  /// slow write is noted ([HolderLog.saved]).
+  void _put(_Entry e) {
     final p = _disk;
     if (p == null) return;
-    p.save([
-      for (final list in _storage.values)
-        for (final e in list)
-          (
-            id: e.id,
-            value: e.value,
-            content: e.content,
-            inserted: e.inserted
-          ),
-    ]);
+    final watch = Stopwatch()..start();
+    p.put((id: e.id, value: e.value, content: e.content, inserted: e.inserted));
+    log.saved(watch.elapsedMilliseconds, 1);
   }
 
-  /// 0x30: `Sorte | id | Tageswert | Nachweis 16 | Inhalt`.
+  void _drop(_Entry e) => _disk?.drop(e.id);
+
+  /// 0x30: `Sorte | id | Tageswert | Nachweis 16 | Inhalt`. Silent only
+  /// without a valid proof (§8.2); every other deposit not taken is refused
+  /// with `0x37` naming its id (`post_box_holder_answers.dart`).
   void onDeposit(Uint8List packet, Neighbour from) {
-    if (packet.length < kDepositHeader) return;
+    if (packet.length < kDepositHeader) return log.discarded(DepositDiscard.length, from);
     var i = 1;
     final id = packet.sublist(i, i += kIdLength);
     final value = packet.sublist(i, i += kValueLength);
     final proofOfWork = packet.sublist(i, i += kProofOfWorkLength);
     final content = packet.sublist(i);
     // FIRST: without a valid proof no receipt, no space, not even
-    // information on whether the id is already known (F3/B4). Silently, as with
-    // first contact — an answer would itself already be a signal.
-    if (!depositProofOfWorkCarries(id, value, content, proofOfWork)) return;
+    // information on whether the id is already known (F3/B4) — silently.
+    if (!depositProofOfWorkCarries(id, value, content, proofOfWork)) {
+      return log.discarded(DepositDiscard.proofOfWork, from,
+          detail: () => depositProofOfWorkWindow(id, value, content, proofOfWork));
+    }
     final valueHex = _hex(value);
     // A known id is never bent (proposal B1, second consequence): under
     // another value the real entry would afterwards no longer be
     // deletable by receipt. The same value: a duplicate, only acknowledge.
     final known = _idToValue[_hex(id)];
     if (known != null) {
-      if (known == valueHex) send(receiptPacket(id, nodeIdentifier), from);
+      if (known != valueHex) return _refuseDeposit(DepositDiscard.idElsewhere, id, value, from);
+      send(receiptPacket(id, nodeIdentifier), from);
       return;
     }
     // The public manifest compartment: checked, only the newest (decision 20,
     // B-2); §8.2 "cannot read the content" is for private post — the manifest
-    // is public. Rejected silently like a missing proof of computation: an
-    // answer to an unchecked address would be an oracle and an amplifier.
-    if (isManifestValue(value) && !_manifestAdmits(valueHex, content)) return;
+    // is public. The held sequence is acknowledged: this holder holds it.
+    if (isManifestValue(value)) {
+      switch (_manifestAdmits(valueHex, content)) {
+        case Admit.same:
+          log.sameHeld(from);
+          send(receiptPacket(id, nodeIdentifier), from);
+          return;
+        case Admit.older:
+          return _refuseDeposit(DepositDiscard.manifestOlder, id, value, from);
+        case Admit.invalid:
+          return _refuseDeposit(DepositDiscard.manifestInvalid, id, value, from);
+        case Admit.yes:
+      }
+    }
     deposits++;
     final list = _storage.putIfAbsent(valueHex, () => []);
     _purge(list);
-    list.add(_Entry(id, value, content, now()));
+    final entry = _Entry(id, value, content, now());
+    list.add(entry);
     _idToValue[_hex(id)] = valueHex;
     while (list.length > kAtMostProValue) {
       final old = list.removeAt(0); // oldest in first, out first
+      _drop(old);
       _idToValue.remove(_hex(old.id));
       evicted++;
       evictedInProcess++;
     }
-    // Save BEFORE the receipt: the receipt is the promise that I hold the
-    // piece.
-    _save();
+    // Written BEFORE the receipt: the receipt is the promise that I hold
+    // the piece.
+    _put(entry);
     send(receiptPacket(id, nodeIdentifier), from);
   }
 
-  /// The manifest check (decision 20): signed and newer than the ONE held
-  /// entry ([orSame]: or as new), recomputed from it, never remembered.
-  /// Clears what it displaces; says whether [content] may be stored.
-  bool _manifestAdmits(String valueHex, Uint8List content, {bool orSame = false}) {
-    final sequence = manifestVerifier(content);
-    if (sequence == null) return false;
+  /// A deposit with a valid proof that this holder does not take: answered,
+  /// never silent (§11.3a) — `0x37` with the deposit's id as request.
+  void _refuseDeposit(DepositDiscard why, Uint8List id, Uint8List value, Neighbour from) {
+    log.discarded(why, from);
+    send(refusalPacket(value, id), from);
+  }
+
+  /// The manifest check ([manifestAgainst], decision 20); clears what it
+  /// displaces when it admits.
+  Admit _manifestAdmits(String valueHex, Uint8List content, {bool orSame = false}) {
     final held = _storage[valueHex];
-    if (held == null || held.isEmpty) return true;
-    final old = manifestVerifier(held.last.content);
-    if (old != null && (sequence < old || (sequence == old && !orSame))) return false;
-    for (final e in held) {
-      _idToValue.remove(_hex(e.id));
+    final r = manifestAgainst(content, held?.lastOrNull?.content, orSame: orSame);
+    if (r == Admit.yes && held != null) {
+      for (final e in held) {
+        _idToValue.remove(_hex(e.id));
+        _drop(e);
+      }
+      held.clear();
     }
-    held.clear();
-    return true;
+    return r;
   }
 
   /// §26.5.4 (owner 07.10.2026): a node holding a verified manifest keeps it
@@ -233,12 +246,13 @@ class PostBoxHolder {
   bool holdOwn(Uint8List value, Uint8List content) {
     if (!isManifestValue(value) || content.length > kManifestAtMost) return false;
     final valueHex = _hex(value);
-    if (!_manifestAdmits(valueHex, content, orSame: true)) return false;
+    if (_manifestAdmits(valueHex, content, orSame: true) != Admit.yes) return false;
     final id = SodiumFFI().sha256(content).sublist(0, kIdLength);
-    _storage.putIfAbsent(valueHex, () => []).add(_Entry(
-        id, Uint8List.fromList(value), Uint8List.fromList(content), now()));
+    final entry = _Entry(
+        id, Uint8List.fromList(value), Uint8List.fromList(content), now());
+    _storage.putIfAbsent(valueHex, () => []).add(entry);
     _idToValue[_hex(id)] = valueHex;
-    _save();
+    _put(entry);
     return true;
   }
 
@@ -315,7 +329,7 @@ class PostBoxHolder {
   Future<void> _handOut(
       Uint8List value, String valueHex, Neighbour from, Uint8List request) async {
     final list = _storage[valueHex];
-    if (list != null && _purge(list)) _save();
+    if (list != null) _purge(list);
     if (list == null || list.isEmpty) {
       send((BytesBuilder()..addByte(kinds.kNothingThere)..add(value)..add(request))
           .toBytes(), from);
@@ -334,10 +348,9 @@ class PostBoxHolder {
         ..add(e.content);
       final sending = send(p.toBytes(), from);
       if (sending is! Future) continue; // a send without flow (probes)
-      final end = await sending;
-      // Unreachable or the bound for others (§20.2): the holder hands out
-      // later — no refusal (`0x37` is only for a proof, owner 30.09.2026).
-      if (end == SendEnd.unreachable || end == SendEnd.refused) return;
+      // Unreachable, the bound for others, or the collector silent (§11.3a,
+      // `post_box_hand_out.dart`): stop — no `0x37` (owner 30.09.2026).
+      if (!_silent.ended(from, await sending)) return;
     }
   }
 
@@ -358,41 +371,27 @@ class PostBoxHolder {
     final s = _proven['${_source(from)}|$valueHex'];
     if (s == null || !s.until.isAfter(now())) return;
     if (!deleteReceiptCarries(packet, list[i].value, s.random, s.pk)) return;
-    list.removeAt(i);
+    _drop(list.removeAt(i));
     _idToValue.remove(idHex);
-    _save();
   }
 
   /// `0x37 | value | request`: this value is not handed out now.
   void _refuse(Uint8List value, Neighbour to, Uint8List request) =>
-      send((BytesBuilder()..addByte(kinds.kRefused)..add(value)..add(request))
-          .toBytes(), to);
+      send(refusalPacket(value, request), to);
 
-  /// Throws away what is older than [kAtMostAge]. Reports back whether
-  /// something dropped out in the process — only then does the disk have to be
-  /// touched.
-  bool _purge(List<_Entry> list) {
+  /// Throws away what is older than [kAtMostAge], each with its row.
+  void _purge(List<_Entry> list) {
     final limit = now().subtract(kAtMostAge);
-    final before = list.length;
     list.removeWhere((e) {
       final expired = e.inserted.isBefore(limit);
-      if (expired) _idToValue.remove(_hex(e.id));
+      if (expired) {
+        _idToValue.remove(_hex(e.id));
+        _drop(e);
+      }
       return expired;
     });
-    return list.length != before;
   }
 }
-
-/// 0x31 `Sorte | id | Knotenkennung 16 | Anfragekennung 8` — the deposited
-/// receipt; the node identifier (B1, S388) counts one node under two
-/// addresses once. It answers a deposit, not a question: the request
-/// identifier is carried as zero (§8.2).
-Uint8List receiptPacket(Uint8List id, Uint8List node) => (BytesBuilder()
-      ..addByte(kinds.kDeposited)..add(id)..add(node)..add(Uint8List(kRequestIdLength)))
-    .toBytes();
-
-/// Length of the node identifier in `0x31` and `0x35` (text in the call).
-const int kNodeIdentifierLength = 16;
 
 String _source(Neighbour n) => '${n.$1.address}:${n.$2}';
 

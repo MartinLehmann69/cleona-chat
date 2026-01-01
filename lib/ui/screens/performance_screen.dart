@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/crypto/kem_benchmark.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Performance Profile screen (Architecture section 23.2).
 ///
@@ -140,6 +141,7 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(locale.get('performance_title')),
+        actions: const [AppScreenshotButton()],
         leading: Navigator.canPop(context)
             ? IconButton(
                 icon: const Icon(Icons.arrow_back),

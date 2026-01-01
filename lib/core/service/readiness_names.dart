@@ -1,7 +1,7 @@
 // The names of the readiness state at the service and IPC boundary (§22.7).
 //
-// WHY THESE THREE STRINGS ARE A LEAF OF THEIR OWN. `Readiness`
-// (`lib/core/tagline/readiness.dart`) is the truth about the state,
+// WHY THESE THREE STRINGS ARE A LEAF OF THEIR OWN. `ReadinessState`
+// (`mycelium/lib/readiness.dart`) is the truth about the state,
 // but it does not cross the IPC boundary: there is JSON, and JSON knows
 // no enumeration. The service interface therefore carries the state
 // as a string (`ICleonaService.readinessState`) — and needs
@@ -11,7 +11,7 @@
 // the service interface (which pulls in Flutter and half the application)
 // and a pure Dart smoke test that holds the names against the enumeration.
 // Exactly this counter-check is in
-// `test/smoke/smoke_delivery_api.dart` — without it the coupling would be a
+// `test/smoke/smoke_readiness_names.dart` — without it the coupling would be a
 // note instead of a gate: a renamed enum value would silently
 // pin `isReady` to `false`, and every gate above it would stay
 // closed without anything failing.
@@ -30,7 +30,7 @@ const String kReadinessReady = 'ready';
 /// The three in order of increasing readiness.
 ///
 /// Used by the display (which is to show progress, not success)
-/// and by the counter-check against `Readiness.values`.
+/// and by the counter-check against `ReadinessState.values`.
 const List<String> kReadinessNames = <String>[
   kReadinessSearching,
   kReadinessConnecting,

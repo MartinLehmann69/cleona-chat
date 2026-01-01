@@ -40,15 +40,29 @@
 // **not invented**: [UploadObservation.capacityBitsPerSecond] stays
 // `null` as long as the line has not shown its limit by itself.
 //
-// ══ WHAT THE VALUE DOES NOT DO TODAY ═════════════════════════════════
+// ══ WHERE THE LIMIT COMES FROM (S407-GALOSS) ═══════════════════════════
 //
-// **It is not distributed.** A bandwidth report to the other participants
-// would need a control channel, and §17.1 has none
-// (`call_transport_v41.dart`, `sendSecuredToParticipant` -> `noCarrier`).
-// Inventing one is explicitly not part of this file; the decision on it
-// lies with the owner (S368 proposal §4, option A/B/C).
-// Until then every node knows only its own value — which for the formula
-// above is exactly the half one can have locally.
+// From the receivers. §17.1.1: "a receiver tells the participant it
+// receives from how many frames of a second went missing, sent only in a
+// second with loss, and a broker that loses frames to several receivers has
+// shown its limit (§17.7)" (D-69, D-75). `loss_report.dart` counts and
+// judges; `CallService` calls [UploadProbe.recordCongestion] when the
+// reports show THIS line's limit, and [UploadProbe.reset] on a network
+// change.
+//
+// The limit is not kept for the rest of the call: it grows back as Google
+// Congestion Control's loss-based estimate does (draft-ietf-rmcat-gcc-02
+// §6: "As_hat(i) = 1.05 * As_hat(i-1)" while no limit shows, "As_hat(i-1)
+// (1 - 0.5p)" on loss p above 10 %) — a short foreign jam (a download
+// beside the call) must not cap a broker for an hour.
+//
+// The sentence that stood here until S407-GALOSS — "It is not distributed
+// … a control channel … §17.1 has none … the decision on it lies with the
+// owner (S368 proposal §4, option A/B/C)" — is outdated twice: option A is
+// built as the fourth kind on Plane D (§17.1.1), and a broker's free
+// capacity derived from this value travels in `relayHave` (§17.7,
+// `group_call_broker.dart`). It stays as a correction instead of
+// disappearing.
 library;
 
 import 'dart:math' as math;
@@ -74,7 +88,7 @@ enum UploadConfidence {
   /// sent media** — and the reason why [UploadObservation] delivers
   /// `null` here instead of a number. A default value would look weighted
   /// at this point and would not be; exactly the same facade that
-  /// `CallTransportV41.routeCostTo` rejects for route costs.
+  /// `PlaneDCallTransport.routeCostTo` rejects for route costs.
   unknown,
 }
 
@@ -140,11 +154,11 @@ final class UploadObservation {
   /// happening. Nobody saturates a call deliberately (work rule
   /// 5), which is why this field stays empty in ordinary operation.
   ///
-  /// **Today `lib/` calls [UploadProbe.recordCongestion] nowhere**, and
-  /// that is stated here instead of being missing: the level-D send side
-  /// has no loss signal — `CallTransport.sendMedia` is fire-and-forget
-  /// (§17.1), and there is no DELIVERY_RECEIPT for media. Whoever builds
-  /// one finds the intake point here.
+  /// The loss signal is the receivers' loss report (§17.1.1, S407-GALOSS);
+  /// until then this said "Today `lib/` calls [UploadProbe.recordCongestion]
+  /// nowhere … `CallTransport.sendMedia` is fire-and-forget" — true then,
+  /// kept as a correction. The value grows back while no further limit
+  /// shows ([UploadProbe.growthPerSecond]).
   final int? capacityBitsPerSecond;
 
   /// How reliable [observedBitsPerSecond] is.
@@ -307,25 +321,71 @@ class UploadProbe {
     _trim(second);
   }
 
-  /// The line has shown its limit — sustained loss or backpressure
-  /// while sending.
+  /// How fast a shown limit grows back while no further limit shows: 5 %
+  /// per second — the increase of Google Congestion Control's loss-based
+  /// controller, "As_hat(i) = 1.05 * As_hat(i-1)" per report
+  /// (draft-ietf-rmcat-gcc-02 §6), reports there arriving about once a
+  /// second. Doubles in 15 s, tenfold in 48 s.
+  static const double growthPerSecond = 1.05;
+
+  /// The growth stops counting here (1.05^400 ≈ 3·10^8): the value is then
+  /// far beyond any line and needs no larger exponent.
+  static const int _maxGrowthSeconds = 400;
+
+  DateTime? _capacityAt;
+
+  /// The line has shown its limit — its receivers lost [lossFraction] of
+  /// what it sent (`loss_report.dart`, §17.1.1).
   ///
   /// Only this call turns a lower bound into a capacity: if something
   /// jams at X bit/s, X is the upper limit and no longer merely an
-  /// achieved value.
+  /// achieved value. X is what went out in the last two full seconds — the
+  /// seconds the receivers' reports are about (their interval plus one
+  /// control tick) — not the best second of the last half minute.
   ///
-  /// **Nobody in `lib/` calls this today** — see
-  /// [UploadObservation.capacityBitsPerSecond]. The method stands here as
-  /// a named intake point, not as a claim that it is served.
-  void recordCongestion() {
-    final observed = _peakBitsPerSecond();
-    if (observed == null) return;
-    final soFar = _capacityBitsPerSecond;
-    // The SMALLEST observed jam limit applies: a line that already jammed
-    // at 300 kbit/s does not get better through a later jam at 900
-    // — the later one only says that more got through at that moment.
-    _capacityBitsPerSecond =
-        soFar == null ? observed : math.min(soFar, observed);
+  /// ── UNTIL S407-GALOSS THE SMALLEST LIMIT WAS KEPT ─────────────────────
+  ///
+  /// "A line that already jammed at 300 kbit/s does not get better through
+  /// a later jam at 900." That held the first jam for the rest of the call,
+  /// and a jam caused by something else on the line (a download beside the
+  /// call) capped a broker until hang-up. Now the earlier limit counts only
+  /// as grown since ([growthPerSecond]), and the new one takes the lower of
+  /// the two, reduced by half the share lost (GCC §6: "As_hat(i-1)
+  /// (1 - 0.5p)").
+  void recordCongestion({double lossFraction = 0}) {
+    final recent = _recentBitsPerSecond();
+    if (recent == null) return;
+    final now = _clock();
+    final grown = _grownCapacity(now);
+    final base = grown == null ? recent : math.min(grown, recent);
+    final p = lossFraction.clamp(0.0, 1.0);
+    _capacityBitsPerSecond = (base * (1 - 0.5 * p)).floor();
+    _capacityAt = now;
+  }
+
+  /// The shown limit as grown since it was shown, in bit/s — `null` while
+  /// none was shown.
+  int? _grownCapacity(DateTime now) {
+    final cap = _capacityBitsPerSecond;
+    final at = _capacityAt;
+    if (cap == null || at == null) return null;
+    var seconds = now.difference(at).inSeconds;
+    if (seconds <= 0) return cap;
+    if (seconds > _maxGrowthSeconds) seconds = _maxGrowthSeconds;
+    return (cap * math.pow(growthPerSecond, seconds)).floor();
+  }
+
+  /// The best of the last two FULL seconds, in bit/s.
+  int? _recentBitsPerSecond() {
+    final running = _clock().millisecondsSinceEpoch ~/ 1000;
+    int? best;
+    for (final s in [running - 1, running - 2]) {
+      final bytes = _buckets[s];
+      if (bytes == null) continue;
+      final bits = bytes * 8;
+      if (best == null || bits > best) best = bits;
+    }
+    return best;
   }
 
   /// The finding. Generates no traffic and no system call.
@@ -341,7 +401,7 @@ class UploadProbe {
     }
     return UploadObservation(
       observedBitsPerSecond: observed,
-      capacityBitsPerSecond: _capacityBitsPerSecond,
+      capacityBitsPerSecond: _grownCapacity(_clock()),
       confidence: trust,
       form: form,
       power: power,
@@ -349,11 +409,13 @@ class UploadProbe {
   }
 
   /// Forget everything — after a network change, where the old number is
-  /// not just old but wrong.
+  /// not just old but wrong. Called by `CallService.onNetworkChanged`
+  /// (S407-GALOSS; until then it had no caller).
   void reset() {
     _buckets.clear();
     _lastRecord = null;
     _capacityBitsPerSecond = null;
+    _capacityAt = null;
   }
 
   /// The maximum of the FULL seconds, in bit/s.

@@ -242,9 +242,15 @@ class KeyMigration {
   /// values, so there is nothing to re-key — and should a real change of
   /// the storage key ever come, the store needs a re-keyer of its own,
   /// which no file list would have replaced.
-  static const List<String> perIdentityFiles = [
-    'keys.json',
-  ];
+  ///
+  /// ── `keys.json` STOOD HERE AND IS GONE (S407, E10) ─────────────────
+  /// Since E10 (owner decision 08.10.2026, V16 = B) every identity has a
+  /// master seed, and the keys.json path of `initKeys`/`_saveKeys` is
+  /// removed: nothing writes the file any more (the guard
+  /// `smoke_key_rotation_list.dart` reported it as an entry without
+  /// writer). The list stays, empty, so that a future per-identity file
+  /// sealed under a found key has its place.
+  static const List<String> perIdentityFiles = [];
 
   /// At the profile ROOT DIRECTORY, under a FOUND `db.key` and not under a
   /// derived key — the 24 words ARE the seed, and a key derived from them
@@ -507,11 +513,15 @@ class KeyMigration {
   /// `DeviceStore.areaDeviceKeys`; `device_keys_store.dart`); the file has
   /// no writer any more and is removed at start, not re-keyed
   /// (`superseded_device_files.dart`).
-  static const List<String> deviceScopedJsonFiles = [
-    'v41_entries.json',
-    'v41_ages.json',
-    'v41_rendezvous_deposit.json',
-  ];
+  ///
+  /// EMPTY SINCE S408-P23. `v41_entries.json`, `v41_ages.json` and
+  /// `v41_rendezvous_deposit.json` were written only by the V4.1 delivery
+  /// layer (`attachV41`, without caller since S388), which fell with
+  /// `lib/core/tagline/`; no 4.2 path writes or reads them. The guard
+  /// `smoke_key_rotation_list.dart` reports a listed name without writer
+  /// as a dead entry. The list stays as the place for a future device-wide
+  /// JSON file.
+  static const List<String> deviceScopedJsonFiles = <String>[];
   static const List<String> deviceScopedBinaryFiles = [
     'node_keys',
   ];

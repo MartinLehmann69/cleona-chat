@@ -4,15 +4,15 @@
 // SENDER (§17.6 "Cascade and windows"). After the consent (§24.4.5):
 //   (a) draw `K_T`, send the announcement with the flag "stream possible"
 //       and no holder (`bulk_announce.dart`) — phase `negotiating`;
-//   (b) wait for the recipient's request (`MTV3_MEDIA_STREAM_REQUEST`) for
+//   (b) wait for the recipient's request (`MT_MEDIA_STREAM_REQUEST`) for
 //       [CleonaService.streamRequestWait];
 //   (c) request there: ask `laneChoose` again with what was found — the
 //       recipient is online, a candidate exists — and stream
 //       (`MailboxStream.streamSend`); its `offer` goes to the recipient as an
-//       ordinary message (`MTV3_MEDIA_STREAM_OFFER`) — phase `streaming n %`;
+//       ordinary message (`MT_MEDIA_STREAM_OFFER`) — phase `streaming n %`;
 //   (d) no request, no candidate, or the stream reports `fallback`: place the
 //       object under the SAME `K_T` with holders (`bulkPlaceFor`, D-30) and
-//       send their list (`MTV3_MEDIA_HOLDERS`, the lane 3 announcement) —
+//       send their list (`MT_MEDIA_HOLDERS`, the lane 3 announcement) —
 //       phase `seeding n %` → `available`.
 // Groups and objects above `C` never get here (`sendMediaMessage`: lane 3 at
 // once, §17.6 last paragraph).
@@ -26,9 +26,10 @@
 // the sender, phase `negotiating`. The offer joins the stream
 // (`MailboxStream.streamJoin`) — phase `collecting n %`; the object goes
 // through `bulkObjectArrived`, which stores it and only THEN sends the held
-// receipt of the announcement (Q1, D-29). A fallback keeps the pieces already
-// opened (`_streamSeeds`) and waits for the holder list; with it lane 3
-// collects the rest (`bulkCollect(seed:)`).
+// receipt of the announcement (Q1, D-29). A fallback waits for the holder
+// list; the pieces already opened the delivery layer kept on this identity's
+// disk BEFORE the give-up named the rest (no reneging, S407-N4,
+// `stream_receive.dart`), and the collection takes them from there.
 //
 // WHAT THE SENDER CANNOT TELL (named, not guessed): whether the announcement
 // reached the recipient directly (60 s) or through the post box (20 min).
@@ -44,11 +45,6 @@ part of 'cleona_service.dart';
 /// At most this many lane 2 transfers wait for their request at once; one
 /// more ends the wait of the oldest, which takes lane 3 (§20.2).
 const int _kStreamOutAtMost = 16;
-
-/// At most this many seeds of fallen-back streams are kept (one per open
-/// reception of `StreamReceiver`, `kReceptionsAtMost`); the oldest goes and
-/// lane 3 then brings its object whole.
-const int _kStreamSeedsAtMost = 4;
 
 /// Holder lists that came before their announcement; the oldest goes.
 const int _kStreamHoldersEarlyAtMost = 64;
@@ -158,7 +154,7 @@ extension CleonaServiceStream on CleonaService {
       return;
     }
     final recipientHex = bytesToHex(recipient.nodeId);
-    Future<bool> send(proto.MessageTypeV3 type, Uint8List payload,
+    Future<bool> send(proto.MessageType type, Uint8List payload,
             {Uint8List? messageId, proto.ContentMetadata? meta}) =>
         sendToUser(
           recipientUserId: recipient.nodeId,
@@ -207,11 +203,11 @@ extension CleonaServiceStream on CleonaService {
     _transferProgress(conversationId, msg.id, TransferPhase.negotiating, 0);
     final legs = <String>[msg.id];
     // Index BEFORE sending, for the reason given in `sendTextMessage`.
-    _v41ApplyOutgoingStatus(msg, legs);
-    final announced = await send(proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
+    _applyOutgoingLegStatus(msg, legs);
+    final announced = await send(proto.MessageType.MT_MEDIA_ANNOUNCE,
         announce,
         messageId: messageIdBytes, meta: metadata);
-    _v41ApplyOutgoingStatus(msg, legs);
+    _applyOutgoingLegStatus(msg, legs);
     if (!announced) {
       // B-8: nothing handed over — no stream, no lane 3 for an object the
       // recipient never hears of.
@@ -233,11 +229,28 @@ extension CleonaServiceStream on CleonaService {
     settle();
 
     // (b) The recipient's request — the evidence that it is online (§17.6).
+    //     The window follows the rung that carried the announcement (§17.6
+    //     "Cascade and windows"): 60 s when it reached the recipient
+    //     directly, 20 min when it went via the post box — the recipient
+    //     reads it at its next collection. The delivery layer says which:
+    //     a placed announcement (its history entry carries `placedAt`). Until
+    //     S408-LEBENSLAUF P21 the sender always waited 60 s and sent a placed
+    //     announcement's object to lane 3 before the recipient could ask.
     bool requested;
     try {
       requested = await wait.request.future.timeout(streamRequestWait);
     } on TimeoutException {
       requested = false;
+    }
+    if (!requested && _announcePlaced(bytesToHex(messageIdBytes))) {
+      _log.info('[E2E media-stream-send] msgId=$short announcement placed — '
+          'the request window is ${streamRequestWaitPlaced.inMinutes} min');
+      try {
+        requested = await wait.request.future
+            .timeout(streamRequestWaitPlaced - streamRequestWait);
+      } on TimeoutException {
+        requested = false;
+      }
     }
     if (identical(_streamOut[tag], wait)) _streamOut.remove(tag);
     if (_disposed) return;
@@ -251,6 +264,7 @@ extension CleonaServiceStream on CleonaService {
         bothOnline: requested,
         volunteerThere: candidates.isNotEmpty);
     String why;
+    List<int>? lastMissing; // what the recipient named, S407 M-2
     if (lane == mycelium.Lane.streamed) {
       _log.info('[E2E media-stream-send] msgId=$short request came, '
           '${candidates.length} candidate(s)');
@@ -260,7 +274,7 @@ extension CleonaServiceStream on CleonaService {
             final payload = Uint8List(kTagLength + o.length)
               ..setRange(0, kTagLength, tagBytes)
               ..setRange(kTagLength, kTagLength + o.length, o);
-            if (!await send(proto.MessageTypeV3.MTV3_MEDIA_STREAM_OFFER, payload)) {
+            if (!await send(proto.MessageType.MT_MEDIA_STREAM_OFFER, payload)) {
               _log.warn('[E2E media-stream-send] msgId=$short offer not handed '
                   'to the delivery layer');
             }
@@ -268,13 +282,15 @@ extension CleonaServiceStream on CleonaService {
           progress: (sent, total) => _transferProgress(conversationId, msg.id,
               TransferPhase.streaming,
               total == 0 ? 0 : (sent * 100 ~/ total).clamp(0, 99))));
+      if (s.recipientGaveUp) lastMissing = s.missingStripes;
       if (_disposed) return;
       if (s.done) {
         _transferProgress(conversationId, msg.id, TransferPhase.available, 100);
         _transferProgressEnd(msg.id);
         _transferRecordDrop(r);
         _mediaInNetwork(msg, tag); // streamed to the end (D-34)
-        _fileOrderRelease(msg); // S398-W5: what waited behind it goes now
+        // S398-W5: what waited behind it goes now.
+        _fileOrderRelease(msg, fileFailed: false);
         _log.info('[E2E media-send-done] msgId=$short filename=${msg.filename} '
             'size=${msg.fileSize} recipient=${conversationId.substring(0, 8)} '
             'lane=streamed frames=${s.frames} sessions=${s.sessions} '
@@ -285,15 +301,23 @@ extension CleonaServiceStream on CleonaService {
     } else {
       why = requested
           ? 'no volunteer candidate'
-          : 'no request within ${streamRequestWait.inSeconds} s';
+          : 'no request within its window (§17.6)';
     }
 
     // (d) Lane 3 for the remainder, under the SAME K_T (§17.6 "falls to the
     // bulk lane for the remainder"): the tag of the announcement stays.
-    // The WHOLE object: the sender cannot know what survived at the
-    // recipient (a recipient that crashed mid-stream keeps nothing), and a
-    // partial placement would leave its file unassemblable.
-    _log.info('[E2E media-send-path] lane mass msgId=$short after lane 2 — $why');
+    // S407 M-2: when the recipient gave up, it named what it cannot decode
+    // and kept the rest it opened on its disk (S407-N4: what it cannot keep
+    // it names too): only those stripes go. Otherwise (volunteer lost, nothing named) the
+    // recipient may still be collecting from the stream — the whole object.
+    final missing = lastMissing;
+    final total = mycelium.stripeNumber(object.length);
+    if (missing != null && missing.isNotEmpty && missing.length < total) {
+      r['only'] = missing;
+      _transferRecordPut(r);
+    }
+    _log.info('[E2E media-send-path] lane mass msgId=$short after lane 2 — $why'
+        '${r['only'] == null ? '' : ' — ${missing!.length} of $total stripes'}');
     await _laneThree(msg, object, r);
   }
 
@@ -304,8 +328,20 @@ extension CleonaServiceStream on CleonaService {
     return run;
   }
 
-  /// `MTV3_MEDIA_STREAM_REQUEST` at the sender: the recipient is there and
+  /// `MT_MEDIA_STREAM_REQUEST` at the sender: the recipient is there and
   /// wants the stream of the tag in the payload.
+  /// Whether the announcement [messageIdHex] went via the post box: its
+  /// history entry in the delivery layer is placed (two holders took it,
+  /// §8.2) — the rung-4 case of §17.6's request window.
+  bool _announcePlaced(String messageIdHex) {
+    final p = myceliumMailbox;
+    final a = _myceliumOutbounds[messageIdHex];
+    if (p == null || a == null) return false;
+    final id = bytesToHex(a.identifier);
+    return p.historyFor(a.to).entries.any(
+        (e) => e.placedAt != null && bytesToHex(e.identifier) == id);
+  }
+
   void _streamRequestReceived(HarvestEvent event) {
     final from = event.senderUserId.hex;
     if (event.payload.length != kTagLength) {
@@ -355,14 +391,14 @@ extension CleonaServiceStream on CleonaService {
     }
     unawaited(sendToUser(
       recipientUserId: contact.nodeId,
-      messageType: proto.MessageTypeV3.MTV3_MEDIA_STREAM_REQUEST,
+      messageType: proto.MessageType.MT_MEDIA_STREAM_REQUEST,
       payload: hexToBytes(tag),
     ).then((ok) => _log.info('[E2E media-stream-ask] '
         'msgId=${msgId.substring(0, 8)} request sent=$ok')));
     return true;
   }
 
-  /// `MTV3_MEDIA_STREAM_OFFER` at the recipient: tag ‖ STREAM_OFFER. Joins
+  /// `MT_MEDIA_STREAM_OFFER` at the recipient: tag ‖ STREAM_OFFER. Joins
   /// the volunteer it names for the object of the announcement.
   void _streamOfferReceived(HarvestEvent event) {
     final from = event.senderUserId.hex;
@@ -403,21 +439,19 @@ extension CleonaServiceStream on CleonaService {
         'length=${a.length}');
   }
 
-  /// The stream of [f] cannot finish (§17.6): keep what it opened, and
-  /// collect from the holders once their list is there.
+  /// The stream of [f] cannot finish (§17.6): collect from the holders once
+  /// their list is there. What it opened lies on this identity's disk
+  /// already — the delivery layer kept it before the give-up named the rest
+  /// (S407-N4); the collection takes it from there.
   void _streamFellBack(StreamFallback f) {
     final key = tagHex(f.tag);
     final e = _bulkIncoming[key];
     if (e == null || _disposed) return;
-    if (f.pieces.isNotEmpty) {
-      // S398-W1: also on disk (encrypted), so the seed survives a restart
-      // before the holder list comes (`BulkCollector.stash`).
-      myceliumMailbox?.bulkStash(f.tag, f.pieces);
-      _streamSeeds[key] = f.pieces;
-      while (_streamSeeds.length > _kStreamSeedsAtMost) {
-        _streamSeeds.remove(_streamSeeds.keys.first);
-      }
-    }
+    // What it named is what the sender places (S407 M-2); the rest are the
+    // stripes whose pieces it keeps — the ones it may ask for once more,
+    // should they be lost (D-34 exception, `cleona_service_image_again.dart`).
+    e[kStreamGaveUpKey] = [...f.missingStripes]..sort();
+    _bulkIncomingPut(key, e);
     final msgId = e['msg'] as String;
     final a = bulkAnnounceUnpack(hexToBytes(e['announce'] as String));
     final running = myceliumMailbox?.bulkCollector.status(f.tag) != null;
@@ -429,7 +463,7 @@ extension CleonaServiceStream on CleonaService {
     }
   }
 
-  /// `MTV3_MEDIA_HOLDERS` at the recipient: the lane 3 announcement of a
+  /// `MT_MEDIA_HOLDERS` at the recipient: the lane 3 announcement of a
   /// stream that fell back — same `K_T`, so the same tag and entry.
   void _streamHoldersReceived(HarvestEvent event) {
     final from = event.senderUserId.hex;
@@ -460,7 +494,10 @@ extension CleonaServiceStream on CleonaService {
           'dropped: another sender or another object');
       return;
     }
-    e['announce'] = bytesToHex(payload);
+    // After the D-34 request the new list names only the holders of the
+    // lost stripes; the earlier ones still hold the rest.
+    e['announce'] = bytesToHex(
+        e[kImageAgainKey] == true ? _imageHoldersMerged(was, a) : payload);
     _bulkIncomingPut(key, e);
     _log.info('[E2E media-stream-holders] msgId=${(e['msg'] as String).substring(0, 8)} '
         'holders=${a.holders.length} started=${e['started'] == true}');

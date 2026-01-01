@@ -71,6 +71,9 @@ void updateCoverRouteAttach(
       if (!pushes()) return null;
       return holder.blockNow()?.toBytes();
     }
+    // The identifiers of the system channels count as one more object
+    // (§5.5 rule 2) — a node that pushes no pieces draws from none of these.
+    ..pieceObjects = (() => pushes() ? holder.objectCount : 0)
     ..onPiece = (piece, _, __) {
       // What comes from the wire is nothing the node may fail on:
       // `fromBytes` returns `null` on wrong length or version

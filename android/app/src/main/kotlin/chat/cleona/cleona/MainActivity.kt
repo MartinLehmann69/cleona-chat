@@ -106,6 +106,8 @@ class MainActivity : FlutterActivity() {
         private const val REQUEST_AUDIO_PERMISSION = 1002
         private const val REQUEST_INSTALL_PERMISSION = 1003
         private const val REQUEST_CONFIRM_CREDENTIAL = 1004
+        private const val PREFS_PLATFORM = "cleona_platform"
+        private const val KEY_BATTERY_EXEMPTION_ASKED = "battery_exemption_asked"
     }
 
     // Samsung Auto-Blocker revokes REQUEST_INSTALL_PACKAGES after ~30 min.
@@ -377,13 +379,26 @@ class MainActivity : FlutterActivity() {
                     resetCallAudioMode()
                     result.success(null)
                 }
+                "setNotificationTexts" -> {
+                    // S410-F: the words of the notifications in the app
+                    // language; the channels are renamed at once (Android
+                    // takes name and description of an existing channel).
+                    @Suppress("UNCHECKED_CAST")
+                    val texts = call.arguments as? Map<String, String> ?: emptyMap()
+                    NotificationTexts.store(applicationContext, texts)
+                    createMessageNotificationChannel()
+                    CleonaForegroundService.createChannel(applicationContext)
+                    result.success(null)
+                }
                 "updateBadge" -> {
                     val count = call.argument<Int>("count") ?: 0
-                    updateBadgeCount(count)
+                    val unread = call.argument<List<String>>("conversationIds") ?: emptyList()
+                    updateBadgeCount(count, unread)
                     result.success(null)
                 }
                 "showIncomingCall" -> {
-                    val callerName = call.argument<String>("callerName") ?: "Unbekannt"
+                    val callerName = call.argument<String>("callerName")
+                        ?: NotificationTexts.get(this, "unknownCaller")
                     val callId = call.argument<String>("callId") ?: ""
                     showIncomingCallNotification(callerName, callId)
                     result.success(true)
@@ -667,6 +682,7 @@ class MainActivity : FlutterActivity() {
 
         // §12.5 S254: request Doze-whitelist exemption so UDP delivery works
         // in Deep Doze. The system shows its own dialog — no custom UI needed.
+        // Shown once at first start only (§23.2 K23-3 (c)); see the guard there.
         // Delayed by 5s so the notification permission dialog can be dismissed first.
         Handler(Looper.getMainLooper()).postDelayed({
             requestBatteryOptimizationExemption()
@@ -824,21 +840,24 @@ class MainActivity : FlutterActivity() {
 
     private fun createMessageNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Names and descriptions in the app language (NotificationTexts);
+            // called again on every language change — for an existing
+            // channel Android updates name and description only.
             val channel = NotificationChannel(
                 MSG_CHANNEL_ID,
-                "Nachrichten",
+                NotificationTexts.get(this, "channelMessagesName"),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Benachrichtigungen bei neuen Nachrichten"
+                description = NotificationTexts.get(this@MainActivity, "channelMessagesDesc")
                 setShowBadge(true)
                 enableVibration(true)
             }
             val callChannel = NotificationChannel(
                 CALL_CHANNEL_ID,
-                "Anrufe",
+                NotificationTexts.get(this, "channelCallsName"),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Eingehende Cleona-Anrufe"
+                description = NotificationTexts.get(this@MainActivity, "channelCallsDesc")
                 setSound(null, null)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -861,7 +880,7 @@ class MainActivity : FlutterActivity() {
         val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(callerName)
-            .setContentText("Eingehender Anruf")
+            .setContentText(NotificationTexts.get(this, "incomingCall"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(fullScreenPending, true)
@@ -981,7 +1000,15 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun updateBadgeCount(count: Int) {
+    // [unreadConversationIds]: every conversation that still has something
+    // unread, over every identity (`AndroidBadge` in
+    // lib/core/platform/android_badge.dart). A message notification is posted
+    // under `conversationId.hashCode()` (postMessageNotification); one whose
+    // conversation is not in the list has nothing unread any more and is
+    // cancelled — whichever way the count dropped: read, the author deleted
+    // the message, the identity was deleted here or from another own device
+    // (owner, S410 E1: a badge only while something is unread).
+    private fun updateBadgeCount(count: Int, unreadConversationIds: List<String>) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
             // Update badge via a silent summary notification.
@@ -1005,7 +1032,8 @@ class MainActivity : FlutterActivity() {
                     .setGroup("cleona_messages")
                     .setGroupSummary(true)
                     .setContentTitle("Cleona Chat")
-                    .setContentText("$count ungelesene Nachrichten")
+                    .setContentText(NotificationTexts.get(this, "unreadSummary")
+                        .replace("{count}", count.toString()))
                     .setSilent(true)
                     .setContentIntent(pendingIntent)
                     .setAutoCancel(true)
@@ -1013,7 +1041,18 @@ class MainActivity : FlutterActivity() {
                     .build()
                 manager.notify(0, notification)
             } else {
+                // Nothing unread anywhere: the summary goes as well.
                 manager.cancel(0)
+            }
+            // Only the message channel: the service notice (`cleona_service`)
+            // and a ringing call (`cleona_calls`) are not touched. Id 0 is the
+            // summary, handled above.
+            val keep = unreadConversationIds.map { it.hashCode() }.toHashSet()
+            for (sbn in manager.activeNotifications) {
+                if (sbn.notification.channelId == MSG_CHANNEL_ID &&
+                    sbn.id != 0 && sbn.id !in keep) {
+                    manager.cancel(sbn.tag, sbn.id)
+                }
             }
         }
     }
@@ -1035,6 +1074,12 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        // §23.2 K23-3 (c): the system dialog is shown once, at first start.
+        // A user who declines is not asked again at every start; the flag is
+        // written before the dialog so a crash or kill cannot re-ask either.
+        val prefs = getSharedPreferences(PREFS_PLATFORM, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_BATTERY_EXEMPTION_ASKED, false)) return
+        prefs.edit().putBoolean(KEY_BATTERY_EXEMPTION_ASKED, true).commit()
         try {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:$packageName")

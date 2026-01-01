@@ -10,8 +10,9 @@
 ///   open set and carries address entries along;
 /// * the **board** (`board*.dart`) — asked at the
 ///   edges, given only with proven reachability;
-/// * the app's **port mapping** — it reports its proof via
-///   [HostNetwork.mappingProven].
+/// * the **router mapping** ([router], `host_router.dart`) — asked at the
+///   edges start and network change, its proof read by the board and the
+///   keep-alive (S408-LEBENSLAUF P15, A-4).
 ///
 /// No clock: everything here runs at edges — start, network change, new
 /// neighbour, removal — or with a packet that comes anyway.
@@ -19,10 +20,14 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:cleona/core/util/local_addresses.dart' show dialableFrom;
 import 'package:mycelium/address_entries.dart';
+import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_call.dart' show NodeCall, neighbourAdd;
+import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/board_node.dart';
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/keep_alive.dart';
@@ -30,13 +35,20 @@ import 'package:mycelium/keep_alive_measure.dart';
 import 'package:mycelium/mapping_echo.dart';
 import 'package:mycelium/open_check.dart';
 import 'package:mycelium/open_check_answer.dart';
+import 'package:mycelium/network_watch.dart';
 import 'package:mycelium/host_outside.dart';
+import 'package:mycelium/host_media.dart' show bulkFamilyOpen;
+import 'package:mycelium/host_router.dart';
+import 'package:mycelium/node_helpers.dart' show interfaces;
 import 'package:mycelium/host_memory.dart';
 import 'package:mycelium/own_entries.dart';
 import 'package:mycelium/node_invitation.dart' show namedByStandingCard;
 import 'package:mycelium/invitation_way_in.dart' show wayInEdge;
 import 'package:mycelium/trace.dart' show traceOn;
 import 'package:mycelium/trace_first_contact.dart' show seatsOf;
+
+/// One own address with its port (§17.3 candidates, [HostNetwork.ownLocal]).
+typedef OwnEndpoint = ({InternetAddress address, int port});
 
 /// An entry whose confirmation lies further back is stale
 /// (§11.8) and is not adopted from foreign lists.
@@ -56,8 +68,16 @@ class HostNetwork {
   final void Function(String)? _report;
 
   /// Whether the own router has granted a mapping or a pinhole
-  /// (§7.3) — set by the app seam. Proof for the board (§11.8a).
-  bool Function() mappingProven = () => false;
+  /// (§7.3) — [router]'s; a probe may set its own. Proof for the board (§11.8a).
+  late bool Function() mappingProven = () => router.proven;
+
+  /// The router mapping and pinhole (§7.3); the host sets its switch.
+  late final HostRouter router = HostRouter(() => _k.port, _granted, _report);
+
+  /// Source 3 (§11.8.3): the addresses carried in the invitation data this
+  /// node has read — kept in its contacts' records (the card's own addresses
+  /// and the fixed neighbours it named) — set by the host.
+  List<CardAddress> Function() invitationAddresses = () => const [];
 
   /// The keep-alive per address type (§8.1) — runs from the construction of the network.
   late final KeepAlive keepAlive = KeepAlive(_k);
@@ -69,6 +89,14 @@ class HostNetwork {
   /// Is a family open from outside, and the neighbours' half (§8.1).
   late final OpenCheck openCheck = OpenCheck(_k);
   late final OpenCheckAnswer openAnswer = OpenCheckAnswer(_k);
+
+  /// The edge "network change" decided in one place (§11.8.2, S407-LB-P14):
+  /// the platform hands in its events, this says whether they are one.
+  late final NetworkWatch watch = NetworkWatch(
+      () => keepAlive.intervalV4 < keepAlive.intervalV6
+          ? keepAlive.intervalV4
+          : keepAlive.intervalV6,
+      report: _report);
 
   String? _fixed;
   List<Neighbour> _fixedList = const [];
@@ -94,6 +122,14 @@ class HostNetwork {
         onBoardAnswer: addressList);
     _k.outsideRoute.onAnswerReceived =
         (a, p) => n.confirm(a, p, DateTime.now());
+    // §11.8.4: every answer to a request of this node stamps the address it
+    // went to — the acknowledgement, a media or stream answer, a deposit
+    // receipt, a board answer, every other (S407-LB-P1 C-2). Only an address
+    // the list holds: the list is filled by its sources (§11.8.3), and a
+    // removed address returns only through §11.8.6.
+    _k.silence.onAnswered = (a, p) {
+      if (n.holding(a, p) != null) n.confirm(a, p, DateTime.now());
+    };
     n.onUnderTarget = refill;
     // V6: a standing invitation keeps the fixed seat where its card points.
     n.namedByCards = (x) => namedByStandingCard(_k, x);
@@ -108,7 +144,10 @@ class HostNetwork {
       ..onAsked = echo.asked
       ..onProbe = echo.receive
       ..onOpenCheck = openAnswer.receive;
-    keepAlive.familyOpen = openCheck.isOpen;
+    keepAlive
+      ..familyOpen = openCheck.isOpen
+      ..ipv4Mapped = (() => router.ipv4Proven) // §8.1: the router holds it
+      ..ipv6Mapped = (() => router.ipv6Proven);
     // §8.1: on a metered link a contact reachable only over IPv4 takes no
     // contact seat; the metered flag changing is an edge for the seats.
     n.v4OnlyOnMetered = keepAlive.v4OnlyOnMetered;
@@ -118,13 +157,59 @@ class HostNetwork {
     };
     openCheck.onOpen = (_) {
       keepAlive.edgeNow();
+      _run(_outside.write()); // §11.9: the seen address is now publishable
       wayInEdge(_k); // §12.4: an open family can be an invitation's way in
     };
+    // §11.9 (S410 A): a seen address is published only with its family
+    // evidenced open; each evidence's first arrival is an edge to publish.
+    _outside.familyEvidenced = (f) =>
+        bulkFamilyOpen(this, f) || (_k.passiveProof?.provenFor(f) ?? false);
+    _k.passiveProof?.onFamily = (_) => _run(_outside.write());
     _k.coverStream.onKeepAlive = echo.keepAlive;
     echo.onMoved = keepAlive.moved;
     keepAlive.start();
     measure.edge(); // §8.1: the edge "start"
     openCheck.edge();
+    unawaited(watch.begin()); // the edge "start": the first report is no change
+  }
+
+  // ── The own addresses for a direct path (§17.3; S408 P17) ──────────────
+  // Plane D's call candidates come from here: the interfaces read at the
+  // edges, the router's grant, the mirror — one source, no own enumeration
+  // beside the host. A change reaches a call through the edge network change.
+
+  /// The own interface addresses under the data port, private IPv4 first.
+  List<OwnEndpoint> get ownLocal => [
+        for (final ip in dialableFrom(interfaces))
+          if (InternetAddress.tryParse(ip) case final a?) (address: a, port: _k.port),
+      ];
+
+  /// The outer endpoint of a granted, unexpired router mapping (§7.3).
+  OwnEndpoint? get ownMapped {
+    final m = router.current?.mapper;
+    final ip = InternetAddress.tryParse(m?.externalIp ?? '');
+    final p = m?.externalPort ?? 0;
+    return m == null || !m.hasMapping || ip == null || p <= 0
+        ? null : (address: ip, port: p);
+  }
+
+  /// The own address as a neighbour outside the own segment saw it (§7.3).
+  OwnEndpoint? get ownMirrored => switch (_k.publicAddress) {
+        final p? => (
+            address: InternetAddress.fromRawAddress(Uint8List.fromList(p.address)),
+            port: p.port),
+        null => null,
+      };
+
+  /// A granted mapping (IPv4: the outer address IS the public one) or
+  /// pinhole is a reachable address: published (§11.9) and a way in (§12.4).
+  void _granted(InternetAddress outside, int port) {
+    if (outside.type == InternetAddressType.IPv4) {
+      _k.publicAddress =
+          CardAddress(Uint8List.fromList(outside.rawAddress), port);
+    }
+    _run(_outside.write());
+    wayInEdge(_k);
   }
 
   /// On stopping the host: the keep-alive clock and its measurement stop.
@@ -132,14 +217,24 @@ class HostNetwork {
     keepAlive.stop();
     measure.stop();
     openCheck.stop();
+    watch.stop();
   }
 
   /// EDGE network change (`Host.networkChanged`): the measured intervals
-  /// belong to the old network (§8.1), stale entries are tried once (§11.8).
+  /// belong to the old network (§8.1), and every remembered address is tried
+  /// once (§11.8.2) — not only the stale ones: a stamp from the old network
+  /// says nothing about the new one, and without a request of its own a
+  /// neighbour confirmed today stayed an acquaintance until some other
+  /// packet happened to reach it (S407-LB-P8 C-9). Then, as at start,
+  /// source 3 ([invitationTry]): it adds only what the list does not hold,
+  /// so no address is asked twice; the removal memory is already cleared
+  /// (`Readiness.reset`), so a removed card address is tried again.
   void networkChanged() {
+    unawaited(router.edge()); // §7.3: the router is asked at this edge too
     openCheck.networkChanged(); // first: the keep-alive looks at its result
     measure.networkChanged();
-    staleTry();
+    rememberedTry();
+    invitationTry();
   }
 
   /// What the cover stream takes along to [target] (§5.5): the own
@@ -201,36 +296,65 @@ class HostNetwork {
     if (added.isNotEmpty) _newNeighbour(added);
   }
 
-  /// Edge: a removal let the list fall below 32 (§11.8). What
-  /// runs is what a cold start starts — call, stale entries,
-  /// board, external entries.
+  /// Edge: a removal let the list fall below 32 (§11.8.2): sources 1–3,
+  /// the board, the external records — stale entries, the invitation data
+  /// (S407-LB-P8 C-10), the call, then board and external entries.
   void refill() {
     _report?.call('Neighbourhood below the optimum — refill round');
     staleTry();
+    invitationTry();
     _run(_outside.afterSources(_k.call()));
   }
 
-  /// Every stale entry is tried ONCE at an edge (§11.8) —
-  /// with the address question whose answer confirms it. One request, never
-  /// repeated; a failure is one use without an answer, and the entry goes at
-  /// the second (§11.8 "two uses failed", `Readiness.mute`, S399 step 4),
-  /// only with counter-evidence (E2).
+  /// Source 3 in a round (§11.8.3): every invitation address the list does
+  /// not hold becomes a hint while the list is below 32, and a new one is
+  /// the edge "new neighbour" — which uses it. An address removed since the
+  /// last network change stays out: an invitation carries no time, so it says
+  /// nothing newer than the removal (§11.8.6); without that, a dead card
+  /// address would come back with every round its removal starts (D-9).
+  /// The one admission `neighbourAdd` holds that rule for every source
+  /// (S407-LB-P7, C-8); no second filter here.
+  void invitationTry() {
+    final n = _k.neighbourhood;
+    final added = <(InternetAddress, int)>[];
+    for (final c in invitationAddresses()) {
+      if (n.count >= Neighbourhood.atMost) break;
+      final a = InternetAddress.fromRawAddress(c.address);
+      if (n.holding(a, c.port) != null) continue;
+      if (neighbourAdd(_k, c.address, c.port)) added.add((a, c.port));
+    }
+    if (added.isNotEmpty) _newNeighbour(added);
+  }
+
+  /// Every stale entry is tried at an edge (§11.8) — with the address
+  /// question whose answer confirms it. The question is repeated and, without
+  /// an answer, the address declared failed by the transport (§11.3a,
+  /// `silence.dart`), only with counter-evidence; nothing is counted here.
   void staleTry() {
     for (final x in _k.neighbourhood.stale(DateTime.now())) {
-      unawaited(_try(x));
+      unawaited(_k.outsideRoute.whatIsMyAddress(x.address, x.port));
     }
   }
 
-  Future<void> _try(Neighbour x) async {
-    if (await _k.outsideRoute.whatIsMyAddress(x.address, x.port) != null) return;
-    _k.readiness.mute([(x.address, x.port)]);
+  /// Every remembered address is tried at the edge network change
+  /// (§11.8.2, §11.8.5) — each address of each neighbour on its own, with
+  /// the same address question as [staleTry]; its answer stamps the address,
+  /// its silence is the transport's (§11.3a). Only addresses of a family this
+  /// node has a socket for (§11.1): one under a lost family waits, unused.
+  void rememberedTry() {
+    for (final x in _k.neighbourhood.all) {
+      for (final a in x.addresses) {
+        if (!_k.speaks(a.address)) continue;
+        unawaited(_k.outsideRoute.whatIsMyAddress(a.address, a.port));
+      }
+    }
   }
 
   /// Writes the current neighbourhood including fixed seat into memory.
   void save() {
     _memory.rememberedNeighbours
       ..clear()
-      ..addAll(_k.neighbourhood.all);
+      ..addAll(_k.neighbourhood.toRemember); // what waits, too (C-7)
     _memory.save();
   }
 

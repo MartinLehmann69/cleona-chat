@@ -58,6 +58,40 @@ enum BrowserOpenMode {
   alwaysAsk,
 }
 
+/// The commands that open [url] in a PRIVATE window of the Linux default
+/// browser, named by its desktop entry ([desktopEntry], the output of
+/// `xdg-settings get default-web-browser`, e.g. `firefox.desktop`,
+/// `firefox_firefox.desktop` (snap), `google-chrome.desktop`). Tried in
+/// order; empty when the browser is not one whose private-window switch is
+/// known — the caller then opens the link normally.
+///
+/// Switches: Firefox `--private-window <url>`; Chrome, Chromium, Brave
+/// `--incognito`; Edge `--inprivate` (each browser's documented command-line
+/// option).
+List<List<String>> linuxPrivateBrowserCommands(String desktopEntry, String url) {
+  final e = desktopEntry.toLowerCase();
+  if (e.contains('firefox')) {
+    return [['firefox', '--private-window', url]];
+  }
+  if (e.contains('google-chrome')) {
+    return [
+      ['google-chrome', '--incognito', url],
+      ['google-chrome-stable', '--incognito', url],
+    ];
+  }
+  if (e.contains('chromium')) {
+    return [
+      ['chromium-browser', '--incognito', url],
+      ['chromium', '--incognito', url],
+    ];
+  }
+  if (e.contains('brave')) return [['brave-browser', '--incognito', url]];
+  if (e.contains('microsoft-edge')) {
+    return [['microsoft-edge', '--inprivate', url]];
+  }
+  return const [];
+}
+
 class LinkPreviewSettings {
   /// Whether to fetch link previews when sending messages.
   bool enabled;

@@ -98,6 +98,24 @@ class BandwidthEstimator {
   int _packetsReceived = 0;
   int _packetsLost = 0;
 
+  /// Frames the peer's loss reports said it expected this interval
+  /// ([recordLossReport]) — the denominator of the loss rate whenever a
+  /// report came: the reports count Plane D frames, [recordSent] counts
+  /// encoded video frames, and a fraction of one over the other would mean
+  /// nothing.
+  int _reportedExpected = 0;
+
+  /// When the last round trip was measured ([updateRtt]).
+  DateTime? _rttAt;
+
+  /// How long a round-trip sample describes the line. The 1:1 call measures
+  /// the round trip only with a loss report (RFC 3550 §6.4.1 inside the
+  /// report, `loss_report.dart`), and reports come only in a second with
+  /// loss (§17.1.1); a sample older than [_upgradeDelay] would otherwise hold
+  /// a high round trip — and with it the quality cap — for the rest of the
+  /// call.
+  static const Duration rttLifetime = _upgradeDelay;
+
   BandwidthEstimator({
     VideoQuality initialQuality = VideoQuality.medium,
   }) : _currentQuality = initialQuality;
@@ -116,8 +134,25 @@ class BandwidthEstimator {
   /// Record a lost packet (timeout or NACK).
   void recordLost() => _packetsLost++;
 
+  /// The peer's loss report (§17.1.1, S407-GALOSS): of [expected] frames of
+  /// ours, [lost] went missing there. Fed by `CallService` for the 1:1 call;
+  /// until then nothing in `lib/` called [recordLost], the loss rate was
+  /// always 0 and the cascade never ran (§17.5: "The target bitrate follows
+  /// the measured available bandwidth and is tracked throughout the call").
+  ///
+  /// No report in an interval means no loss in it — the receiver reports
+  /// only seconds with loss.
+  void recordLossReport({required int expected, required int lost}) {
+    if (expected <= 0 || lost < 0) return;
+    _reportedExpected += expected;
+    for (var i = 0; i < lost && i < expected; i++) {
+      recordLost();
+    }
+  }
+
   /// Update RTT measurement.
   void updateRtt(int rttMs) {
+    _rttAt = DateTime.now();
     if (_smoothedRttMs == 0) {
       _smoothedRttMs = rttMs;
     } else {
@@ -130,20 +165,30 @@ class BandwidthEstimator {
   BandwidthEstimate evaluate() {
     final now = DateTime.now();
 
-    // Calculate current loss rate
-    final totalPackets = _packetsSent;
+    // Calculate current loss rate — against what the peer's reports
+    // expected when one came, otherwise against what was sent.
+    final totalPackets =
+        _reportedExpected > 0 ? _reportedExpected : _packetsSent;
     final currentLoss = totalPackets > 0
-        ? _packetsLost / totalPackets
+        ? (_packetsLost / totalPackets).clamp(0.0, 1.0)
         : 0.0;
 
     // EMA smoothing
     _smoothedLossRate = (_emaAlpha * currentLoss) +
         ((1 - _emaAlpha) * _smoothedLossRate);
 
+    // A round trip nobody measured again for [rttLifetime] no longer counts.
+    final rttAt = _rttAt;
+    if (rttAt != null && now.difference(rttAt) > rttLifetime) {
+      _smoothedRttMs = 0;
+      _rttAt = null;
+    }
+
     // Reset counters for next interval
     _packetsSent = 0;
     _packetsReceived = 0;
     _packetsLost = 0;
+    _reportedExpected = 0;
 
     // Determine target quality
     var targetQuality = _currentQuality;
@@ -244,6 +289,8 @@ class BandwidthEstimator {
     _packetsSent = 0;
     _packetsReceived = 0;
     _packetsLost = 0;
+    _reportedExpected = 0;
+    _rttAt = null;
     _lastQualityChange = DateTime.now();
     _lastDegradation = DateTime.now();
   }

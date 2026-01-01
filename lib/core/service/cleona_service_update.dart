@@ -28,7 +28,22 @@ final Expando<UpdateTarget> _updateTargetField =
 final Expando<UpdateCarrier> _updateCarrierField =
     Expando<UpdateCarrier>('updateCarrier');
 
-extension V3InNetworkUpdateOps on CleonaService {
+/// The objects this service has handed to the carrier to hold (SHA-256
+/// hex) — so that the next manifest can release them (`holdExactly`).
+final Expando<Set<String>> _heldObjectsField =
+    Expando<Set<String>>('heldObjects');
+
+/// Bytes of [_heldObjectsField] on disk — their share of the bulk-cache
+/// class (S407-UPDATEFRAGMENTE).
+final Expando<int> _heldObjectBytesField = Expando<int>('heldObjectBytes');
+
+/// A phone's installed binary (Android: `ApplicationInfo.sourceDir`),
+/// resolved at start — what it hands out instead of a copy in the store
+/// (S407-UPDATEFRAGMENTE W9, `installed_binary.dart`). Null on a desktop.
+final Expando<String> _installedBinaryPathField =
+    Expando<String>('installedBinaryPath');
+
+extension InNetworkUpdateOps on CleonaService {
 
   // ══ THE CARRIER IN THE DELIVERY LAYER (S387, M1+ AND P1) ═════════════
   //
@@ -89,19 +104,28 @@ extension V3InNetworkUpdateOps on CleonaService {
   /// hold nothing for others.
   void _ownObjectsHold(UpdateCarrier carrier) {
     final manifest = _latestManifest;
-    final store = _binaryFragmentStore;
+    final store = _updateBinaryStore;
     if (manifest == null || store == null) return;
     if (Platform.isAndroid || Platform.isIOS) return;
+    // What this manifest names and lies complete on disk — and only that:
+    // whatever an earlier manifest had held is released (§26.6.1).
+    final wanted = <String, String>{};
     for (final platform in kInNetworkPlatforms) {
       final hash = manifest.binaryHashes?[platform];
       if (hash == null || !store.hasCompleteSync(platform, manifest.version)) {
         continue;
       }
+      // §26.6.3: a binary fetched on demand for one visitor is not offered
+      // to the network ("no network-wide advertising") — it stays for that
+      // visitor and is evicted after 24 h.
+      if (_foreignBinaryAcquirer?.isOnDemand(platform, manifest.version) ??
+          false) {
+        continue;
+      }
       // From the file, never into memory (S406-OOM): the android object
       // is ~200 MB, and the holder used to load it whole on the first
       // cover packet.
-      carrier.objectHoldFile(
-          hexToBytes(hash), store.completePath(platform, manifest.version));
+      wanted[hash.toLowerCase()] = store.completePath(platform, manifest.version);
       _log.info('[update] carrier: $platform v${manifest.version} is '
           'held for others');
     }
@@ -109,10 +133,34 @@ extension V3InNetworkUpdateOps on CleonaService {
     // a smaller object on the same path as the full binary"), placed by the
     // release pipeline in <data dir>/update-deltas/ (S406-DELTA).
     for (final (hash, path) in deltaObjectsHeld(manifest, AppPaths.dataDir)) {
-      carrier.objectHoldFile(hexToBytes(hash), path);
+      wanted[hash.toLowerCase()] = path;
       _log.info('[update] carrier: delta ${hash.substring(0, 16)} is held for '
           'others');
     }
+    _heldObjectsField[this] =
+        holdExactly(carrier, _heldObjectsField[this] ?? <String>{}, wanted);
+    _heldObjectsReserve(wanted.values);
+  }
+
+  /// The objects held for others count against the bulk-cache class
+  /// (S407-UPDATEFRAGMENTE, `update_store_budget.dart`): the pieces of
+  /// lane 3 get what is left, the oldest give way at once.
+  void _heldObjectsReserve(Iterable<String> paths) {
+    var bytes = 0;
+    for (final path in paths) {
+      try {
+        bytes += File(path).lengthSync();
+      } on FileSystemException {
+        // gone meanwhile — not held
+      }
+    }
+    _heldObjectBytesField[this] = bytes;
+    final holder = myceliumMailbox?.host.bulk.holder;
+    if (holder == null) return; // the next piece makes room
+    holder.fit();
+    _log.info('[update] bulk cache: $bytes B of update objects held for '
+        'others; pieces of lane 3 keep ${holder.usedBytes} B of '
+        '${holder.budget} B');
   }
 
   /// A collection for [target] is outdated — a newer manifest has moved
@@ -156,7 +204,7 @@ extension V3InNetworkUpdateOps on CleonaService {
               '${updateObjectShort(fresh.object)} (Z1) — its fetch ends');
       carrier?.fetchAbort();
       if (old.version != currentAppVersion) { // V3-TOUCH-OK: the running version, not a peer's — its store holds the self-seeded binary
-        unawaited(_binaryFragmentStore?.deleteVersion(platform, old.version));
+        unawaited(_updateBinaryStore?.deleteVersion(platform, old.version));
       }
     }
     updateTrace('target',
@@ -165,7 +213,7 @@ extension V3InNetworkUpdateOps on CleonaService {
         object: fresh.object,
         platform: platform,
         reason: '$fresh, before: ${old ?? 'none'}');
-    if (!File(_binaryFragmentStore?.completePath(platform, fresh.version) ?? '')
+    if (!File(_updateBinaryStore?.completePath(platform, fresh.version) ?? '')
         .existsSync()) {
       _updateExpect(fresh);
     }
@@ -189,7 +237,7 @@ extension V3InNetworkUpdateOps on CleonaService {
     final t = _updateTargetSet(manifest);
     if (t == null) return;
     final complete =
-        _binaryFragmentStore?.completePath(t.platform, t.version) ?? '';
+        _updateBinaryStore?.completePath(t.platform, t.version) ?? '';
     if (File(complete).existsSync()) {
       unawaited(_storedCheck(manifest, t, complete).catchError((Object e) {
         _log.warn('[update] check of the stored $t failed: $e');
@@ -199,23 +247,37 @@ extension V3InNetworkUpdateOps on CleonaService {
 
   BinaryUpdateManager? get binaryUpdateManager => _binaryUpdateManager;
 
+  /// The installed binary of a phone, when [platform]/[version] is what it
+  /// runs — the source of an export for a physical handover (§26.6.6,
+  /// S407-UPDATEFRAGMENTE W9). Null on a desktop and for anything else.
+  String? installedBinaryPathFor(String platform, String version) =>
+      platform == Platform.operatingSystem &&
+              version == CleonaService.kCurrentAppVersion
+          ? _installedBinaryPathField[this]
+          : null;
+
+  /// Bytes of the update objects this desktop holds for others — what the
+  /// pieces of lane 3 leave free in the bulk-cache class (`BulkHolder.reserved`,
+  /// set by `attachUpdateToService`).
+  int get heldObjectBytes => _heldObjectBytesField[this] ?? 0;
+
   /// The fragment store of this service.
   ///
   /// **Restored on 2026-09-01 (gap G-7).** Until the cut of 31.08. the
   /// getter stood as a one-liner in `cleona_service_v3_binary.dart` and
   /// fell with that file — although neither the field
-  /// (`cleona_service.dart:548`) nor the class [BinaryFragmentStore] hangs
+  /// (`cleona_service.dart:548`) nor the class [UpdateBinaryStore] hangs
   /// on anything from the V3 network code. So what fell was the ACCESS,
   /// not the thing.
   ///
   /// **What was dead without it:** on Android `CleonaAppState.applyUpdate`
   /// needs the path of the completely assembled APK
-  /// ([BinaryFragmentStore.completePath]) to hand it to the system
+  /// ([UpdateBinaryStore.completePath]) to hand it to the system
   /// installer. Without the getter the flow listed as MANDATORY "user
   /// clicks download -> auto-install" (§26.6.1 step 6, memo
   /// `project_android_update_flow_v145.md`) ended in the state `failed`.
   /// `test/smoke/smoke_update_mandatory_flow.dart` measures that now.
-  BinaryFragmentStore? get binaryFragmentStore => _binaryFragmentStore;
+  UpdateBinaryStore? get updateBinaryStore => _updateBinaryStore;
 
   /// The embedded HTTP server of this service (§26.6.5).
   ///
@@ -254,11 +316,16 @@ extension V3InNetworkUpdateOps on CleonaService {
 
   // ── Update Checking (Architecture Section 17.5.5) ──────────────────
 
+  /// "An in-network update is available" — a row of the device database
+  /// (`DeviceStore.keyUpdateInNetwork`, §4.5.3; a file until S407). A file
+  /// of an earlier build is dropped, not read: the next manifest check sets
+  /// the value anew.
   bool _loadInNetworkFlag() {
+    legacyDeviceStateDrop(AppPaths.dataDir, kLegacyInNetworkFlagFile);
     try {
-      final f = File(
-          '${AppPaths.dataDir}${Platform.pathSeparator}update_in_network.flag');
-      return f.existsSync();
+      final row = identity.deviceStoreOrNull
+          ?.entry(DeviceStore.areaDevice, DeviceStore.keyUpdateInNetwork);
+      return row?['v'] == true;
     } catch (_) {
       return false;
     }
@@ -465,16 +532,15 @@ extension V3InNetworkUpdateOps on CleonaService {
   }
 
 
-  /// §19.6.2 fragment-store housekeeping: drops fragments/complete binaries
-  /// for versions superseded by [CleonaService.kCurrentAppVersion] and enforces a
-  /// platform-dependent storage budget on what's left. Invoked once at
-  /// startup and then hourly via [_binaryGcTimer].
+  /// Update-store housekeeping: drops the versions superseded by the newest
+  /// known manifest (or, without one, [CleonaService.kCurrentAppVersion]),
+  /// removes fragment files of the 3.x layout next to a checked complete
+  /// object, and enforces a platform-dependent storage budget on what's
+  /// left. Invoked once at startup and then hourly via [_binaryGcTimer].
   Future<void> _runBinaryFragmentGc() async {
     final updater = _binaryUpdateManager;
-    final store = _binaryFragmentStore;
+    final store = _updateBinaryStore;
     if (updater == null || store == null) return;
-
-    final currentPlatform = Platform.operatingSystem;
 
     // §19.6.4: drop on-demand foreign binaries past their TTL first, so the
     // budget decision below sees the post-eviction state.
@@ -486,22 +552,31 @@ extension V3InNetworkUpdateOps on CleonaService {
       _log.debug('[update] on-demand eviction failed: $e');
     }
 
-    // Cross-platform content switches the store to the unlimited bootstrap
-    // budget — but ONLY when the node deliberately seeds other platforms.
-    // An on-demand acquisition is transient and must not disable the budget
-    // for the whole store, otherwise one visitor permanently unbounds it.
-    final hasCrossPlatform = ['android', 'linux', 'windows', 'macos', 'ios']
-        .where((p) => p != currentPlatform)
-        .any((p) => store.storedVersionsSync(p)
-            .any((v) => acquirer == null || !acquirer.isOnDemand(p, v)));
-    final budgetBytes = hasCrossPlatform
-        ? BinaryFragmentStore.kBootstrapBudgetBytes
-        : (Platform.isAndroid || Platform.isIOS)
-            ? BinaryFragmentStore.kMobileBudgetBytes
-            : BinaryFragmentStore.kDesktopBudgetBytes;
+    // The store is part of the bulk-cache class (S407-UPDATEFRAGMENTE,
+    // `update_store_budget.dart`): the objects a desktop holds for others
+    // stay whatever the budget, the rest shares what the pieces of lane 3
+    // leave of the class. Until S407 the store had budgets of its own —
+    // 32 MiB desktop (smaller than one linux binary), 5 MB mobile, and
+    // unlimited as soon as another platform lay in it.
+    final manifest = _latestManifest;
+    final desktop = !(Platform.isAndroid || Platform.isIOS);
+    bool hold(String platform, String version) =>
+        heldForOthers(manifest, platform, version,
+            desktop: desktop, onDemand: acquirer?.isOnDemand);
+    final budgetBytes = updateStoreBudget(
+        classBytes: bulkCacheBytesForPlatform(),
+        piecesBytes: myceliumMailbox?.host.bulk.holder.usedBytes ?? 0);
 
     try {
-      updater.gc(CleonaService.kCurrentAppVersion, budgetBytes);
+      // Superseded is what the newest known manifest has passed, not only
+      // what the running version has (S407-BOOTSTRAPSPEICHER, §26.6.1).
+      // ... and the fragment files an earlier version left next to a
+      // checked complete object go (S407-UPDATEFRAGMENTE).
+      await updater.gc(CleonaService.kCurrentAppVersion, budgetBytes,
+          manifestVersion: manifest?.version,
+          manifestHashes: manifest?.binaryHashes,
+          hold: hold,
+          phonePlatform: desktop ? null : Platform.operatingSystem);
     } catch (e) {
       _log.debug('[update] Fragment GC failed: $e');
     }
@@ -568,7 +643,7 @@ extension V3InNetworkUpdateOps on CleonaService {
     }
 
     final platform = Platform.operatingSystem;
-    final store = _binaryFragmentStore;
+    final store = _updateBinaryStore;
     final updater = _binaryUpdateManager;
     if (store == null || updater == null) {
       updateTrace('collect-start',
@@ -651,7 +726,7 @@ extension V3InNetworkUpdateOps on CleonaService {
         object: target.object,
         platform: target.platform,
         reason: 'stored complete.bin failed its check — deleted, fetched anew');
-    await _binaryFragmentStore?.deleteVersion(target.platform, target.version);
+    await _updateBinaryStore?.deleteVersion(target.platform, target.version);
     _updateExpect(target);
   }
 
@@ -669,7 +744,7 @@ extension V3InNetworkUpdateOps on CleonaService {
   Future<bool> _objectComplete(
       UpdateManifest manifest, UpdateTarget target, String objectPath) async {
     final updater = _binaryUpdateManager;
-    final store = _binaryFragmentStore;
+    final store = _updateBinaryStore;
     final carrier = _updateCarrierField[this];
     final signature = _binarySignatureOf(manifest, target.platform);
     final hash = manifest.binaryHashes?[target.platform];
@@ -773,44 +848,33 @@ extension V3InNetworkUpdateOps on CleonaService {
   /// Extracted from [startService] (S331, §4c.2f) — pure move,
   /// body verbatim unchanged. Block boundaries: docs/analysis/start_service_blocks.tsv.
   Future<void> _initInNetworkUpdate() async {
-    // §19.6 Censorship-Resistant Distribution: in-network binary updates.
-    // Node-wide subsystem (fragment store on disk, one embedded HTTP server
-    // on the shared transport, one Nostr rendezvous manager) — only the
-    // first identity's service on this daemon wires it up, mirroring the
-    // node.rendezvousManager ??= _rendezvousManager first-wins pattern above.
-    // FORMERLY the guard was `node.binaryRendezvousManager == null` — the
-    // "first identity wins" pattern for a NODE-WIDE subsystem. Without a
-    // shared node every service builds its own; the fragment store lies in
-    // the profile directory anyway and was thus per identity even before.
-    if (_binaryRendezvousManager == null) {
-      await InstallSourceDetector.detect();
+    // §26.6 in-network binary updates: fragment store on disk and one
+    // embedded HTTP server. Wired once per service; the fragment store lies
+    // in the profile directory. The guard was `_binaryRendezvousManager ==
+    // null` until the Nostr announcement of binaries fell (V9 A1,
+    // 08.10.2026; v4_2 §26.6.4).
+    if (_updateBinaryStore == null) {
+      await InstallSourceDetector.detect(store: identity.deviceStoreForWrite());
 
-      _binaryFragmentStore = BinaryFragmentStore(profileDir);
-      await _binaryFragmentStore!.init();
+      _updateBinaryStore = UpdateBinaryStore(profileDir);
+      await _updateBinaryStore!.init();
 
       _binaryUpdateManager = BinaryUpdateManager(
-        store: _binaryFragmentStore!,
+        store: _updateBinaryStore!,
         checker: UpdateChecker(log: _log),
         profileDir: profileDir,
-      );
-      _deltaUpdateManager = DeltaUpdateManager(
-        store: _binaryFragmentStore!,
-        log: _log,
+        deviceStore: identity.deviceStoreForWrite,
       );
       _inviteLinkService = InviteLinkService(profileDir: profileDir);
       _physicalTransferHelper = PhysicalTransferHelper(
-        store: _binaryFragmentStore!,
+        store: _updateBinaryStore!,
         profileDir: profileDir,
       );
-      _binarySeeder = BinarySeeder(store: _binaryFragmentStore!, profileDir: profileDir);
-      _binaryFetchClient = BinaryFetchClient(profileDir: profileDir);
-      // Once a download is verified and ready, this device becomes a
-      // legitimate distribution source — (re)publish availability so
-      // other cold-starting nodes can find it.
+      // Once a download is verified and ready, this device holds it for
+      // others through the update carrier ([_ownObjectsHold]); nothing is
+      // announced anywhere (V9 A1: the Nostr republish fell, §26.6.4).
       _binaryUpdateManager!.onUpdateReady = (version, path) {
         binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
       };
       _binaryUpdateManager!.onStateChanged = (state, progress) {
         onUpdateStateChanged?.call(state, progress);
@@ -820,16 +884,17 @@ extension V3InNetworkUpdateOps on CleonaService {
       _binaryHttpServer!.bootstrapWebApp = Uint8List.fromList(
           utf8.encode(BootstrapWebApp.html(
               maintainerPublicKeyHex: UpdateChecker.maintainerPublicKeyHex)));
-      _binaryHttpServer!.binaryProvider = (platform) {
-        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
-        if (versions.isEmpty) return null;
-        return _binaryFragmentStore!.getCompletePath(platform, versions.last);
-      };
-      _binaryHttpServer!.fragmentProvider = (platform, index) {
-        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
-        if (versions.isEmpty) return null;
-        return _binaryFragmentStore!.getFragmentSync(platform, versions.last, index);
-      };
+      // The newest complete object; on a phone its own platform from the
+      // installed file (§26.6.3/§26.6.5, S407-UPDATEFRAGMENTE W9).
+      _binaryHttpServer!.binaryProvider = (platform) => servedBinaryPath(
+          _updateBinaryStore!, platform,
+          ownPlatform: Platform.operatingSystem,
+          installedPath: _installedBinaryPathField[this]);
+      // `fragmentProvider` (`GET /cleona/fragment/<platform>/<index>`) stood
+      // here: Reed-Solomon fragments of the 3.x layout, read only by the
+      // browser assembler of the same node. §26.6.5 names the complete
+      // binary as the only path; fragments are no longer stored
+      // (S407-UPDATEFRAGMENTE).
       // ── GAP G-20 IS CLOSED (S361) — WHERE, AND WHY NOT HERE ──
       //
       // `node.transport.httpServer = _binaryHttpServer` stood here. The V3
@@ -860,29 +925,13 @@ extension V3InNetworkUpdateOps on CleonaService {
       //
       // The access to the server is the getter [binaryHttpServer] above.
 
-      _binaryRendezvousManager = BinaryRendezvousManager(profileDir: profileDir);
-      _binaryRendezvousManager!.init(
-        networkSecret: NetworkSecret.secret,
-        previousNetworkSecret: NetworkSecret.previousSecret,
-        deviceId: identity.deviceNodeId,
-        // FORMERLY `node.currentSelfAddresses()` — the addresses the V3
-        // transport knew of itself (local, UPnP-mapped, STUN-observed).
-        // V4.1 knows only the local ones (§4.5, `localIps`) and no public
-        // one (gap G-12); the port is that of the service.
-        addressProvider: () =>
-            localIps.map((ip) => RendezvousAddress(ip, port)).toList(),
-      );
-      // `node.binaryRendezvousManager` and `node.binaryRecordProvider`
-      // stood here: with them the node answered infrastructure requests for
-      // binary records. No node, no infra requests (T).
-
-      // §19.6.4: serve platforms this node does not run, on demand. Always
+      // §26.6.3: serve platforms this node does not run, on demand,
+      // collected from the network like the node's own update. Always
       // active and hard-bounded inside the acquirer — one acquisition at a
       // time, one foreign binary stored, 24h TTL eviction.
       _foreignBinaryAcquirer = ForeignBinaryAcquirer(
-        store: _binaryFragmentStore!,
-        fetchClient: _binaryFetchClient!,
-        rendezvous: () => _binaryRendezvousManager,
+        store: _updateBinaryStore!,
+        carrier: () => _updateCarrierField[this],
         profileDir: profileDir,
       );
       _binaryHttpServer!.onForeignBinaryRequested = (platform) {
@@ -892,24 +941,33 @@ extension V3InNetworkUpdateOps on CleonaService {
       _binaryHttpServer!.foreignStatusProvider = (platform) =>
           _foreignBinaryAcquirer!.statusFor(platform).toJson();
 
-      // Working rule #5 (no unnecessary network traffic): only start the
-      // periodic Nostr republish if this device already holds binary/
-      // fragment data worth advertising. Devices with an empty store stay
-      // silent until BinaryUpdateManager.onUpdateReady flips the flag above.
       binaryHasContentToShare = ['android', 'linux', 'windows', 'macos', 'ios']
-              .any((p) => _binaryFragmentStore!.storedVersionsSync(p).isNotEmpty);
-      if (binaryHasContentToShare) {
-        _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager!.publishAll(_buildBinaryAvailabilityRecords());
-      }
+              .any((p) => _updateBinaryStore!.storedVersionsSync(p).isNotEmpty);
 
-      // Self-seed: encode the running binary into RS fragments so this node
-      // can serve updates (§19.6.2). Fire-and-forget: the Isolate-based
-      // RS encoding of the ~90 MB binary must not block conversation loading
-      // and node bootstrap. The seed sets binaryHasContentToShare + starts
-      // rendezvous publishing on completion (line 10606-10608).
-      if (InstallSourceDetector.cached != InstallSource.playStore) {
+      // Self-seed (desktop): store the running binary as the complete object
+      // so this node can serve it (§26.6.1, §26.6.5). Fire-and-forget: hashing and
+      // copying the binary in an isolate must not block conversation
+      // loading and node bootstrap. The seed sets binaryHasContentToShare
+      // on completion.
+      // A phone holds no object (§26.6.1 step 3): it does not copy its
+      // installed binary into the store, it hands that file out directly
+      // (S407-UPDATEFRAGMENTE W9). Until S407 every phone copied its APK
+      // (~390 MB) here at every start, and the budget evicted it again.
+      final phone = Platform.isAndroid || Platform.isIOS;
+      if (selfSeedWanted(
+          phone: phone,
+          playStore: InstallSourceDetector.cached == InstallSource.playStore,
+          hasComplete: _updateBinaryStore!.hasCompleteSync(
+              Platform.operatingSystem, CleonaService.kCurrentAppVersion))) {
         unawaited(_selfSeedCurrentBinary());
+      }
+      // A store build's APK is signed by the store, not by the maintainer:
+      // its hash is in no manifest, so it is not handed out at all.
+      if (phone &&
+          InstallSourceDetector.cached != InstallSource.playStore) {
+        unawaited(_resolveCurrentBinaryPath().then((p) {
+          if (p != null) _installedBinaryPathField[this] = p;
+        }));
       }
 
       _selfPublishManifest();
@@ -918,9 +976,9 @@ extension V3InNetworkUpdateOps on CleonaService {
       // peers. Without a push path the second attempt has no subject
       // (gap G-18).
 
-      // §19.6 fragment GC — prune old/excess fragment data once per hour,
-      // and once immediately at startup to clean up stale data from
-      // previous runs.
+      // Update-store housekeeping once per hour, and once immediately at
+      // startup to clean up stale data from previous runs — among it the
+      // fragment files of the 3.x layout (S407-UPDATEFRAGMENTE).
       _runBinaryFragmentGc();
       _binaryGcTimer = Timer.periodic(const Duration(hours: 1), (_) {
         _runBinaryFragmentGc();

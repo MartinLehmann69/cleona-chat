@@ -5,7 +5,7 @@
 // second time. A device whose last collection lies further back asks every
 // party for what it missed — with the reconciliation of §14.6.3
 // (`reconcile_wire.dart`: the same packets, the same bounds), carried
-// between the two parties of a pair as the ordinary message `MTV3_CATCH_UP`.
+// between the two parties of a pair as the ordinary message `MT_CATCH_UP`.
 //
 // THIS FILE: the stored moment, the check, the requests, and what the
 // requester does with an answer. The party asked is in
@@ -194,10 +194,10 @@ extension CleonaServiceCatchUp on CleonaService {
   void _catchUpRequestSend(
       String partyHex, Uint8List fetchId, int sinceMs, String? groupHex) {
     _detachedSend(
-        'MTV3_CATCH_UP request',
+        'MT_CATCH_UP request',
         sendToUser(
           recipientUserId: hexToBytes(partyHex),
-          messageType: proto.MessageTypeV3.MTV3_CATCH_UP,
+          messageType: proto.MessageType.MT_CATCH_UP,
           payload: reconcileEncode(
               catchUpRequestFrame(fetchId: fetchId, sinceMs: sinceMs)),
           // The request's own identifier: its acknowledgement (§9.2) says
@@ -229,7 +229,7 @@ extension CleonaServiceCatchUp on CleonaService {
 
   // ── Reception (both roles) ────────────────────────────────────────────
 
-  /// `MTV3_CATCH_UP` from a party: a request, a packet of an answer, or a
+  /// `MT_CATCH_UP` from a party: a request, a packet of an answer, or a
   /// progress report. Only from a PROVEN sender — an accepted contact, or a
   /// group pair for a group both belong to (`_myceliumInboundAccept` lets
   /// nobody else through; the trust is checked here once more).
@@ -258,6 +258,9 @@ extension CleonaServiceCatchUp on CleonaService {
         _catchUpRequestReceived(partyHex, groupHex, frame.fetch);
         // AFTER the own answer is under way: the party is back.
         _catchUpAskAgain(partyHex);
+        // §16.2.5 "Catching up and restoring": the owner's answer carries
+        // the current keys for that member, as at a joining.
+        unawaited(_skCatchUp(partyHex));
       case proto.ReconcileFrame_Kind.deliver:
         _catchUpDeliverReceived(partyHex, frame.deliver, event.harvestedAt);
       case proto.ReconcileFrame_Kind.progress:
@@ -354,6 +357,7 @@ extension CleonaServiceCatchUp on CleonaService {
       final discloses = !_withholdsDeliveryStatusTo(
           party, isGroup ? hexToBytes(convId) : const <int>[]);
       if (_catchUpHolds(convId, idHex)) {
+        _catchUpEditTake(convId, idHex, m, partyHex);
         if (discloses) delivered.add(idHex);
         continue;
       }
@@ -463,10 +467,10 @@ extension CleonaServiceCatchUp on CleonaService {
     if (parts.isEmpty) parts.add(const []);
     for (var k = 0; k < parts.length; k++) {
       _detachedSend(
-          'MTV3_CATCH_UP progress',
+          'MT_CATCH_UP progress',
           sendToUser(
             recipientUserId: hexToBytes(partyHex),
-            messageType: proto.MessageTypeV3.MTV3_CATCH_UP,
+            messageType: proto.MessageType.MT_CATCH_UP,
             payload: reconcileEncode(catchUpProgressFrame(
                 fetchId: hexToBytes(fetch),
                 received: k == parts.length - 1 ? received : 0,
@@ -482,6 +486,52 @@ extension CleonaServiceCatchUp on CleonaService {
     if (conv == null) return false;
     ensureLoaded(convId);
     return conv.messages.any((m) => m.id == idHex);
+  }
+
+  /// §9.5 (owner decision F-C b, 08.10.2026): a record of a message this
+  /// device already holds replaces its text when the record was edited
+  /// later than the held copy — an edit that lapsed in the post box comes
+  /// with the answer. Only a message the answering party wrote, never one
+  /// this device sent; an older or equal edit time changes nothing.
+  /// Returns whether the text was replaced.
+  bool _catchUpEditTake(String convId, String idHex, proto.ReconcileMessage m,
+      String partyHex) {
+    final conv = conversations[convId];
+    if (conv == null) return false;
+    ensureLoaded(convId);
+    UiMessage? held;
+    for (final x in conv.messages) {
+      if (x.id == idHex) {
+        held = x;
+        break;
+      }
+    }
+    if (held == null || held.isOutgoing || held.senderNodeIdHex != partyHex) {
+      return false;
+    }
+    int? editedMs;
+    if (m.extraJson.isNotEmpty) {
+      try {
+        final j = jsonDecode(utf8.decode(m.extraJson));
+        if (j is Map<String, dynamic> && j['editedAt'] is int) {
+          editedMs = j['editedAt'] as int;
+        }
+      } catch (_) {
+        // Unreadable rarer fields: no edit time, nothing replaced.
+      }
+    }
+    if (editedMs == null ||
+        editedMs <= (held.editedAt?.millisecondsSinceEpoch ?? 0)) {
+      return false;
+    }
+    held
+      ..text = m.text
+      ..editedAt = DateTime.fromMillisecondsSinceEpoch(editedMs);
+    persistMessage(convId, held);
+    onStateChanged?.call();
+    _log.event('catch-up: the edit of ${idHex.substring(0, 8)} by '
+        '${partyHex.substring(0, 8)} came with the answer — text replaced');
+    return true;
   }
 
   /// The message a record of [partyHex] becomes on this device — its sender
@@ -654,10 +704,12 @@ extension CleonaServiceCatchUp on CleonaService {
         closed.add(leg);
         if (!msg.deliveredBy.add(partyHex)) continue;
         msg.withheldBy.remove(partyHex);
-        if (msg.isFullyDelivered &&
-            msg.status.canTransitionTo(MessageStatus.delivered)) {
+        // The display over ALL legs, by the one rule (S410 finding 8): a
+        // `failed` message whose failed leg is now held rises — to
+        // `delivered` once every leg is receipted, else to the weakest leg.
+        _applyOutgoingLegStatus(msg, msg.fanoutLegs.values.toList());
+        if (msg.status != MessageStatus.failed) {
           msg
-            ..status = MessageStatus.delivered
             ..failureReason = null
             ..failureDetail = null;
         }
@@ -687,9 +739,9 @@ extension CleonaServiceCatchUp on CleonaService {
       final history = p.historyFor(address);
       for (final e in history.entries.toList()) {
         if (!e.outgoing || !e.open || e.content.isEmpty) continue;
-        final proto.ApplicationFrameV3 frame;
+        final proto.ApplicationFrame frame;
         try {
-          frame = proto.ApplicationFrameV3.fromBuffer(e.content);
+          frame = proto.ApplicationFrame.fromBuffer(e.content);
         } catch (_) {
           continue;
         }
@@ -711,10 +763,10 @@ extension CleonaServiceCatchUp on CleonaService {
 
 /// The kinds of frame that ARE a message of [kCatchUpTypes] — what an entry
 /// of the delivery history must carry to be closed by a catching up.
-const Set<proto.MessageTypeV3> _kCatchUpMessageKinds = {
-  proto.MessageTypeV3.MTV3_TEXT,
-  proto.MessageTypeV3.MTV3_REPLY,
-  proto.MessageTypeV3.MTV3_MEDIA_INLINE,
-  proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
-  proto.MessageTypeV3.MTV3_VOICE_MESSAGE,
+const Set<proto.MessageType> _kCatchUpMessageKinds = {
+  proto.MessageType.MT_TEXT,
+  proto.MessageType.MT_REPLY,
+  proto.MessageType.MT_MEDIA_INLINE,
+  proto.MessageType.MT_MEDIA_ANNOUNCE,
+  proto.MessageType.MT_VOICE_MESSAGE,
 };

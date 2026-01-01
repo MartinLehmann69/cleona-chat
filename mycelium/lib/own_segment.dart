@@ -25,8 +25,15 @@ library;
 
 import 'dart:io';
 
-import 'package:mycelium/node_helpers.dart' show interfaces;
+import 'package:mycelium/node_helpers.dart' show interfaces, outTheSegment;
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
+
+/// Whether [a] lies INSIDE the own segment — a private address of this
+/// device's network (step 1) — or outside it (§7.1: "an address inside the
+/// sender's own segment serves step 1, one reachable from the open net
+/// serves step 2"). The one split the way of §11.3a uses next to the family:
+/// a neighbour in the LAN proves nothing about the internet (D-68).
+bool withinOwnSegment(InternetAddress a) => outTheSegment(a) && inOwnSegment(a);
 
 /// Whether [a] — not reachable from the open network — lies in the own
 /// segment; `true` for every address the open network reaches (see head).

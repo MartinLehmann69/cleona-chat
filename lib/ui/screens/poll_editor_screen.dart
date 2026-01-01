@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Full-screen poll composer (§24.6). Launched from the chat action menu
 /// of a group or channel. Submits via [ICleonaService.createPoll] and
@@ -60,6 +61,7 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
       appBar: AppBar(
         title: Text(locale.get('poll_create_title')),
         actions: [
+          const AppScreenshotButton(),
           IconButton(
             icon: const Icon(Icons.send),
             onPressed: _submitting ? null : _submit,
@@ -244,17 +246,32 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
     );
   }
 
+  bool get _anonymousPossible =>
+      context.read<CleonaAppState>().service?.anonymousPollPossible(
+          widget.conversationId) ??
+      true;
+
   Widget _settingsBlock(AppLocale locale) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(locale.get('poll_settings'), style: const TextStyle(fontWeight: FontWeight.bold)),
-        SwitchListTile(
-          title: Text(locale.get('poll_anonymous')),
-          subtitle: Text(locale.get('poll_anonymous_hint')),
-          value: _anonymous,
-          onChanged: (v) => setState(() => _anonymous = v),
-        ),
+        // §16.2.1, §18.4.3: on the shared key (17 members on) a vote
+        // carries its author's signature — no anonymous poll there.
+        if (_anonymousPossible)
+          SwitchListTile(
+            title: Text(locale.get('poll_anonymous')),
+            subtitle: Text(locale.get('poll_anonymous_hint')),
+            value: _anonymous,
+            onChanged: (v) => setState(() => _anonymous = v),
+          )
+        else
+          SwitchListTile(
+            title: Text(locale.get('poll_anonymous')),
+            subtitle: Text(locale.get('poll_anonymous_unavailable')),
+            value: false,
+            onChanged: null,
+          ),
         if (_anonymous) _anonymityScopeHint(locale),
         SwitchListTile(
           title: Text(locale.get('poll_allow_vote_change')),
@@ -379,7 +396,7 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
         pollType: _type,
         options: options,
         settings: PollSettings(
-          anonymous: _anonymous,
+          anonymous: _anonymous && _anonymousPossible,
           deadline: _deadline == null ? 0 : _deadline!.millisecondsSinceEpoch,
           allowVoteChange: _allowChange,
           showResultsBeforeClose: _showResultsBeforeClose,

@@ -58,7 +58,7 @@ abstract interface class PacketRoute {
 /// port number; the port is the address of the node (§11.1), every
 /// issued card names it.
 class Wire implements PacketRoute {
-  late final _Side _v4;
+  late final _Side _v4;  // version-name-ok: IP address family
   _Side? _v6;
   final void Function(String)? _report;
 
@@ -153,6 +153,7 @@ class Wire implements PacketRoute {
     try {
       final sock = await RawDatagramSocket.bind(to6, port);
       _v6 = _Side(this, to6, 'IPv6', sock);
+      if (_onPacket != null) _v6!.subscribe(); // opened after listen (S407)
       return true;
     } on Object catch (e) {
       _say('wire: no IPv6 socket on port $port ($e) — this '
@@ -267,6 +268,7 @@ class _Side {
   final InternetAddress to;
   final String kind;
   RawDatagramSocket sock;
+  bool _reopening = false; // [againOpen] in flight (S407)
 
   /// The native send path of this side — only on Windows, `null` elsewhere
   /// ([NativeSendPath.usesNativeSendPath]); receiving stays on [sock].
@@ -299,23 +301,20 @@ class _Side {
   /// still lost 10–42 parts in the kernel (S399 probe, two processes):
   /// read events queued behind a batch arrived too late. With it: 0 of 30.
   ///
-  /// Until S399 each read event took ONE datagram and processed it in the
-  /// same handler (shell: AEAD open; splitter: sort in). A burst of 367
-  /// parts filled the 212 992-B kernel buffer faster than that, and the
-  /// kernel dropped 100–144 of them (`RcvbufErrors` rose by exactly the
-  /// missing count, `smoke_burst_loss`); a re-request round had to bring
-  /// back what the node itself had been too slow to read.
+  /// Until S399 one datagram per read event: a 367-part burst overran the
+  /// 212 992-B kernel buffer, 100–144 dropped (`smoke_burst_loss`).
   ///
   /// Nothing is evicted and nothing is dropped: the queue is bounded by
   /// the flow of the senders (§11.3, §20.2). `Timer.run` is no clock —
   /// it yields the event loop once and is scheduled only while the queue
   /// is not empty.
   void subscribe() {
-    sock.listen((e) {
+    final s = sock; // an error of a replaced socket reopens nothing (S407)
+    s.listen((e) {
       if (e != RawSocketEvent.read) return;
       _drain();
       _schedule();
-    }, onError: error);
+    }, onError: (Object e) => identical(s, sock) ? error(e) : null);
   }
 
   /// Reads [sock] until `receive()` returns nothing. On a socket that
@@ -371,14 +370,13 @@ class _Side {
     againOpen();
   }
 
-  /// Reopen the same port. Measured: after `close()` the same
-  /// port number binds again immediately, and sending as well as receiving work again —
-  /// repeatably, and also when the OTHER side holds the same number the
-  /// whole time (measured S390, case E). ANOTHER port would be
-  /// out of the question: the port is the address of the node (§11.1), every
-  /// issued card names it.
+  /// Reopen the SAME port (it is the node's address, §11.1, every card names
+  /// it); after `close()` it binds again at once (measured S390, case E).
+  /// One error burst reopens ONCE: the OS reports two errors per dead socket,
+  /// and two concurrent reopens left one socket open, unread (S407: 35).
   Future<void> againOpen() async {
-    if (_d._to) return;
+    if (_d._to || _reopening) return;
+    _reopening = true;
     final old = sock.port;
     shut();
     try {
@@ -389,6 +387,8 @@ class _Side {
               '(§11.1).' : 'this node no longer accepts anything.'}');
       _d._lost(this);
       return;
+    } finally {
+      _reopening = false;
     }
     if (_d._to) return sock.close();
     _nativeOpen();

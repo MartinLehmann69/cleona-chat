@@ -14,6 +14,11 @@ class ContactTile extends StatelessWidget {
   final VoidCallback? onTap;
   final Widget? avatarOverride;
 
+  /// The name of [verificationLevel] in the user's language, shown as the
+  /// badge's tooltip (S410 C1-7, §3 "Contact verification": the level is a
+  /// badge at the avatar; the tooltip says which). Null: no tooltip.
+  final String? verificationLabel;
+
   const ContactTile({
     super.key,
     required this.name,
@@ -22,7 +27,12 @@ class ContactTile extends StatelessWidget {
     this.trailing,
     this.onTap,
     this.avatarOverride,
+    this.verificationLabel,
   });
+
+  /// The i18n key that names [level] (`verification_*`, all 34 locales).
+  static String verificationLabelKey(ContactVerification level) =>
+      'verification_${level.name}';
 
   // ── Verification icon / colour ────────────────────────────────────────────
 
@@ -57,6 +67,14 @@ class ContactTile extends StatelessWidget {
         return const Color(0xFF2E7D32);
     }
   }
+
+  Widget _withLabel(Widget badge) => verificationLabel == null
+      ? badge
+      : Tooltip(
+          key: const ValueKey('contact_verification_badge'),
+          message: verificationLabel!,
+          child: badge,
+        );
 
   // ── Card chrome ───────────────────────────────────────────────────────────
 
@@ -126,7 +144,7 @@ class ContactTile extends StatelessWidget {
   Color _statusColor(SurfaceRenderMode mode) {
     switch (mode) {
       case SurfaceRenderMode.photo:
-        return const Color(0xCCFFFFFF);
+        return kPhotoSecondaryText;
       case SurfaceRenderMode.cssTeal:
         return const Color(0xCC000000);
       case SurfaceRenderMode.cssSlate:
@@ -290,7 +308,7 @@ class ContactTile extends StatelessWidget {
               Positioned(
                 right: -3,
                 bottom: -3,
-                child: Container(
+                child: _withLabel(Container(
                   width: 16,
                   height: 16,
                   decoration: BoxDecoration(
@@ -305,7 +323,7 @@ class ContactTile extends StatelessWidget {
                     size: 10,
                     color: levelColor,
                   ),
-                ),
+                )),
               ),
             ],
           ),

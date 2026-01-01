@@ -9,7 +9,7 @@
 /// (`d_frame.dart`: cookie 8 + nonce 12 + tag 16 + inner header 7). One
 /// serialized `VideoFrame` of the mock at preset `medium` is 3382 B, a
 /// keyframe 16 715 B (S399-MESSUNG-V3-VIDEOGROESSE.md). Before this file
-/// `CallTransportV41.sendMedia` refused every such frame as `tooLarge`:
+/// `PlaneDCallTransport.sendMedia` refused every such frame as `tooLarge`:
 /// 1:1 video carried nothing at all.
 ///
 /// ── THE FORMAT ──────────────────────────────────────────────────────────

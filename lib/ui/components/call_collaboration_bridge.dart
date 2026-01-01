@@ -8,7 +8,7 @@
 // translation layer is built, deliberately still WITHOUT visible effect
 // — no file in `lib/ui/screens/` imports this class. Reason: the
 // send path of the four managers currently has no carrier
-// (`call_collaboration_panel.dart` header comment, `call_transport_v41.dart`
+// (`call_collaboration_panel.dart` header comment, `plane_d_call_transport.dart`
 // l. 451-468). A screen that calls this class would promise a
 // delivery to other participants that does not exist yet. As soon as
 // the group topology (§17.5, C-9/C-10/C-11) is decided, a

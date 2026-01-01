@@ -127,7 +127,7 @@ class PortMapperEvent {
   /// response as a UPnP measurement. A DEFAULT would be the same
   /// error, only quieter: it enters the wrong value exactly where
   /// a new caller forgets to choose. `source` is read
-  /// today only in the log (`tagline/port_map_wiring.dart:121`, and there
+  /// today only in the log (`tagline/port_map_wiring.dart`, fallen S408-P23, and there
   /// only in the branch `mappingAcquired`/`mappingRenewed`) — that nobody
   /// evaluates it today is the reason to be careful, not the
   /// reason to leave it: a wrong value in the log is later read as a

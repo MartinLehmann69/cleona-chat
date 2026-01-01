@@ -24,7 +24,8 @@
 /// | 0x60-0x6F | groups |
 /// | 0x70-0x7F | update (software update) |
 /// | 0x80-0x8F | enrolment of an own device (§14.6.1) |
-/// | 0x90-0xFF | free |
+/// | 0x90-0x9F | durable objects (§16.0) |
+/// | 0xA0-0xFF | free |
 ///
 /// The neighbour search (`neighbours.dart`) does NOT belong here: it has its
 /// own socket on port 41341 and thus its own number space.
@@ -150,9 +151,32 @@ const int kStreamFrame = 0x59;
 /// Lane 2: the recipient's missing list, done, give-up or mark.
 const int kStreamMissing = 0x5A;
 
-// ── Groups (group.dart) ──────────────────────────────────────────────
-const int kGroupsMessage = 0x60;
-const int kKeyDelivery = 0x61;
+// ── Groups and channels on the shared key (§16.2.5, `channel_*.dart`) ──
+//
+// The table of §11.5. Keys travel in ordinary 1:1 deliveries, never as
+// packets of their own.
+
+/// Hold: channel value ‖ collect public key ‖ generation public key ‖ author
+/// key with its certificate ‖ signature ‖ entry ‖ proof of work on the first
+/// deposit under a value at this keeper.
+const int kChannelHold = 0x60;
+/// Held, or refused (cap, keys, certificate or signature).
+const int kChannelHeld = 0x61;
+/// Question: channel values ‖ state root ‖ collect public keys ‖ generation
+/// public key ‖ signatures.
+const int kChannelQuestion = 0x62;
+/// Same: the state roots agree.
+const int kChannelSame = 0x63;
+/// The hashes of the entries a keeper holds under the asked values.
+const int kChannelList = 0x64;
+/// Fetch: the hashes of the entries the member lacks.
+const int kChannelFetch = 0x65;
+/// One entry handed out.
+const int kChannelEntry = 0x66;
+/// End of pass: the number handed out, or nothing here.
+const int kChannelEnd = 0x67;
+/// Nudge: a post wrapped per pair, steps 1 and 3 only, never acknowledged.
+const int kChannelNudge = 0x68;
 
 // ── Update (update_piece.dart) ───────────────────────────────
 //
@@ -194,6 +218,33 @@ const int kEnrolPiece = 0x82;
 /// The piece arrived: kind | value 16 B | first 16 B of SHA-256(piece).
 /// 33 B.
 const int kEnrolPieceHeard = 0x83;
+
+// ── Durable objects (durable_*.dart, v4_2 §16.0, §11.5) ─────────────────
+//
+// The system channels (§16.7) stand on this class. A 4.2.3 node discards
+// every kind of this range without an answer (`node_helpers.dart`, D-21).
+
+/// Deposit: kind | channel 1 | the signed object.
+const int kDurableDeposit = 0x90;
+/// Deposit acknowledged: kind | channel 1 | hash 16. 18 B.
+const int kDurableDeposited = 0x91;
+/// Fetch: kind | identifier 20 [| blocks already received u16]. 21/23 B.
+const int kDurableFetch = 0x92;
+/// Object piece: kind | fountain block 1041. 1042 B.
+const int kDurablePiece = 0x93;
+/// Not held here: kind | identifier 20. 21 B.
+const int kDurableNotHeld = 0x94;
+/// "Identifiers of channel K since T": kind | channel 1 | T in hours u16
+/// (0xFFFF: from the beginning) | own state root 32. 36 B.
+const int kDurableStockAsk = 0x95;
+/// Answer: kind | channel 1 | "same" 0 or list 1 | identifier blocks in the
+/// codec of §5.5 (only in the list form).
+const int kDurableStockAnswer = 0x96;
+/// "Crash fingerprint known?": kind | channel 1 | random 8 | fingerprint.
+const int kDurableFingerprintAsk = 0x97;
+/// Answer: kind | channel 1 | the same random 8 | head of the group, or
+/// nothing ("unknown").
+const int kDurableFingerprintAnswer = 0x98;
 /// All assigned numbers — the self-test records that none
 /// occurs twice.
 const List<int> allKinds = [
@@ -210,9 +261,13 @@ const List<int> allKinds = [
   kMediaAnnouncement, kMediaPiece,
   kBulkHold, kBulkHeld, kBulkCollect, kBulkNothingHere,
   kStreamAsk, kStreamAnswer, kStreamJoin, kStreamFrame, kStreamMissing,
-  kGroupsMessage, kKeyDelivery,
+  kChannelHold, kChannelHeld, kChannelQuestion, kChannelSame, kChannelList,
+  kChannelFetch, kChannelEntry, kChannelEnd, kChannelNudge,
   kPiecePlea, kPieceTask, kUpdatePiece, kNoPieces,
   kEnrolCall, kEnrolHeard, kEnrolPiece, kEnrolPieceHeard,
+  kDurableDeposit, kDurableDeposited, kDurableFetch, kDurablePiece,
+  kDurableNotHeld, kDurableStockAsk, kDurableStockAnswer,
+  kDurableFingerprintAsk, kDurableFingerprintAnswer,
 ];
 
 // ── Groups of kinds ────────────────────────────────────────────────
@@ -249,6 +304,7 @@ bool isStream(int s) => s >= kStreamAsk && s <= kStreamMissing;
 bool isGroup(int s) => s >= 0x60 && s <= 0x6F;
 bool isUpdate(int s) => s >= 0x70 && s <= 0x7F;
 bool isEnrolment(int s) => s >= 0x80 && s <= 0x8F;
+bool isDurable(int s) => s >= 0x90 && s <= 0x9F;
 
 // ── Content bytes of the cover packet (cover_stream_content.dart, S391) ─────────
 //
@@ -269,6 +325,9 @@ const int kCoverEntries = 0x02;
 /// neighbour can follow a move and report it (`mapping_echo.dart`).
 const int kCoverKeepAlive = 0x04;
 
+/// Durable-object identifiers (§5.5, §16.0): count 1 | count × 20 B.
+const int kCoverIdentifiers = 0x05;
+
 // ── Forwarding via codes (forward.dart, S391 proposal M, §8.1) ──
 //
 // Since S391 0x20 and 0x21 carry a code (16 B) instead of the identifier; the
@@ -287,5 +346,11 @@ const int kWhereAreYou = 0x23;
 const int kRegistration = 0x24;
 
 /// Registered, the fixed neighbour's answer to each `0x24`: kind | day u32 BE
-/// | piece 1. 6 B — far smaller than what it answers.
+/// | piece 1 [| its record key 32 B, S407 a']. 6 B (38 B with the key).
 const int kRegistered = 0x25;
+
+/// Not a kind — two bits in fields of packets above (S407 a'): in the pieces
+/// byte of a `0x24`, "this device reads a `0x25` with record key"; in the count
+/// byte of a neighbour list (`neighbour_list.dart`), "record keys follow".
+const int kBitReadsKeyedRegistered = 0x80;
+const int kBitNeighbourKeysFollow = 0x80;

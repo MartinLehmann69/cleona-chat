@@ -73,7 +73,7 @@ jobs:
           import 'package:cleona/core/crypto/oqs_ffi.dart';
           import 'package:cleona/core/identity/identity_manager.dart';
           import 'package:cleona/core/node/identity_context.dart';
-          import 'package:cleona/core/crypto/network_secret.dart';
+          import 'package:cleona/core/config/network_channel.dart';
           Future<void> main() async {
             SodiumFFI();
             OqsFFI().init();
@@ -88,7 +88,7 @@ jobs:
             final ctx = IdentityContext(
               profileDir: identity.profileDir,
               displayName: 'Alice',
-              networkChannel: NetworkSecret.channel.name,
+              networkChannel: activeNetworkChannel.name,
               hdIndex: identity.hdIndex,
               masterSeed: masterSeed,
             );

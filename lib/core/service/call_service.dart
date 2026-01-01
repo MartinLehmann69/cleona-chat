@@ -9,10 +9,13 @@ import 'package:cleona/core/calls/voice_codec.dart';
 import 'package:cleona/core/calls/voice_event_dispatch.dart';
 import 'package:cleona/core/calls/voice_session.dart';
 import 'package:cleona/core/calls/audio_permissions.dart';
+import 'package:cleona/core/calls/call_consent.dart';
 import 'package:cleona/core/calls/call_integration.dart';
 import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/call_transport.dart';
-import 'package:cleona/core/calls/call_transport_v41.dart';
+import 'package:cleona/core/calls/bandwidth_estimator.dart';
+import 'package:cleona/core/calls/plane_d_call_transport.dart';
+import 'package:cleona/core/calls/loss_report.dart';
 import 'package:cleona/core/calls/upload_probe.dart';
 import 'package:cleona/core/calls/video_pipeline.dart' show VideoStartFailure;
 import 'package:cleona/core/link_io/d_frame.dart';
@@ -33,7 +36,7 @@ import 'package:cleona/core/service/app_version.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/harvest_event.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 class CallService {
   final ServiceContext _ctx;
@@ -53,8 +56,11 @@ class CallService {
   ///
   /// Fed from both send paths: [sendLiveMediaFrame] (1:1) and
   /// `GroupCallManager._sendGroupLiveMediaFrame` (group), each only on
-  /// success. The value is NOT distributed — the control channel for that is missing
-  /// (§17.1), and one is not invented here.
+  /// success. Its limit comes from the receivers' loss reports
+  /// ([_onLineLimit], §17.1.1) and is forgotten on a network change
+  /// ([onNetworkChanged]). (Until S407-GALOSS this said "The value is NOT
+  /// distributed — the control channel for that is missing (§17.1)"; the
+  /// broker's room derived from it travels in `relayHave` since GA-P5.)
   final UploadProbe uploadProbe = UploadProbe();
 
   VoiceSession? _voiceSession;
@@ -100,6 +106,17 @@ class CallService {
   void Function(CallInfo)? onCallAccepted;
   void Function(CallInfo, String)? onCallRejected;
   void Function(CallInfo)? onCallEnded;
+
+  /// §17.2 "Missed call": an outgoing 1:1 call ended unanswered
+  /// (`CallManager.onMissedCall`) — the peer's UserID (hex), the `callId`
+  /// and whether it was a video call. `CleonaService` sends the message.
+  void Function(String peerHex, Uint8List callId, bool isVideo)? onMissedCall;
+
+  /// §17.2 "Missed call" in a group call: a member's invitation ended
+  /// unanswered (`GroupCallManager.onMissedCall`) — the member's UserID
+  /// (hex), the group and the `callId`. `CleonaService` sends the message.
+  void Function(String memberHex, String groupIdHex, Uint8List callId)?
+      onMissedGroupCall;
   void Function(GroupCallInfo info)? onIncomingGroupCall;
   void Function(GroupCallInfo info)? onGroupCallStarted;
   void Function(GroupCallInfo info)? onGroupCallEnded;
@@ -325,7 +342,7 @@ class CallService {
         // off — `callTransport.mediaUnavailableReason` reports a reason
         // and [startCall] refuses with it, instead of setting up a call
         // that then stays silent.
-        _v41Transport = CallTransportV41(
+        _planeDTransport = PlaneDCallTransport(
           profileDir: _ctx.profileDir,
           // `skipL3: true` is the class switch of the signalling.
           // The name is a V3 remnant; on the V4.1 line it chooses according to
@@ -346,18 +363,18 @@ class CallService {
   ///
   /// TWO HANDLES ON THE SAME OBJECT, and the reason is the contract:
   /// [callTransport] is the narrow plane D API from §17 ("call code does
-  /// not access transport internals"), [_v41Transport] is the concrete
+  /// not access transport internals"), [_planeDTransport] is the concrete
   /// version. Registering the D socket is not a plane D OPERATION,
   /// but the setup of the transport itself — it therefore does not belong
   /// in `CallTransport` but here.
-  CallTransport get callTransport => _v41Transport;
-  final CallTransportV41 _v41Transport;
+  CallTransport get callTransport => _planeDTransport;
+  final PlaneDCallTransport _planeDTransport;
 
   /// Hooks in plane D of the node (§17.3/§17.4). Called by `attachV41`
   /// via `CleonaService.attachCallPlaneD` as soon as node and service
   /// both stand.
   void attachPlaneD(CallPlaneD? planeD) =>
-      _v41Transport.attachPlaneD(planeD);
+      _planeDTransport.attachPlaneD(planeD);
 
   /// The network has changed (§17.4 path migration, S376/A-2).
   ///
@@ -369,7 +386,48 @@ class CallService {
   /// the narrow API therefore stays as it is.
   ///
   /// Without a running call the call costs zero packets.
-  void onNetworkChanged() => _v41Transport.onNetworkChanged();
+  ///
+  /// The upload probe forgets its measurement and its limit here
+  /// (S407-GALOSS): Wi-Fi -> cellular changes the line by orders of
+  /// magnitude, and the old number is not just old but wrong
+  /// (`UploadProbe.reset`, which had no caller until then).
+  void onNetworkChanged() {
+    uploadProbe.reset();
+    _planeDTransport.onNetworkChanged();
+  }
+
+  /// A loss report about our frames (§17.1.1, `loss_report.dart`).
+  ///
+  /// The 1:1 call: the loss and the round trip go into the video rate
+  /// control (§17.5 "The target bitrate follows the measured available
+  /// bandwidth and is tracked throughout the call"). Until S407-GALOSS
+  /// `BandwidthEstimator.recordLost`/`updateRtt` had no caller in `lib/`: the
+  /// loss rate was always 0 and the video never scaled down.
+  void _onLossFeedback(String peerHex, LossFeedback feedback) {
+    final call = callManager.currentCall;
+    if (call == null || call.peerNodeIdHex != peerHex) return;
+    final Object? estimator;
+    try {
+      estimator = (_videoEngine as dynamic)?.estimator;
+    } catch (_) {
+      return; // an engine without rate control
+    }
+    if (estimator is! BandwidthEstimator) return;
+    estimator.recordLossReport(
+        expected: feedback.expected, lost: feedback.lost);
+    final rtt = feedback.rttMs;
+    if (rtt != null) estimator.updateRtt(rtt);
+  }
+
+  /// The receivers' reports show this line's limit (§17.1.1, §17.7): the
+  /// upload probe records it, and the broker of a running group call
+  /// decides again (D-69: voice stays, video falls).
+  void _onLineLimit(double lossFraction) {
+    uploadProbe.recordCongestion(lossFraction: lossFraction);
+    _log.info('Upload limit shown by loss reports: '
+        '${uploadProbe.observe()} (§17.1.1)');
+    groupCallManager.lineLimitShown();
+  }
 
   void init() {
     callManager = CallManager(
@@ -489,6 +547,10 @@ class CallService {
       onCallEnded?.call(session.toCallInfo());
       onStateChanged?.call();
     };
+    callManager.onMissedCall = (session) => onMissedCall?.call(
+        session.peerNodeIdHex,
+        Uint8List.fromList(session.callId),
+        session.isVideo);
 
     // Receive-side keyframe recovery (mid-stream join / decode failures)
     // asks the peer for a fresh keyframe; the peer's video engine forces
@@ -509,7 +571,11 @@ class CallService {
     // the UI names.
     callTransport.onMediaPathLost = (peerHex) {
       final call = callManager.currentCall;
-      if (call == null || call.peerNodeIdHex != peerHex) return;
+      if (call == null || call.peerNodeIdHex != peerHex) {
+        // A group media pair (§17.4: "end that media pair, not the call").
+        groupCallManager.mediaPairLost(peerHex);
+        return;
+      }
       _log.warn('Plane D: media path to ${peerHex.substring(0, 8)} lost '
           '(§17.4) — call is being ended');
       unawaited(callManager
@@ -523,7 +589,7 @@ class CallService {
     // sequence number INSIDE the AEAD (`kind ‖ seq ‖ len`), and its
     // payload is the raw Opus frame — the encryption IS the AEAD
     // under the `call_key`. That is why nothing goes through a second
-    // decryption here any more, unlike in `handleCallAudioV3`.
+    // decryption here any more, unlike in `handleCallAudio`.
     callTransport.onMediaFrame = (peerHex, frame) {
       final call = callManager.currentCall;
       if (call == null || call.peerNodeIdHex != peerHex) {
@@ -559,7 +625,7 @@ class CallService {
               '${peerHex.substring(0, 8)} — discarded (§17.6)');
         case DFrameKind.punch:
           // DOES NOT REACH THIS BRANCH, and the branch stands here nonetheless.
-          // `CallTransportV41` sifts out probes before [onMediaFrame] — they
+          // `PlaneDCallTransport` sifts out probes before [onMediaFrame] — they
           // have already done their work when `DSession._deliver` made
           // the carrying path from their origin (§17.3). The branch is
           // the assurance that a DIFFERENT transport version does not
@@ -570,7 +636,7 @@ class CallService {
         case DFrameKind.pathChallenge:
         case DFrameKind.pathResponse:
           // DOES NOT REACH THIS BRANCH EITHER, for the same reason as
-          // the probe: `CallTransportV41` sifts out path validation before
+          // the probe: `PlaneDCallTransport` sifts out path validation before
           // [onMediaFrame]. Its work is done before it would arrive
           // here — `DSession._deliver` has challenged or
           // answered (§17.4 + RFC 9000 §8.2). The branch stands here because
@@ -582,7 +648,7 @@ class CallService {
               '— discarded (§17.4)');
         case DFrameKind.control:
           // DOES NOT REACH THIS BRANCH — the same assurance as with
-          // `punch` one line above. `CallTransportV41` diverts
+          // `punch` one line above. `PlaneDCallTransport` diverts
           // control frames before [onMediaFrame] to [onControlRecord]
           // (§17.1.1: "It is **not** a media frame — it carries no media
           // and is never handed to a codec"). The branch stands here so that
@@ -609,20 +675,32 @@ class CallService {
     // about a GROUP. Set only after the manager has been built: a
     // control frame that arrived before it would have no recipient.
     callTransport.onControlRecord = groupCallManager.handleControlRecord;
+    // §17.1.1 loss reports: the transport counts, reports and judges
+    // (`loss_report.dart`); what follows from them is decided here.
+    _planeDTransport.onLossFeedback = _onLossFeedback;
+    _planeDTransport.onLineLimit = _onLineLimit;
 
     // The same E5 version field as the 1:1 INVITE (S398-W2).
     groupCallManager.callerAppMajorMinor = ownAppMajorMinor;
-    groupCallManager.sendViaUser = (recipientUserId, type, payload) =>
+    // The group of the call goes with every signal (§17.2, §16.2.2): to a
+    // fellow member who is not a contact the seam sends it over the group
+    // pair — as a call signal, steps 1 and 3 only — and the gate there
+    // admits it only for a group both belong to (§15.7).
+    groupCallManager.sendViaUser = (recipientUserId, type, payload,
+            {groupId}) =>
         _ctx.sendToUser(
           recipientUserId: recipientUserId,
           messageType: type,
           payload: payload,
+          groupId: groupId,
           skipL3: true,
         );
     groupCallManager.onIncomingGroupCall = (info) {
       onIncomingGroupCall?.call(info);
       onStateChanged?.call();
     };
+    groupCallManager.onMissedCall = (memberHex, groupIdHex, callId) =>
+        onMissedGroupCall?.call(memberHex, groupIdHex, callId);
     groupCallManager.onGroupCallStarted = (info) {
       _startAudioMixer(groupCallManager.currentGroupCall!);
       _startGroupVideo(groupCallManager.currentGroupCall!);
@@ -630,6 +708,13 @@ class CallService {
       onStateChanged?.call();
     };
     groupCallManager.onGroupCallEnded = (info) {
+      // A ringing group call can end by itself now (§17.2: 60 s, or the
+      // initiator's HANGUP) — the tone and the notification end with it.
+      // Idempotent, as in the 1:1 `onCallEnded`.
+      onCancelCallNotificationAndroid?.call();
+      try {
+        notificationSound.stopRingtone();
+      } catch (_) {}
       _stopAudioMixer();
       _stopGroupVideo();
       onGroupCallEnded?.call(info);
@@ -639,6 +724,15 @@ class CallService {
       if (state == ParticipantState.joined) {
         // Participant indicator tone: join beep
         try { notificationSound.playParticipantJoined(); } catch (_) {}
+        // §17.7: past the video limit, video goes off for this call.
+        final session = groupCallManager.currentGroupCall;
+        if (session != null &&
+            session.applyVideoCap(GroupCallManager.maxParticipantsVideo)) {
+          _log.info('Group call grew past '
+              '${GroupCallManager.maxParticipantsVideo} participants — '
+              'video switched off for this call (§17.7)');
+          _stopGroupVideo();
+        }
       } else if (state == ParticipantState.left ||
           state == ParticipantState.crashed) {
         // Participant indicator tone: leave beep
@@ -648,6 +742,9 @@ class CallService {
       }
       onStateChanged?.call();
     };
+    // §17.7: a media pair, a broker or one of the three notices changed —
+    // the tiles read it from the participant info.
+    groupCallManager.onReachChanged = () => onStateChanged?.call();
     groupCallManager.onOwnSendKeyChanged = (ownKey, version) {
       _audioMixer?.updateOwnSendKey(ownKey, version);
       try {
@@ -665,7 +762,7 @@ class CallService {
     //
     // Until now a group media frame from plane D ended in
     // forwarding. Only what came via the DELIVERY LAYER was played
-    // (`handleCallGroupAudioV3`) — and exactly this path does not exist in V4.1:
+    // (`handleCallGroupAudio`) — and exactly this path does not exist in V4.1:
     // §17.1, "media does **not** run in delivery cells". A node
     // thus forwarded for its children and heard nothing itself.
     groupCallManager.onGroupMediaBody = (senderHex, kind, body) {
@@ -728,6 +825,16 @@ class CallService {
 
   Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false}) async {
     if (groupCallManager.currentGroupCall != null) return null;
+    // §17 principle, RL-7, D-69: the INVITE carries this device's address
+    // candidates (§17.3) — with "allow calls" off for this contact it does
+    // not go out, and the user is told why instead.
+    if (!callsAllowedWith(_ctx.contacts, peerNodeIdHex)) {
+      _log.info('1:1 call to ${peerNodeIdHex.substring(0, 8)} not started — '
+          'calls are not allowed with this contact (§17, RL-7)');
+      onCallUnavailable?.call(CallUnavailableReason.callsNotAllowed,
+          'calls not allowed with this contact');
+      return null;
+    }
     if (!_mediaCarrierReady('1:1-Anruf')) return null;
     // §17.2: NO ringback tone here.
     //
@@ -767,6 +874,18 @@ class CallService {
   Future<void> acceptCall() async {
     onCancelCallNotificationAndroid?.call();
     await notificationSound.stopRingtone();
+    // §17 principle, RL-7, D-69: the ANSWER carries this device's address
+    // candidates (§17.3). Switched off while it rang (or the contact went
+    // away), picking up declines instead — the switch is the later word.
+    final ringing = callManager.currentCall;
+    if (ringing != null &&
+        ringing.direction == CallDirection.incoming &&
+        !callsAllowedWith(_ctx.contacts, ringing.peerNodeIdHex)) {
+      _log.info('Call from ${ringing.peerNodeIdHex.substring(0, 8)} not '
+          'answered — calls are not allowed with this contact (§17, RL-7)');
+      await callManager.rejectCall(reason: 'declined');
+      return;
+    }
     // The same gate as with [startCall], and it is NOT
     // superfluous here: the caller can run an older version in which
     // the media still ran differently. Accepting and then staying silent would be the
@@ -780,7 +899,7 @@ class CallService {
     await callManager.acceptCall();
   }
 
-  Future<void> rejectCall({String reason = 'busy'}) async {
+  Future<void> rejectCall({String reason = 'declined'}) async {
     onCancelCallNotificationAndroid?.call();
     await notificationSound.stopRingtone();
     await callManager.rejectCall(reason: reason);
@@ -828,16 +947,18 @@ class CallService {
   GroupCallInfo? get currentGroupCall =>
       groupCallManager.currentGroupCall?.toGroupCallInfo();
 
-  Future<GroupCallInfo?> startGroupCall(String groupIdHex) async {
+  Future<GroupCallInfo?> startGroupCall(String groupIdHex,
+      {Set<String>? invitees}) async {
     if (callManager.currentCall != null) return null;
     if (!_mediaCarrierReady('Gruppenanruf')) return null;
-    final session = await groupCallManager.startGroupCall(groupIdHex);
+    final session = await groupCallManager.startGroupCall(groupIdHex,
+        invitees: invitees);
     return session?.toGroupCallInfo();
   }
 
   Future<void> acceptGroupCall() => groupCallManager.acceptGroupCall();
 
-  Future<void> rejectGroupCall({String reason = 'busy'}) =>
+  Future<void> rejectGroupCall({String reason = 'declined'}) =>
       groupCallManager.rejectGroupCall(reason: reason);
 
   Future<void> leaveGroupCall() async {
@@ -884,6 +1005,7 @@ class CallService {
       // Mode before stream-open — see _startVoiceSession for the rationale.
       onSetCallAudioModeAndroid?.call(true);
       await _audioMixer!.start();
+      session.audioBackend = _audioMixer!.backendLibrary;
       // Poll audio levels at 4 Hz for active speaker detection + mute inference.
       _audioLevelTimer?.cancel();
       _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
@@ -894,6 +1016,10 @@ class CallService {
           groupCallManager.updateParticipantAudioLevel(entry.key, entry.value);
           // Infer mute: sustained silence (level < 0.001) across consecutive polls.
           groupCallManager.updateParticipantMuteState(entry.key, entry.value < 0.001);
+        }
+        // Same local tick, no network: what this device heard of whom.
+        for (final entry in mixer.peerHearing.entries) {
+          groupCallManager.updateParticipantHearing(entry.key, entry.value);
         }
       });
     } catch (e) {
@@ -917,6 +1043,13 @@ class CallService {
   }
 
   Future<void> _startGroupVideo(GroupCallSession session) async {
+    // §17.7: no video start (own or on accepting) above the video limit.
+    session.applyVideoCap(GroupCallManager.maxParticipantsVideo);
+    if (session.videoSwitchedOff) {
+      _log.info('Group video not started: more than '
+          '${GroupCallManager.maxParticipantsVideo} participants (§17.7)');
+      return;
+    }
     if (!(Platform.isLinux || Platform.isMacOS || Platform.isWindows) ||
         session.ownSendKey == null) {
       return;
@@ -1514,13 +1647,13 @@ class CallService {
   /// frame as sent only when all its fragments were accepted (S399).
   bool sendLiveMediaFrame({
     required CallSession session,
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
   }) {
     if (session.state == CallState.ended) return false;
     final failure = callTransport.sendMedia(
       peerHex: session.peerNodeIdHex,
-      kind: messageType == proto.MessageTypeV3.MTV3_CALL_VIDEO
+      kind: messageType == proto.MessageType.MT_CALL_VIDEO
           ? DFrameKind.video
           : DFrameKind.voice,
       payload: payload,
@@ -1534,7 +1667,7 @@ class CallService {
       // measured upload collapse in every speech pause. The number stands
       // here only in the comment; counted is `frameClass.wireSize`.
       uploadProbe.recordSent(
-        (messageType == proto.MessageTypeV3.MTV3_CALL_VIDEO
+        (messageType == proto.MessageType.MT_CALL_VIDEO
                 ? DFrameKind.video
                 : DFrameKind.voice)
             .frameClass
@@ -1558,7 +1691,7 @@ class CallService {
     session.framesSent++;
     sendLiveMediaFrame(
       session: session,
-      messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
+      messageType: proto.MessageType.MT_CALL_AUDIO,
       payload: opusFrame,
     );
   }
@@ -1666,7 +1799,7 @@ class CallService {
     for (final fragment in fragments) {
       final sent = sendLiveMediaFrame(
         session: session,
-        messageType: proto.MessageTypeV3.MTV3_CALL_VIDEO,
+        messageType: proto.MessageType.MT_CALL_VIDEO,
         payload: fragment,
       );
       if (!sent) return;
@@ -1708,7 +1841,7 @@ class CallService {
     _ctx
         .sendToUser(
           recipientUserId: hexToBytes(session.peerNodeIdHex),
-          messageType: proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST,
+          messageType: proto.MessageType.MT_CALL_KEYFRAME_REQUEST,
           payload: Uint8List(0),
         )
         .catchError((Object e, StackTrace st) {
@@ -1826,7 +1959,7 @@ class CallService {
       _ctx
           .sendToUser(
             recipientUserId: Uint8List.fromList(event.senderUserId),
-            messageType: proto.MessageTypeV3.MTV3_CALL_REJECT,
+            messageType: proto.MessageType.MT_CALL_REJECT,
             payload: reject.writeToBuffer(),
             skipL3: true,
           )
@@ -1840,17 +1973,25 @@ class CallService {
     }
   }
 
-  void handleCallInviteV3(HarvestEvent event) {
-    // `claimedSentAt` is the unverified sender statement (V4 §15.5.3). The
-    // factory maps `timestampMs == 0` to null; the old version computed
-    // against 0 in that case, which gave a huge age and discarded the invite as
-    // stale. The `?? 0` records exactly that.
-    final ageMs = DateTime.now().millisecondsSinceEpoch -
-        (event.claimedSentAt?.millisecondsSinceEpoch ?? 0);
-    if (ageMs > 60000) {
-      _log.info('Stale CALL_INVITE (${(ageMs / 1000).toStringAsFixed(0)}s old) '
+  /// §17.2 "A signal that arrives late": "The callee's device counts on its
+  /// own clock, from its own arrival time: an `INVITE` opened more than 10 s
+  /// after it arrived does not ring and is dropped. The caller's claimed
+  /// send time decides nothing (§22.5.3)."
+  static const Duration inviteOpenLimit = Duration(seconds: 10);
+
+  void handleCallInvite(HarvestEvent event) {
+    // The age is measured from THIS device's arrival time
+    // (`harvestedAt`, observed by the delivery layer, §22.5.3) — never from
+    // the sender's claimed send time. Until S407-CALLNORM this read
+    // `claimedSentAt` with a 60 s limit ("S&F ghost prevention" from the
+    // time INVITEs were collected from post boxes): a caller's wrong clock
+    // decided whether a call rang, and a parked INVITE could ring up to
+    // 60 s after its arrival.
+    final age = DateTime.now().difference(event.harvestedAt);
+    if (age > inviteOpenLimit) {
+      _log.info('CALL_INVITE opened ${age.inSeconds}s after its arrival '
           'from ${bytesToHex(Uint8List.fromList(event.senderUserId)).substring(0, 8)} '
-          '— discarded (S&F ghost prevention)');
+          '— does not ring, dropped (§17.2)');
       return;
     }
     proto.CallInvite invite;
@@ -1859,6 +2000,22 @@ class CallService {
     } catch (e) {
       _log.warn('CALL_INVITE V3: payload parse failed: $e');
       return;
+    }
+    // §17 principle, RL-7, D-69: a 1:1 call rings only for an accepted
+    // contact whose "allow calls" is on. Otherwise nothing rings and nothing
+    // goes back — no RING_ACK, no REJECT: the caller ends at its `reaching`
+    // limit with "not reachable" (§17.2: 10 s, `CallManager.
+    // reachingTimeoutSec`), as for a device that was not reached, and the
+    // switch is told to nobody. Checked before the
+    // version gate, whose REJECT would answer too. The group call has its
+    // own admission (§17.7, `GroupCallManager`).
+    if (!invite.isGroupCall) {
+      final callerHex = bytesToHex(Uint8List.fromList(event.senderUserId));
+      if (!callsAllowedWith(_ctx.contacts, callerHex)) {
+        _log.info('CALL_INVITE from ${callerHex.substring(0, 8)} does not '
+            'ring — no contact with calls allowed (§17, RL-7)');
+        return;
+      }
     }
     // §10.4 / Erratum E5 — version gate. A call between an old and a new
     // voice stack must be rejected EXPLICITLY, with a reason the user can
@@ -1876,8 +2033,8 @@ class CallService {
     // sender repeats every 3 s) and for a call we are just refusing because of
     // busy.
     final ringing = invite.isGroupCall
-        ? groupCallManager.handleGroupCallInviteV3(event)
-        : callManager.handleCallInviteV3(event);
+        ? groupCallManager.handleGroupCallInvite(event)
+        : callManager.handleCallInvite(event);
     if (!ringing) return;
 
     notificationSound.startRingtone();
@@ -1895,26 +2052,45 @@ class CallService {
     }
   }
 
-  void handleCallAnswerV3(HarvestEvent event) {
+  /// Whether [event] names a group although no group call runs here.
+  ///
+  /// A call signal that names a group in its frame is a signal of a call in
+  /// that group (§17.2, §16.2.2) — the group call sends every signal with its
+  /// group, and only with a group can one come over a group pair from a
+  /// fellow member who is not a contact (§15.7). It never touches the 1:1
+  /// call: without a running group call it is dropped before it could stop a
+  /// ringtone or end a call by an equal `callId`.
+  bool _groupSignalWithoutGroupCall(HarvestEvent event) {
+    if (event.groupId == null || groupCallManager.currentGroupCall != null) {
+      return false;
+    }
+    _log.debug('${event.type.name} names a group, no group call runs — '
+        'dropped (§16.2.2)');
+    return true;
+  }
+
+  void handleCallAnswer(HarvestEvent event) {
+    if (_groupSignalWithoutGroupCall(event)) return;
     onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     try { notificationSound.playConnected(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallAnswerV3(event);
+      groupCallManager.handleGroupCallAnswer(event);
     } else {
-      callManager.handleCallAnswerV3(event);
+      callManager.handleCallAnswer(event);
     }
   }
 
-  void handleCallRejectV3(HarvestEvent event) {
+  void handleCallReject(HarvestEvent event) {
+    if (_groupSignalWithoutGroupCall(event)) return;
     onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallRejectV3(event);
+      groupCallManager.handleGroupCallReject(event);
     } else {
-      callManager.handleCallRejectV3(event);
+      callManager.handleCallReject(event);
     }
   }
 
@@ -1935,49 +2111,56 @@ class CallService {
   /// because only the manager knows whether this device has won or lost.
   /// RING_ACK (§17.2) — "it really is ringing at theirs".
   ///
-  /// Like [handleCallCancelOthersV3] deliberately WITHOUT the
+  /// Like [handleCallCancelOthers] deliberately WITHOUT the
   /// `stopRingtone`/`stopRingback` prelude of the refusal neighbours: here
   /// nothing is ended, here something begins. The ringback tone runs via
   /// [CallManager.onRemoteRinging], so that it only starts the first time.
-  void handleCallRingAckV3(HarvestEvent event) {
-    callManager.handleCallRingAckV3(event);
+  void handleCallRingAck(HarvestEvent event) {
+    // A RING_ACK of a group call this device started (§17.2, S407-GAMUTE
+    // H-1) — the running one or the last it ended; every other one is the
+    // 1:1 path's.
+    if (groupCallManager.handleGroupCallRingAck(event)) return;
+    if (_groupSignalWithoutGroupCall(event)) return;
+    callManager.handleCallRingAck(event);
   }
 
-  void handleCallCancelOthersV3(HarvestEvent event) {
+  void handleCallCancelOthers(HarvestEvent event) {
+    if (_groupSignalWithoutGroupCall(event)) return;
     if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallCancelOthersV3(event);
+      groupCallManager.handleGroupCallCancelOthers(event);
     } else {
-      callManager.handleCallCancelOthersV3(event);
+      callManager.handleCallCancelOthers(event);
     }
   }
 
-  void handleCallHangupV3(HarvestEvent event) {
+  void handleCallHangup(HarvestEvent event) {
+    if (_groupSignalWithoutGroupCall(event)) return;
     onCancelCallNotificationAndroid?.call();
     try { notificationSound.stopRingtone(); } catch (_) {}
     try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallHangupV3(event);
+      groupCallManager.handleGroupCallHangup(event);
     } else {
-      callManager.handleCallHangupV3(event);
+      callManager.handleCallHangup(event);
     }
   }
 
-  void handleIceCandidateV3(HarvestEvent event) {
+  void handleIceCandidate(HarvestEvent event) {
     _log.debug('ICE_CANDIDATE V3: not wired yet — drop');
   }
 
-  void handleCallRejoinV3(HarvestEvent event) {
-    groupCallManager.handleCallRejoinV3(event);
+  void handleCallRejoin(HarvestEvent event) {
+    groupCallManager.handleCallRejoin(event);
   }
 
   /// **Media via the DELIVERY LAYER — that does not exist in V4.1.**
   ///
-  /// Same justification as with [handleCallVideoV3]. Until the CUT
+  /// Same justification as with [handleCallVideo]. Until the CUT
   /// the counterpart of the old send path stood here: `seq(4) ‖ nonce(12) ‖
   /// AES-GCM(opus)` from a cell. §17.1 puts both into the D-frame —
   /// `seq` into the inner header, the encryption into the AEAD under the
   /// `call_key` — and the delivery layer no longer carries media.
-  void handleCallAudioV3(HarvestEvent event) {
+  void handleCallAudio(HarvestEvent event) {
     _log.warn('CALL_AUDIO received via the delivery layer — V4.1 carries '
         'media exclusively via Layer D (§17.1); discarded');
   }
@@ -2004,7 +2187,7 @@ class CallService {
   /// A video frame into the display and into decoding.
   ///
   /// Extracted so that the plane D path (`onMediaFrame`) and the old
-  /// delivery path ([handleCallVideoV3]) have the same body and do not
+  /// delivery path ([handleCallVideo]) have the same body and do not
   /// drift apart.
   void _feedVideoFrame(Uint8List payload) {
     onVideoFrameReceived?.call(payload);
@@ -2023,14 +2206,14 @@ class CallService {
   /// but it no longer accepts anything. A frame that arrives here comes
   /// from a sender that does not send according to §17 — and that should be
   /// seen, not silently processed.
-  void handleCallVideoV3(HarvestEvent event) {
+  void handleCallVideo(HarvestEvent event) {
     _log.warn('CALL_VIDEO received via the delivery layer — V4.1 carries '
         'media exclusively via Layer D (§17.1); discarded');
   }
 
   /// **Group media via the DELIVERY LAYER — that does not exist in V4.1.**
   ///
-  /// The same situation as with [handleCallVideoV3] next to it, and until S369 the
+  /// The same situation as with [handleCallVideo] next to it, and until S369 the
   /// opposite stood here: the place unpacked a `GroupCallAudio` and
   /// fed the mixer. That was the ONLY path on which group sound ever
   /// reached playback — and §17.1 excludes it ("media does **not**
@@ -2041,63 +2224,63 @@ class CallService {
   /// has packed according to `group_media_frame.dart` since S369. A parser for a
   /// format nobody writes any more would be backward compatibility, and
   /// that does not exist on this line.
-  void handleCallGroupAudioV3(HarvestEvent event) {
+  void handleCallGroupAudio(HarvestEvent event) {
     _log.warn('CALL_GROUP_AUDIO received via the delivery layer — V4.1 '
         'carries media exclusively via Layer D (§17.1); discarded');
   }
 
-  /// See [handleCallGroupAudioV3] — same reasoning, same consequence.
-  void handleCallGroupVideoV3(HarvestEvent event) {
+  /// See [handleCallGroupAudio] — same reasoning, same consequence.
+  void handleCallGroupVideo(HarvestEvent event) {
     _log.warn('CALL_GROUP_VIDEO received via the delivery layer — V4.1 '
         'carries media exclusively via Layer D (§17.1); discarded');
   }
 
-  void handleCallGroupLeaveV3(HarvestEvent event) {
-    groupCallManager.handleGroupCallLeaveV3(event);
+  void handleCallGroupLeave(HarvestEvent event) {
+    groupCallManager.handleGroupCallLeave(event);
   }
 
   // S368: `handleCallGroupKeyRotateV3` is removed — see the justification
-  // above `handleGroupCallSenderKeyV3` in `group_call_manager.dart`.
+  // above `handleGroupCallSenderKey` in `group_call_manager.dart`.
 
-  void handleCallRttPingV3(HarvestEvent event) {
-    groupCallManager.handleCallRttPingV3(event);
+  void handleCallRttPing(HarvestEvent event) {
+    groupCallManager.handleCallRttPing(event);
   }
 
-  void handleCallRttPongV3(HarvestEvent event) {
-    groupCallManager.handleCallRttPongV3(event);
+  void handleCallRttPong(HarvestEvent event) {
+    groupCallManager.handleCallRttPong(event);
   }
 
-  void handleCallTreeUpdateV3(HarvestEvent event) {
-    groupCallManager.handleCallTreeUpdateV3(event);
+  void handleCallTreeUpdate(HarvestEvent event) {
+    groupCallManager.handleCallTreeUpdate(event);
   }
 
   // ── §10.5 In-Call Collaboration ─────────────────────────────────────
 
-  void handleWhiteboardStrokeV3(HarvestEvent event) {
-    groupCallManager.handleWhiteboardStrokeV3(event);
+  void handleWhiteboardStroke(HarvestEvent event) {
+    groupCallManager.handleWhiteboardStroke(event);
   }
 
-  void handleWhiteboardPageV3(HarvestEvent event) {
-    groupCallManager.handleWhiteboardPageV3(event);
+  void handleWhiteboardPage(HarvestEvent event) {
+    groupCallManager.handleWhiteboardPage(event);
   }
 
-  void handleFileExchangeV3(HarvestEvent event) {
-    groupCallManager.handleFileExchangeV3(event);
+  void handleFileExchange(HarvestEvent event) {
+    groupCallManager.handleFileExchange(event);
   }
 
-  void handleClipboardExchangeV3(HarvestEvent event) {
-    groupCallManager.handleClipboardExchangeV3(event);
+  void handleClipboardExchange(HarvestEvent event) {
+    groupCallManager.handleClipboardExchange(event);
   }
 
-  void handleScreenShareFrameV3(HarvestEvent event) {
-    groupCallManager.handleScreenShareV3(event);
+  void handleScreenShareFrame(HarvestEvent event) {
+    groupCallManager.handleScreenShare(event);
   }
 
-  void handleCallChatV3(HarvestEvent event) {
-    groupCallManager.handleCallChatV3(event);
+  void handleCallChat(HarvestEvent event) {
+    groupCallManager.handleCallChat(event);
   }
 
-  void handleRemoteControlInputV3(HarvestEvent event) {
+  void handleRemoteControlInput(HarvestEvent event) {
     // Remote control not yet implemented (§10.5.4 planned)
   }
 }

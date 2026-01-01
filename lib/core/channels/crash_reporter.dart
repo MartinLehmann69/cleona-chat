@@ -1,100 +1,19 @@
-import 'dart:convert';
 import 'dart:io';
 
 import '../log/clogger.dart';
 import '../service/cleona_service.dart';
 import 'system_channels.dart';
 
-/// Collects crash data and manages the opt-in reporting flow (§9.5.2).
+/// Builds crash and log reports (§16.7).
 ///
-/// The crash reporter does NOT post anything automatically — it builds a
-/// [CrashReport], checks for duplicates in the local Bug Log channel, and
-/// returns the result so the UI layer can show the appropriate popup.
+/// The crash reporter does NOT post anything — it builds a [CrashReport] or
+/// [LogReport]; the user decides in the preview, and the deposit, the
+/// duplicate question and the own limits run through `SystemChannelApi`
+/// (`system_channel_service.dart`).
 class CrashReporter {
   final CleonaService _service;
-  final CLogger _log;
 
-  /// Area of the encrypted storage (§21.4.1, S366).
-  ///
-  /// Formerly `crash_rate_limit.json` per profile. The content is a
-  /// list of at most ten timestamps, which drop out on the next write
-  /// when older than 24 hours — capped in NUMBER and in TIME. That is
-  /// why `replaceArea` with ONE entry stands here and not `putEntry` per
-  /// timestamp: this is not a growing collection but a state.
-  ///
-  /// NO DATA-LOSS LATCH, and for a reason: if the state is lost, the
-  /// consequence is a burst of at most
-  /// [SystemChannels.maxReportsPerDay] reports — exactly what
-  /// F5-R2 introduced the persistence against, but an annoyance and not
-  /// a loss. A latch that blocked reporting entirely on an unreadable
-  /// state would be the worse side: then after a crash no report at all
-  /// would come any more.
-  static const String area = 'crash_rate_limit';
-  static const String _key = '_';
-
-  /// Tracks reports-per-hour and reports-per-day for rate limiting.
-  /// Persisted across restarts to prevent burst-on-restart (F5-R2).
-  final List<DateTime> _reportTimestamps = [];
-  bool _loaded = false;
-
-  // _service.profileDir is already the source that _ensureLoaded() uses
-  // for the rate_limit file (line above) -> the same value for the logger.
-  CrashReporter(this._service)
-      : _log = CLogger.get('CrashReporter', profileDir: _service.profileDir);
-
-  // ── Rate limiting ─────────────────────────────────────────────────
-
-  void _ensureLoaded() {
-    if (_loaded) return;
-    _loaded = true;
-    try {
-      final json = _service.store.loadArea(area)[_key];
-      if (json == null) return;
-      final list = json['ts'] as List<dynamic>?;
-      if (list == null) return;
-      final now = DateTime.now();
-      for (final ms in list) {
-        final t = DateTime.fromMillisecondsSinceEpoch(ms as int);
-        if (now.difference(t).inHours < 24) _reportTimestamps.add(t);
-      }
-    } catch (e) {
-      _log.debug('Failed to load rate-limit timestamps: $e');
-    }
-  }
-
-  bool get isRateLimited {
-    _ensureLoaded();
-    final now = DateTime.now();
-    _reportTimestamps.removeWhere(
-        (t) => now.difference(t).inHours >= 24);
-
-    final lastHour = _reportTimestamps
-        .where((t) => now.difference(t).inMinutes < 60)
-        .length;
-    if (lastHour >= SystemChannels.maxReportsPerHour) return true;
-    if (_reportTimestamps.length >= SystemChannels.maxReportsPerDay) return true;
-    return false;
-  }
-
-  void _recordReport() {
-    _reportTimestamps.add(DateTime.now());
-    _persistTimestamps();
-  }
-
-  void _persistTimestamps() {
-    try {
-      final now = DateTime.now();
-      _reportTimestamps.removeWhere((t) => now.difference(t).inHours >= 24);
-      final ms = _reportTimestamps
-          .map((t) => t.millisecondsSinceEpoch)
-          .toList();
-      _service.store.replaceArea(area, {
-        _key: {'ts': ms}
-      });
-    } catch (e) {
-      _log.debug('Failed to persist rate-limit timestamps: $e');
-    }
-  }
+  CrashReporter(this._service);
 
   // ── Report building ───────────────────────────────────────────────
 
@@ -144,92 +63,6 @@ class CrashReporter {
       uptimeSeconds: uptime,
       memoryBytes: memBytes,
     );
-  }
-
-  // ── Duplicate detection ───────────────────────────────────────────
-
-  /// Searches the local Bug Log channel for an existing post with the
-  /// same fingerprint. Returns the post ID if found, null otherwise.
-  String? findExistingReport(String fingerprint) {
-    final channelId = SystemChannels.bugLogChannelIdHex;
-    final conv = _service.conversations[channelId];
-    if (conv == null) return null;
-    final messages = conv.messages;
-
-    for (final msg in messages) {
-      final parsed = _parsePostJson(msg.text);
-      if (parsed == null) continue;
-      final type = parsed['type'] as String?;
-      final fp = parsed['fingerprint'] as String?;
-      if (type == 'crash_report' && fp == fingerprint) return msg.id;
-    }
-    return null;
-  }
-
-  /// Counts how many +1 replies exist for a given fingerprint.
-  int countDuplicates(String fingerprint) {
-    final channelId = SystemChannels.bugLogChannelIdHex;
-    final conv = _service.conversations[channelId];
-    if (conv == null) return 0;
-    final messages = conv.messages;
-
-    int count = 0;
-    for (final msg in messages) {
-      final parsed = _parsePostJson(msg.text);
-      if (parsed == null) continue;
-      if (parsed['type'] == 'crash_duplicate' &&
-          parsed['fingerprint'] == fingerprint) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  // ── Posting ───────────────────────────────────────────────────────
-
-  /// Posts a new crash report to the Bug Log channel.
-  /// Call only after the user consented via the popup.
-  Future<bool> publishReport(CrashReport report) async {
-    if (isRateLimited) return false;
-
-    final postText = report.toPostText();
-    if (postText.length > SystemChannels.maxAutoReportBytes) {
-      _log.warn('Crash report exceeds size limit, truncating');
-      return false;
-    }
-
-    final result = await _service.sendChannelPost(
-      SystemChannels.bugLogChannelIdHex,
-      postText,
-    );
-    if (result != null) {
-      _recordReport();
-      _log.info('Crash report published (fp: ${report.fingerprint.substring(0, 16)})');
-      return true;
-    }
-    return false;
-  }
-
-  /// Posts a lightweight "+1" duplicate reply.
-  Future<bool> publishDuplicate(CrashReport report) async {
-    if (isRateLimited) return false;
-
-    final reply = CrashDuplicateReply(
-      fingerprint: report.fingerprint,
-      appVersion: report.appVersion,
-      platform: report.platform,
-      timestampMs: report.timestampMs,
-    );
-
-    final result = await _service.sendChannelPost(
-      SystemChannels.bugLogChannelIdHex,
-      reply.toPostText(),
-    );
-    if (result != null) {
-      _recordReport();
-      return true;
-    }
-    return false;
   }
 
   // ── Manual log report ──────────────────────────────────────────────
@@ -312,27 +145,6 @@ class CrashReporter {
     );
   }
 
-  Future<bool> publishLogReport(LogReport report) async {
-    if (isRateLimited) return false;
-
-    final postText = report.toPostText();
-    if (postText.length > SystemChannels.maxAutoReportBytes) {
-      _log.warn('Log report exceeds size limit');
-      return false;
-    }
-
-    final result = await _service.sendChannelPost(
-      SystemChannels.bugLogChannelIdHex,
-      postText,
-    );
-    if (result != null) {
-      _recordReport();
-      _log.info('Log report published');
-      return true;
-    }
-    return false;
-  }
-
   // ── Helpers ───────────────────────────────────────────────────────
 
   static String _platformString() {
@@ -356,14 +168,5 @@ class CrashReporter {
         .replaceAll(RegExp(r'/home/[^ ]*/lib/'), 'lib/')
         .replaceAll(RegExp(r'C:\\[^ ]*\\lib\\'), 'lib/')
         .replaceAll(RegExp(r'/data/[^ ]*/lib/'), 'lib/');
-  }
-
-  static Map<String, dynamic>? _parsePostJson(String? text) {
-    if (text == null || text.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) return decoded;
-    } catch (_) {}
-    return null;
   }
 }

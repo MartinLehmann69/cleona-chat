@@ -72,22 +72,19 @@ extension MailboxBulk on Mailbox {
           {void Function(int sent, int total)? progress,
           Uint8List? transferKey,
           BulkResume? resume,
-          void Function(List<CardAddress?> assigned)? onAssigned}) =>
+          void Function(List<CardAddress?> assigned)? onAssigned,
+          Set<int>? only}) =>
       host.bulk.placer.place(object, bulkHoldersFor(contactIdentifiers),
           progress: progress,
           transferKey: transferKey,
           resume: resume,
-          onAssigned: onAssigned);
+          onAssigned: onAssigned,
+          only: only);
 
   /// The collector of THIS identity (S401): its transfers, its opened
   /// blocks in its own folder under its own key (`HostMedia.admit`). Throws
   /// [StateError] once the mailbox is deregistered.
   BulkCollector get bulkCollector => host.bulk.collectorOf(ownIdentifier);
-
-  /// Keeps pieces of a fallen-back stream for the collection to come
-  /// (`BulkCollector.stash`, survives a restart).
-  void bulkStash(Uint8List tag, Map<int, Map<int, Uint8List>> pieces) =>
-      bulkCollector.stash(tag, pieces);
 
   /// The announcement of a placed object (`bulk_announce.dart`): `K_T`,
   /// length, SHA-256, the holders that accepted, and [preview].

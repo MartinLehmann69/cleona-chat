@@ -6,7 +6,7 @@ import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 // ---------------------------------------------------------------------------
 // Native PoW FFI (libcleona_pow) — optional, graceful fallback to Dart loop

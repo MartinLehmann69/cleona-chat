@@ -1,173 +1,62 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart' show sha256;
-
-import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/codec/reed_solomon.dart';
-import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex;
-import 'package:cleona/core/update/binary_fragment_store.dart';
 
-/// Outcome of [seedBinaryFileToStore]: how many fragments were stored and
-/// the SHA-256 of the seeded binary — computed by streaming the file, never
-/// by holding it in memory.
+/// Outcome of [seedBinaryFileToStore]: the SHA-256 of the stored object and
+/// its size — the hash computed by streaming the file, never by holding it
+/// in memory.
 class SeedFileResult {
-  final int fragmentCount;
   final String binaryHash;
+  final int bytes;
 
-  const SeedFileResult({required this.fragmentCount, required this.binaryHash});
+  const SeedFileResult({required this.binaryHash, required this.bytes});
 }
 
-/// Seed a binary FROM DISK into the fragment-store layout of [profileDir]
-/// with bounded memory (S404): the hash is streamed (`sha256.bind`), the
-/// fragments come from [ReedSolomon.encodeFileStreaming], and
-/// `complete.bin` is a `File.copySync` — the file is never held in memory.
-/// Before S404 the same body held the binary three times (a `readAsBytes`
-/// in the caller, another in the isolate, and encode()'s padded copy plus
-/// all N fragments), which OOM-killed the bootstrap daemon at 515.7 MB
-/// peak on a 200 MB APK.
+/// Seed a binary FROM DISK into the store layout of [profileDir] as the
+/// complete object, with bounded memory: the hash is streamed
+/// (`sha256.bind`) and `complete.bin` is a `File.copySync` — the file is
+/// never held in memory.
+///
+/// v4_2 §26.6.1 step 2: "Every node that holds an object encodes fountain
+/// blocks from it, one block per packet and fresh for each request … nothing
+/// is placed in advance"; step 3: desktops "hold the complete objects".
+/// Until S407 this body ALSO wrote Reed-Solomon fragments (`fragment-NNN.bin`,
+/// §19.6.2 of the 3.x line) next to `complete.bin` — on the bootstrap
+/// ≈ 655 MB for 4.2.3 that nothing in 4.2 reads (S407-UPDATEFRAGMENTE).
 ///
 /// This is the body the seeding isolate runs. It uses raw file I/O instead
-/// of [BinaryFragmentStore]/[BinarySeeder] to avoid CLogger's
-/// Timer.periodic which is not sendable across isolate boundaries.
+/// of [UpdateBinaryStore] to avoid CLogger's Timer.periodic which is not
+/// sendable across isolate boundaries.
 ///
 /// Returns null when [binaryPath] does not exist or when [expectedHash] is
-/// given and does not match — exactly the two zero-fragment outcomes of
-/// the previous in-isolate body. Otherwise writes `fragment-NNN.bin`
-/// (first [maxFragments], capped at N), `complete.bin` and `meta.json`
-/// (`storedAt`, `fragmentCount`, `binaryHash`) under
-/// `$profileDir/binary-updates/$platform/$version` and returns the stored
-/// fragment count and the measured hash.
+/// given and does not match. Otherwise writes `complete.bin` and
+/// `meta.json` (`storedAt`, `binaryHash`) under
+/// `$profileDir/binary-updates/$platform/$version` and returns the measured
+/// hash and size.
 Future<SeedFileResult?> seedBinaryFileToStore({
   required String binaryPath,
   required String profileDir,
   required String platform,
   required String version,
-  required int maxFragments,
   String? expectedHash,
 }) async {
   final file = File(binaryPath);
   if (!file.existsSync()) return null;
 
-  final hash = await _sha256OfFile(file);
-  if (expectedHash != null && hash != expectedHash) return null;
+  final hash = bytesToHex(await sha256OfFile(binaryPath));
+  if (expectedHash != null && hash != expectedHash.toLowerCase()) return null;
 
-  final params = BinarySeeder.paramsFor(platform);
   final storageDir = '$profileDir/binary-updates/$platform/$version';
   Directory(storageDir).createSync(recursive: true);
 
-  final storeCount = maxFragments < params.n ? maxFragments : params.n;
-  if (storeCount > 0) {
-    final rs = ReedSolomon.withParams(params.n, params.k);
-    final outputPaths = List.generate(
-        storeCount,
-        (i) => '$storageDir/fragment-${i.toString().padLeft(3, '0')}.bin');
-    rs.encodeFileStreaming(inputPath: binaryPath, outputPaths: outputPaths);
-  }
-
-  File(binaryPath).copySync('$storageDir/complete.bin');
+  final tmp = '$storageDir/complete.bin.tmp';
+  file.copySync(tmp);
+  File(tmp).renameSync('$storageDir/complete.bin');
 
   File('$storageDir/meta.json').writeAsStringSync(
       '{"storedAt":${DateTime.now().millisecondsSinceEpoch},'
-      '"fragmentCount":$storeCount,"binaryHash":"$hash"}');
+      '"binaryHash":"$hash"}');
 
-  return SeedFileResult(fragmentCount: storeCount, binaryHash: hash);
-}
-
-/// SHA-256 of [file] as lowercase hex (same format as
-/// [BinarySeeder.computeHash]), computed by streaming the file in chunks.
-Future<String> _sha256OfFile(File file) async {
-  final digest = await sha256.bind(file.openRead()).last;
-  return bytesToHex(Uint8List.fromList(digest.bytes));
-}
-
-/// Encodes complete binaries into Reed-Solomon erasure fragments and stores
-/// them in [BinaryFragmentStore], turning this node into a distribution
-/// source for in-network binary updates (§19.6.2).
-class BinarySeeder {
-  final BinaryFragmentStore _store;
-  final CLogger _log;
-
-  BinarySeeder({required this._store, String? profileDir})
-      : _log = CLogger.get('bin-seeder', profileDir: profileDir);
-
-  /// Per-platform Reed-Solomon parameters (§19.6.2).
-  static const Map<String, ({int n, int k})> platformParams = {
-    'android': (n: 30, k: 21),
-    'linux': (n: 50, k: 35),
-    'windows': (n: 50, k: 35),
-  };
-
-  /// Get the RS parameters for a platform. Falls back to default (N=10, K=7)
-  /// for unknown platforms.
-  static ({int n, int k}) paramsFor(String platform) {
-    return platformParams[platform] ??
-        (n: ReedSolomon.defaultN, k: ReedSolomon.defaultK);
-  }
-
-  /// Compute SHA-256 hash of the binary for the availability record.
-  String computeHash(Uint8List binary) {
-    return bytesToHex(SodiumFFI().sha256(binary));
-  }
-
-  /// Encode [binary] into erasure fragments and store them in the fragment
-  /// store. Also stores the complete binary itself. Returns the number of
-  /// fragments stored, or 0 on failure.
-  ///
-  /// If fragments for this platform/version already exist, skips encoding
-  /// (idempotent). [maxFragments] limits how many fragments this node stores
-  /// (§19.6.2: mobile=1-2, desktop=6-8, bootstrap=all). Pass null for all.
-  Future<int> seed({
-    required Uint8List binary,
-    required String platform,
-    required String version,
-    int? maxFragments,
-  }) async {
-    try {
-      final existing = await _store.availableFragments(platform, version);
-      if (existing.isNotEmpty) {
-        _log.debug('seed $platform/$version: already have '
-            '${existing.length} fragments, skipping encode');
-        return existing.length;
-      }
-
-      final params = paramsFor(platform);
-      final hash = computeHash(binary);
-      _log.info('seed $platform/$version: encoding ${binary.length}B '
-          '(N=${params.n}, K=${params.k}, hash=$hash)');
-
-      await _store.storeComplete(platform, version, binary);
-
-      final sw = Stopwatch()..start();
-      final rs = ReedSolomon.withParams(params.n, params.k);
-      final fragments = rs.encode(binary);
-      sw.stop();
-      _log.info('seed $platform/$version: encoded ${fragments.length} '
-          'fragments in ${sw.elapsedMilliseconds}ms');
-
-      final storeCount = (maxFragments != null && maxFragments < fragments.length)
-          ? maxFragments
-          : fragments.length;
-
-      for (var i = 0; i < storeCount; i++) {
-        await _store.storeFragment(platform, version, i, fragments[i]);
-      }
-
-      _log.info('seed $platform/$version: stored $storeCount/'
-          '${fragments.length} fragments');
-      return storeCount;
-    } catch (e) {
-      _log.error('seed $platform/$version failed: $e');
-      return 0;
-    }
-  }
-
-  /// Check if this node has fragments worth seeding for the given
-  /// platform/version.
-  Future<bool> isSeeding(String platform, String version) async {
-    if (await _store.hasComplete(platform, version)) return true;
-    final fragments = await _store.availableFragments(platform, version);
-    return fragments.isNotEmpty;
-  }
+  return SeedFileResult(binaryHash: hash, bytes: file.lengthSync());
 }

@@ -1,7 +1,8 @@
-import 'package:mycelium/message.dart' show Inbound;
+import 'package:mycelium/message.dart' show Inbound, Outbound;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_pair.dart' show MailboxPair;
 import 'package:mycelium/mailbox_group_pair.dart' show MailboxGroupPair;
+import 'package:mycelium/day_key_notice.dart' show DayKeyNotice;
 
 /// The inbound of the mailbox: what arrives for THIS identity, and what
 /// of it goes upwards.
@@ -112,8 +113,39 @@ extension MailboxInbound on Mailbox {
   /// has been DECIDED above that the sender is a contact. The IDENTIFIER
   /// only, no content and no time (file header): the content is the
   /// application's, the time is not stored at all (V-2 = b, V-4).
+  ///
+  /// LAST SEEN (§6.3, S407 P11): a delivery that came DIRECTLY sets the
+  /// contact's `lastSeen` to [Inbound.origin] — "from the most recent received
+  /// packet". One forwarded or collected carries no origin (its address is the
+  /// forwarder's or holder's) and leaves it. A second copy never gets here
+  /// ([inboundAccept] returns first): a replayed packet from a stranger's
+  /// address cannot move the route.
   void inboundMark(Inbound e) {
-    contactRemember(e.from);
+    final o = e.origin;
+    contactRemember(e.from, ip: o?.address, port: o?.port);
     histories.store.incomingKeep(e.identifier);
+  }
+
+  /// A receipt of THIS identity (`Messages.onReceiptToMailbox`; only for an
+  /// open sending — a duplicate is ignored before, §9.2). For a contact it
+  /// is the record's second edge (§6.3 "and on every acknowledgement"):
+  /// `lastSuccess` becomes the time of the receipt, and a receipt that came
+  /// DIRECTLY ([Outbound.acknowledgedFrom]) also sets `lastSeen`. Then the
+  /// day-key count of contacts and group pairs (`day_key_notice.dart`).
+  void receiptArrived(Outbound out) {
+    final k = contactOrNull(identifierFrom(out.to));
+    if (k != null) {
+      final o = out.acknowledgedFrom;
+      // D-66: `lastSuccess` alone is held in memory and written with the
+      // next save due anyway or at the orderly stop ([Mailbox.memorySave]);
+      // a moved `lastSeen` is written now, as from a message.
+      final moved = o != null && !(k.lastSeen?.equal(o) ?? false);
+      contactRemember(k.address,
+          ip: o?.address,
+          port: o?.port,
+          lastSuccess: out.acknowledgedAt ?? DateTime.now(),
+          save: moved);
+    }
+    dayKeyNoticeAcked(out);
   }
 }

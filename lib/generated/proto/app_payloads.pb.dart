@@ -1082,12 +1082,12 @@ class GroupCreate extends $pb.GeneratedMessage {
   void clearPicture() => clearField(5);
 }
 
-class GroupInviteV3 extends $pb.GeneratedMessage {
-  factory GroupInviteV3({
+class GroupInvite extends $pb.GeneratedMessage {
+  factory GroupInvite({
     $core.List<$core.int>? groupId,
     $core.String? groupName,
     $core.List<$core.int>? inviterId,
-    $core.Iterable<GroupMemberV3>? members,
+    $core.Iterable<GroupMember>? members,
     $core.List<$core.int>? groupPicture,
     $core.String? groupDescription,
     $fixnum.Int64? membershipEpoch,
@@ -1095,6 +1095,7 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? membershipSigEd25519,
     $core.List<$core.int>? membershipSigMlDsa,
     $core.Iterable<GroupPairSeed>? pairSeeds,
+    SharedKeyStep? sharedKeyStep,
   }) {
     final $result = create();
     if (groupId != null) {
@@ -1130,17 +1131,20 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     if (pairSeeds != null) {
       $result.pairSeeds.addAll(pairSeeds);
     }
+    if (sharedKeyStep != null) {
+      $result.sharedKeyStep = sharedKeyStep;
+    }
     return $result;
   }
-  GroupInviteV3._() : super();
-  factory GroupInviteV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory GroupInviteV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  GroupInvite._() : super();
+  factory GroupInvite.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupInvite.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupInviteV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupInvite', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
     ..aOS(2, _omitFieldNames ? '' : 'groupName')
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'inviterId', $pb.PbFieldType.OY)
-    ..pc<GroupMemberV3>(4, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMemberV3.create)
+    ..pc<GroupMember>(4, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'groupPicture', $pb.PbFieldType.OY)
     ..aOS(6, _omitFieldNames ? '' : 'groupDescription')
     ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'membershipEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1148,6 +1152,7 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'membershipSigEd25519', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'membershipSigMlDsa', $pb.PbFieldType.OY)
     ..pc<GroupPairSeed>(11, _omitFieldNames ? '' : 'pairSeeds', $pb.PbFieldType.PM, subBuilder: GroupPairSeed.create)
+    ..aOM<SharedKeyStep>(12, _omitFieldNames ? '' : 'sharedKeyStep', subBuilder: SharedKeyStep.create)
     ..hasRequiredFields = false
   ;
 
@@ -1155,22 +1160,22 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  GroupInviteV3 clone() => GroupInviteV3()..mergeFromMessage(this);
+  GroupInvite clone() => GroupInvite()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  GroupInviteV3 copyWith(void Function(GroupInviteV3) updates) => super.copyWith((message) => updates(message as GroupInviteV3)) as GroupInviteV3;
+  GroupInvite copyWith(void Function(GroupInvite) updates) => super.copyWith((message) => updates(message as GroupInvite)) as GroupInvite;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static GroupInviteV3 create() => GroupInviteV3._();
-  GroupInviteV3 createEmptyInstance() => create();
-  static $pb.PbList<GroupInviteV3> createRepeated() => $pb.PbList<GroupInviteV3>();
+  static GroupInvite create() => GroupInvite._();
+  GroupInvite createEmptyInstance() => create();
+  static $pb.PbList<GroupInvite> createRepeated() => $pb.PbList<GroupInvite>();
   @$core.pragma('dart2js:noInline')
-  static GroupInviteV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupInviteV3>(create);
-  static GroupInviteV3? _defaultInstance;
+  static GroupInvite getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupInvite>(create);
+  static GroupInvite? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get groupId => $_getN(0);
@@ -1200,7 +1205,7 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
   void clearInviterId() => clearField(3);
 
   @$pb.TagNumber(4)
-  $core.List<GroupMemberV3> get members => $_getList(3);
+  $core.List<GroupMember> get members => $_getList(3);
 
   @$pb.TagNumber(5)
   $core.List<$core.int> get groupPicture => $_getN(4);
@@ -1262,10 +1267,23 @@ class GroupInviteV3 extends $pb.GeneratedMessage {
   /// outside the membership hash.
   @$pb.TagNumber(11)
   $core.List<GroupPairSeed> get pairSeeds => $_getList(10);
+
+  /// §16.2.5 "Joining": on the shared key, the generation and the step after
+  /// the joining this update reports. An older 4.2 device ignores it.
+  @$pb.TagNumber(12)
+  SharedKeyStep get sharedKeyStep => $_getN(11);
+  @$pb.TagNumber(12)
+  set sharedKeyStep(SharedKeyStep v) { setField(12, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasSharedKeyStep() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearSharedKeyStep() => clearField(12);
+  @$pb.TagNumber(12)
+  SharedKeyStep ensureSharedKeyStep() => $_ensure(11);
 }
 
-class GroupMemberV3 extends $pb.GeneratedMessage {
-  factory GroupMemberV3({
+class GroupMember extends $pb.GeneratedMessage {
+  factory GroupMember({
     $core.List<$core.int>? nodeId,
     $core.String? displayName,
     $core.String? role,
@@ -1276,6 +1294,9 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? addressSigEd25519,
     $core.List<$core.int>? addressSigMlDsa,
     $core.List<$core.int>? neighbours,
+    $core.int? capabilities,
+    $fixnum.Int64? viewEpoch,
+    $core.bool? readsPairTag,
   }) {
     final $result = create();
     if (nodeId != null) {
@@ -1308,13 +1329,22 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     if (neighbours != null) {
       $result.neighbours = neighbours;
     }
+    if (capabilities != null) {
+      $result.capabilities = capabilities;
+    }
+    if (viewEpoch != null) {
+      $result.viewEpoch = viewEpoch;
+    }
+    if (readsPairTag != null) {
+      $result.readsPairTag = readsPairTag;
+    }
     return $result;
   }
-  GroupMemberV3._() : super();
-  factory GroupMemberV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory GroupMemberV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  GroupMember._() : super();
+  factory GroupMember.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupMember.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupMemberV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupMember', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'nodeId', $pb.PbFieldType.OY)
     ..aOS(2, _omitFieldNames ? '' : 'displayName')
     ..aOS(3, _omitFieldNames ? '' : 'role')
@@ -1325,6 +1355,9 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'addressSigEd25519', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'addressSigMlDsa', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'neighbours', $pb.PbFieldType.OY)
+    ..a<$core.int>(11, _omitFieldNames ? '' : 'capabilities', $pb.PbFieldType.OU3)
+    ..a<$fixnum.Int64>(12, _omitFieldNames ? '' : 'viewEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(13, _omitFieldNames ? '' : 'readsPairTag')
     ..hasRequiredFields = false
   ;
 
@@ -1332,22 +1365,22 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  GroupMemberV3 clone() => GroupMemberV3()..mergeFromMessage(this);
+  GroupMember clone() => GroupMember()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  GroupMemberV3 copyWith(void Function(GroupMemberV3) updates) => super.copyWith((message) => updates(message as GroupMemberV3)) as GroupMemberV3;
+  GroupMember copyWith(void Function(GroupMember) updates) => super.copyWith((message) => updates(message as GroupMember)) as GroupMember;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static GroupMemberV3 create() => GroupMemberV3._();
-  GroupMemberV3 createEmptyInstance() => create();
-  static $pb.PbList<GroupMemberV3> createRepeated() => $pb.PbList<GroupMemberV3>();
+  static GroupMember create() => GroupMember._();
+  GroupMember createEmptyInstance() => create();
+  static $pb.PbList<GroupMember> createRepeated() => $pb.PbList<GroupMember>();
   @$core.pragma('dart2js:noInline')
-  static GroupMemberV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupMemberV3>(create);
-  static GroupMemberV3? _defaultInstance;
+  static GroupMember getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupMember>(create);
+  static GroupMember? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get nodeId => $_getN(0);
@@ -1442,6 +1475,43 @@ class GroupMemberV3 extends $pb.GeneratedMessage {
   $core.bool hasNeighbours() => $_has(9);
   @$pb.TagNumber(10)
   void clearNeighbours() => clearField(10);
+
+  /// §16.2.2 (S407 channel step 1): only between owner and admins of a
+  /// private channel. The capabilities the member showed in its acceptance
+  /// (`GroupJoin.capabilities`) and, for a subscriber, the epoch of the
+  /// short list (owner and admins) it was last given — 0: it holds the
+  /// complete list. An older 4.2 device ignores both.
+  @$pb.TagNumber(11)
+  $core.int get capabilities => $_getIZ(10);
+  @$pb.TagNumber(11)
+  set capabilities($core.int v) { $_setUnsignedInt32(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasCapabilities() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearCapabilities() => clearField(11);
+
+  @$pb.TagNumber(12)
+  $fixnum.Int64 get viewEpoch => $_getI64(11);
+  @$pb.TagNumber(12)
+  set viewEpoch($fixnum.Int64 v) { $_setInt64(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasViewEpoch() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearViewEpoch() => clearField(12);
+
+  /// S407-UMSCHLAG (§4.4.3, §1.2 principle 8): the member reads the envelope
+  /// with the pair tag instead of signatures — set by the member itself in its
+  /// own entry (13: fields 11/12 belong to the channel list). 4.2.3 does not
+  /// know the field and skips it; a co-member that sees it seals its group
+  /// legs to this member with the tag.
+  @$pb.TagNumber(13)
+  $core.bool get readsPairTag => $_getBF(12);
+  @$pb.TagNumber(13)
+  set readsPairTag($core.bool v) { $_setBool(12, v); }
+  @$pb.TagNumber(13)
+  $core.bool hasReadsPairTag() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearReadsPairTag() => clearField(13);
 }
 
 /// B-3 (§4.3): the pair secret seed of the receiver with one co-member.
@@ -1514,7 +1584,9 @@ class GroupPairSeed extends $pb.GeneratedMessage {
 class GroupJoin extends $pb.GeneratedMessage {
   factory GroupJoin({
     $core.List<$core.int>? groupId,
-    GroupMemberV3? member,
+    GroupMember? member,
+    $core.int? capabilities,
+    $core.List<$core.int>? authorPk,
   }) {
     final $result = create();
     if (groupId != null) {
@@ -1522,6 +1594,12 @@ class GroupJoin extends $pb.GeneratedMessage {
     }
     if (member != null) {
       $result.member = member;
+    }
+    if (capabilities != null) {
+      $result.capabilities = capabilities;
+    }
+    if (authorPk != null) {
+      $result.authorPk = authorPk;
     }
     return $result;
   }
@@ -1531,7 +1609,9 @@ class GroupJoin extends $pb.GeneratedMessage {
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupJoin', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
-    ..aOM<GroupMemberV3>(2, _omitFieldNames ? '' : 'member', subBuilder: GroupMemberV3.create)
+    ..aOM<GroupMember>(2, _omitFieldNames ? '' : 'member', subBuilder: GroupMember.create)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'capabilities', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'authorPk', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -1566,15 +1646,39 @@ class GroupJoin extends $pb.GeneratedMessage {
   void clearGroupId() => clearField(1);
 
   @$pb.TagNumber(2)
-  GroupMemberV3 get member => $_getN(1);
+  GroupMember get member => $_getN(1);
   @$pb.TagNumber(2)
-  set member(GroupMemberV3 v) { setField(2, v); }
+  set member(GroupMember v) { setField(2, v); }
   @$pb.TagNumber(2)
   $core.bool hasMember() => $_has(1);
   @$pb.TagNumber(2)
   void clearMember() => clearField(2);
   @$pb.TagNumber(2)
-  GroupMemberV3 ensureMember() => $_ensure(1);
+  GroupMember ensureMember() => $_ensure(1);
+
+  /// Retired before any release (S407 channel step 2): the capability now
+  /// travels in its own notice (`CapabilityNotice`, §16.2.5). Never written,
+  /// never read; the number stays taken.
+  @$pb.TagNumber(3)
+  $core.int get capabilities => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set capabilities($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasCapabilities() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCapabilities() => clearField(3);
+
+  /// §16.2.5 "Joining": the author key the joining member names, where it may
+  /// post on the shared key; owner or admin certify it. Absent at an older
+  /// 4.2 device and where nothing is posted on the shared key.
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get authorPk => $_getN(3);
+  @$pb.TagNumber(4)
+  set authorPk($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasAuthorPk() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAuthorPk() => clearField(4);
 }
 
 /// GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
@@ -2037,7 +2141,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
     $core.List<$core.int>? welcomeMessage,
     $core.List<$core.int>? channelPicture,
     $core.String? channelDescription,
-    $core.Iterable<GroupMemberV3>? members,
+    $core.Iterable<GroupMember>? members,
     $core.bool? isPublic,
     $core.bool? isAdult,
     $core.String? language,
@@ -2045,6 +2149,11 @@ class ChannelInvite extends $pb.GeneratedMessage {
     $core.List<$core.int>? membershipHash,
     $core.List<$core.int>? membershipSigEd25519,
     $core.List<$core.int>? membershipSigMlDsa,
+    $core.Iterable<GroupPairSeed>? pairSeeds,
+    $core.bool? roleView,
+    $fixnum.Int64? roleEpoch,
+    $fixnum.Int64? membersEpoch,
+    SharedKeyStep? sharedKeyStep,
   }) {
     final $result = create();
     if (channelId != null) {
@@ -2092,6 +2201,21 @@ class ChannelInvite extends $pb.GeneratedMessage {
     if (membershipSigMlDsa != null) {
       $result.membershipSigMlDsa = membershipSigMlDsa;
     }
+    if (pairSeeds != null) {
+      $result.pairSeeds.addAll(pairSeeds);
+    }
+    if (roleView != null) {
+      $result.roleView = roleView;
+    }
+    if (roleEpoch != null) {
+      $result.roleEpoch = roleEpoch;
+    }
+    if (membersEpoch != null) {
+      $result.membersEpoch = membersEpoch;
+    }
+    if (sharedKeyStep != null) {
+      $result.sharedKeyStep = sharedKeyStep;
+    }
     return $result;
   }
   ChannelInvite._() : super();
@@ -2106,7 +2230,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'welcomeMessage', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'channelPicture', $pb.PbFieldType.OY)
     ..aOS(7, _omitFieldNames ? '' : 'channelDescription')
-    ..pc<GroupMemberV3>(8, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMemberV3.create)
+    ..pc<GroupMember>(8, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
     ..aOB(9, _omitFieldNames ? '' : 'isPublic')
     ..aOB(10, _omitFieldNames ? '' : 'isAdult')
     ..aOS(11, _omitFieldNames ? '' : 'language')
@@ -2114,6 +2238,11 @@ class ChannelInvite extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(13, _omitFieldNames ? '' : 'membershipHash', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(14, _omitFieldNames ? '' : 'membershipSigEd25519', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(15, _omitFieldNames ? '' : 'membershipSigMlDsa', $pb.PbFieldType.OY)
+    ..pc<GroupPairSeed>(16, _omitFieldNames ? '' : 'pairSeeds', $pb.PbFieldType.PM, subBuilder: GroupPairSeed.create)
+    ..aOB(17, _omitFieldNames ? '' : 'roleView')
+    ..a<$fixnum.Int64>(18, _omitFieldNames ? '' : 'roleEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(19, _omitFieldNames ? '' : 'membersEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOM<SharedKeyStep>(20, _omitFieldNames ? '' : 'sharedKeyStep', subBuilder: SharedKeyStep.create)
     ..hasRequiredFields = false
   ;
 
@@ -2202,7 +2331,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
   void clearChannelDescription() => clearField(7);
 
   @$pb.TagNumber(8)
-  $core.List<GroupMemberV3> get members => $_getList(7);
+  $core.List<GroupMember> get members => $_getList(7);
 
   @$pb.TagNumber(9)
   $core.bool get isPublic => $_getBF(8);
@@ -2267,6 +2396,56 @@ class ChannelInvite extends $pb.GeneratedMessage {
   $core.bool hasMembershipSigMlDsa() => $_has(14);
   @$pb.TagNumber(15)
   void clearMembershipSigMlDsa() => clearField(15);
+
+  /// §4.3, §16.2.2: s_AB of the receiver with each co-member that this
+  /// invitation makes a co-member — as GroupInvite.pair_seeds.
+  @$pb.TagNumber(16)
+  $core.List<GroupPairSeed> get pairSeeds => $_getList(15);
+
+  /// §16.2.2 (S407 channel step 1): `role_view` — the list names the owner,
+  /// the admins and the receiver only; `membership_epoch` and the hash are
+  /// then those of this short list. `role_epoch` is the epoch of the role
+  /// state (owner and admins), `members_epoch` the membership epoch that
+  /// owner and admins keep, as a number. An older 4.2 device reads the
+  /// short list as the whole list and ignores the three fields.
+  @$pb.TagNumber(17)
+  $core.bool get roleView => $_getBF(16);
+  @$pb.TagNumber(17)
+  set roleView($core.bool v) { $_setBool(16, v); }
+  @$pb.TagNumber(17)
+  $core.bool hasRoleView() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearRoleView() => clearField(17);
+
+  @$pb.TagNumber(18)
+  $fixnum.Int64 get roleEpoch => $_getI64(17);
+  @$pb.TagNumber(18)
+  set roleEpoch($fixnum.Int64 v) { $_setInt64(17, v); }
+  @$pb.TagNumber(18)
+  $core.bool hasRoleEpoch() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearRoleEpoch() => clearField(18);
+
+  @$pb.TagNumber(19)
+  $fixnum.Int64 get membersEpoch => $_getI64(18);
+  @$pb.TagNumber(19)
+  set membersEpoch($fixnum.Int64 v) { $_setInt64(18, v); }
+  @$pb.TagNumber(19)
+  $core.bool hasMembersEpoch() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearMembersEpoch() => clearField(19);
+
+  /// §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  @$pb.TagNumber(20)
+  SharedKeyStep get sharedKeyStep => $_getN(19);
+  @$pb.TagNumber(20)
+  set sharedKeyStep(SharedKeyStep v) { setField(20, v); }
+  @$pb.TagNumber(20)
+  $core.bool hasSharedKeyStep() => $_has(19);
+  @$pb.TagNumber(20)
+  void clearSharedKeyStep() => clearField(20);
+  @$pb.TagNumber(20)
+  SharedKeyStep ensureSharedKeyStep() => $_ensure(19);
 }
 
 class ChannelRoleUpdate extends $pb.GeneratedMessage {
@@ -2350,10 +2529,26 @@ class ChannelRoleUpdate extends $pb.GeneratedMessage {
 class ChannelLeave extends $pb.GeneratedMessage {
   factory ChannelLeave({
     $core.List<$core.int>? channelId,
+    $fixnum.Int64? roleEpoch,
+    $fixnum.Int64? membersEpoch,
+    GroupMember? newOwner,
+    GroupPairSeed? pairSeed,
   }) {
     final $result = create();
     if (channelId != null) {
       $result.channelId = channelId;
+    }
+    if (roleEpoch != null) {
+      $result.roleEpoch = roleEpoch;
+    }
+    if (membersEpoch != null) {
+      $result.membersEpoch = membersEpoch;
+    }
+    if (newOwner != null) {
+      $result.newOwner = newOwner;
+    }
+    if (pairSeed != null) {
+      $result.pairSeed = pairSeed;
     }
     return $result;
   }
@@ -2363,6 +2558,10 @@ class ChannelLeave extends $pb.GeneratedMessage {
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ChannelLeave', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'roleEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'membersEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOM<GroupMember>(4, _omitFieldNames ? '' : 'newOwner', subBuilder: GroupMember.create)
+    ..aOM<GroupPairSeed>(5, _omitFieldNames ? '' : 'pairSeed', subBuilder: GroupPairSeed.create)
     ..hasRequiredFields = false
   ;
 
@@ -2395,6 +2594,317 @@ class ChannelLeave extends $pb.GeneratedMessage {
   $core.bool hasChannelId() => $_has(0);
   @$pb.TagNumber(1)
   void clearChannelId() => clearField(1);
+
+  /// §16.2.2 (S407 channel step 1): the leaving of an owner or admin changes
+  /// the role state; the epochs after it, and for an owner the member that
+  /// takes the role — its entry and the receiver's `s_AB` with it, where the
+  /// receiver did not know it. Absent from an older 4.2 device.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get roleEpoch => $_getI64(1);
+  @$pb.TagNumber(2)
+  set roleEpoch($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasRoleEpoch() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRoleEpoch() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get membersEpoch => $_getI64(2);
+  @$pb.TagNumber(3)
+  set membersEpoch($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasMembersEpoch() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMembersEpoch() => clearField(3);
+
+  @$pb.TagNumber(4)
+  GroupMember get newOwner => $_getN(3);
+  @$pb.TagNumber(4)
+  set newOwner(GroupMember v) { setField(4, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasNewOwner() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearNewOwner() => clearField(4);
+  @$pb.TagNumber(4)
+  GroupMember ensureNewOwner() => $_ensure(3);
+
+  @$pb.TagNumber(5)
+  GroupPairSeed get pairSeed => $_getN(4);
+  @$pb.TagNumber(5)
+  set pairSeed(GroupPairSeed v) { setField(5, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasPairSeed() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearPairSeed() => clearField(5);
+  @$pb.TagNumber(5)
+  GroupPairSeed ensurePairSeed() => $_ensure(4);
+}
+
+/// §16.2.2 (S407 channel step 1): a membership change of a private channel
+/// as a change — never the whole list again. `upserted`: members new to the
+/// receiver (full entry) or whose role changed; `removed`: members gone.
+/// Sent only to members that showed the capability (`GroupJoin`).
+class ChannelMembersChange extends $pb.GeneratedMessage {
+  factory ChannelMembersChange({
+    $core.List<$core.int>? channelId,
+    $fixnum.Int64? membersEpoch,
+    $fixnum.Int64? roleEpoch,
+    $core.Iterable<GroupMember>? upserted,
+    $core.Iterable<$core.List<$core.int>>? removed,
+    $core.Iterable<GroupPairSeed>? pairSeeds,
+    $core.List<$core.int>? stateHash,
+    SharedKeyStep? sharedKeyStep,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (membersEpoch != null) {
+      $result.membersEpoch = membersEpoch;
+    }
+    if (roleEpoch != null) {
+      $result.roleEpoch = roleEpoch;
+    }
+    if (upserted != null) {
+      $result.upserted.addAll(upserted);
+    }
+    if (removed != null) {
+      $result.removed.addAll(removed);
+    }
+    if (pairSeeds != null) {
+      $result.pairSeeds.addAll(pairSeeds);
+    }
+    if (stateHash != null) {
+      $result.stateHash = stateHash;
+    }
+    if (sharedKeyStep != null) {
+      $result.sharedKeyStep = sharedKeyStep;
+    }
+    return $result;
+  }
+  ChannelMembersChange._() : super();
+  factory ChannelMembersChange.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ChannelMembersChange.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ChannelMembersChange', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'membersEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'roleEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..pc<GroupMember>(4, _omitFieldNames ? '' : 'upserted', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
+    ..p<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'removed', $pb.PbFieldType.PY)
+    ..pc<GroupPairSeed>(6, _omitFieldNames ? '' : 'pairSeeds', $pb.PbFieldType.PM, subBuilder: GroupPairSeed.create)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'stateHash', $pb.PbFieldType.OY)
+    ..aOM<SharedKeyStep>(8, _omitFieldNames ? '' : 'sharedKeyStep', subBuilder: SharedKeyStep.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ChannelMembersChange clone() => ChannelMembersChange()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ChannelMembersChange copyWith(void Function(ChannelMembersChange) updates) => super.copyWith((message) => updates(message as ChannelMembersChange)) as ChannelMembersChange;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelMembersChange create() => ChannelMembersChange._();
+  ChannelMembersChange createEmptyInstance() => create();
+  static $pb.PbList<ChannelMembersChange> createRepeated() => $pb.PbList<ChannelMembersChange>();
+  @$core.pragma('dart2js:noInline')
+  static ChannelMembersChange getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ChannelMembersChange>(create);
+  static ChannelMembersChange? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get membersEpoch => $_getI64(1);
+  @$pb.TagNumber(2)
+  set membersEpoch($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMembersEpoch() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMembersEpoch() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get roleEpoch => $_getI64(2);
+  @$pb.TagNumber(3)
+  set roleEpoch($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasRoleEpoch() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRoleEpoch() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<GroupMember> get upserted => $_getList(3);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.List<$core.int>> get removed => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.List<GroupPairSeed> get pairSeeds => $_getList(5);
+
+  /// The canonical hash of the state after the change, as the receiver
+  /// should hold it (complete list for owner and admins, role state for a
+  /// subscriber); a different local hash asks a resync.
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get stateHash => $_getN(6);
+  @$pb.TagNumber(7)
+  set stateHash($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasStateHash() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearStateHash() => clearField(7);
+
+  /// §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  @$pb.TagNumber(8)
+  SharedKeyStep get sharedKeyStep => $_getN(7);
+  @$pb.TagNumber(8)
+  set sharedKeyStep(SharedKeyStep v) { setField(8, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSharedKeyStep() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSharedKeyStep() => clearField(8);
+  @$pb.TagNumber(8)
+  SharedKeyStep ensureSharedKeyStep() => $_ensure(7);
+}
+
+/// §16.2.2 (S407 group list): a membership change of a GROUP as a change —
+/// never the whole list again. `upserted`: members new to the receiver (full
+/// entry only for them) or whose role changed; `removed`: members gone (the
+/// receiver itself: its removal). The receiver applies it on top of the state
+/// it holds and checks `state_hash` — the canonical membership hash after the
+/// change; a different local hash asks a resync. Sent only to members that
+/// showed the capability of the member list (`CapabilityNotice`, bit 1); an
+/// older 4.2 member gets the `GroupInvite` update as before.
+class GroupMembersChange extends $pb.GeneratedMessage {
+  factory GroupMembersChange({
+    $core.List<$core.int>? groupId,
+    $fixnum.Int64? membershipEpoch,
+    $core.Iterable<GroupMember>? upserted,
+    $core.Iterable<$core.List<$core.int>>? removed,
+    $core.Iterable<GroupPairSeed>? pairSeeds,
+    $core.List<$core.int>? stateHash,
+    SharedKeyStep? sharedKeyStep,
+  }) {
+    final $result = create();
+    if (groupId != null) {
+      $result.groupId = groupId;
+    }
+    if (membershipEpoch != null) {
+      $result.membershipEpoch = membershipEpoch;
+    }
+    if (upserted != null) {
+      $result.upserted.addAll(upserted);
+    }
+    if (removed != null) {
+      $result.removed.addAll(removed);
+    }
+    if (pairSeeds != null) {
+      $result.pairSeeds.addAll(pairSeeds);
+    }
+    if (stateHash != null) {
+      $result.stateHash = stateHash;
+    }
+    if (sharedKeyStep != null) {
+      $result.sharedKeyStep = sharedKeyStep;
+    }
+    return $result;
+  }
+  GroupMembersChange._() : super();
+  factory GroupMembersChange.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupMembersChange.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupMembersChange', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'membershipEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..pc<GroupMember>(3, _omitFieldNames ? '' : 'upserted', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
+    ..p<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'removed', $pb.PbFieldType.PY)
+    ..pc<GroupPairSeed>(5, _omitFieldNames ? '' : 'pairSeeds', $pb.PbFieldType.PM, subBuilder: GroupPairSeed.create)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'stateHash', $pb.PbFieldType.OY)
+    ..aOM<SharedKeyStep>(7, _omitFieldNames ? '' : 'sharedKeyStep', subBuilder: SharedKeyStep.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupMembersChange clone() => GroupMembersChange()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupMembersChange copyWith(void Function(GroupMembersChange) updates) => super.copyWith((message) => updates(message as GroupMembersChange)) as GroupMembersChange;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupMembersChange create() => GroupMembersChange._();
+  GroupMembersChange createEmptyInstance() => create();
+  static $pb.PbList<GroupMembersChange> createRepeated() => $pb.PbList<GroupMembersChange>();
+  @$core.pragma('dart2js:noInline')
+  static GroupMembersChange getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupMembersChange>(create);
+  static GroupMembersChange? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get groupId => $_getN(0);
+  @$pb.TagNumber(1)
+  set groupId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasGroupId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGroupId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get membershipEpoch => $_getI64(1);
+  @$pb.TagNumber(2)
+  set membershipEpoch($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMembershipEpoch() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMembershipEpoch() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<GroupMember> get upserted => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.List<$core.int>> get removed => $_getList(3);
+
+  @$pb.TagNumber(5)
+  $core.List<GroupPairSeed> get pairSeeds => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get stateHash => $_getN(5);
+  @$pb.TagNumber(6)
+  set stateHash($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasStateHash() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearStateHash() => clearField(6);
+
+  /// §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  @$pb.TagNumber(7)
+  SharedKeyStep get sharedKeyStep => $_getN(6);
+  @$pb.TagNumber(7)
+  set sharedKeyStep(SharedKeyStep v) { setField(7, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasSharedKeyStep() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSharedKeyStep() => clearField(7);
+  @$pb.TagNumber(7)
+  SharedKeyStep ensureSharedKeyStep() => $_ensure(6);
 }
 
 class ChatConfigUpdate extends $pb.GeneratedMessage {
@@ -2408,6 +2918,8 @@ class ChatConfigUpdate extends $pb.GeneratedMessage {
     $fixnum.Int64? editWindowMs,
     $core.bool? readReceipts,
     $core.bool? typingIndicators,
+    $core.bool? announcementOnly,
+    GroupProfile? profile,
   }) {
     final $result = create();
     if (conversationId != null) {
@@ -2437,6 +2949,12 @@ class ChatConfigUpdate extends $pb.GeneratedMessage {
     if (typingIndicators != null) {
       $result.typingIndicators = typingIndicators;
     }
+    if (announcementOnly != null) {
+      $result.announcementOnly = announcementOnly;
+    }
+    if (profile != null) {
+      $result.profile = profile;
+    }
     return $result;
   }
   ChatConfigUpdate._() : super();
@@ -2453,6 +2971,8 @@ class ChatConfigUpdate extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'editWindowMs', $pb.PbFieldType.OS6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..aOB(8, _omitFieldNames ? '' : 'readReceipts')
     ..aOB(9, _omitFieldNames ? '' : 'typingIndicators')
+    ..aOB(10, _omitFieldNames ? '' : 'announcementOnly')
+    ..aOM<GroupProfile>(11, _omitFieldNames ? '' : 'profile', subBuilder: GroupProfile.create)
     ..hasRequiredFields = false
   ;
 
@@ -2557,6 +3077,132 @@ class ChatConfigUpdate extends $pb.GeneratedMessage {
   $core.bool hasTypingIndicators() => $_has(8);
   @$pb.TagNumber(9)
   void clearTypingIndicators() => clearField(9);
+
+  /// §16.2.2 (S407 group list): the owner's choice of a group between
+  /// discussion and announcement mode. Explicit presence: an older 4.2 admin
+  /// does not set it, and its absence leaves the mode as it was — it never
+  /// switches the mode off.
+  @$pb.TagNumber(10)
+  $core.bool get announcementOnly => $_getBF(9);
+  @$pb.TagNumber(10)
+  set announcementOnly($core.bool v) { $_setBool(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasAnnouncementOnly() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearAnnouncementOnly() => clearField(10);
+
+  /// §16.2.2 (S407 group profile): a change of the name, the description or
+  /// the image of a group or private channel. An update that carries it
+  /// changes those and nothing else — its other fields are not read. Sent
+  /// only to members that showed the capability (`kCapGroupProfile`); its
+  /// other fields carry the settings in force, so that a device that does
+  /// not read it would only take the same settings again.
+  @$pb.TagNumber(11)
+  GroupProfile get profile => $_getN(10);
+  @$pb.TagNumber(11)
+  set profile(GroupProfile v) { setField(11, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasProfile() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearProfile() => clearField(11);
+  @$pb.TagNumber(11)
+  GroupProfile ensureProfile() => $_ensure(10);
+}
+
+/// The fields present are the ones that changed: a description present but
+/// empty removes it, `picture_removed` removes the image; a name is never
+/// empty. (An empty `bytes` does not read back as present in Dart protobuf,
+/// hence the flag.)
+class GroupProfile extends $pb.GeneratedMessage {
+  factory GroupProfile({
+    $core.String? name,
+    $core.String? description,
+    $core.List<$core.int>? picture,
+    $core.bool? pictureRemoved,
+  }) {
+    final $result = create();
+    if (name != null) {
+      $result.name = name;
+    }
+    if (description != null) {
+      $result.description = description;
+    }
+    if (picture != null) {
+      $result.picture = picture;
+    }
+    if (pictureRemoved != null) {
+      $result.pictureRemoved = pictureRemoved;
+    }
+    return $result;
+  }
+  GroupProfile._() : super();
+  factory GroupProfile.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupProfile.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupProfile', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'description')
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'picture', $pb.PbFieldType.OY)
+    ..aOB(4, _omitFieldNames ? '' : 'pictureRemoved')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupProfile clone() => GroupProfile()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupProfile copyWith(void Function(GroupProfile) updates) => super.copyWith((message) => updates(message as GroupProfile)) as GroupProfile;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupProfile create() => GroupProfile._();
+  GroupProfile createEmptyInstance() => create();
+  static $pb.PbList<GroupProfile> createRepeated() => $pb.PbList<GroupProfile>();
+  @$core.pragma('dart2js:noInline')
+  static GroupProfile getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupProfile>(create);
+  static GroupProfile? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String v) { $_setString(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get description => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set description($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDescription() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDescription() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get picture => $_getN(2);
+  @$pb.TagNumber(3)
+  set picture($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasPicture() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPicture() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get pictureRemoved => $_getBF(3);
+  @$pb.TagNumber(4)
+  set pictureRemoved($core.bool v) { $_setBool(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasPictureRemoved() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPictureRemoved() => clearField(4);
 }
 
 class IdentityDeletedNotification extends $pb.GeneratedMessage {
@@ -2840,7 +3486,7 @@ class CallInvite extends $pb.GeneratedMessage {
   ///  Capping: minor < 1000.
   ///
   ///  THE CHECK ITSELF DOES NOT LIE HERE. It belongs to V2.1
-  ///  (`call_service.dart`, `handleCallInviteV3`), together with the rejection reason visible to the
+  ///  (`call_service.dart`, `handleCallInvite`), together with the rejection reason visible to the
   ///  user and its translation. §10.4: a
   ///  call between incompatible versions is explicitly rejected,
   ///  "never allowed to fail silently".
@@ -2914,7 +3560,7 @@ class CallInvite extends $pb.GeneratedMessage {
   ///  benefit. What does change in the middle of the call is resolution
   ///  and bitrate (V1.17); those already stand in `VideoFrame.width/height`
   ///  and are a preset, not a format. A change of the format itself
-  ///  requires a rebuild (`MTV3_CALL_REJOIN`), which renegotiates.
+  ///  requires a rebuild (`MT_CALL_REJOIN`), which renegotiates.
   ///  The negotiation is reliable: `CALL_INVITE`/`CALL_ANSWER` are
   ///  setup frames with ML-DSA, zstd and the normal delivery cascade, not
   ///  live media — they cannot get lost silently.
@@ -3478,6 +4124,73 @@ class CallHangup extends $pb.GeneratedMessage {
   $core.bool hasCallId() => $_has(0);
   @$pb.TagNumber(1)
   void clearCallId() => clearField(1);
+}
+
+/// §17.2 "Missed call": "It carries the `callId` and whether the call was
+/// audio or video." Sent by the caller for a call that ended unanswered; the
+/// callee shows it with its own arrival time.
+class CallMissed extends $pb.GeneratedMessage {
+  factory CallMissed({
+    $core.List<$core.int>? callId,
+    $core.bool? isVideo,
+  }) {
+    final $result = create();
+    if (callId != null) {
+      $result.callId = callId;
+    }
+    if (isVideo != null) {
+      $result.isVideo = isVideo;
+    }
+    return $result;
+  }
+  CallMissed._() : super();
+  factory CallMissed.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CallMissed.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CallMissed', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'callId', $pb.PbFieldType.OY)
+    ..aOB(2, _omitFieldNames ? '' : 'isVideo')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CallMissed clone() => CallMissed()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CallMissed copyWith(void Function(CallMissed) updates) => super.copyWith((message) => updates(message as CallMissed)) as CallMissed;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallMissed create() => CallMissed._();
+  CallMissed createEmptyInstance() => create();
+  static $pb.PbList<CallMissed> createRepeated() => $pb.PbList<CallMissed>();
+  @$core.pragma('dart2js:noInline')
+  static CallMissed getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CallMissed>(create);
+  static CallMissed? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get callId => $_getN(0);
+  @$pb.TagNumber(1)
+  set callId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get isVideo => $_getBF(1);
+  @$pb.TagNumber(2)
+  set isVideo($core.bool v) { $_setBool(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasIsVideo() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearIsVideo() => clearField(2);
 }
 
 class IceCandidate extends $pb.GeneratedMessage {
@@ -5713,6 +6426,387 @@ class EmojiReaction extends $pb.GeneratedMessage {
   void clearRemove() => clearField(3);
 }
 
+/// §16.2.4: the reactions to the posts of a private channel as totals — how
+/// many of each, no identity. The owner sends them to every subscriber and
+/// admin, each as an ordinary 1:1 delivery. They are a state, not a message:
+/// a receiver keeps the newest per post (by `at_ms`).
+class ChannelReactionTotals extends $pb.GeneratedMessage {
+  factory ChannelReactionTotals({
+    $fixnum.Int64? atMs,
+    $core.Iterable<PostReactionTotals>? posts,
+  }) {
+    final $result = create();
+    if (atMs != null) {
+      $result.atMs = atMs;
+    }
+    if (posts != null) {
+      $result.posts.addAll(posts);
+    }
+    return $result;
+  }
+  ChannelReactionTotals._() : super();
+  factory ChannelReactionTotals.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ChannelReactionTotals.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ChannelReactionTotals', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aInt64(1, _omitFieldNames ? '' : 'atMs')
+    ..pc<PostReactionTotals>(2, _omitFieldNames ? '' : 'posts', $pb.PbFieldType.PM, subBuilder: PostReactionTotals.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ChannelReactionTotals clone() => ChannelReactionTotals()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ChannelReactionTotals copyWith(void Function(ChannelReactionTotals) updates) => super.copyWith((message) => updates(message as ChannelReactionTotals)) as ChannelReactionTotals;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelReactionTotals create() => ChannelReactionTotals._();
+  ChannelReactionTotals createEmptyInstance() => create();
+  static $pb.PbList<ChannelReactionTotals> createRepeated() => $pb.PbList<ChannelReactionTotals>();
+  @$core.pragma('dart2js:noInline')
+  static ChannelReactionTotals getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ChannelReactionTotals>(create);
+  static ChannelReactionTotals? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get atMs => $_getI64(0);
+  @$pb.TagNumber(1)
+  set atMs($fixnum.Int64 v) { $_setInt64(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasAtMs() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAtMs() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<PostReactionTotals> get posts => $_getList(1);
+}
+
+class PostReactionTotals extends $pb.GeneratedMessage {
+  factory PostReactionTotals({
+    $core.List<$core.int>? postId,
+    $core.Iterable<ReactionCount>? counts,
+  }) {
+    final $result = create();
+    if (postId != null) {
+      $result.postId = postId;
+    }
+    if (counts != null) {
+      $result.counts.addAll(counts);
+    }
+    return $result;
+  }
+  PostReactionTotals._() : super();
+  factory PostReactionTotals.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PostReactionTotals.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PostReactionTotals', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'postId', $pb.PbFieldType.OY)
+    ..pc<ReactionCount>(2, _omitFieldNames ? '' : 'counts', $pb.PbFieldType.PM, subBuilder: ReactionCount.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PostReactionTotals clone() => PostReactionTotals()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PostReactionTotals copyWith(void Function(PostReactionTotals) updates) => super.copyWith((message) => updates(message as PostReactionTotals)) as PostReactionTotals;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PostReactionTotals create() => PostReactionTotals._();
+  PostReactionTotals createEmptyInstance() => create();
+  static $pb.PbList<PostReactionTotals> createRepeated() => $pb.PbList<PostReactionTotals>();
+  @$core.pragma('dart2js:noInline')
+  static PostReactionTotals getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PostReactionTotals>(create);
+  static PostReactionTotals? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get postId => $_getN(0);
+  @$pb.TagNumber(1)
+  set postId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasPostId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPostId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<ReactionCount> get counts => $_getList(1);
+}
+
+class ReactionCount extends $pb.GeneratedMessage {
+  factory ReactionCount({
+    $core.String? emoji,
+    $core.int? count,
+  }) {
+    final $result = create();
+    if (emoji != null) {
+      $result.emoji = emoji;
+    }
+    if (count != null) {
+      $result.count = count;
+    }
+    return $result;
+  }
+  ReactionCount._() : super();
+  factory ReactionCount.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReactionCount.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReactionCount', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'emoji')
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReactionCount clone() => ReactionCount()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReactionCount copyWith(void Function(ReactionCount) updates) => super.copyWith((message) => updates(message as ReactionCount)) as ReactionCount;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReactionCount create() => ReactionCount._();
+  ReactionCount createEmptyInstance() => create();
+  static $pb.PbList<ReactionCount> createRepeated() => $pb.PbList<ReactionCount>();
+  @$core.pragma('dart2js:noInline')
+  static ReactionCount getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReactionCount>(create);
+  static ReactionCount? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get emoji => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set emoji($core.String v) { $_setString(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasEmoji() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearEmoji() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get count => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set count($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCount() => clearField(2);
+}
+
+/// §16.2.4: who holds which reaction — from the previous owner of a private
+/// channel to the new one when ownership passes (§16.2.2), and from a device
+/// that is no longer the owner for a reaction that still reached it.
+class ChannelReactionHandover extends $pb.GeneratedMessage {
+  factory ChannelReactionHandover({
+    $core.Iterable<PostReactionHolders>? posts,
+    $fixnum.Int64? firstChangeAtMs,
+  }) {
+    final $result = create();
+    if (posts != null) {
+      $result.posts.addAll(posts);
+    }
+    if (firstChangeAtMs != null) {
+      $result.firstChangeAtMs = firstChangeAtMs;
+    }
+    return $result;
+  }
+  ChannelReactionHandover._() : super();
+  factory ChannelReactionHandover.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ChannelReactionHandover.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ChannelReactionHandover', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..pc<PostReactionHolders>(1, _omitFieldNames ? '' : 'posts', $pb.PbFieldType.PM, subBuilder: PostReactionHolders.create)
+    ..aInt64(2, _omitFieldNames ? '' : 'firstChangeAtMs')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ChannelReactionHandover clone() => ChannelReactionHandover()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ChannelReactionHandover copyWith(void Function(ChannelReactionHandover) updates) => super.copyWith((message) => updates(message as ChannelReactionHandover)) as ChannelReactionHandover;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ChannelReactionHandover create() => ChannelReactionHandover._();
+  ChannelReactionHandover createEmptyInstance() => create();
+  static $pb.PbList<ChannelReactionHandover> createRepeated() => $pb.PbList<ChannelReactionHandover>();
+  @$core.pragma('dart2js:noInline')
+  static ChannelReactionHandover getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ChannelReactionHandover>(create);
+  static ChannelReactionHandover? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<PostReactionHolders> get posts => $_getList(0);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get firstChangeAtMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set firstChangeAtMs($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFirstChangeAtMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFirstChangeAtMs() => clearField(2);
+}
+
+class PostReactionHolders extends $pb.GeneratedMessage {
+  factory PostReactionHolders({
+    $core.List<$core.int>? postId,
+    $core.Iterable<ReactionHolder>? holders,
+    $core.bool? pending,
+  }) {
+    final $result = create();
+    if (postId != null) {
+      $result.postId = postId;
+    }
+    if (holders != null) {
+      $result.holders.addAll(holders);
+    }
+    if (pending != null) {
+      $result.pending = pending;
+    }
+    return $result;
+  }
+  PostReactionHolders._() : super();
+  factory PostReactionHolders.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PostReactionHolders.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PostReactionHolders', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'postId', $pb.PbFieldType.OY)
+    ..pc<ReactionHolder>(2, _omitFieldNames ? '' : 'holders', $pb.PbFieldType.PM, subBuilder: ReactionHolder.create)
+    ..aOB(3, _omitFieldNames ? '' : 'pending')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PostReactionHolders clone() => PostReactionHolders()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PostReactionHolders copyWith(void Function(PostReactionHolders) updates) => super.copyWith((message) => updates(message as PostReactionHolders)) as PostReactionHolders;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PostReactionHolders create() => PostReactionHolders._();
+  PostReactionHolders createEmptyInstance() => create();
+  static $pb.PbList<PostReactionHolders> createRepeated() => $pb.PbList<PostReactionHolders>();
+  @$core.pragma('dart2js:noInline')
+  static PostReactionHolders getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PostReactionHolders>(create);
+  static PostReactionHolders? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get postId => $_getN(0);
+  @$pb.TagNumber(1)
+  set postId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasPostId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPostId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<ReactionHolder> get holders => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.bool get pending => $_getBF(2);
+  @$pb.TagNumber(3)
+  set pending($core.bool v) { $_setBool(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasPending() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPending() => clearField(3);
+}
+
+class ReactionHolder extends $pb.GeneratedMessage {
+  factory ReactionHolder({
+    $core.List<$core.int>? userId,
+    $core.String? emoji,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (emoji != null) {
+      $result.emoji = emoji;
+    }
+    return $result;
+  }
+  ReactionHolder._() : super();
+  factory ReactionHolder.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReactionHolder.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReactionHolder', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..aOS(2, _omitFieldNames ? '' : 'emoji')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReactionHolder clone() => ReactionHolder()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReactionHolder copyWith(void Function(ReactionHolder) updates) => super.copyWith((message) => updates(message as ReactionHolder)) as ReactionHolder;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReactionHolder create() => ReactionHolder._();
+  ReactionHolder createEmptyInstance() => create();
+  static $pb.PbList<ReactionHolder> createRepeated() => $pb.PbList<ReactionHolder>();
+  @$core.pragma('dart2js:noInline')
+  static ReactionHolder getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReactionHolder>(create);
+  static ReactionHolder? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get emoji => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set emoji($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasEmoji() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearEmoji() => clearField(2);
+}
+
 class MediaChunk extends $pb.GeneratedMessage {
   factory MediaChunk({
     $core.List<$core.int>? transferId,
@@ -5822,14 +6916,14 @@ class MediaChunk extends $pb.GeneratedMessage {
 ///  ── Two-Stage Media Stage-2 (V3) ────────────────────────────────────
 ///
 ///  MEDIA_ANNOUNCE (Stage 1) carries metadata + thumbnail. The receiver
-///  then asks for the actual content via MTV3_MEDIA_REQUEST (payload =
+///  then asks for the actual content via MT_MEDIA_REQUEST (payload =
 ///  original messageId bytes). The sender splits the file into
-///  MediaChunkV3 frames, each shipped as its own ApplicationFrameV3
+///  MediaRequestChunk frames, each shipped as its own ApplicationFrame
 ///  (per-chunk KEM-encrypted via sendToUser), and finalises with a
-///  MediaCompleteV3 carrying the SHA-256 of the assembled bytes for
+///  MediaRequestComplete carrying the SHA-256 of the assembled bytes for
 ///  receiver-side integrity-check. Architecture §5.7 + §1797.
-class MediaChunkV3 extends $pb.GeneratedMessage {
-  factory MediaChunkV3({
+class MediaRequestChunk extends $pb.GeneratedMessage {
+  factory MediaRequestChunk({
     $core.List<$core.int>? mediaId,
     $core.int? chunkIndex,
     $core.int? totalChunks,
@@ -5850,11 +6944,11 @@ class MediaChunkV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  MediaChunkV3._() : super();
-  factory MediaChunkV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory MediaChunkV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  MediaRequestChunk._() : super();
+  factory MediaRequestChunk.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory MediaRequestChunk.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaChunkV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaRequestChunk', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'mediaId', $pb.PbFieldType.OY)
     ..a<$core.int>(2, _omitFieldNames ? '' : 'chunkIndex', $pb.PbFieldType.OU3)
     ..a<$core.int>(3, _omitFieldNames ? '' : 'totalChunks', $pb.PbFieldType.OU3)
@@ -5866,22 +6960,22 @@ class MediaChunkV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  MediaChunkV3 clone() => MediaChunkV3()..mergeFromMessage(this);
+  MediaRequestChunk clone() => MediaRequestChunk()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  MediaChunkV3 copyWith(void Function(MediaChunkV3) updates) => super.copyWith((message) => updates(message as MediaChunkV3)) as MediaChunkV3;
+  MediaRequestChunk copyWith(void Function(MediaRequestChunk) updates) => super.copyWith((message) => updates(message as MediaRequestChunk)) as MediaRequestChunk;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static MediaChunkV3 create() => MediaChunkV3._();
-  MediaChunkV3 createEmptyInstance() => create();
-  static $pb.PbList<MediaChunkV3> createRepeated() => $pb.PbList<MediaChunkV3>();
+  static MediaRequestChunk create() => MediaRequestChunk._();
+  MediaRequestChunk createEmptyInstance() => create();
+  static $pb.PbList<MediaRequestChunk> createRepeated() => $pb.PbList<MediaRequestChunk>();
   @$core.pragma('dart2js:noInline')
-  static MediaChunkV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaChunkV3>(create);
-  static MediaChunkV3? _defaultInstance;
+  static MediaRequestChunk getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaRequestChunk>(create);
+  static MediaRequestChunk? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get mediaId => $_getN(0);
@@ -5920,8 +7014,8 @@ class MediaChunkV3 extends $pb.GeneratedMessage {
   void clearData() => clearField(4);
 }
 
-class MediaCompleteV3 extends $pb.GeneratedMessage {
-  factory MediaCompleteV3({
+class MediaRequestComplete extends $pb.GeneratedMessage {
+  factory MediaRequestComplete({
     $core.List<$core.int>? mediaId,
     $core.List<$core.int>? contentHash,
     $fixnum.Int64? totalSize,
@@ -5938,11 +7032,11 @@ class MediaCompleteV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  MediaCompleteV3._() : super();
-  factory MediaCompleteV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory MediaCompleteV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  MediaRequestComplete._() : super();
+  factory MediaRequestComplete.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory MediaRequestComplete.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaCompleteV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaRequestComplete', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'mediaId', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'contentHash', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'totalSize', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
@@ -5953,22 +7047,22 @@ class MediaCompleteV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  MediaCompleteV3 clone() => MediaCompleteV3()..mergeFromMessage(this);
+  MediaRequestComplete clone() => MediaRequestComplete()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  MediaCompleteV3 copyWith(void Function(MediaCompleteV3) updates) => super.copyWith((message) => updates(message as MediaCompleteV3)) as MediaCompleteV3;
+  MediaRequestComplete copyWith(void Function(MediaRequestComplete) updates) => super.copyWith((message) => updates(message as MediaRequestComplete)) as MediaRequestComplete;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static MediaCompleteV3 create() => MediaCompleteV3._();
-  MediaCompleteV3 createEmptyInstance() => create();
-  static $pb.PbList<MediaCompleteV3> createRepeated() => $pb.PbList<MediaCompleteV3>();
+  static MediaRequestComplete create() => MediaRequestComplete._();
+  MediaRequestComplete createEmptyInstance() => create();
+  static $pb.PbList<MediaRequestComplete> createRepeated() => $pb.PbList<MediaRequestComplete>();
   @$core.pragma('dart2js:noInline')
-  static MediaCompleteV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaCompleteV3>(create);
-  static MediaCompleteV3? _defaultInstance;
+  static MediaRequestComplete getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaRequestComplete>(create);
+  static MediaRequestComplete? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get mediaId => $_getN(0);
@@ -7094,7 +8188,7 @@ class GroupCallSenderKey extends $pb.GeneratedMessage {
 }
 
 /// Whiteboard stroke data — real-time streaming via Overlay Multicast Tree.
-/// MTV3_WHITEBOARD_STROKE = 210
+/// MT_WHITEBOARD_STROKE = 210
 class WhiteboardStroke extends $pb.GeneratedMessage {
   factory WhiteboardStroke({
     $core.List<$core.int>? strokeId,
@@ -7294,7 +8388,7 @@ class WhiteboardStroke extends $pb.GeneratedMessage {
 }
 
 /// Whiteboard page management — add/switch pages, snapshot for late joiners.
-/// MTV3_WHITEBOARD_PAGE = 211
+/// MT_WHITEBOARD_PAGE = 211
 class WhiteboardPage extends $pb.GeneratedMessage {
   factory WhiteboardPage({
     $core.int? action,
@@ -7396,7 +8490,7 @@ class WhiteboardPage extends $pb.GeneratedMessage {
 }
 
 /// File sharing within a call — metadata announcement via Overlay Multicast Tree.
-/// MTV3_FILE_EXCHANGE = 212
+/// MT_FILE_EXCHANGE = 212
 class CallFileShare extends $pb.GeneratedMessage {
   factory CallFileShare({
     $core.List<$core.int>? fileId,
@@ -7546,7 +8640,7 @@ class CallFileShare extends $pb.GeneratedMessage {
 }
 
 /// Clipboard exchange within a call.
-/// MTV3_CLIPBOARD_EXCHANGE = 213
+/// MT_CLIPBOARD_EXCHANGE = 213
 class CallClipboardExchange extends $pb.GeneratedMessage {
   factory CallClipboardExchange({
     $core.List<$core.int>? senderId,
@@ -7668,7 +8762,7 @@ class CallClipboardExchange extends $pb.GeneratedMessage {
 }
 
 /// Screen share control — start/stop/quality negotiation.
-/// MTV3_SCREEN_SHARE_FRAME = 214
+/// MT_SCREEN_SHARE_FRAME = 214
 class ScreenShareControl extends $pb.GeneratedMessage {
   factory ScreenShareControl({
     $core.bool? isSharing,
@@ -7790,7 +8884,7 @@ class ScreenShareControl extends $pb.GeneratedMessage {
 }
 
 /// Ephemeral in-call chat message — NOT persisted after call ends.
-/// MTV3_CALL_CHAT = 215
+/// MT_CALL_CHAT = 215
 class CallChatMessage extends $pb.GeneratedMessage {
   factory CallChatMessage({
     $core.List<$core.int>? messageId,
@@ -9375,6 +10469,8 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     TwinSyncType? syncType,
     $core.List<$core.int>? payload,
     $core.List<$core.int>? deliveryId,
+    $core.List<$core.int>? neighbours,
+    $core.List<$core.int>? segmentAddresses,
   }) {
     final $result = create();
     if (syncId != null) {
@@ -9395,6 +10491,12 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     if (deliveryId != null) {
       $result.deliveryId = deliveryId;
     }
+    if (neighbours != null) {
+      $result.neighbours = neighbours;
+    }
+    if (segmentAddresses != null) {
+      $result.segmentAddresses = segmentAddresses;
+    }
     return $result;
   }
   TwinSyncEnvelope._() : super();
@@ -9408,6 +10510,8 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
     ..e<TwinSyncType>(4, _omitFieldNames ? '' : 'syncType', $pb.PbFieldType.OE, defaultOrMaker: TwinSyncType.CONTACT_ADDED, valueOf: TwinSyncType.valueOf, enumValues: TwinSyncType.values)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'deliveryId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'neighbours', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'segmentAddresses', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -9489,6 +10593,30 @@ class TwinSyncEnvelope extends $pb.GeneratedMessage {
   $core.bool hasDeliveryId() => $_has(5);
   @$pb.TagNumber(6)
   void clearDeliveryId() => clearField(6);
+
+  /// §14.7 (D-46): "Every own-line deposit carries, sealed, the depositing
+  /// device's fixed neighbours and its segment addresses", so that a device
+  /// knows where its siblings are reachable — for the mirror of a call
+  /// signal on steps 1 and 3. Each is the neighbour-list codec of the
+  /// delivery layer (count 0..3, `mycelium/lib/mailbox_own_signal.dart`,
+  /// `ownWhereWire`). Added after 4.2.3: an older device skips both.
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get neighbours => $_getN(6);
+  @$pb.TagNumber(7)
+  set neighbours($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasNeighbours() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearNeighbours() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get segmentAddresses => $_getN(7);
+  @$pb.TagNumber(8)
+  set segmentAddresses($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSegmentAddresses() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSegmentAddresses() => clearField(8);
 }
 
 class DeviceRecord extends $pb.GeneratedMessage {
@@ -10818,7 +11946,6 @@ class PollSettingsMsg extends $pb.GeneratedMessage {
     $core.int? maxChoices,
     $core.int? scaleMin,
     $core.int? scaleMax,
-    $core.bool? onlyMembersCanVote,
   }) {
     final $result = create();
     if (anonymous != null) {
@@ -10842,9 +11969,6 @@ class PollSettingsMsg extends $pb.GeneratedMessage {
     if (scaleMax != null) {
       $result.scaleMax = scaleMax;
     }
-    if (onlyMembersCanVote != null) {
-      $result.onlyMembersCanVote = onlyMembersCanVote;
-    }
     return $result;
   }
   PollSettingsMsg._() : super();
@@ -10859,7 +11983,6 @@ class PollSettingsMsg extends $pb.GeneratedMessage {
     ..a<$core.int>(5, _omitFieldNames ? '' : 'maxChoices', $pb.PbFieldType.O3)
     ..a<$core.int>(6, _omitFieldNames ? '' : 'scaleMin', $pb.PbFieldType.O3)
     ..a<$core.int>(7, _omitFieldNames ? '' : 'scaleMax', $pb.PbFieldType.O3)
-    ..aOB(8, _omitFieldNames ? '' : 'onlyMembersCanVote')
     ..hasRequiredFields = false
   ;
 
@@ -10946,15 +12069,6 @@ class PollSettingsMsg extends $pb.GeneratedMessage {
   $core.bool hasScaleMax() => $_has(6);
   @$pb.TagNumber(7)
   void clearScaleMax() => clearField(7);
-
-  @$pb.TagNumber(8)
-  $core.bool get onlyMembersCanVote => $_getBF(7);
-  @$pb.TagNumber(8)
-  set onlyMembersCanVote($core.bool v) { $_setBool(7, v); }
-  @$pb.TagNumber(8)
-  $core.bool hasOnlyMembersCanVote() => $_has(7);
-  @$pb.TagNumber(8)
-  void clearOnlyMembersCanVote() => clearField(8);
 }
 
 class PollCreateMsg extends $pb.GeneratedMessage {
@@ -12295,8 +13409,8 @@ class DeviceDelegationCertProto extends $pb.GeneratedMessage {
 ///  V2 packed text as raw UTF-8 into encrypted_payload. V3 wraps every
 ///  payload type into a proto message of its own — gives us version fields per
 ///  type and a clear schema for future extensions (formatHint etc.).
-class TextMessageV3 extends $pb.GeneratedMessage {
-  factory TextMessageV3({
+class TextMessage extends $pb.GeneratedMessage {
+  factory TextMessage({
     $core.String? text,
     $core.String? formatHint,
     $core.List<$core.int>? replyToMessageId,
@@ -12321,11 +13435,11 @@ class TextMessageV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  TextMessageV3._() : super();
-  factory TextMessageV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory TextMessageV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  TextMessage._() : super();
+  factory TextMessage.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory TextMessage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'TextMessageV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'TextMessage', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'text')
     ..aOS(2, _omitFieldNames ? '' : 'formatHint')
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'replyToMessageId', $pb.PbFieldType.OY)
@@ -12338,22 +13452,22 @@ class TextMessageV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  TextMessageV3 clone() => TextMessageV3()..mergeFromMessage(this);
+  TextMessage clone() => TextMessage()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  TextMessageV3 copyWith(void Function(TextMessageV3) updates) => super.copyWith((message) => updates(message as TextMessageV3)) as TextMessageV3;
+  TextMessage copyWith(void Function(TextMessage) updates) => super.copyWith((message) => updates(message as TextMessage)) as TextMessage;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static TextMessageV3 create() => TextMessageV3._();
-  TextMessageV3 createEmptyInstance() => create();
-  static $pb.PbList<TextMessageV3> createRepeated() => $pb.PbList<TextMessageV3>();
+  static TextMessage create() => TextMessage._();
+  TextMessage createEmptyInstance() => create();
+  static $pb.PbList<TextMessage> createRepeated() => $pb.PbList<TextMessage>();
   @$core.pragma('dart2js:noInline')
-  static TextMessageV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TextMessageV3>(create);
-  static TextMessageV3? _defaultInstance;
+  static TextMessage getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TextMessage>(create);
+  static TextMessage? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.String get text => $_getSZ(0);
@@ -12416,8 +13530,8 @@ class TextMessageV3 extends $pb.GeneratedMessage {
 }
 
 /// New device → Primary: "I want to pair, here are my device keys"
-class DevicePairRequestV3 extends $pb.GeneratedMessage {
-  factory DevicePairRequestV3({
+class DevicePairRequest extends $pb.GeneratedMessage {
+  factory DevicePairRequest({
     $core.List<$core.int>? deviceEd25519Pk,
     $core.List<$core.int>? deviceMlDsaPk,
     $core.List<$core.int>? pairTokenSignature,
@@ -12438,11 +13552,11 @@ class DevicePairRequestV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  DevicePairRequestV3._() : super();
-  factory DevicePairRequestV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory DevicePairRequestV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  DevicePairRequest._() : super();
+  factory DevicePairRequest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory DevicePairRequest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DevicePairRequestV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DevicePairRequest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'deviceEd25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceMlDsaPk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'pairTokenSignature', $pb.PbFieldType.OY)
@@ -12454,22 +13568,22 @@ class DevicePairRequestV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  DevicePairRequestV3 clone() => DevicePairRequestV3()..mergeFromMessage(this);
+  DevicePairRequest clone() => DevicePairRequest()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  DevicePairRequestV3 copyWith(void Function(DevicePairRequestV3) updates) => super.copyWith((message) => updates(message as DevicePairRequestV3)) as DevicePairRequestV3;
+  DevicePairRequest copyWith(void Function(DevicePairRequest) updates) => super.copyWith((message) => updates(message as DevicePairRequest)) as DevicePairRequest;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static DevicePairRequestV3 create() => DevicePairRequestV3._();
-  DevicePairRequestV3 createEmptyInstance() => create();
-  static $pb.PbList<DevicePairRequestV3> createRepeated() => $pb.PbList<DevicePairRequestV3>();
+  static DevicePairRequest create() => DevicePairRequest._();
+  DevicePairRequest createEmptyInstance() => create();
+  static $pb.PbList<DevicePairRequest> createRepeated() => $pb.PbList<DevicePairRequest>();
   @$core.pragma('dart2js:noInline')
-  static DevicePairRequestV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DevicePairRequestV3>(create);
-  static DevicePairRequestV3? _defaultInstance;
+  static DevicePairRequest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DevicePairRequest>(create);
+  static DevicePairRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get deviceEd25519Pk => $_getN(0);
@@ -12509,8 +13623,8 @@ class DevicePairRequestV3 extends $pb.GeneratedMessage {
 }
 
 /// Primary → New device: delegation material (KEM-encrypted end-to-end)
-class DevicePairApproveV3 extends $pb.GeneratedMessage {
-  factory DevicePairApproveV3({
+class DevicePairApprove extends $pb.GeneratedMessage {
+  factory DevicePairApprove({
     $core.List<$core.int>? delegatedEd25519Pk,
     $core.List<$core.int>? delegatedEd25519Sk,
     $core.List<$core.int>? delegatedMlDsaPk,
@@ -12555,11 +13669,11 @@ class DevicePairApproveV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  DevicePairApproveV3._() : super();
-  factory DevicePairApproveV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory DevicePairApproveV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  DevicePairApprove._() : super();
+  factory DevicePairApprove.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory DevicePairApprove.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DevicePairApproveV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DevicePairApprove', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'delegatedEd25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'delegatedEd25519Sk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'delegatedMlDsaPk', $pb.PbFieldType.OY)
@@ -12577,22 +13691,22 @@ class DevicePairApproveV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  DevicePairApproveV3 clone() => DevicePairApproveV3()..mergeFromMessage(this);
+  DevicePairApprove clone() => DevicePairApprove()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  DevicePairApproveV3 copyWith(void Function(DevicePairApproveV3) updates) => super.copyWith((message) => updates(message as DevicePairApproveV3)) as DevicePairApproveV3;
+  DevicePairApprove copyWith(void Function(DevicePairApprove) updates) => super.copyWith((message) => updates(message as DevicePairApprove)) as DevicePairApprove;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static DevicePairApproveV3 create() => DevicePairApproveV3._();
-  DevicePairApproveV3 createEmptyInstance() => create();
-  static $pb.PbList<DevicePairApproveV3> createRepeated() => $pb.PbList<DevicePairApproveV3>();
+  static DevicePairApprove create() => DevicePairApprove._();
+  DevicePairApprove createEmptyInstance() => create();
+  static $pb.PbList<DevicePairApprove> createRepeated() => $pb.PbList<DevicePairApprove>();
   @$core.pragma('dart2js:noInline')
-  static DevicePairApproveV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DevicePairApproveV3>(create);
-  static DevicePairApproveV3? _defaultInstance;
+  static DevicePairApprove getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DevicePairApprove>(create);
+  static DevicePairApprove? _defaultInstance;
 
   /// Delegated Sig keys (per-device, derived from seed via HKDF)
   @$pb.TagNumber(1)
@@ -12887,7 +14001,7 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     $core.List<$core.int>? newMlDsaPk,
     $core.List<$core.int>? newX25519Pk,
     $core.List<$core.int>? newMlKemPk,
-    ApprovalKindV3? approvalKind,
+    ApprovalKind? approvalKind,
     $core.Iterable<$core.List<$core.int>>? newDeviceNodeIds,
   }) {
     final $result = create();
@@ -12924,7 +14038,7 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'newX25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
-    ..e<ApprovalKindV3>(6, _omitFieldNames ? '' : 'approvalKind', $pb.PbFieldType.OE, defaultOrMaker: ApprovalKindV3.APPROVAL_KIND_KEY_ROTATION, valueOf: ApprovalKindV3.valueOf, enumValues: ApprovalKindV3.values)
+    ..e<ApprovalKind>(6, _omitFieldNames ? '' : 'approvalKind', $pb.PbFieldType.OE, defaultOrMaker: ApprovalKind.APPROVAL_KIND_KEY_ROTATION, valueOf: ApprovalKind.valueOf, enumValues: ApprovalKind.values)
     ..p<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'newDeviceNodeIds', $pb.PbFieldType.PY)
     ..hasRequiredFields = false
   ;
@@ -12996,9 +14110,9 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
   void clearNewMlKemPk() => clearField(5);
 
   @$pb.TagNumber(6)
-  ApprovalKindV3 get approvalKind => $_getN(5);
+  ApprovalKind get approvalKind => $_getN(5);
   @$pb.TagNumber(6)
-  set approvalKind(ApprovalKindV3 v) { setField(6, v); }
+  set approvalKind(ApprovalKind v) { setField(6, v); }
   @$pb.TagNumber(6)
   $core.bool hasApprovalKind() => $_has(5);
   @$pb.TagNumber(6)
@@ -13292,8 +14406,8 @@ class DeviceSetChangeProof extends $pb.GeneratedMessage {
 ///  the contact relation; the announcement adds the device COUNT and the
 ///  device-sig pubkeys of a person they already correspond with. It does not
 ///  widen the social graph by one edge.
-class DeviceSetAnnounceV3 extends $pb.GeneratedMessage {
-  factory DeviceSetAnnounceV3({
+class DeviceSetAnnounce extends $pb.GeneratedMessage {
+  factory DeviceSetAnnounce({
     $core.int? seq,
     $fixnum.Int64? issuedAtMs,
     $core.int? previousDeviceCount,
@@ -13326,11 +14440,11 @@ class DeviceSetAnnounceV3 extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  DeviceSetAnnounceV3._() : super();
-  factory DeviceSetAnnounceV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory DeviceSetAnnounceV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  DeviceSetAnnounce._() : super();
+  factory DeviceSetAnnounce.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory DeviceSetAnnounce.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DeviceSetAnnounceV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DeviceSetAnnounce', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.int>(1, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU3)
     ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'issuedAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..a<$core.int>(3, _omitFieldNames ? '' : 'previousDeviceCount', $pb.PbFieldType.OU3)
@@ -13345,22 +14459,22 @@ class DeviceSetAnnounceV3 extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  DeviceSetAnnounceV3 clone() => DeviceSetAnnounceV3()..mergeFromMessage(this);
+  DeviceSetAnnounce clone() => DeviceSetAnnounce()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  DeviceSetAnnounceV3 copyWith(void Function(DeviceSetAnnounceV3) updates) => super.copyWith((message) => updates(message as DeviceSetAnnounceV3)) as DeviceSetAnnounceV3;
+  DeviceSetAnnounce copyWith(void Function(DeviceSetAnnounce) updates) => super.copyWith((message) => updates(message as DeviceSetAnnounce)) as DeviceSetAnnounce;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static DeviceSetAnnounceV3 create() => DeviceSetAnnounceV3._();
-  DeviceSetAnnounceV3 createEmptyInstance() => create();
-  static $pb.PbList<DeviceSetAnnounceV3> createRepeated() => $pb.PbList<DeviceSetAnnounceV3>();
+  static DeviceSetAnnounce create() => DeviceSetAnnounce._();
+  DeviceSetAnnounce createEmptyInstance() => create();
+  static $pb.PbList<DeviceSetAnnounce> createRepeated() => $pb.PbList<DeviceSetAnnounce>();
   @$core.pragma('dart2js:noInline')
-  static DeviceSetAnnounceV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceSetAnnounceV3>(create);
-  static DeviceSetAnnounceV3? _defaultInstance;
+  static DeviceSetAnnounce getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceSetAnnounce>(create);
+  static DeviceSetAnnounce? _defaultInstance;
 
   /// Monotonic per announcing identity. Replay defence: a receiver keeps the
   /// highest seq it has accepted per contact and refuses anything <=.
@@ -14056,6 +15170,653 @@ class SysChanPush extends $pb.GeneratedMessage {
   $core.bool hasTtl() => $_has(2);
   @$pb.TagNumber(3)
   void clearTtl() => clearField(3);
+}
+
+/// §16.2.5 "Mixed operation within 4.2": what this version builds, each a
+/// bit (1: the member list of §16.2.2 as owner and admins, changes as
+/// changes; 2: the shared key of §16.2.5), and the device class (1 desktop,
+/// 2 phone). Sent with the acceptance of an invitation, once to each owner
+/// and admin of every group and channel, once to every contact whose fixed
+/// neighbour the node is.
+class CapabilityNotice extends $pb.GeneratedMessage {
+  factory CapabilityNotice({
+    $core.int? capabilities,
+    $core.int? deviceClass,
+  }) {
+    final $result = create();
+    if (capabilities != null) {
+      $result.capabilities = capabilities;
+    }
+    if (deviceClass != null) {
+      $result.deviceClass = deviceClass;
+    }
+    return $result;
+  }
+  CapabilityNotice._() : super();
+  factory CapabilityNotice.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CapabilityNotice.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CapabilityNotice', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'capabilities', $pb.PbFieldType.OU3)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'deviceClass', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CapabilityNotice clone() => CapabilityNotice()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CapabilityNotice copyWith(void Function(CapabilityNotice) updates) => super.copyWith((message) => updates(message as CapabilityNotice)) as CapabilityNotice;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CapabilityNotice create() => CapabilityNotice._();
+  CapabilityNotice createEmptyInstance() => create();
+  static $pb.PbList<CapabilityNotice> createRepeated() => $pb.PbList<CapabilityNotice>();
+  @$core.pragma('dart2js:noInline')
+  static CapabilityNotice getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CapabilityNotice>(create);
+  static CapabilityNotice? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get capabilities => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set capabilities($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCapabilities() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCapabilities() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get deviceClass => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set deviceClass($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceClass() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceClass() => clearField(2);
+}
+
+/// §16.2.5: the keys of a group or channel on the shared key for ONE member —
+/// at a joining (`step_key` = S_g(d, j), `day_key` = D_g(d+1)), at a new
+/// generation (`day_key` = D_g(d), `step` 0: a leaving, a removal, a transfer
+/// of ownership, the switch at 17), or the return to pairwise legs
+/// (`pairwise`). `generation_seed` (W_g) goes to owner and admins only; a
+/// certificate only to an author, for the key it named.
+class SharedKeyDelivery extends $pb.GeneratedMessage {
+  factory SharedKeyDelivery({
+    $core.List<$core.int>? groupId,
+    $core.int? generation,
+    $core.List<$core.int>? generationId,
+    $core.int? day,
+    $core.int? step,
+    $core.List<$core.int>? stepKey,
+    $core.List<$core.int>? dayKey,
+    $core.List<$core.int>? keeperKey,
+    $core.List<$core.int>? generationPk,
+    $core.List<$core.int>? generationSeed,
+    $core.Iterable<$core.List<$core.int>>? keepers,
+    $core.List<$core.int>? authorPk,
+    $core.List<$core.int>? certificate,
+    $core.Iterable<$core.List<$core.int>>? served,
+    $core.bool? pairwise,
+    $fixnum.Int64? membershipEpoch,
+    $core.int? keepersVersion,
+  }) {
+    final $result = create();
+    if (groupId != null) {
+      $result.groupId = groupId;
+    }
+    if (generation != null) {
+      $result.generation = generation;
+    }
+    if (generationId != null) {
+      $result.generationId = generationId;
+    }
+    if (day != null) {
+      $result.day = day;
+    }
+    if (step != null) {
+      $result.step = step;
+    }
+    if (stepKey != null) {
+      $result.stepKey = stepKey;
+    }
+    if (dayKey != null) {
+      $result.dayKey = dayKey;
+    }
+    if (keeperKey != null) {
+      $result.keeperKey = keeperKey;
+    }
+    if (generationPk != null) {
+      $result.generationPk = generationPk;
+    }
+    if (generationSeed != null) {
+      $result.generationSeed = generationSeed;
+    }
+    if (keepers != null) {
+      $result.keepers.addAll(keepers);
+    }
+    if (authorPk != null) {
+      $result.authorPk = authorPk;
+    }
+    if (certificate != null) {
+      $result.certificate = certificate;
+    }
+    if (served != null) {
+      $result.served.addAll(served);
+    }
+    if (pairwise != null) {
+      $result.pairwise = pairwise;
+    }
+    if (membershipEpoch != null) {
+      $result.membershipEpoch = membershipEpoch;
+    }
+    if (keepersVersion != null) {
+      $result.keepersVersion = keepersVersion;
+    }
+    return $result;
+  }
+  SharedKeyDelivery._() : super();
+  factory SharedKeyDelivery.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SharedKeyDelivery.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SharedKeyDelivery', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'generation', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'generationId', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'day', $pb.PbFieldType.OU3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'step', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'stepKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'dayKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'keeperKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'generationPk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'generationSeed', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'keepers', $pb.PbFieldType.PY)
+    ..a<$core.List<$core.int>>(12, _omitFieldNames ? '' : 'authorPk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(13, _omitFieldNames ? '' : 'certificate', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(14, _omitFieldNames ? '' : 'served', $pb.PbFieldType.PY)
+    ..aOB(15, _omitFieldNames ? '' : 'pairwise')
+    ..a<$fixnum.Int64>(16, _omitFieldNames ? '' : 'membershipEpoch', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.int>(17, _omitFieldNames ? '' : 'keepersVersion', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SharedKeyDelivery clone() => SharedKeyDelivery()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SharedKeyDelivery copyWith(void Function(SharedKeyDelivery) updates) => super.copyWith((message) => updates(message as SharedKeyDelivery)) as SharedKeyDelivery;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyDelivery create() => SharedKeyDelivery._();
+  SharedKeyDelivery createEmptyInstance() => create();
+  static $pb.PbList<SharedKeyDelivery> createRepeated() => $pb.PbList<SharedKeyDelivery>();
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyDelivery getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SharedKeyDelivery>(create);
+  static SharedKeyDelivery? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get groupId => $_getN(0);
+  @$pb.TagNumber(1)
+  set groupId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasGroupId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGroupId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get generation => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set generation($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasGeneration() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearGeneration() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get generationId => $_getN(2);
+  @$pb.TagNumber(3)
+  set generationId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasGenerationId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearGenerationId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get day => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set day($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasDay() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDay() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get step => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set step($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasStep() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearStep() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get stepKey => $_getN(5);
+  @$pb.TagNumber(6)
+  set stepKey($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasStepKey() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearStepKey() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get dayKey => $_getN(6);
+  @$pb.TagNumber(7)
+  set dayKey($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasDayKey() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearDayKey() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get keeperKey => $_getN(7);
+  @$pb.TagNumber(8)
+  set keeperKey($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasKeeperKey() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearKeeperKey() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get generationPk => $_getN(8);
+  @$pb.TagNumber(9)
+  set generationPk($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasGenerationPk() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearGenerationPk() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get generationSeed => $_getN(9);
+  @$pb.TagNumber(10)
+  set generationSeed($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasGenerationSeed() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearGenerationSeed() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.List<$core.List<$core.int>> get keepers => $_getList(10);
+
+  @$pb.TagNumber(12)
+  $core.List<$core.int> get authorPk => $_getN(11);
+  @$pb.TagNumber(12)
+  set authorPk($core.List<$core.int> v) { $_setBytes(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasAuthorPk() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearAuthorPk() => clearField(12);
+
+  @$pb.TagNumber(13)
+  $core.List<$core.int> get certificate => $_getN(12);
+  @$pb.TagNumber(13)
+  set certificate($core.List<$core.int> v) { $_setBytes(12, v); }
+  @$pb.TagNumber(13)
+  $core.bool hasCertificate() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearCertificate() => clearField(13);
+
+  @$pb.TagNumber(14)
+  $core.List<$core.List<$core.int>> get served => $_getList(13);
+
+  @$pb.TagNumber(15)
+  $core.bool get pairwise => $_getBF(14);
+  @$pb.TagNumber(15)
+  set pairwise($core.bool v) { $_setBool(14, v); }
+  @$pb.TagNumber(15)
+  $core.bool hasPairwise() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearPairwise() => clearField(15);
+
+  @$pb.TagNumber(16)
+  $fixnum.Int64 get membershipEpoch => $_getI64(15);
+  @$pb.TagNumber(16)
+  set membershipEpoch($fixnum.Int64 v) { $_setInt64(15, v); }
+  @$pb.TagNumber(16)
+  $core.bool hasMembershipEpoch() => $_has(15);
+  @$pb.TagNumber(16)
+  void clearMembershipEpoch() => clearField(16);
+
+  /// The keeper list's version: a member uses the newest list it has read.
+  @$pb.TagNumber(17)
+  $core.int get keepersVersion => $_getIZ(16);
+  @$pb.TagNumber(17)
+  set keepersVersion($core.int v) { $_setUnsignedInt32(16, v); }
+  @$pb.TagNumber(17)
+  $core.bool hasKeepersVersion() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearKeepersVersion() => clearField(17);
+}
+
+/// §16.2.5: an author names the author key it wants certified for a
+/// generation (when it holds none for it); owner or admin answer with a
+/// SharedKeyDelivery carrying the certificate.
+class SharedKeyAuthor extends $pb.GeneratedMessage {
+  factory SharedKeyAuthor({
+    $core.List<$core.int>? groupId,
+    $core.int? generation,
+    $core.List<$core.int>? generationId,
+    $core.List<$core.int>? authorPk,
+  }) {
+    final $result = create();
+    if (groupId != null) {
+      $result.groupId = groupId;
+    }
+    if (generation != null) {
+      $result.generation = generation;
+    }
+    if (generationId != null) {
+      $result.generationId = generationId;
+    }
+    if (authorPk != null) {
+      $result.authorPk = authorPk;
+    }
+    return $result;
+  }
+  SharedKeyAuthor._() : super();
+  factory SharedKeyAuthor.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SharedKeyAuthor.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SharedKeyAuthor', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'generation', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'generationId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'authorPk', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SharedKeyAuthor clone() => SharedKeyAuthor()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SharedKeyAuthor copyWith(void Function(SharedKeyAuthor) updates) => super.copyWith((message) => updates(message as SharedKeyAuthor)) as SharedKeyAuthor;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyAuthor create() => SharedKeyAuthor._();
+  SharedKeyAuthor createEmptyInstance() => create();
+  static $pb.PbList<SharedKeyAuthor> createRepeated() => $pb.PbList<SharedKeyAuthor>();
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyAuthor getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SharedKeyAuthor>(create);
+  static SharedKeyAuthor? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get groupId => $_getN(0);
+  @$pb.TagNumber(1)
+  set groupId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasGroupId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGroupId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get generation => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set generation($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasGeneration() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearGeneration() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get generationId => $_getN(2);
+  @$pb.TagNumber(3)
+  set generationId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasGenerationId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearGenerationId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get authorPk => $_getN(3);
+  @$pb.TagNumber(4)
+  set authorPk($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasAuthorPk() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAuthorPk() => clearField(4);
+}
+
+/// §16.2.5 step 1: what an entry of kind "post" carries, sealed — the
+/// application frame as a pairwise leg would carry it, and the author's
+/// identity signature (Ed25519, §4.4.3) over the entry header and the frame.
+/// `objects`: the hashes of the inline objects (< 256 KB) deposited as their
+/// own entries, in the order of the frame's attachments.
+class SharedKeyPost extends $pb.GeneratedMessage {
+  factory SharedKeyPost({
+    $core.List<$core.int>? frame,
+    $core.List<$core.int>? signature,
+    $core.Iterable<$core.List<$core.int>>? objects,
+    $core.List<$core.int>? nextAuthorPk,
+    $core.Iterable<$core.List<$core.int>>? keepers,
+    $core.int? keepersVersion,
+  }) {
+    final $result = create();
+    if (frame != null) {
+      $result.frame = frame;
+    }
+    if (signature != null) {
+      $result.signature = signature;
+    }
+    if (objects != null) {
+      $result.objects.addAll(objects);
+    }
+    if (nextAuthorPk != null) {
+      $result.nextAuthorPk = nextAuthorPk;
+    }
+    if (keepers != null) {
+      $result.keepers.addAll(keepers);
+    }
+    if (keepersVersion != null) {
+      $result.keepersVersion = keepersVersion;
+    }
+    return $result;
+  }
+  SharedKeyPost._() : super();
+  factory SharedKeyPost.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SharedKeyPost.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SharedKeyPost', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'frame', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'signature', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'objects', $pb.PbFieldType.PY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'nextAuthorPk', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'keepers', $pb.PbFieldType.PY)
+    ..a<$core.int>(6, _omitFieldNames ? '' : 'keepersVersion', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SharedKeyPost clone() => SharedKeyPost()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SharedKeyPost copyWith(void Function(SharedKeyPost) updates) => super.copyWith((message) => updates(message as SharedKeyPost)) as SharedKeyPost;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyPost create() => SharedKeyPost._();
+  SharedKeyPost createEmptyInstance() => create();
+  static $pb.PbList<SharedKeyPost> createRepeated() => $pb.PbList<SharedKeyPost>();
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyPost getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SharedKeyPost>(create);
+  static SharedKeyPost? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get frame => $_getN(0);
+  @$pb.TagNumber(1)
+  set frame($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFrame() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFrame() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get signature => $_getN(1);
+  @$pb.TagNumber(2)
+  set signature($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSignature() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSignature() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.List<$core.int>> get objects => $_getList(2);
+
+  /// The author key the author names for the next generation: owner and
+  /// admins certify it in the next generation delivery (§16.2.5 "Leaving and
+  /// removal": "to every author, a certificate for its next author key").
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get nextAuthorPk => $_getN(3);
+  @$pb.TagNumber(4)
+  set nextAuthorPk($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasNextAuthorPk() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearNextAuthorPk() => clearField(4);
+
+  /// §16.2.5 "Keepers": every post carries the keeper list; a member uses the
+  /// newest list it has read. When a keeper fails at the owner's deposit, the
+  /// owner's next post carries a list without it.
+  @$pb.TagNumber(5)
+  $core.List<$core.List<$core.int>> get keepers => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.int get keepersVersion => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set keepersVersion($core.int v) { $_setUnsignedInt32(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasKeepersVersion() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearKeepersVersion() => clearField(6);
+}
+
+/// §16.2.5 "Joining": the generation and step a membership update reports —
+/// the owner or admin who admitted a member advanced `j` by one.
+class SharedKeyStep extends $pb.GeneratedMessage {
+  factory SharedKeyStep({
+    $core.int? generation,
+    $core.List<$core.int>? generationId,
+    $core.int? day,
+    $core.int? step,
+  }) {
+    final $result = create();
+    if (generation != null) {
+      $result.generation = generation;
+    }
+    if (generationId != null) {
+      $result.generationId = generationId;
+    }
+    if (day != null) {
+      $result.day = day;
+    }
+    if (step != null) {
+      $result.step = step;
+    }
+    return $result;
+  }
+  SharedKeyStep._() : super();
+  factory SharedKeyStep.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SharedKeyStep.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SharedKeyStep', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'generation', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'generationId', $pb.PbFieldType.OY)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'day', $pb.PbFieldType.OU3)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'step', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SharedKeyStep clone() => SharedKeyStep()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SharedKeyStep copyWith(void Function(SharedKeyStep) updates) => super.copyWith((message) => updates(message as SharedKeyStep)) as SharedKeyStep;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyStep create() => SharedKeyStep._();
+  SharedKeyStep createEmptyInstance() => create();
+  static $pb.PbList<SharedKeyStep> createRepeated() => $pb.PbList<SharedKeyStep>();
+  @$core.pragma('dart2js:noInline')
+  static SharedKeyStep getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SharedKeyStep>(create);
+  static SharedKeyStep? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get generation => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set generation($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasGeneration() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGeneration() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get generationId => $_getN(1);
+  @$pb.TagNumber(2)
+  set generationId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasGenerationId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearGenerationId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get day => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set day($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasDay() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDay() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get step => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set step($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasStep() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearStep() => clearField(4);
 }
 
 

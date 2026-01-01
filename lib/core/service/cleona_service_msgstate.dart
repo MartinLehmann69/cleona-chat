@@ -11,415 +11,28 @@
 
 part of 'cleona_service.dart';
 
-extension V3MessageStateOps on CleonaService {
+extension MessageStateOps on CleonaService {
 
-  // ─────────────────── V4.1 DELIVERY STATUS (§9.2, D2) ───────────────────
+  // ─────────────────── DELIVERY STATUS (§9.1, §9.2) ───────────────────
   //
-  // WHAT WAS MISSING HERE, and why it is not a formality. `DeliveryState`,
-  // `DeliveryRecord` and the receipt check had stood since S346 in
-  // `lib/core/tagline/delivery_state.dart` and had NO caller in all of
-  // `lib/` — recounted on 2026-08-30: outside their own file the symbols
-  // only occurred in `test/smoke/`, and the guard
-  // `smoke_tagline_lab_only_guard.dart` listed them explicitly as a known
-  // gap ("der Zustellstatus der Anwendung haengt noch am V3-Pfad").
+  // `MessageStatus` is the DISPLAY value; the delivery state behind it
+  // lives in the mailbox of `package:mycelium` (`_myceliumOutbounds`,
+  // `cleona_service_mycelium.dart`). Only a receipt whose sender is proven
+  // (`SenderTrust.verified`, §9.2: "authenticated by the recipient's pair
+  // tag") may flip a message to `delivered`; the mailbox notes that proof
+  // in [_myceliumReceiptMark], and [_deliveryProven] asks it.
   //
-  // The delivery status thus ran entirely via `_handleDeliveryReceiptV3`
-  // further down — and that flipped the display to `delivered` as soon as
-  // a receipt frame with a matching message identifier arrived, WITHOUT
-  // looking at the verdict about the sender. Recounted: `senderTrust` does
-  // not occur in the whole handler. Exactly that is ruled out by D2:
-  // "Only the recipient, holding `K_AB`, can produce a receipt that flips
-  // the sender's 'delivered' state. … This closes silent deletion."
+  // Until S408-P23 a second register of the V4.1 delivery layer
+  // (`V41DeliveryRegister`, `lib/core/tagline/delivery_state.dart`) stood
+  // behind it. Its only filler was the V4.1 send branch of `sendToUser`,
+  // which had no caller since S388 (`attachV41`); it fell with
+  // `lib/core/tagline/`.
   //
-  // The case is reachable and not theoretical: `acceptV41Frame` DISCARDS
-  // only what is demonstrably forged (`V41SenderVerdict.forged`). If `K_AB`
-  // cannot be formed at all on reception — no contact record, e.g. a group
-  // member without its own entry —, the verdict is `unverifiable`, the
-  // frame goes on and carries `SenderTrust.unknownKey`. Up to here it
-  // flipped the display nonetheless.
-  //
-  // HOW THE TWO SOURCES COME TOGETHER without staying two: `MessageStatus`
-  // stays the DISPLAY value — it carries `sending`/`sent`/`read`/`expired`,
-  // i.e. states that the delivery layer does not know at all. The register
-  // alone decides the ONE question for which §9.2 has a rule: may the
-  // transition to `delivered` take place? The answer then stands in ONE
-  // place — in the record — and not once per receive path.
-  //
-  // BOTH PATHS FEED THE SAME REGISTER, and that is not carelessness towards
-  // §9.2 but its condition. A receipt coming back via V4.1 proves `K_AB`
-  // through the frame MAC (§4.4.3); one coming back via V3 proves the same
-  // sender through KEM and user signature against the contact registry —
-  // and whoever can sign with that can derive `K_AB` from the founding keys
-  // (§15.2). Both are a cryptographic attribution to the PAIR PARTNER, and
-  // only that is required by D2; the relay against which the paragraph is
-  // written has neither the one nor the other. Accepting only the V4.1
-  // path would have nailed a message acknowledged via V3 permanently to
-  // `sent` — a stuck status is no security gain.
-  //
-  // If the register does NOT know an identifier (V3 send path, or long
-  // displaced), the previous behaviour remains. A cap must not permanently
-  // nail a message to "not delivered".
+  // If the mailbox does NOT know an identifier (long displaced), the
+  // previous behaviour remains. A cap must not permanently nail a message
+  // to "not delivered".
 
-  /// Notes what became of a V4.1 send attempt.
-  ///
-  /// ACCEPTED MEANS `placing`, not `placed`. `SendOutcome.legs` counts, for
-  /// secure, the families that `V41Node.placeSecure` QUEUED
-  /// (`egress.stream.enqueueControl`) — not those whose deposit a relay
-  /// has confirmed. The difference is the same that the send site records
-  /// with "'Queued' is not 'placed'". Mapping `legs` to `notePlaced` here
-  /// would mean claiming a placement confirmation that nobody gave.
-  ///
-  /// REJECTED MEANS `failed`, and only that. Each of the three rejections
-  /// from [SendRefusal] says that NOTHING went out: no pair key
-  /// (`noPairKey`), too large for splitting (`tooLarge`), no confirmed
-  /// relay (`notReady`). That is exactly the condition that
-  /// `DeliveryRecord.markFailed` demands — "NOT for offline recipients". A
-  /// recipient that does not harvest does not occur here at all: for them
-  /// the cell lies in the network, and the record stays at `placing` until
-  /// the receipt flips it.
-  void _v41NoteSend(Uint8List messageId, SendOutcome outcome) {
-    final record = v41Deliveries.open(messageId.hex, messageId);
-    if (!outcome.accepted) {
-      record.markFailed();
-      return;
-    }
-    // THE RECORD MUST KNOW INTO HOW MANY PIECES THIS SEALING BROKE — else
-    // it can say nothing about the MESSAGE, only about individual pieces.
-    // And it must know WHICH attempt it was: a resubmission (§5.1) seals
-    // freshly, and proofs of different attempts do not combine at the
-    // receiver.
-    record.noteAttempt(outcome.transferId, outcome.pieces);
-  }
-
-  /// Books a confirmed deposit in the delivery register.
-  ///
-  /// ── THE PRODUCER OF `placed` (§22.5.1) ───────────────────────────
-  ///
-  /// Until S357 `DeliveryRecord.notePlaced` had no caller, and the state
-  /// was unreachable: the placement receipt only carried the tag, and that
-  /// is the same for all messages of the same pair in the same epoch — an
-  /// assignment would have been guessed. It now carries an identifier per
-  /// leg and a MAC that only the storing relay can form; the delivery
-  /// layer passes back message, attempt, piece, family, relay and its
-  /// network blocks.
-  ///
-  /// NOTHING IS CALCULATED HERE. The rule — every piece, independent
-  /// relays, one attempt — stands in the record itself; this place is only
-  /// the seam. Whoever rebuilt it here as a secondary would have two
-  /// verdicts about the same state.
-  ///
-  /// An unknown identifier is NOT an error: the register is capped
-  /// (`maxRecords`), and a displaced record takes its receipts with it.
-  void noteV41Placement(PlacementAck ack) {
-    final record = v41Deliveries.lookup(ack.messageId.hex);
-    if (record == null) return;
-    record.notePlaced(
-      transferId: ack.transferId,
-      piece: ack.piece,
-      family: ack.family,
-      relay: ack.relay,
-      partitions: ack.partitions,
-    );
-    // ── AND INTO THE DISPLAY (§21.5.5, S376) ───────────────────────────
-    //
-    // THIS STEP WAS MISSING HERE. The record moved to `placed`, the outbox
-    // let go of the entry — and the `UiMessage` stayed on `placing`,
-    // because it was only touched at the send edge. `placed` was thus a
-    // state that §21.5.5 lists and that no user ever saw.
-    //
-    // BEFORE the outbox release and not after: both read the same
-    // `record.state`, but the release logs and writes: if it died, the
-    // display would already be right. The reverse order would leave a
-    // message with an empty ledger standing on `placing` — the state that
-    // nobody can move any more.
-    _v41ReflectStatus(ack.messageId.hex);
-    // ── AND WITH THAT IT LEAVES THE OUTBOX (§21.2) ────────────────────
-    //
-    // "The cell remains in the local outbox until >= 2 placement
-    // acknowledgments from independent relays are in hand." EXACTLY THAT
-    // is the condition, and it is not recalculated here, but READ OFF the
-    // record: `DeliveryRecord.state` keeps the three rules (independent
-    // relays per §9.1 network block, EVERY piece, ONE attempt) in ONE
-    // place. A second calculation here would be the double bookkeeping the
-    // header of this file warns against — and it could drift in exactly
-    // the direction that lets `placed` be claimed without a proof behind it.
-    //
-    // `redundant` is the tightening of `placed`, `delivered` lies beyond
-    // it — all three are "proven enough to leave the ledger".
-    switch (record.state) {
-      case DeliveryState.placed:
-      case DeliveryState.redundant:
-      case DeliveryState.delivered:
-        if (v41Outbox.remove(ack.messageId.hex)) {
-          saveV41Outbox();
-          _log.debug('V4.1-Outbox: ${ack.messageId.hex.substring(0, 8)} is '
-              'proven (${record.independentRelays} independent relays) and '
-              'leaves the book');
-        }
-      case DeliveryState.placing:
-      case DeliveryState.failed:
-        break;
-    }
-  }
-
-  /// Drains the local outbox (§21.2) — at an EDGE, never on a clock.
-  ///
-  /// ── WHY NO TIMER (§5.1 invariant 1) ──────────────────────
-  ///
-  /// §21.2 says "no timer retry", and §5.1 says why: "A real cell
-  /// *replaces* an already-scheduled dummy slot; it does not add a
-  /// cell." An own rhythm for the resubmission would be recognisable as
-  /// such on the wire and would break egress indistinguishability.
-  /// This method therefore produces NO traffic beyond the cover clock: it
-  /// queues into the same control queue from which the slot clock draws
-  /// exactly one cell per `kSlotInterval` = 8 s anyway.
-  ///
-  /// ── THE THREE EDGES, AND WHY EACH PROVES THAT NOTHING LIES ────
-  ///
-  ///   * **Restart.** Control queue (`CoverStream._control`) and delivery
-  ///     register (`V41DeliveryRegister._records`) are both bare maps in
-  ///     memory; an entry loaded from `v41_outbox.json` has no proof by
-  ///     construction.
-  ///   * **Readiness change.** The previous attempt ended with
-  ///     `SendRefusal.notReady` — `placeSecure` returned 0, NOTHING went
-  ///     out. Exactly that changes when a relay confirms. This is the V4.1
-  ///     counterpart of the V3 edge `onNetworkChanged`.
-  ///   * **Proven inbound from the counterpart** (§5.1 F3'): the
-  ///     counterpart is demonstrably reachable.
-  ///
-  /// ── HOLDING IS NOT SENDING ───────────────────────────────────────
-  ///
-  /// ONLY what has `independentRelays == 0` is resubmitted. With ONE
-  /// receipt present, resubmission would be strictly worse than holding:
-  /// `DeliveryRecord.noteAttempt` DELETES the proofs of the previous
-  /// attempt (§22.5.1 refinement 3 — "acknowledgments from different
-  /// sealing attempts do not combine"), so the resubmission would cost 60
-  /// cells AND destroy the one proof one had. The cell meanwhile lies at
-  /// the acknowledging relay and waits for the harvest — case (j) from §9.2.
-  ///
-  /// Returns how many entries actually went out again.
-  int flushV41Outbox({required String reason}) {
-    final v41 = v41Delivery;
-    final host = v41Host;
-    if (v41 == null || host == null) return 0;
-    if (v41Outbox.length == 0) return 0;
-
-    // THE EGRESS CAP. Without information from the node NOTHING is
-    // guessed: then nothing drains. An assumed free slot that does not
-    // exist makes `CoverStream` discard the oldest group — and that could
-    // be a message that is in transit regularly right now.
-    final deep = v41PendingControl?.call();
-    final cap = v41ControlBacklogLimit?.call();
-    if (deep == null || cap == null) return 0;
-    final free = cap - deep;
-    if (free < CleonaService._v41SecureFramesPerOffer) {
-      _log.debug('V4.1-Outbox ($reason): control queue $deep/$cap — '
-          'no room for a resubmission '
-          '(${CleonaService._v41SecureFramesPerOffer} frames)');
-      return 0;
-    }
-
-    final due = v41Outbox.due(
-      // THE VERDICT STANDS IN THE RECORD, NOT HERE. `DeliveryRecord` keeps
-      // the three rules of §22.5.1 in ONE place; a second calculation would
-      // be the double bookkeeping the header of this file warns against.
-      //
-      // IF THE REGISTER DOES NOT KNOW THE IDENTIFIER, "no proof" applies —
-      // exactly the case after a restart, and that is the main case of
-      // this method.
-      hasProof: (idHex) =>
-          (v41Deliveries.lookup(idHex)?.independentRelays ?? 0) > 0,
-      freeFrame: free,
-      frameProTemplate: CleonaService._v41SecureFramesPerOffer,
-    );
-    if (due.isEmpty) return 0;
-
-    var out = 0;
-    for (final e in due) {
-      try {
-        if (_v41Resubmit(e, v41, host)) out++;
-      } catch (ex, st) {
-        // A SINGLE ENTRY MUST NOT STOP THE DRAIN.
-        // `v41PairKeyFor` and `v41OutDirectionFor` THROW when the founding
-        // keys are missing (deleted contact, rotated identity). Without
-        // this latch such an entry would tear every further resubmission
-        // down with it — and the throw would run out of an edge callback
-        // into the daemon's zone handler, which does not classify it as
-        // survivable (`exit(99)`).
-        _log.error('V4.1-Outbox: ${e.messageIdHex.substring(0, 8)} '
-            '(${e.messageType}) cannot be resubmitted: $ex\n$st');
-      }
-    }
-    if (out > 0) {
-      saveV41Outbox();
-      _log.event('V4.1-Outbox ($reason): $out of ${v41Outbox.length} '
-          'entries resubmitted, queue $deep/$cap');
-    }
-    return out;
-  }
-
-  /// Resubmits ONE entry. `true` if it was accepted.
-  ///
-  /// It is the same call that `sendToUser` makes — with stored values
-  /// instead of freshly resolved ones. NO second send path: whoever called
-  /// `seal()` or `delivery.send` directly here would skip the prekey draw
-  /// and the splitting, and both have been expensive once already.
-  bool _v41Resubmit(V41OutboxEntry e, V41Delivery v41, V41Host host) {
-    final contactHex = e.recipientUserId.hex;
-    final contact = _contacts[contactHex];
-    final peer = _v41PeerKey(e.recipientUserId);
-    v41.rememberPeer(peer, v41PairKeyFor(e.recipientUserId, contact),
-        outDirection: v41OutDirectionFor(e.recipientUserId, contact));
-
-    // THE KEYS: first the stored overrides (the group member without a
-    // contact record), then the contact record. The same order as in
-    // `sendToUser`, and it must be the same — otherwise the resubmission
-    // seals against different keys than the first attempt.
-    final x = e.x25519Pk ?? contact?.x25519Pk;
-    final m = e.mlKemPk ?? contact?.mlKemPk;
-    if (x == null || m == null) {
-      _log.warn('V4.1-Outbox: ${e.messageIdHex.substring(0, 8)} has no '
-          'KEM keys any more (contact deleted?) — stays until the '
-          'deadline');
-      return false;
-    }
-    host.rememberPeerKeys(peer, x25519: x, mlKem: m);
-
-    // ── THE MODE IS READ AGAIN, NOT REPEATED ─────────────────
-    //
-    // It never stood in the ledger, and that is intentional (see
-    // `v41_outbox.dart`). A chat set to secure in the meantime must not
-    // execute a stored speed decision — that would be the silent mode
-    // switch that the invariant (owner, 30.08.) forbids. The opposite
-    // direction would be just as wrong: a stored secure decision would cost
-    // 60 cells for a chat that has long been on speed.
-    //
-    // `skipL3` and `ephemeral` are both `false`: ephemeral kinds do not
-    // get into the ledger at all, and a signalling that needs a
-    // resubmission no longer is one.
-    // NO MODE INPUT ANY MORE (S389, §3.3/§12.1). Here
-    // `Contact.secureMode`/`Group.secureMode` was read again; the switch
-    // is gone. The constant is `true` for the same reason as in the send
-    // path (`cleona_service.dart`, `secureDesired`): of the two possible
-    // constants the hard rule only allows the protecting direction.
-    const secureDesired = true;
-    final mode = sendMode(
-      secureDesired: secureDesired,
-      skipL3: false,
-      ephemeral: false,
-    );
-    if (mode == null) return false;
-    v41.setChatMode(peer, secure: secureDesired);
-
-    final outcome = host.sendFrame(
-      peer: peer,
-      // EXACTLY THE BYTES OF THE FIRST ATTEMPT. Sealing happens FRESHLY
-      // (new ephemeral key, new one-time prekey, new splitting) — `sendFrame`
-      // does that by itself. What MUST stay the same is the plaintext frame:
-      // it carries the message identifier under which the other side
-      // acknowledges.
-      frame: e.frame,
-      mode: mode,
-      now: DateTime.now().toUtc(),
-      messageId: e.messageId,
-      // THE CLASS COMES FROM THE LEDGER, NOT FROM THE TYPE. Unlike the mode
-      // it is NOT decided again: it belongs to the message, not to the
-      // state of the chat. And it cannot be derived —
-      // `MTV3_KEY_ROTATION_BROADCAST` carries routine as well as emergency
-      // rotation (v41_outbox.dart, [V41OutboxEntry.management]).
-      management: e.management,
-    );
-    // THE RECORD IS RESET, and that is the truth, not a loss:
-    // `noteAttempt` discards the proofs of the previous attempt, because
-    // its cells carry a different seal and cannot be combined with those
-    // of this attempt (§22.5.1 ref. 3).
-    _v41NoteSend(e.messageId, outcome);
-    if (!outcome.accepted) {
-      _log.debug('V4.1-Outbox: ${e.messageIdHex.substring(0, 8)} rejected '
-          'again ($outcome) — stays in the book');
-      return false;
-    }
-    // ONLY COUNT NOW. If the counter were increased before sending, a
-    // rejection would also use up an attempt, and the cap would run empty
-    // without anything ever going out.
-    v41Outbox.markOffered(e.messageIdHex);
-    // ── AND INTO THE DISPLAY (S376) ────────────────────────────────────
-    //
-    // `_v41NoteSend` further up has reset the record to `placing`
-    // (`noteAttempt` discards the proofs of the previous attempt). Without
-    // this line the display stayed on the old value — for a message that
-    // was `failed` before, the user never saw the second attempt, although
-    // §12 explicitly offers them a "Resend" for it.
-    _v41ReflectStatus(e.messageIdHex);
-    _log.event('V4.1-Outbox: ${e.messageType} to ${shortPairLabel(peer)} '
-        'resubmitted (${e.frame.length} B, ${mode.name}, attempt '
-        '${e.offers}/$kMaxOutboxOffers) — $outcome');
-    return true;
-  }
-
-  /// Takes an arrived delivery receipt into the register.
-  ///
-  /// [verified] is the verdict about THIS frame, and depending on the path
-  /// a different proof of the same statement "the frame comes from the
-  /// pair partner": via V4.1 the frame MAC under `K_AB` (`verifyV41Sender`
-  /// -> `V41SenderVerdict.verified`), via V3 the user signature
-  /// (`SenderTrust.verified`). If it is `false`, the receipt is none per
-  /// §9.2, and the record stays where it is. It is therefore not logged
-  /// either: a receipt without proof is not an event about which anything
-  /// could be said.
-  ///
-  /// THE IDENTIFIER STANDS IN THE BODY OF THE RECEIPT, not in the frame:
-  /// the frame's `messageId` is the identifier of THIS receipt,
-  /// `DeliveryReceipt.messageId` that of the acknowledged message. The
-  /// body is unpacked here a second time (the handler below does it
-  /// anyway) — that is cheaper and more honest than passing the verdict
-  /// across `handleApplicationFrame` in a field that only this one type
-  /// needs.
-  /// Does THIS delivery receipt prove that the counterpart possesses our
-  /// day capsule?
-  ///
-  /// Only if it refers to a message that WE sent sealed via V4.1. Whoever
-  /// could open one of our V4.1 frames had the day secret — either the
-  /// capsule rode along, or they knew it already. Both are possession, and
-  /// only possession may switch off the capsule.
-  ///
-  /// ── WHAT THE OLD CONCLUSION COST (30.08. in the field) ──────────────
-  ///
-  /// Up to here ANY delivery receipt sufficed. But a receipt proves
-  /// delivery, not the opening of a seal — and it also comes for messages
-  /// that were delivered via the V3 path. Measured: Alice received a
-  /// receipt from the phone at 11:41:53, her FIRST V4.1 send of this run
-  /// was at 11:47:10, i.e. six minutes later. The receipt could not
-  /// possibly be for a V4.1 frame. It switched off the capsule anyway;
-  /// Alice's frames were then 642 B instead of 1152+, the capsule branch
-  /// in the opener (`message_seal.dart`) never took hold, and because
-  /// `MessageOpener._secrets` only lives in memory and the phone had been
-  /// reinstalled 20 minutes before, EVERY secure message in this direction
-  /// was unopenable — visible as `V4.1 UNGEOEFFNET … Selektor passte, AEAD
-  /// fiel`. Until UTC midnight, because the confirmation key carries the
-  /// day.
-  ///
-  /// [verified] belongs to it and did not stand in front of it before: a
-  /// receipt without proof is none per §9.2, and it may all the less
-  /// switch off the capsule — that would be a way to take delivery away
-  /// from a pair for the rest of the day.
-  ///
-  /// Falls back to "not proven" when in doubt: sending the capsule along
-  /// further costs 1088 B, switching it off too early costs the day.
-  bool _v41ReceiptProvesCapsule(List<int> receiptPayload,
-      {required bool verified}) {
-    if (!verified) return false;
-    try {
-      final receipt = proto.DeliveryReceipt.fromBuffer(
-          Uint8List.fromList(receiptPayload));
-      if (receipt.messageId.isEmpty) return false;
-      return v41Deliveries.lookup(receipt.messageId.hex) != null;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  void _v41NoteReceipt(List<int> receiptPayload, {required bool verified}) {
+  void _noteReceipt(List<int> receiptPayload, {required bool verified}) {
     if (!verified) return;
     try {
       final receipt = proto.DeliveryReceipt.fromBuffer(
@@ -428,22 +41,9 @@ extension V3MessageStateOps on CleonaService {
       // S387: the receipt is already proven here (`verified`) — for a
       // message sent via mycelium this is noted in the mailbox index.
       _myceliumReceiptMark(receipt.messageId.hex);
-      v41Deliveries
-          .lookup(receipt.messageId.hex)
-          ?.noteReceiptAuthenticatedByFrame();
-      // DELIVERED INCLUDES PROVEN (§21.5.5: "`placed` -> `delivered`
-      // only on a harvested delivery-receipt cell"). Whoever acknowledges
-      // has harvested, so the cell lay there — the entry has no business
-      // in the ledger any more, even if two placement receipts never
-      // arrived.
-      //
-      // THIS IS NO CONTRADICTION TO "receipts have no influence on this"
-      // (§21.5.5, line 7419). What it says there is that the receipt does
-      // not produce the STATE `placed` — it does not replace the placement
-      // proof. HOLDING a message that the receiver has demonstrably read
-      // would, by contrast, be pointless: the resubmission would cost 60
-      // cells for something that has arrived.
-      if (v41Outbox.remove(receipt.messageId.hex)) saveV41Outbox();
+      // An acknowledged message has no business in the parking compartment
+      // any more (§9.2): the receiver demonstrably has it.
+      if (localOutbox.remove(receipt.messageId.hex)) saveLocalOutbox();
     } catch (_) {
       // A malformed body carries no information (E-83). The handler below
       // catches the same case and logs it there.
@@ -477,7 +77,7 @@ extension V3MessageStateOps on CleonaService {
   /// the next edge does not send an acknowledged message again; and the
   /// proof is noted for [_myceliumDeliveryProven]. The DISPLAY flips with
   /// the application's DELIVERY_RECEIPT as before
-  /// ([_handleDeliveryReceiptV3]) — only it carries the recipient's
+  /// ([_handleDeliveryReceipt]) — only it carries the recipient's
   /// disclosure bit (§16.2.3); flipping on the 0x11 alone would show what a
   /// withholding recipient chose to conceal. `true` if the entry was closed.
   bool _myceliumReceiptLate(Uint8List identifier, mycelium.Address from) {
@@ -525,9 +125,9 @@ extension V3MessageStateOps on CleonaService {
           'history (§9.2, §9.3)');
       return true;
     }
-    final proto.ApplicationFrameV3 frame;
+    final proto.ApplicationFrame frame;
     try {
-      frame = proto.ApplicationFrameV3.fromBuffer(entry.content);
+      frame = proto.ApplicationFrame.fromBuffer(entry.content);
     } catch (_) {
       return false; // not an application frame: nothing of the app's
     }
@@ -556,49 +156,21 @@ extension V3MessageStateOps on CleonaService {
 
   /// May the display for [messageIdHex] switch to `delivered`?
   ///
-  /// `true` also when the register does NOT know the identifier — see the
-  /// block header: that is the V3 path and the displaced record, not a
-  /// missing receipt.
-  bool _v41DeliveryProven(String messageIdHex) {
-    final viaMycelium = _myceliumDeliveryProven(messageIdHex);
-    if (viaMycelium != null) return viaMycelium;
-    final record = v41Deliveries.lookup(messageIdHex);
-    return record == null || record.state == DeliveryState.delivered;
-  }
+  /// `true` also when the mailbox does NOT know the identifier — see the
+  /// block header: a displaced or never registered identifier is not a
+  /// missing receipt. (Until S408-P23 a V4.1 register stood behind the
+  /// mailbox; it was filled only by the V4.1 send path, which has had no
+  /// caller since S388, and fell with `lib/core/tagline/`.)
+  bool _deliveryProven(String messageIdHex) =>
+      _myceliumDeliveryProven(messageIdHex) ?? true;
 
-  /// The display status that the delivery register PROVES for
-  /// [messageIdHex].
+  /// The display status that the mailbox PROVES for [messageIdHex].
   ///
-  /// `null` means "the register does not know the identifier" — the V3
-  /// send path (`kBulkTypes`, first-contact types) or a long displaced
-  /// record. Then the previous value stays; a cap must not nail a message
-  /// to a state.
-  MessageStatus? _v41StatusFor(String messageIdHex) {
-    // S387: a message sent via mycelium keeps its state in the mailbox, not
-    // in the V4.1 register (`cleona_service_mycelium.dart`).
-    final viaMycelium = _myceliumStatusFor(messageIdHex);
-    if (viaMycelium != null) return viaMycelium;
-    final record = v41Deliveries.lookup(messageIdHex);
-    if (record == null) return null;
-    // THREE REGISTER STATES ONTO ONE DISPLAY STATE, and that is the spec
-    // and not an imprecision: §9.1 says "`in transit` deliberately
-    // covers 'lying in a post box'. A sender does not learn, and does not
-    // need to learn, which rung of the ladder carried the packet."
-    // `placing` (out, nothing lies), `placed` (two independent deposits)
-    // and `redundant` (all families) are three strengths of THE SAME
-    // statement "in transit, no receipt from the receiver yet". The number
-    // of families stays in the record and is not lost.
-    switch (record.state) {
-      case DeliveryState.placing:
-      case DeliveryState.placed:
-      case DeliveryState.redundant:
-        return MessageStatus.inTransit;
-      case DeliveryState.delivered:
-        return MessageStatus.delivered;
-      case DeliveryState.failed:
-        return MessageStatus.failed;
-    }
-  }
+  /// `null` means "the mailbox does not know the identifier" — a long
+  /// displaced entry. Then the previous value stays; a cap must not nail a
+  /// message to a state.
+  MessageStatus? _statusFor(String messageIdHex) =>
+      _myceliumStatusFor(messageIdHex);
 
   /// Catches up the status of an OUTGOING message from the delivery
   /// register — the only source that v4_1 §22.5.1 permits for it.
@@ -607,15 +179,18 @@ extension V3MessageStateOps on CleonaService {
   /// were sent: for a 1:1 message exactly one, for the group fan-out one
   /// per member (`UiMessage.fanoutLegs`).
   ///
-  /// AGGREGATE OVER THE WEAKEST LEG (§21.5.5 "Aggregation per leg").
-  /// `failed` is NOT the weakest here, but a class of its own: it only
-  /// applies if NO known leg lay anywhere. A single unplaceable leg next
-  /// to a placed one does not turn the message into an error — and a
-  /// receiver that does not harvest does not occur here at all (it stands
-  /// on `placing`, not on `failed`).
+  /// AGGREGATE OVER THE WEAKEST LEG (§16.2.3, §21.5.5 "Aggregation per
+  /// leg"), `failed` the weakest (S410 finding 8, owner decision 30.10.2026
+  /// variant A): one leg that no rung carried shows the message with the
+  /// warning mark, and `delivered` comes only when every leg is receipted
+  /// and none withholds (`UiMessage.isFullyDelivered`). Until S410 `failed`
+  /// was a class of its own here (only when NO leg lay anywhere) while the
+  /// receipt path counted the failed leg — the message stood on one tick
+  /// for good. A receiver that is merely offline does not occur here as
+  /// `failed` (§9.1: it stands on `inTransit`).
   /// Returns `true` if the display status ACTUALLY changed — since S376
   /// whether `onStateChanged` fires hangs on that.
-  bool _v41ApplyOutgoingStatus(UiMessage msg, List<String> legIdsHex) {
+  bool _applyOutgoingLegStatus(UiMessage msg, List<String> legIdsHex) {
     // ── THE INDEX IS KEPT HERE (S376, P5 finding 2) ─────────────
     //
     // At this place and only here, because both are present at once here:
@@ -623,45 +198,71 @@ extension V3MessageStateOps on CleonaService {
     // on the same path by which a message gets into the delivery register
     // at all — there is no send path that does the one without the other.
     for (final id in legIdsHex) {
-      _v41LegIndex[id] = (convId: msg.conversationId, msgId: msg.id);
+      _legIndex[id] = (convId: msg.conversationId, msgId: msg.id);
     }
-    while (_v41LegIndex.length > CleonaService._v41LegIndexMax) {
-      _v41LegIndex.remove(_v41LegIndex.keys.first);
+    while (_legIndex.length > CleonaService._legIndexMax) {
+      _legIndex.remove(_legIndex.keys.first);
     }
+    // §16.2.3: a post on the shared key has the state of its placing with
+    // the keepers (`cleona_service_shared_key_post.dart`); legs to members on
+    // pairwise legs do not enter it.
+    if (msg.sharedKey) return false;
 
-    final known = <MessageStatus>[];
+    // S410 finding 8 (variant A): ONE rule for every path — the register
+    // here, the receipts (`_applyFanoutReceipt`, `_catchUpMarkOwnDelivered`)
+    // call this method too (`weakestLegState`, service_types.dart).
+    final fanout = msg.fanoutLegs.isNotEmpty;
+    final memberOf = <String, String>{
+      for (final e in msg.fanoutLegs.entries) e.value: e.key,
+    };
+    final legs = <MessageStatus?>[];
+    var legsChanged = false;
     for (final id in legIdsHex) {
+      final member = memberOf[id];
+      final receipted = member != null && msg.deliveredBy.contains(member);
+      MessageStatus? register;
       // S398-W5: a leg waiting behind a file (§9.4) is not sent yet —
       // `resting` (§9.1), and the weakest leg counts (§16.2.3).
-      if (_fileOrderWaiting.contains(id)) {
-        known.add(MessageStatus.resting);
-        continue;
+      if (!receipted) {
+        register = _fileOrderWaiting.contains(id)
+            ? MessageStatus.resting
+            : _statusFor(id);
       }
-      final s = _v41StatusFor(id);
-      if (s != null) known.add(s);
-    }
-    if (known.isEmpty) return false;
-    final placed =
-        known.where((s) => s != MessageStatus.failed).toList();
-    final fresh = placed.isEmpty
-        ? MessageStatus.failed
-        : placed.reduce((a, b) => _statusRank(a) <= _statusRank(b) ? a : b);
-    if (msg.status == fresh) return false;
-    if (msg.status.canTransitionTo(fresh)) {
-      msg.status = fresh;
-      // §12.2 "warning mark and its reason" (S398-W1): the delivery layer
-      // gave up — no rung carried it.
-      if (fresh == MessageStatus.failed) {
-        msg.failureReason ??= FailureReason.noRoute;
+      final leg = fanout
+          ? legDisplayState(
+              receipted: receipted,
+              withheld: member != null && msg.withheldBy.contains(member),
+              register: register)
+          : register;
+      legs.add(leg);
+      // Which member's leg failed — what "retry" sends again (S410 "B").
+      // Known legs only: a leg this run does not know keeps its entry.
+      if (member != null && leg != null) {
+        legsChanged |= leg == MessageStatus.failed
+            ? msg.legFailedBy.add(member)
+            : msg.legFailedBy.remove(member);
       }
-      // §21.4.1: every change to a message goes into the store.
-      // `conversationId` stands at the object itself — the method does not
-      // get it passed through, and pulling it from the caller would be a
-      // second source for the same fact.
-      persistMessage(msg.conversationId, msg);
-      return true;
     }
-    return false;
+    final fresh = weakestLegState(legs,
+        deliveredAllowed: !fanout || msg.isFullyDelivered);
+    if (fresh == null || msg.status == fresh ||
+        !msg.status.canTransitionTo(fresh)) {
+      // §21.4.1: the failed legs changed without the display.
+      if (legsChanged) persistMessage(msg.conversationId, msg);
+      return false;
+    }
+    msg.status = fresh;
+    // §12.2 "warning mark and its reason" (S398-W1): the delivery layer
+    // gave up — no rung carried it.
+    if (fresh == MessageStatus.failed) {
+      msg.failureReason ??= FailureReason.noRoute;
+    }
+    // §21.4.1: every change to a message goes into the store.
+    // `conversationId` stands at the object itself — the method does not
+    // get it passed through, and pulling it from the caller would be a
+    // second source for the same fact.
+    persistMessage(msg.conversationId, msg);
+    return true;
   }
 
   /// Carries the register state for ONE leg over into the display.
@@ -670,7 +271,7 @@ extension V3MessageStateOps on CleonaService {
   /// WHY THIS METHOD EXISTS (S376, P5 finding 2)
   /// ══════════════════════════════════════════════════════════════════
   ///
-  /// Until S376 [_v41ApplyOutgoingStatus] ran at EXACTLY TWO places, and
+  /// Until S376 [_applyOutgoingLegStatus] ran at EXACTLY TWO places, and
   /// both lie on the SEND EDGE: `cleona_service.dart` immediately after
   /// `sendToUser` (1:1) and after the fan-out loop (group). At this point
   /// no relay has acknowledged yet — the record stands on `placing`, and
@@ -698,17 +299,17 @@ extension V3MessageStateOps on CleonaService {
   /// The caller knows ONE leg; the display of a group message, however,
   /// is the aggregate over ALL (§21.5.5 "Aggregation per leg", the weakest
   /// counts). This method therefore looks up the message via the index and
-  /// passes it with ALL its legs to [_v41ApplyOutgoingStatus] — the same
+  /// passes it with ALL its legs to [_applyOutgoingLegStatus] — the same
   /// calculation as at the send edge, no second verdict.
   ///
   /// ── A NOTIFICATION ONLY ON A REAL CHANGE ───────────────────────────
   ///
   /// Up to `m x R` = 60 receipts per message (§9.2); one `onStateChanged`
   /// per receipt would be 60 redraws of the list for at most two visible
-  /// transitions. `_v41ApplyOutgoingStatus` therefore reports whether
+  /// transitions. `_applyOutgoingLegStatus` therefore reports whether
   /// something has changed, and only then does the notification go out.
-  void _v41ReflectStatus(String legIdHex) {
-    final place = _v41LegIndex[legIdHex];
+  void _reflectLegStatus(String legIdHex) {
+    final place = _legIndex[legIdHex];
     if (place == null) return;
     final conv = conversations[place.convId];
     if (conv == null) return;
@@ -727,7 +328,7 @@ extension V3MessageStateOps on CleonaService {
     if (msg == null) {
       // The message has been deleted (§21.5.1, unlimited deletion) or has
       // expired. The index entry points into nothing and goes along.
-      _v41LegIndex.remove(legIdHex);
+      _legIndex.remove(legIdHex);
       return;
     }
     // ALL LEGS: for 1:1 the display identifier is at the same time the
@@ -735,7 +336,7 @@ extension V3MessageStateOps on CleonaService {
     final legs = msg.fanoutLegs.isEmpty
         ? <String>[msg.id]
         : msg.fanoutLegs.values.toList();
-    if (_v41ApplyOutgoingStatus(msg, legs)) {
+    if (_applyOutgoingLegStatus(msg, legs)) {
       onStateChanged?.call();
     }
   }
@@ -845,13 +446,13 @@ extension V3MessageStateOps on CleonaService {
     // What NO LONGER happens here is giving up. `_checkAndMarkExpired`
     // stood next to it and set `MessageStatus.expired`; §9.3 forbids that
     // ("There is no timer that expires messages"), and the method has
-    // fallen. If an entry drops out here, `_v41StatusFor` returns `null`
+    // fallen. If an entry drops out here, `_statusFor` returns `null`
     // for its identifier, and `null` means explicitly "the cap nails no
     // message to a state": the display keeps its last value.
-    final expired = v41Outbox.sweep(
+    final expired = localOutbox.sweep(
         nowMs: now, ttlMs: CleonaService._placementTtlMs);
     if (expired > 0) {
-      saveV41Outbox();
+      saveLocalOutbox();
       _log.info('V4.1-Outbox: $expired entries beyond the '
           '14-day deadline taken out (storage cap, no '
           'state change — §9.3)');
@@ -955,7 +556,7 @@ extension V3MessageStateOps on CleonaService {
   // a new identifier (§9.3), the old entry becomes `failed`. Otherwise
   // `failed` is set by the ladder alone, and only if no rung has carried.
   //
-  // The cleanup of the outbox (`v41Outbox.sweep` in `_checkMessageExpiry`)
+  // The cleanup of the outbox (`localOutbox.sweep` in `_checkMessageExpiry`)
   // is separate from that and stays: it takes LEDGER ENTRIES above the
   // memory cap out and touches no display state.
 
@@ -980,7 +581,7 @@ extension V3MessageStateOps on CleonaService {
   /// V3 DELIVERY_RECEIPT: sender side marks the outgoing message as
   /// `delivered`. Conversation lookup is on senderUserId-hex (DM); group
   /// receipts are deferred to C4-Groups.
-  void _handleDeliveryReceiptV3(HarvestEvent event, {bool wasDirect = false}) {
+  void _handleDeliveryReceipt(HarvestEvent event, {bool wasDirect = false}) {
     try {
       final receipt = proto.DeliveryReceipt.fromBuffer(event.payload);
       if (receipt.messageId.isEmpty) return;
@@ -996,14 +597,10 @@ extension V3MessageStateOps on CleonaService {
       // `AckTracker` lived in `lib/core/network/` and was deleted with it.
       //
       // WHAT TAKES ITS PLACE already stands in this file and below: the
-      // delivery status of the message flips directly to `delivered` here,
-      // and the V4.1 placement confirmation
-      // (`PlacementAck` -> `V41Delivery.bindPlacementAcked`) flips it to
-      // `placed` before. The difference to V3 is that there is NO timer any
-      // more that notices a missing reception: V4.1 knows no deadline on
-      // the delivery path (§22.5.1), because the cell stays with the
-      // responsible relays until it is harvested. A receiver that stayed
-      // offline is not an error.
+      // delivery status of the message flips directly to `delivered` here.
+      // There is NO timer that notices a missing reception: the message
+      // rests in the post box until it is collected (§8.2, §9.1), and a
+      // receiver that stayed offline is not an error.
       //
       // Nothing in route selection hangs on this place any more — there
       // are no routes, no address rating and no resubmission any more that
@@ -1034,44 +631,22 @@ extension V3MessageStateOps on CleonaService {
       final withheld = receipt.withholdDeliveryStatus;
 
       // 1:1 path — the sender reused the UiMessage id as the wire messageId.
-      // THE ONE QUESTION THAT THE DELIVERY REGISTER DECIDES (§9.2, D2).
-      // See the block header of this file: for a message sent via V4.1 the
-      // display only flips if the receipt frame was authenticated under
-      // `K_AB`. For everything else the answer is `true`, and the following
-      // line is then exactly the one from before.
-      //
-      // NO STEP BACK FOR MIXED NETWORKS, and that is recalculated: only
-      // what `routeFor` sent to `DeliveryRoute.v41` is registered. Whoever
-      // could open such a message at all possesses `K_AB` and answers via
-      // the same path — `MTV3_DELIVERY_RECEIPT` stands neither in
-      // `kBootstrapTypes` nor in `kBulkTypes` (see
-      // `_receiptReturnsOverV41`). A counterpart without `K_AB` could never
-      // have read the message and has nothing to acknowledge.
-      // ── THE DELIVERY REGISTER, ENTERED AND THEN ASKED (§9.2, D2) ──
-      //
-      // What is entered here is the V3 proof: `SenderTrust.verified` means
-      // that KEM unpacking and user signature held against the contact
-      // registry — the frame comes from the pair partner. The stronger V4.1
-      // proof (frame MAC under `K_AB`) is already entered at this point;
-      // `acceptV41Frame` does it before handing over here; a second entry
-      // of the same verdict changes nothing.
-      //
-      // WHY NOT SIMPLY QUERY `event.senderTrust` HERE and omit the record:
-      // then the rule would stand in two places — here and in the fan-out
-      // branch in `cleona_service_receive.dart` —, and the one could change
-      // without the other following. The record is the one place.
-      _v41NoteReceipt(event.payload,
+      // THE ONE QUESTION §9.2 DECIDES: only a receipt whose sender is proven
+      // (`SenderTrust.verified`) flips the display. `_noteReceipt` notes
+      // the proof in the mailbox index, `_deliveryProven` reads it — the
+      // rule stands in ONE place and not once per receive path.
+      _noteReceipt(event.payload,
           verified: event.senderTrust == SenderTrust.verified);
-      final deliveryProven = _v41DeliveryProven(msgIdHex);
+      final deliveryProven = _deliveryProven(msgIdHex);
 
       // ── AND: WAS THIS A LEG OF A LOCK-OUT ANNOUNCEMENT? (E-7) ────
       //
-      // AFTER `_v41NoteReceipt`, not before: there the record in the
-      // register is flipped, here what it says is read. The question "is
-      // this receipt proven?" is thus answered at exactly ONE place (§9.2,
-      // D2) and not a second time in the lock-out path. If the register
-      // does not know the leg, the contact stays pending — the justified
-      // strictness stands at `_v41DeliveryProvenForLockout`.
+      // AFTER `_noteReceipt`, not before: there the proof of the
+      // receipt is noted in the mailbox, here what it says is read. The
+      // question "is this receipt proven?" is thus answered at exactly ONE
+      // place (§9.2, D2) and not a second time in the lock-out path. If the
+      // mailbox does not know the leg, the contact stays pending — the
+      // justified strictness stands at `_lockoutDeliveryProven`.
       //
       // The identifier is that of the ACKNOWLEDGED leg, not that of the
       // receipt frame: `msgIdHex` comes from `receipt.messageId`.
@@ -1105,18 +680,3 @@ extension V3MessageStateOps on CleonaService {
     }
   }
 }
-
-/// Ranking of the display states for the leg aggregate (§9.5: "groups
-/// show the weakest state over all members").
-///
-/// Only the three steps that an OUTGOING leg can take on its way forward.
-/// `failed` is not a step of this ladder, but a class of its own (§9.1:
-/// "no way carried it") and is sorted out by the caller beforehand — a
-/// single uncarried leg next to a carried one does not turn the message
-/// into an error.
-int _statusRank(MessageStatus s) => switch (s) {
-      MessageStatus.resting => 0,
-      MessageStatus.inTransit => 1,
-      MessageStatus.delivered => 2,
-      MessageStatus.failed => -1,
-    };

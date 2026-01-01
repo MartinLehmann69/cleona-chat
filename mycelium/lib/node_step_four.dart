@@ -6,7 +6,8 @@
 ///  * **a line join's request (2)** carries the invitation value
 ///    `dayValue(pk_inv)` ([Target.boxValue]): it is left there, the card's
 ///    neighbour first — the holder the issuer asks (§8.2) — never on a
-///    device of the issuer ([Target.lan], its card address). No contact is
+///    device of the issuer ([Target.lan] and every card address,
+///    [Target.recipientOwn]). No contact is
 ///    looked up: until OP-20 step 4 asked every mailbox of the host for the
 ///    issuer, and when ANOTHER identity of this node had it as a contact the
 ///    request went under that contact's day value (lab E/O2, T2/T3). That
@@ -14,7 +15,7 @@
 ///    the requester's device hosts one of its contacts (§9.2 "a friend of
 ///    one identity is never named to the contacts of another").
 ///  * **everything else** — messages, answers, the receipt (4) — goes under
-///    the recipient's day value ([NodePostBox.stepFourForIdentifier]).
+///    the recipient's day value ([NodeDeposit.stepFourForIdentifier]).
 ///
 /// A QR or NFC join has no post box before the contact (§15.1 "a card read
 /// from them is redeemable only while the issuer is on"): `node_join.dart`
@@ -41,7 +42,10 @@ extension NodeStepFour on Node {
       return depositNamed(packet, value, [
         if (target.neighbour case final n?) n,
       ], at: [
+        // every address of the issuer, not only the one step 1 takes: a
+        // second one of the same machine is the same node (C17 U-1, B-18)
         if (target.lan case final l?) l,
+        ...target.recipientOwn,
       ], ended: ended)
           .then((r) => r.$1);
     }

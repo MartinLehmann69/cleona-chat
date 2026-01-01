@@ -28,7 +28,7 @@
 /// ## Bounds (§20.2 — every buffer states its bound and its overflow)
 /// | Buffer | Bound | On overflow |
 /// |---|---|---|
-/// | all pieces together | [budget] B | oldest identifier's oldest pieces evicted |
+/// | all pieces together | [budget] B less [reserved] | oldest identifier's oldest pieces evicted |
 /// | pieces per identifier | the `count` of its open | the rest discarded |
 /// | identifiers | [kIdentifiersAtMost] | oldest identifier evicted |
 /// | answers to `0x54` running at once | [kAnswersAtMost] | the question ignored — it comes again at the asker's next edge |
@@ -52,6 +52,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/bulk_disk.dart';
 import 'package:mycelium/bulk_piece.dart';
+import 'package:mycelium/bulk_want.dart' show readCollectWanted;
 import 'package:mycelium/card.dart' show CardAddress;
 import 'package:mycelium/kinds.dart' as kinds;
 
@@ -65,10 +66,8 @@ class _Held {
   final Uint8List tag;
   final DateTime inserted;
 
-  /// The sender's addresses. ONE node may be named under several addresses
-  /// (LAN and public, the recipient's list and the own one), and the sender
-  /// then places one share per address — each arrives from the address it
-  /// was sent to.
+  /// The sender's addresses. ONE node may be named under several (LAN and public, the recipient's list and the
+  /// own one); the sender then places one share per address — each arrives from the address it was sent to.
   final List<CardAddress> from = [];
 
   /// The proofs taken for this identifier: each distinct valid open adds
@@ -87,8 +86,16 @@ class _Held {
 }
 
 class BulkHolder {
-  /// The bulk cache in bytes of sealed pieces; 0 = no bulk.
-  final int budget;
+  /// The bulk cache in bytes of sealed pieces; 0 = no bulk. The user may
+  /// change it while the holder runs ([budgetSet]).
+  int get budget => _budget;
+  int _budget;
+
+  /// Bytes of the same class held outside this holder: the binary objects a desktop holds for others (§31.3 tier 1,
+  /// §26.6.1 step 3). Never evicted — the pieces get what is left; read when a piece needs room, no clock.
+  int Function() reserved = () => 0;
+
+  int get _cap => max(0, budget - reserved());
 
   /// Desktop or phone — stated in every `0x53`.
   final BulkClass cls;
@@ -118,7 +125,7 @@ class BulkHolder {
   int evicted = 0;
 
   BulkHolder({
-    required this.budget,
+    required int budget,
     required void Function(Uint8List packet, CardAddress to) send,
     required List<CardAddress> Function() own,
     this.cls = BulkClass.desktop,
@@ -128,7 +135,8 @@ class BulkHolder {
     BulkDisk? disk,
     BulkPace? pace,
     this.report,
-  })  : _send = send,
+  })  : _budget = budget,
+        _send = send,
         _own = own,
         _reachable = reachable ?? ((_) => false),
         _proven = proven ?? (() => false),
@@ -140,6 +148,24 @@ class BulkHolder {
 
   /// Bytes of sealed pieces held — for the statistics (§21.3.3 item 4).
   int get usedBytes => _used;
+
+  /// [reserved] grew: the oldest pieces give way until the class fits.
+  void fit() {
+    if (budget > 0 && _used > _cap) _room(0, '');
+  }
+
+  /// The user's new size (§21.3.1, §21.3.3 item 3: "user-overridable in tiers"). A smaller one frees the space at
+  /// once by the rule of every full cache ([_room]: oldest pieces of the oldest transfer first; [reserved] counts
+  /// against it); a larger one evicts nothing. `false` for a size of 0 or less and for a holder started without
+  /// bulk (the start paths always pass one, `mycelium_seam.dart`).
+  bool budgetSet(int bytes) {
+    if (bytes <= 0 || _budget <= 0) return false;
+    _budget = bytes;
+    report?.call('Bulk: cache set to ${bytes >> 20} MB, '
+        '${_used >> 20} MB held');
+    if (_used > _cap) _room(0, '');
+    return true;
+  }
 
   /// Pieces held under [tag].
   int heldFor(Uint8List tag) => _held[tagHex(tag)]?.held ?? 0;
@@ -153,8 +179,8 @@ class BulkHolder {
     _expire();
     if (p.isEmpty) return;
     if (p[0] == kinds.kBulkCollect) {
-      final c = readCollect(p);
-      if (c != null && !_resting) unawaited(_answer(c.tag, from, c.from));
+      final c = readCollectWanted(p);
+      if (c != null && !_resting) unawaited(_answer(c.tag, from, c.wants, c.says));
       return;
     }
     final open = readOpen(p);
@@ -165,7 +191,7 @@ class BulkHolder {
 
   void _open(BulkOpen o, CardAddress from) {
     final size = o.count * kSealedLength;
-    if (budget <= 0 || o.count == 0 || size > budget || _resting) {
+    if (budget <= 0 || o.count == 0 || size > _cap || _resting) {
       _send(heldPacket(o.tag, 0, cls), from);
       return;
     }
@@ -203,8 +229,8 @@ class BulkHolder {
     final key = x.stripe << 8 | x.no;
     if (x.no >= kHoldersAtMost || h.fresh.containsKey(key)) return;
     if (h.held >= h.allowed) return; // more than announced: discarded
-    if (_used + kSealedLength > budget) _room(kSealedLength, tagHex(x.tag));
-    if (_used + kSealedLength > budget) return;
+    if (_used + kSealedLength > _cap) _room(kSealedLength, tagHex(x.tag));
+    if (_used + kSealedLength > _cap) return;
     h.fresh[key] = x.sealed;
     _used += kSealedLength;
     h.quiet?.cancel();
@@ -246,7 +272,7 @@ class BulkHolder {
   /// [except]. At least 1/16 of the budget goes at once, so that a full
   /// cache does not rewrite a file for every arriving piece.
   void _room(int need, String except) {
-    var over = _used + need - budget;
+    var over = _used + need - _cap;
     if (over <= 0) return;
     over = max(over, budget ~/ 16);
     for (final k in _held.keys.toList()) {
@@ -285,10 +311,11 @@ class BulkHolder {
     _disk?.piecesDrop(h.tag);
   }
 
-  /// One pass for [to]: every piece held under [tag] from stripe [from] on,
+  /// One pass for [to]: every piece held under [tag] of a stripe it [wants],
   /// then the end of the pass (`0x55` with the count, `bulk_piece.dart`) —
   /// the recipient's event to ask again for what is still open (S398-W1).
-  Future<void> _answer(Uint8List tag, CardAddress to, int from) async {
+  Future<void> _answer(Uint8List tag, CardAddress to,
+      bool Function(int stripe) wants, String says) async {
     final k = tagHex(tag);
     final h = _held[k];
     if (h == null || h.held == 0) {
@@ -310,8 +337,8 @@ class BulkHolder {
         _send(tagPacket(kinds.kBulkNothingHere, tag), to);
         return;
       }
-      final pass = [for (final s in all) if (s.stripe >= from) s];
-      report?.call('Bulk: holder answers $short to $to from stripe $from: '
+      final pass = [for (final s in all) if (wants(s.stripe)) s];
+      report?.call('Bulk: holder answers $short to $to $says: '
           '${pass.length} of ${all.length} piece(s)');
       final step = max(1, pass.length ~/ 10);
       for (final s in pass) {
@@ -355,7 +382,7 @@ class BulkHolder {
     }
     disk.orphansDrop(_held.values.map((h) => h.tag));
     _expire();
-    if (_used > budget) _room(0, '');
+    if (_used > _cap) _room(0, '');
   }
 
   void _indexSave() => _disk?.indexSave(_held.values.map((h) => h.index));

@@ -51,7 +51,7 @@ extension IdentityDeletionOps on CleonaService {
   /// A device that has not seen a rotation yet would otherwise discard
   /// exactly the deletion that concerns it.
   ///
-  /// THE FRAME ITSELF IS ALREADY AUTHENTICATED: `_handleTwinSyncV3` only
+  /// THE FRAME ITSELF IS ALREADY AUTHENTICATED: `_handleTwinSync` only
   /// gets what the receive chain has checked against the user key of this
   /// identity (or that of an authorised delegate), and the dedup lock on
   /// `sync_id` keeps repetitions out. The check here is the second door,

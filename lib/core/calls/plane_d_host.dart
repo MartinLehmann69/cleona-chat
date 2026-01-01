@@ -6,7 +6,7 @@
 // `CleonaService.attachCallPlaneD` had exactly one caller,
 // `lib/core/tagline/v41_attach.dart`, inside `attachV41` — and `attachV41`
 // has had no caller since the replacement. So no service ever got a
-// [CallPlaneD], `CallTransportV41.mediaUnavailableReason` always named a
+// [CallPlaneD], `PlaneDCallTransport.mediaUnavailableReason` always named a
 // reason, and `CallService._mediaCarrierReady` rejected every 1:1 call,
 // every acceptance and every group call (S398-LUECKEN-NAHT.md, B-2).
 //
@@ -41,23 +41,24 @@
 //
 // ══ THE ADDRESS CANDIDATES (§17.3) ══════════════════════════════════════
 //
-//  * local: `dialableLocalAddresses` inside `ownCallCandidates`, with the
+//  Since S408-LEBENSLAUF P17 all three come from the host
+//  (`HostNetwork.ownLocal`/`ownMapped`/`ownMirrored`):
+//  * local: the interfaces the delivery layer read at its edges, with the
 //    host's port;
-//  * mapped: the port mapping of the app seam (`portMappingFrom`, §25.9);
+//  * mapped: the host's router mapping (`host.network.router`, §25.9);
 //  * mirrored: `Node.publicAddress`, which the host learns from a
 //    neighbour outside the own segment ("how do I look from there",
 //    `mycelium/lib/node_outside.dart`) — the §17.3 mirror of the 4.2
-//    carrier. It is also where the seam writes a granted IPv4 mapping;
+//    carrier. It is also where the host writes a granted IPv4 mapping;
 //    then it equals the mapped candidate and counts once, as mapped.
 library;
 
 import 'dart:typed_data';
 
 import 'package:cleona/core/calls/address_candidates.dart';
-import 'package:cleona/core/calls/call_transport_v41.dart' show CallPlaneD;
+import 'package:cleona/core/calls/plane_d_call_transport.dart' show CallPlaneD;
 import 'package:cleona/core/link_io/d_socket.dart';
 import 'package:cleona/core/service/cleona_service.dart';
-import 'package:cleona/core/service/mycelium_seam.dart' show portMappingFrom;
 import 'package:cleona/core/sync/entry_record.dart' show EntryAddress;
 import 'package:mycelium/board_node.dart' show NodeAnswer;
 import 'package:mycelium/host.dart';
@@ -120,18 +121,20 @@ CallPlaneD _build(Host host, void Function(String)? report) {
   return CallPlaneD(
     socket: socket,
     ownPort: host.port,
-    mapped: () {
-      final m = portMappingFrom(host)?.mapper;
-      if (m == null || !m.hasMapping) return null;
-      final ip = m.externalIp;
-      final port = m.externalPort;
-      if (ip == null || port == null) return null;
-      return EntryAddress(ip, port);
-    },
+    // §17.3: all three kinds of own candidates come from the host — the
+    // delivery layer holds them (S408-LEBENSLAUF P17); Plane D keeps the
+    // punch window, the path check and the loss rule (§17.4).
+    localAddresses: () async =>
+        [for (final e in host.network.ownLocal) e.address.address],
+    mapped: () => switch (host.network.ownMapped) {
+          final m? => EntryAddress(m.address.address, m.port),
+          null => null,
+        },
     mirrored: () {
-      final p = host.node.publicAddress;
+      final p = host.network.ownMirrored;
       if (p == null) return const <CallCandidate>[];
-      final c = CallCandidate.of(Uint8List.fromList(p.address), p.port,
+      final c = CallCandidate.of(
+          Uint8List.fromList(p.address.rawAddress), p.port,
           fromMirror: true);
       return c == null ? const <CallCandidate>[] : [c];
     },

@@ -16,34 +16,38 @@ const String kKeyRotationRetryArea = 'key_rotation_retry';
 /// by side, and the invariant would only be a declaration of intent.
 const String kKeyRotationRetryKey = '_';
 
-/// §26.6.2 package C — retry path for emergency key rotation.
+/// §26.6.2 package C — who has the emergency key rotation, and who not yet.
 ///
-/// Background: `rotateIdentityKeys()` sends a dual-signed
-/// `KEY_ROTATION_BROADCAST` to every accepted contact and hopes the contacts
-/// confirm via `KEY_ROTATION_ACK`. The initial broadcast is stored in S&F for
-/// 30d (V3.1.67, commit e916e36), but a contact who stays offline longer
-/// (extended trip, device swap, dead battery holiday) would still miss the
-/// rotation and from then on be unreachable — any message encrypted with the
-/// new keys cannot be decrypted by a contact that still has the old keys.
+/// `rotateIdentityKeys()` sends a dual-signed `KEY_ROTATION_BROADCAST` to every
+/// accepted contact; a contact confirms with `KEY_ROTATION_ACK`. This manager
+/// keeps, per contact, whether it is still pending, has acknowledged, or will
+/// not be reached.
 ///
-/// This manager persists per-contact retry state and re-sends the original
-/// dual-signed broadcast when a contact has not ACKed within `retryIntervalMs`.
+/// **No clock, no counting (S408-LEBENSLAUF P20, finding A-7).** Until S408 a
+/// 24-hour timer of the service counted "attempts" per contact — without
+/// sending anything (the V4.1 carrier had fallen, gap G-3) — and moved a
+/// contact to `expired` after three of them or 90 days. The broadcast is an
+/// ordinary sending of the delivery layer: without a way it rests and leaves
+/// again at every edge, placed it waits for the contact's collection, and
+/// only after 14 days without a way does the delivery layer close it as
+/// failed (§9.3, D-47; §11.3a: the layers above "do not repeat, count or
+/// time anything themselves"). So the state follows the DELIVERY STATE of the
+/// broadcast to each contact: pending → acked on its `KEY_ROTATION_ACK`,
+/// pending → expired when the delivery layer closed that contact's broadcast
+/// as failed ([markFailed]); the service reads it at its edges.
 ///
 /// Key invariants:
 ///
 /// - Only one rotation state at a time. A new rotation supersedes any prior
 ///   state (the previous broadcast's keys are already history).
 /// - The stored broadcast bytes are the *inner* `KeyRotationBroadcast`
-///   protobuf which is dual-signed with the OLD and NEW Ed25519 keys. The
-///   outer envelope and KEM ciphertext are recreated per retry — only the
-///   inner signature matters for the receiver's `_handleEmergencyKeyRotation`
-///   verification path.
-/// - After `rotatedAt + expireTtlMs` the pending contact list is flushed
-///   into `expired`. Expired contacts are NOT auto-removed — the user must
-///   decide what to do. We emit an IPC event so the UI can warn.
-/// - The manager never retries an `acked` or `expired` contact. A contact
-///   that rotates away independently (different rotation epoch) will simply
-///   time out here and land in `expired`.
+///   protobuf, dual-signed with the OLD and NEW Ed25519 keys.
+/// - Expired contacts are NOT auto-removed — the user decides. An IPC event
+///   lets the UI warn ([drainNewlyExpired]).
+/// - The stored row keeps the fields an earlier 4.2 version reads
+///   (`expireAt`, `maxAttempts`, the attempt fields), so a profile stays
+///   readable by it (§1.2 principle 8, D-21); this version decides nothing
+///   on them.
 class KeyRotationRetryManager {
   final String profileDir;
   final String identityId;
@@ -53,16 +57,6 @@ class KeyRotationRetryManager {
   final MessageStore? _store;
   final CLogger _log;
 
-  /// Retry cadence. Caller ticks the timer; this class decides what is due.
-  final int retryIntervalMs;
-
-  /// Absolute cutoff for a single rotation state (default 90d).
-  final int expireTtlMs;
-
-  /// Max number of retry attempts per contact (default 3). After this, the
-  /// contact moves to `expired` even if the overall window is not yet hit.
-  final int maxAttempts;
-
   KeyRotationRetryState? _state;
 
   bool _loaded = false;
@@ -71,9 +65,6 @@ class KeyRotationRetryManager {
     required this.profileDir,
     required this.identityId,
     this._store,
-    this.retryIntervalMs = 24 * 60 * 60 * 1000,
-    this.expireTtlMs = 90 * 24 * 60 * 60 * 1000,
-    this.maxAttempts = 3,
   })  : // profileDir is a constructor parameter (per identity) -> directly usable.
         _log = CLogger.get('key-rotation-retry[${shortHex(identityId)}]',
             profileDir: profileDir);
@@ -193,8 +184,9 @@ class KeyRotationRetryManager {
     _state = KeyRotationRetryState(
       rotationId: rotationId,
       rotatedAt: now,
-      expireAt: now + expireTtlMs,
-      maxAttempts: maxAttempts,
+      // Read by an earlier 4.2 version only (class header); no decision here.
+      expireAt: now + _earlierExpireMs,
+      maxAttempts: _earlierMaxAttempts,
       oldUserIdHex: oldUserIdHex,
       broadcastBytes: Uint8List.fromList(broadcastBytes),
       pending: pending,
@@ -221,83 +213,36 @@ class KeyRotationRetryManager {
     return false;
   }
 
-  /// Returns the list of contacts due for a retry right now. A contact is due
-  /// if it is in `pending`, `lastAttemptAt + retryIntervalMs <= now`, and
-  /// neither `maxAttempts` nor `expireAt` has been reached. Contacts whose
-  /// limits are already exceeded are moved to `expired` as a side effect.
-  ///
-  /// Returns the `broadcastBytes` plus the list of contact hexes the caller
-  /// should re-send to. The caller must invoke [markAttempt] after each
-  /// successful re-send.
-  DueRetries duePending({required int now}) {
-    final s = _state;
-    if (s == null) {
-      return DueRetries(
-        broadcastBytes: Uint8List(0),
-        oldUserIdHex: '',
-        contacts: const [],
-      );
-    }
-
-    final due = <String>[];
-    final toExpire = <String>[];
-
-    s.pending.forEach((hex, entry) {
-      if (now >= s.expireAt) {
-        toExpire.add(hex);
-        return;
-      }
-      if (entry.attempts >= s.maxAttempts) {
-        toExpire.add(hex);
-        return;
-      }
-      if (now - entry.lastAttemptAt >= retryIntervalMs) {
-        due.add(hex);
-      }
-    });
-
-    if (toExpire.isNotEmpty) {
-      for (final hex in toExpire) {
-        s.pending.remove(hex);
-        if (s.expired.add(hex)) {
-          s.pendingExpiredNotifications.add(hex);
-        }
-      }
-      _log.warn('Marked ${toExpire.length} contact(s) as expired '
-          '(no ACK after ${s.maxAttempts} attempts or $expireTtlMs ms)');
-      _save();
-    }
-
-    return DueRetries(
-      broadcastBytes: s.broadcastBytes,
-      oldUserIdHex: s.oldUserIdHex,
-      contacts: List.unmodifiable(due),
-    );
-  }
-
-  /// Record that a retry was sent for [contactNodeIdHex] at [now].
-  void markAttempt(String contactNodeIdHex, {required int now}) {
-    final s = _state;
-    if (s == null) return;
-    final entry = s.pending[contactNodeIdHex];
-    if (entry == null) return;
-    entry.lastAttemptAt = now;
-    entry.attempts++;
+  /// The broadcast to [contactNodeIdHex] went out as the delivery layer's
+  /// sending [messageIdHex] (the identifier of its outbound) — the one the
+  /// service asks the delivery state of.
+  void noteSending(String contactNodeIdHex, String messageIdHex) {
+    final entry = _state?.pending[contactNodeIdHex];
+    if (entry == null || entry.messageId == messageIdHex) return;
+    entry.messageId = messageIdHex;
     _save();
   }
 
-  /// Test-only: reset all `lastAttemptAt` to 0 so the next `duePending` call
-  /// treats every pending contact as due, regardless of `retryIntervalMs`.
-  /// Used by E2E harness to simulate "24h passed" without wall-clock wait.
-  /// Does NOT reset the `attempts` counter — `maxAttempts` still caps retries
-  /// as in production.
-  void resetAttemptClocksForTesting() {
+  /// The pending contacts with the sending their broadcast went out as.
+  Map<String, String> get pendingSendings => {
+        for (final e in _state?.pending.entries ??
+            const <MapEntry<String, KeyRotationRetryEntry>>[])
+          e.key: ?e.value.messageId,
+      };
+
+  /// The delivery layer closed the broadcast to [contactNodeIdHex] as
+  /// failed (§9.3, D-47): the contact is not reached — `expired`, reported
+  /// once ([drainNewlyExpired]). Returns true if the state changed.
+  bool markFailed(String contactNodeIdHex) {
     final s = _state;
-    if (s == null) return;
-    for (final entry in s.pending.values) {
-      entry.lastAttemptAt = 0;
+    if (s == null || s.pending.remove(contactNodeIdHex) == null) return false;
+    if (s.expired.add(contactNodeIdHex)) {
+      s.pendingExpiredNotifications.add(contactNodeIdHex);
     }
     _save();
+    _log.warn('Rotation broadcast to ${shortHex(contactNodeIdHex)} closed as '
+        'failed by the delivery layer — not reached');
+    return true;
   }
 
   /// Drops the whole state. Only called when the identity itself is deleted.
@@ -342,37 +287,34 @@ class KeyRotationRetryManager {
   }
 }
 
-/// Result of [KeyRotationRetryManager.duePending].
-class DueRetries {
-  final Uint8List broadcastBytes;
-  /// Pre-rotation user-id hex of the rotator. Retry envelopes must use this
-  /// as `senderId` so the offline receiver's `_contacts[senderHex]` lookup
-  /// succeeds. Empty when the manager has no active rotation.
-  final String oldUserIdHex;
-  final List<String> contacts;
-  DueRetries({
-    required this.broadcastBytes,
-    required this.oldUserIdHex,
-    required this.contacts,
-  });
-}
+/// What an earlier 4.2 version reads from the row (class header).
+const int _earlierExpireMs = 90 * 24 * 60 * 60 * 1000;
+const int _earlierMaxAttempts = 3;
 
 /// Per-contact retry bookkeeping.
 class KeyRotationRetryEntry {
+  /// Written for an earlier 4.2 version (class header); unused here.
   int firstAttemptAt;
   int lastAttemptAt;
   int attempts;
+
+  /// The delivery layer's sending of the broadcast to this contact (its
+  /// outbound identifier, hex); `null` until it is known, and in a row an
+  /// earlier 4.2 version wrote.
+  String? messageId;
 
   KeyRotationRetryEntry({
     required this.firstAttemptAt,
     required this.lastAttemptAt,
     required this.attempts,
+    this.messageId,
   });
 
   Map<String, dynamic> toJson() => {
         'firstAttemptAt': firstAttemptAt,
         'lastAttemptAt': lastAttemptAt,
         'attempts': attempts,
+        'messageId': ?messageId,
       };
 
   factory KeyRotationRetryEntry.fromJson(Map<String, dynamic> json) =>
@@ -380,6 +322,7 @@ class KeyRotationRetryEntry {
         firstAttemptAt: (json['firstAttemptAt'] as num).toInt(),
         lastAttemptAt: (json['lastAttemptAt'] as num).toInt(),
         attempts: (json['attempts'] as num).toInt(),
+        messageId: json['messageId'] as String?,
       );
 }
 
@@ -390,7 +333,7 @@ class KeyRotationRetryState {
   int rotatedAt;
   int expireAt;
   int maxAttempts;
-  /// Pre-rotation user-id hex of the rotator (us). See `DueRetries`.
+  /// Pre-rotation user-id hex of the rotator (us).
   String oldUserIdHex;
   Uint8List broadcastBytes;
   Map<String, KeyRotationRetryEntry> pending;

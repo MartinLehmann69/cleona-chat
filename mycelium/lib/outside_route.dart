@@ -17,7 +17,7 @@
 /// No foreign STUN packet — only this one exchange with a neighbour whom
 /// one already knows from the own card anyway. Asking the OWN
 /// router (NAT-PMP/PCP, then UPnP/IGD, §7.3) is not here: that
-/// is taken over by the app seam (`lib/core/service/port_mapping.dart`), at
+/// is taken over by the host (`host_router.dart`, `router_mapping.dart`), at
 /// start and network change, independent of this neighbour exchange.
 library;
 
@@ -28,6 +28,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/wire.dart';
 import 'package:mycelium/card.dart';
+import 'package:mycelium/silence.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 
 const int kKindWhatIsMyAddress = kinds.kWhatIsMyAddress;
@@ -38,7 +39,9 @@ const int kKindKnock = kinds.kKnock;
 /// (§7.3, table „`0x40` ask"; W10, S391: until then 8, the spec leads).
 const int kIdentifierLength = 16;
 
-const Duration kAnswerDeadlineStandard = Duration(seconds: 3); // waiting period for 0x41
+/// The answer wait for 0x41 after the 0x40 has left (§11.6), repeated as
+/// §11.3a says (`silence.dart`). Until S407 one 3-s wait, never repeated.
+const Duration kAnswerDeadlineStandard = kAnswerWait;
 const Duration kKeepAliveDeadlineStandard = Duration(seconds: 30); // see keep-alive sender
 const int kKnockAtMostAttempts = 5; // after that the attempt counts as failed
 const Duration kKnockInterval = Duration(milliseconds: 250);
@@ -81,9 +84,13 @@ class OutsideRoute {
   /// was thus still mute even after wiring the kind allocation —
   /// two different routes out on the same socket are one too
   /// many.
-  final void Function(Uint8List packet, InternetAddress target, int targetPort)
-      _send;
+  final FutureOr<Object?> Function(
+      Uint8List packet, InternetAddress target, int targetPort) _send;
   final Map<String, _WaitingRequest> _waitingRequests = {};
+
+  /// Where the 0x40 is repeated and given up (§11.3a) — the node's, which
+  /// declares a failed address; alone on the wire one that declares nothing.
+  Silence silence = Silence();
   final Map<String, _KnockAttempt> _waitingKnockAttempts = {};
 
   /// ONLY for observation/measurement, they do not change the behaviour itself:
@@ -127,7 +134,9 @@ class OutsideRoute {
   /// node otherwise uses, and feeds [receive] from its
   /// kind allocation — exactly that is what `node.dart` does.
   OutsideRoute.appended(
-      void Function(Uint8List packet, InternetAddress target, int targetPort) send,
+      FutureOr<Object?> Function(
+              Uint8List packet, InternetAddress target, int targetPort)
+          send,
       {this.onUnknownKnock,
       this.onAnswerSent})
       : _send = send;
@@ -156,7 +165,9 @@ class OutsideRoute {
 
   /// (1) Learn the own public address. Sends 0x40 to
   /// [neighbour]:[neighbourPort], returns the address under which the neighbour
-  /// SAW the packet — `null` on timeout.
+  /// SAW the packet — `null` when it and its repeats stayed without an answer
+  /// (§11.3a; [deadline] is the answer wait of each). Only that address: the
+  /// answer says how THIS address sees the node, and confirms only it.
   ///
   /// [identifier] instead of a random one: the keep-alive measurement
   /// (§8.1) needs it for its echo request, and a test reproduces with it a
@@ -174,11 +185,15 @@ class OutsideRoute {
     final request = Uint8List(1 + kIdentifierLength);
     request[0] = kKindWhatIsMyAddress;
     request.setRange(1, request.length, identifier);
-    _send(request, neighbour, neighbourPort);
     try {
-      return await waiting.completed.future.timeout(deadline);
-    } on TimeoutException {
-      return null;
+      final at = await silence.ask(waiting.completed.future,
+          to: neighbour,
+          port: neighbourPort,
+          send: (a, p) => _send(request, a, p),
+          wait: deadline,
+          others: false,
+          what: 'address question 0x40');
+      return at == null ? null : await waiting.completed.future;
     } finally {
       _waitingRequests.remove(key);
     }
@@ -333,8 +348,12 @@ class KeepAliveSender {
     int neighbourPort, {
     Duration deadline = kKeepAliveDeadlineStandard,
   }) {
+    // A keep-alive keeps the mapping open; it waits for no answer and is
+    // therefore never repeated (§11.3a) — one 0x40 per period.
     final t = Timer.periodic(deadline, (_) {
-      unawaited(outsideRoute.whatIsMyAddress(neighbour, neighbourPort));
+      final p = Uint8List(1 + kIdentifierLength)..[0] = kKindWhatIsMyAddress;
+      p.setRange(1, p.length, _randomIdentifier());
+      unawaited(Future.value(outsideRoute._send(p, neighbour, neighbourPort)));
     });
     return KeepAliveSender._(t);
   }

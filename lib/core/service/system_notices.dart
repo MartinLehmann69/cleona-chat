@@ -42,6 +42,31 @@ const String kNoticeGroupMemberUnconfirmed =
 /// sender before they were acknowledged. Its argument is the number.
 const String kNoticeExpiredBeforeRead = 'system_notice_expired_before_read';
 
+/// §18.1.7 (S410): the calendar lines of a group chat. Each is written by
+/// the RECEIVING service from the calendar cell (`calendar_protocol_
+/// service.dart`); nothing of it travels on the wire, so a 4.2.3 counterpart
+/// is not touched. Until S410 they were fixed English/German texts
+/// ("hat zugesagt", "declined") in every language. The four event lines
+/// carry `{name}` and `{title}` ([noticeWithNameAndTitle]), the four
+/// answers `{name}` ([noticeWithName]).
+const String kNoticeCalendarCreated = 'system_notice_calendar_created';
+const String kNoticeCalendarChanged = 'system_notice_calendar_changed';
+const String kNoticeCalendarCancelled = 'system_notice_calendar_cancelled';
+const String kNoticeCalendarDeleted = 'system_notice_calendar_deleted';
+const String kNoticeCalendarAccepted = 'system_notice_calendar_accepted';
+const String kNoticeCalendarDeclined = 'system_notice_calendar_declined';
+const String kNoticeCalendarTentative = 'system_notice_calendar_tentative';
+const String kNoticeCalendarProposesTime =
+    'system_notice_calendar_proposes_time';
+
+/// The keys whose line carries a second argument, `{title}`.
+const Set<String> kNoticeKeysWithTitle = {
+  kNoticeCalendarCreated,
+  kNoticeCalendarChanged,
+  kNoticeCalendarCancelled,
+  kNoticeCalendarDeleted,
+};
+
 /// Every key a system line may carry instead of a text.
 const Set<String> kSystemNoticeKeys = {
   kNoticeReconnectAfterUpdate,
@@ -49,6 +74,11 @@ const Set<String> kSystemNoticeKeys = {
   kNoticeGroupMemberUnreachable,
   kNoticeGroupMemberUnconfirmed,
   kNoticeExpiredBeforeRead,
+  ...kNoticeKeysWithTitle,
+  kNoticeCalendarAccepted,
+  kNoticeCalendarDeclined,
+  kNoticeCalendarTentative,
+  kNoticeCalendarProposesTime,
 };
 
 /// Between the key and its `{name}` argument. A control character (unit
@@ -65,11 +95,27 @@ String noticeWithName(String key, String name) =>
 String noticeWithCount(String key, int count) =>
     '$key$kNoticeArgSeparator$count';
 
-/// The notice a system line [text] carries — its key and, if any, its
-/// `{name}` argument — or `null` for a plain text line.
-({String key, String? name})? systemNoticeParse(String text) {
+/// The system line for [key] with `{name}` [name] and `{title}` [title]
+/// (a key of [kNoticeKeysWithTitle]). The title is the event's own text and
+/// is shown as it is, in every language.
+String noticeWithNameAndTitle(String key, String name, String title) =>
+    '$key$kNoticeArgSeparator$name$kNoticeArgSeparator$title';
+
+/// The notice a system line [text] carries — its key, its `{name}` argument
+/// and, for a key of [kNoticeKeysWithTitle], its `{title}` — or `null` for a
+/// plain text line. A line written before S410 ("Alice created an event:
+/// …") is a plain text line and is shown as it was stored.
+({String key, String? name, String? title})? systemNoticeParse(String text) {
   final i = text.indexOf(kNoticeArgSeparator);
   final key = i < 0 ? text : text.substring(0, i);
   if (!kSystemNoticeKeys.contains(key)) return null;
-  return (key: key, name: i < 0 ? null : text.substring(i + 1));
+  if (i < 0) return (key: key, name: null, title: null);
+  final rest = text.substring(i + 1);
+  if (!kNoticeKeysWithTitle.contains(key)) {
+    return (key: key, name: rest, title: null);
+  }
+  final j = rest.indexOf(kNoticeArgSeparator);
+  return j < 0
+      ? (key: key, name: rest, title: null)
+      : (key: key, name: rest.substring(0, j), title: rest.substring(j + 1));
 }

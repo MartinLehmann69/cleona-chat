@@ -1,6 +1,6 @@
 /// The announcement of a media transfer of lanes 2 and 3 (§9.4, §17.6,
 /// D-29, D-30) — the payload the application sends as an ordinary sealed
-/// message (`MTV3_MEDIA_ANNOUNCE`).
+/// message (`MT_MEDIA_ANNOUNCE`).
 ///
 /// Two forms, told apart by the flag byte:
 /// * **lane 3** — sent once the pieces lie with their holders; names them
@@ -9,7 +9,7 @@
 ///   "Cascade and windows": announce → the recipient's request → volunteer)
 ///   — sent BEFORE anything is placed, with no holder (count 0). If the
 ///   stream does not come about, the sender places the object under the
-///   SAME `K_T` and sends the lane 3 form afterwards (`MTV3_MEDIA_HOLDERS`):
+///   SAME `K_T` and sends the lane 3 form afterwards (`MT_MEDIA_HOLDERS`):
 ///   the identifier stays the same, pieces are lane-neutral (§9.4).
 ///
 /// It is the ONLY place `K_T` travels: the message is sealed like every

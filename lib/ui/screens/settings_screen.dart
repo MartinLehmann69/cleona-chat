@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use, depend_on_referenced_packages
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -21,12 +22,10 @@ import 'package:cleona/core/service/app_version.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_network.dart';
-import 'package:cleona/core/storage/message_store.dart';
-import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/archive/share_identity.dart';
-import 'package:cleona/core/service/multi_interface_mode.dart';
+import 'package:cleona/core/service/bulk_cache_setting.dart'
+    show bulkCacheDefaultMb, kBulkCacheTiersMb;
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/screens/performance_screen.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/form_group.dart';
@@ -224,53 +223,6 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  String _multiInterfaceModeLabel(AppLocale locale, MultiInterfaceMode mode) {
-    switch (mode) {
-      case MultiInterfaceMode.off:
-        return locale.get('multi_interface_off');
-      case MultiInterfaceMode.on:
-        return locale.get('multi_interface_on');
-      case MultiInterfaceMode.auto:
-        return locale.get('multi_interface_auto');
-    }
-  }
-
-  void _showMultiInterfaceModeDialog(BuildContext context) {
-    final locale = AppLocale.read(context);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(locale.get('multi_interface_title')),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(locale.get('multi_interface_help')),
-            const SizedBox(height: 16),
-            for (final mode in MultiInterfaceMode.values)
-              RadioListTile<MultiInterfaceMode>(
-                value: mode,
-                groupValue: service.multiInterfaceMode,
-                title: Text(_multiInterfaceModeLabel(locale, mode)),
-                subtitle: Text(locale.get('multi_interface_${mode.name}_desc')),
-                onChanged: (v) {
-                  if (v != null) {
-                    service.setMultiInterfaceMode(v);
-                    Navigator.of(ctx).pop();
-                  }
-                },
-              ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(locale.get('cancel')),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<CleonaAppState>();
@@ -335,11 +287,11 @@ class SettingsScreen extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showConnectionSheet(context, service),
               ),
-              ListTile(
-                leading: const Icon(Icons.storage),
-                title: Text(locale.get('stored_fragments')),
-                subtitle: Text('${service.fragmentCount}'),
-              ),
+              // The tile "stored fragments" stood here (S407-UPDATEFRAGMENTE).
+              // Its number was the count of entries in the local
+              // `MailboxStore` — in 4.2 only copies of the update manifest —,
+              // not a count of anything the user could act on; update
+              // fragments are no longer stored at all.
               // §24.4.2 — data-saving mode. It stands in the FIRST group
               // of the screen, not in a submenu: "a visible
               // state, not a setting buried in a submenu".
@@ -379,6 +331,9 @@ class SettingsScreen extends StatelessWidget {
               _ExternalRecordsTile(service: service),
               // §12.7 "router mapping (§7.3)" — until S398 without a tile.
               _PortMappingTile(service: service),
+              // §21.3.3 item 3 — what this device holds for others of
+              // lane 3; a device value beside the network switches.
+              _BulkCacheTile(service: service),
             ],
           ),
 
@@ -403,6 +358,23 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           FormGroup(
+            title: locale.get('master_mute_title'),
+            dividers: false,
+            children: [
+              SwitchListTile(
+                key: const Key('master_mute_switch'),
+                secondary: const Icon(Icons.notifications_off_outlined),
+                title: Text(locale.get('master_mute_title')),
+                subtitle: Text(locale.get('master_mute_subtitle')),
+                value: service.masterMute,
+                // The client mirror calls onStateChanged on success; the
+                // screen watches CleonaAppState and rebuilds from it.
+                onChanged: (v) => unawaited(service.setMasterMute(v)),
+              ),
+            ],
+          ),
+
+          FormGroup(
             title: locale.get('section_backup'),
             dividers: false,
             children: [
@@ -418,107 +390,7 @@ class SettingsScreen extends StatelessWidget {
               // NEXT TO the phrase, not in a separate group:
               // until S361 the group was called "Social Recovery" and offered a
               // set-up path that no longer exists (gap G-8).
-              _RecoveryBundleTile(service: service),
               _SocialRecoveryLimitTile(service: service),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('section_devices'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.devices),
-                title: _titleWithHelp(context, 'device_management_title', 'device_management_help'),
-                subtitle: Text(locale.get('device_management_subtitle')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => DeviceManagementScreen(service: service)),
-                ),
-              ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('section_media'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.download),
-                title: _titleWithHelp(context, 'media_settings_title', 'media_settings_help'),
-                subtitle: Text(locale.get('media_settings_subtitle')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => MediaSettingsScreen(service: service)),
-                ),
-              ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('notification_settings_title'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.notifications_outlined),
-                title: _titleWithHelp(context, 'notification_settings_title', 'notification_settings_help'),
-                subtitle: Text(locale.get('notification_settings_subtitle')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => NotificationSettingsScreen(service: service)),
-                ),
-              ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('section_archive'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.archive_outlined),
-                title: _titleWithHelp(context, 'archive_settings_title', 'archive_settings_help'),
-                subtitle: const Text('SMB / SFTP / FTPS / HTTP'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => ArchiveSettingsScreen(service: service)),
-                ),
-              ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('section_transcription'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.record_voice_over_outlined),
-                title: _titleWithHelp(context, 'transcription_settings_title', 'transcription_settings_help'),
-                subtitle: Text(locale.get('whisper_engine')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => TranscriptionSettingsScreen(service: service)),
-                ),
-              ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('multi_interface_title'),
-            dividers: false,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.wifi),
-                title: _titleWithHelp(context, 'multi_interface_title', 'multi_interface_help'),
-                subtitle: Text(_multiInterfaceModeLabel(locale, service.multiInterfaceMode)),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => _showMultiInterfaceModeDialog(context),
-              ),
             ],
           ),
 
@@ -643,9 +515,9 @@ class SettingsScreen extends StatelessWidget {
 /// days`. An expired bundle must not lapse silently." Three states: none in
 /// the network (error colour), expiring within two days (error colour — it
 /// is renewed only when the app meets the network), valid until a date.
-class _RecoveryBundleTile extends StatelessWidget {
+class RecoveryBundleTile extends StatelessWidget {
   final ICleonaService service;
-  const _RecoveryBundleTile({required this.service});
+  const RecoveryBundleTile({super.key, required this.service});
 
   @override
   Widget build(BuildContext context) {
@@ -898,66 +770,71 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   Map<String, dynamic>? _shareStatus;
   String? _networkError;
 
-  /// Loading has failed (the storage THREW), and
-  /// [_config] therefore carries default values instead of the real setting.
-  /// Carries the data-loss bolt in [_save].
+  /// The service answered [ICleonaService.getArchiveSettings]; until then
+  /// the screen shows a progress mark and writes nothing.
+  bool _loaded = false;
+
+  /// Loading has failed (the store THREW, or the daemon could not be
+  /// asked), and [_config] therefore carries default values instead of the
+  /// real setting. The data-loss bolt: [_save] writes nothing then.
   bool _loadFailed = false;
 
-  /// The encrypted storage of the identity — or `null`.
-  ///
-  /// ── WHY THIS CAN BE `null` HERE, AND WHAT THAT MEANS ──────────
-  ///
-  /// Under Linux and Windows the UI is a SEPARATE process: it
-  /// talks to the daemon via IPC, and `widget.service` there is an
-  /// `IpcClient`, not a [CleonaService] (`main.dart:1908` `_service =
-  /// ipcClient`). So it has neither profile directory nor
-  /// storage key — the daemon holds both. Under macOS the
-  /// same applies as soon as a daemon program exists.
-  ///
-  /// **The write path of this screen was therefore already dead before S366**
-  /// (finding B-2 of the S363 inventory, re-measured here): `_profileDir` returned
-  /// `''` there, `_save()` returned in the first line, and
-  /// `archive_config.json` arose on none of the three desktop
-  /// platforms. It carried only on Android and iOS, where the app
-  /// ITSELF is the node and `widget.service` is a real
-  /// [CleonaService].
-  ///
-  /// The conversion deliberately changes NOTHING about that: it leads the path
-  /// where it carries into the encrypted storage — where
-  /// it is dead, it stays dead. Reviving it would mean building an
-  /// IPC write command, and that would carry the archive password across
-  /// the IPC boundary. Exactly that is not supposed to happen (see
-  /// `ipc_server.dart`, `archive_test_connection`). That is a
-  /// decision for the owner, not a side effect of a rebuild.
-  MessageStore? get _store {
-    final s = widget.service;
-    if (s is! CleonaService) return null;
-    try {
-      return s.store;
-    } catch (_) {
-      // `CleonaService.store` THROWS if the identity has no
-      // master seed — explicitly and without a substitute key
-      // (§21.4.1). A settings screen must not
-      // break on that: it then shows default values and writes nothing.
-      return null;
-    }
-  }
+  /// A share password is stored. The screen never holds it (§21.6, S410
+  /// E10): the field stays empty and shows that one is there.
+  bool _hasPassword = false;
+
+  // ── WHERE THE SETTING LIES (S410 E10) ─────────────────────────────────
+  //
+  // In the service, per identity, in its encrypted store (S366, S407-E9).
+  // Until S410 this screen read and wrote the store ITSELF, through
+  // `widget.service is CleonaService` — which holds only in-process
+  // (Android/iOS). On Linux and Windows `widget.service` is an `IpcClient`,
+  // and the setting was never stored there (since the archive screen
+  // appeared, d67dfa43, April 2026; no IPC write command ever existed —
+  // 4010919a; gui-23 15). Now both surfaces go through the interface: read
+  // without the password, write with the password only when the user typed
+  // one, test where the password lies.
 
   @override
   void initState() {
     super.initState();
-    _config = _load();
+    _config = ArchiveConfig.production();
+    unawaited(_load());
+    unawaited(_refreshShareStatus());
+  }
+
+  void _fillFields() {
     _ssidController.text = _config.allowedSSIDs.join(', ');
     _budgetController.text = '${_config.storageBudgetMB}';
     _hostController.text = _config.archiveHost;
     _pathController.text = _config.archivePath;
     _usernameController.text = _config.archiveUsername ?? '';
-    _passwordController.text = _config.archivePassword ?? '';
+    _passwordController.text = '';
     _portController.text = _config.archivePort?.toString() ?? '';
     _tier1Controller.text = '${_config.tier1Boundary.inDays}';
     _tier2Controller.text = '${_config.tier2Boundary.inDays}';
     _tier3Controller.text = '${_config.tier3Boundary.inDays}';
-    unawaited(_refreshShareStatus());
+  }
+
+  /// The setting from the service. `null` — unreadable store or no answer —
+  /// is not "never configured": the screen shows defaults and writes
+  /// nothing, so that defaults never lie down over a setting that exists.
+  Future<void> _load() async {
+    ArchiveSettingsView? view;
+    try {
+      view = await widget.service.getArchiveSettings();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      if (view == null) {
+        _loadFailed = true;
+      } else {
+        _config = view.config;
+        _hasPassword = view.hasPassword;
+      }
+      _loaded = true;
+      _fillFields();
+    });
   }
 
   Future<void> _refreshShareStatus() async {
@@ -1004,20 +881,6 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     super.dispose();
   }
 
-  ArchiveConfig _load() {
-    final s = _store;
-    if (s == null) return ArchiveConfig.production();
-    try {
-      return ArchiveConfig.readFrom(s) ?? ArchiveConfig.production();
-    } catch (_) {
-      // The storage threw — the data is there, but not readable.
-      // That is NOT the same as "never configured", and the bolt in
-      // [_save] must know the difference.
-      _loadFailed = true;
-      return ArchiveConfig.production();
-    }
-  }
-
   void _applyTierBoundaries() {
     final t1 = int.tryParse(_tier1Controller.text);
     final t2 = int.tryParse(_tier2Controller.text);
@@ -1038,55 +901,32 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     ));
   }
 
-  /// S366: into the `archive_config` area of the storage instead of bare into
-  /// `archive_config.json`. The file carried [ArchiveConfig.archivePassword]
-  /// in plain text.
+  /// Hands the setting to the service, which stores it in the identity's
+  /// encrypted store (S366: never `archive_config.json`, which carried the
+  /// password in plain text).
   ///
   /// ── THE DATA-LOSS BOLT ─────────────────────────────────────────
   ///
-  /// There was none here, and the gap was sharp: [_load] silently returned
-  /// `ArchiveConfig.production()` on every read error, and
-  /// the next field change immediately called this method via `_updateConfig`
-  /// — so the default values laid themselves over the real
-  /// setting, including host name, user name and password. The
-  /// user would only have flipped a switch.
-  ///
-  /// Now: if loading THREW and the area still holds
-  /// a row, NOTHING is written. If the storage is not readable at
-  /// all, the bolt fails CLOSED.
-  void _save() {
-    final s = _store;
-    if (s == null) return;
-    if (_loadFailed) {
-      int present;
-      try {
-        present = s.countArea(kArchiveConfigArea);
-      } catch (_) {
-        return;
-      }
-      if (present > 0) return;
-    }
-    try {
-      // S394: pin and "only in this network" belong to the service (the
-      // archive run pins, the capture buttons go through the service). This
-      // screen's copy of them may be older — take them fresh from the store,
-      // or an ordinary field edit would silently undo a pin and the next
-      // run would pin whatever answers then.
-      final stored = ArchiveConfig.readFrom(s);
-      _config.withShareIdentity(stored?.shareIdentity)
-          .withAllowedNetworks(stored?.allowedNetworks ?? const [])
-          .writeTo(s);
-    } catch (_) {
-      // A failed write must not knock over the UI;
-      // the existing data stays unchanged.
-    }
+  /// If loading failed, [_config] carries defaults; writing them would lay
+  /// them over the real setting, host, user name and password included — the
+  /// user would only have flipped a switch. So NOTHING is written then. The
+  /// service holds the second half: it reads the stored record before it
+  /// writes and refuses if it cannot (pin, networks and — unless [password]
+  /// is given — the password come from there, never from this screen).
+  void _save({String? password}) {
+    if (!_loaded || _loadFailed) return;
+    unawaited(widget.service
+        .setArchiveSettings(_config, password: password)
+        .catchError((Object _) => false));
   }
 
-  void _updateConfig(ArchiveConfig Function(ArchiveConfig) updater) {
+  void _updateConfig(ArchiveConfig Function(ArchiveConfig) updater,
+      {String? password}) {
     setState(() {
       _config = updater(_config);
+      if (password != null) _hasPassword = password.isNotEmpty;
     });
-    _save();
+    _save(password: password);
   }
 
   /// Create a copy of the current config with updated fields.
@@ -1102,12 +942,12 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     String? archiveHost,
     String? archivePath,
     String? archiveUsername,
-    String? archivePassword,
     int? archivePort,
     bool clearUsername = false,
-    bool clearPassword = false,
     bool clearPort = false,
   }) {
+    // No password here: the screen does not hold it (it goes as the
+    // `password` of [_updateConfig] when the user typed one).
     return ArchiveConfig(
       tier1Boundary: tier1Boundary ?? _config.tier1Boundary,
       tier2Boundary: tier2Boundary ?? _config.tier2Boundary,
@@ -1121,23 +961,24 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
       archiveHost: archiveHost ?? _config.archiveHost,
       archivePath: archivePath ?? _config.archivePath,
       archiveUsername: clearUsername ? null : (archiveUsername ?? _config.archiveUsername),
-      archivePassword: clearPassword ? null : (archivePassword ?? _config.archivePassword),
       archivePort: clearPort ? null : (archivePort ?? _config.archivePort),
     );
   }
 
+  /// Tests the STORED setting where the password lies — in the service
+  /// (on Linux/Windows the daemon, `archive_test_connection`).
   Future<void> _testConnection() async {
     setState(() => _connectionTestResult = null);
     try {
-      final r = await testArchiveConnection(_config,
-          profileDir: widget.service.profileDir);
+      final r = await widget.service.testArchiveShare();
       if (!mounted) return;
-      setState(() => _connectionTestResult = r.reachable
+      setState(() => _connectionTestResult = r != null && r.reachable
           ? 'OK'
-          : r.identity == ShareIdentityState.mismatch
+          : r?.identity == ShareIdentityState.mismatch
               ? AppLocale.read(context).get('archive_identity_mismatch')
               : 'FAIL');
     } catch (e) {
+      if (!mounted) return;
       setState(() => _connectionTestResult = 'ERROR: $e');
     }
   }
@@ -1256,7 +1097,11 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
               onPressed: () => Navigator.pop(context),
             )
           : null,
-      body: ListView(
+      // Until the service answered, nothing is shown that could be changed
+      // and then not written ([_save] waits for the load).
+      body: !_loaded
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
         children: [
           const SizedBox(height: 8),
           FormGroup(
@@ -1336,13 +1181,12 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.lock),
                   labelText: locale.get('archive_password'),
+                  // A stored password is not shown, only that it is there.
+                  hintText: _hasPassword ? '••••••••' : null,
                 ),
-                onSubmitted: (v) {
-                  final val = v.trim();
-                  _updateConfig((_) => val.isEmpty
-                      ? _copyConfig(clearPassword: true)
-                      : _copyConfig(archivePassword: val));
-                },
+                // Submitted empty: the stored password is removed (as before).
+                onSubmitted: (v) =>
+                    _updateConfig((c) => c, password: v.trim()),
               ),
               const SizedBox(height: 8),
               TextField(
@@ -1603,6 +1447,11 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     final locale = AppLocale.read(context);
     final modelExists = _isModelDownloaded(_selectedModel);
     final whisperAvailable = _status?.whisperAvailable ?? false;
+    // `modelLoaded` speaks for the size the service holds as set; it is
+    // only taken for the size selected here.
+    final modelChecked = (_status?.modelLoaded ?? false) &&
+        _status?.modelSize == _selectedModel;
+    final ready = whisperAvailable && modelChecked;
 
     return AppBarScaffold(
       title: locale.get('transcription_settings_title'),
@@ -1619,17 +1468,23 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
           FormGroup(
             title: locale.get('whisper_status'),
             children: [
+              // Ready only when the model of the SET size passed its
+              // SHA-256 check (D-64) — a file on disk is not enough.
               ListTile(
                 leading: Icon(
-                  whisperAvailable && modelExists ? Icons.check_circle : Icons.warning,
-                  color: whisperAvailable && modelExists ? Colors.green : Colors.orange,
+                  ready ? Icons.check_circle : Icons.warning,
+                  color: ready ? Colors.green : Colors.orange,
                 ),
-                title: Text(whisperAvailable && modelExists
+                title: Text(ready
                     ? locale.get('transcription_ready')
                     : locale.get('transcription_not_ready')),
-                subtitle: Text(whisperAvailable
-                    ? (modelExists ? locale.get('transcription_model_loaded') : locale.get('transcription_model_missing'))
-                    : locale.get('transcription_library_missing')),
+                subtitle: Text(!whisperAvailable
+                    ? locale.get('transcription_library_missing')
+                    : modelChecked
+                        ? locale.get('transcription_model_loaded')
+                        : modelExists
+                            ? locale.get('transcription_model_checking')
+                            : locale.get('transcription_model_missing')),
               ),
             ],
           ),
@@ -1730,10 +1585,31 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
       return const SizedBox.shrink();
     }
 
-    return ElevatedButton.icon(
+    final button = ElevatedButton.icon(
       onPressed: _downloadModel,
       icon: const Icon(Icons.download),
       label: Text('Download ${_modelLabel(_selectedModel, locale)}'),
+    );
+    // D-64: a file that did not match the fixed SHA-256 was deleted — the
+    // user is told why the model is missing again. A failed download says
+    // its reason (the service hands it over without any URL).
+    final String? problem = switch (_downloadStatus) {
+      'rejected' => locale.get('transcription_model_rejected'),
+      'failed' => locale.tr('transcription_download_failed',
+          {'reason': _status?.downloadError ?? '—'}),
+      _ => null,
+    };
+    if (problem == null) return button;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ListTile(
+          leading: Icon(Icons.error_outline,
+              color: Theme.of(context).colorScheme.error),
+          title: Text(problem),
+        ),
+        button,
+      ],
     );
   }
 }
@@ -1987,6 +1863,27 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
     setState(() {});
   }
 
+  /// A minute of the day in the system's time format (12 h or 24 h).
+  static String _minuteLabel(BuildContext context, int minute) =>
+      TimeOfDay(hour: minute ~/ 60, minute: minute % 60).format(context);
+
+  Future<void> _pickQuietMinute(BuildContext context,
+      {required bool from}) async {
+    final current = from ? _settings.quietFromMinute : _settings.quietToMinute;
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: current ~/ 60, minute: current % 60),
+    );
+    if (picked == null || !mounted) return;
+    final minute = picked.hour * 60 + picked.minute;
+    if (from) {
+      _settings.quietFromMinute = minute;
+    } else {
+      _settings.quietToMinute = minute;
+    }
+    _save();
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -2068,6 +1965,38 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                   _settings.defaultChannelNotify = v;
                   _save();
                 },
+              ),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('quiet_hours_section'),
+            children: [
+              SwitchListTile(
+                key: const Key('quiet_hours_switch'),
+                secondary: const Icon(Icons.bedtime_outlined),
+                title: Text(locale.get('quiet_hours_enabled')),
+                subtitle: Text(locale.get('quiet_hours_hint')),
+                value: _settings.quietHoursEnabled,
+                onChanged: (v) {
+                  _settings.quietHoursEnabled = v;
+                  _save();
+                },
+              ),
+              ListTile(
+                key: const Key('quiet_hours_from'),
+                leading: const Icon(Icons.nightlight_outlined),
+                title: Text(locale.get('quiet_hours_from')),
+                trailing: Text(_minuteLabel(context, _settings.quietFromMinute)),
+                enabled: _settings.quietHoursEnabled,
+                onTap: () => _pickQuietMinute(context, from: true),
+              ),
+              ListTile(
+                key: const Key('quiet_hours_to'),
+                leading: const Icon(Icons.wb_sunny_outlined),
+                title: Text(locale.get('quiet_hours_to')),
+                trailing: Text(_minuteLabel(context, _settings.quietToMinute)),
+                enabled: _settings.quietHoursEnabled,
+                onTap: () => _pickQuietMinute(context, from: false),
               ),
             ],
           ),
@@ -2389,6 +2318,90 @@ class _PortMappingTileState extends State<_PortMappingTile> {
         setState(() {});
         if (!ok && context.mounted) _refused(context);
       },
+    );
+  }
+}
+
+/// §21.3.1/§21.3.3 item 3 — the size of the bulk cache (S407-MASSENCACHE):
+/// what this device holds of lane 3 for others (§9.4), in the tiers of
+/// `bulk_cache_setting.dart`; default desktop 1 GB, phone 100 MB (D-32).
+///
+/// The consequence ALWAYS stands below: pieces of others for up to 7 days,
+/// and that a smaller size deletes the oldest at once. The row shows the
+/// size the device answered, never an anticipated one.
+class _BulkCacheTile extends StatefulWidget {
+  final ICleonaService service;
+
+  const _BulkCacheTile({required this.service});
+
+  @override
+  State<_BulkCacheTile> createState() => _BulkCacheTileState();
+}
+
+class _BulkCacheTileState extends State<_BulkCacheTile> {
+  // The same source as the seam's `_mobile` (`mycelium_seam.dart`): the
+  // operating system, not the theme's `defaultTargetPlatform`.
+  static final int _defaultMb =
+      bulkCacheDefaultMb(mobile: Platform.isAndroid || Platform.isIOS);
+
+  String _label(AppLocale locale, int mb) {
+    final size = mb >= 1024 ? '${mb ~/ 1024} GB' : '$mb MB';
+    return mb == _defaultMb
+        ? '$size (${locale.get('bulk_cache_default')})'
+        : size;
+  }
+
+  Future<void> _choose(BuildContext context) async {
+    final locale = AppLocale.read(context);
+    final now = widget.service.bulkCacheMb;
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(locale.get('bulk_cache_title')),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(locale.get('bulk_cache_consequence')),
+              const SizedBox(height: 16),
+              for (final mb in kBulkCacheTiersMb)
+                RadioListTile<int>(
+                  key: ValueKey('bulk-cache-tier-$mb'),
+                  value: mb,
+                  groupValue: now,
+                  title: Text(_label(locale, mb)),
+                  onChanged: (v) => Navigator.of(ctx).pop(v),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(locale.get('cancel')),
+          ),
+        ],
+      ),
+    );
+    if (picked == null || picked == now) return;
+    // The ONLY way to set it — a user action.
+    final ok = await widget.service.setBulkCacheMb(picked);
+    if (!mounted) return;
+    setState(() {});
+    if (!ok && context.mounted) _refused(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    return ListTile(
+      key: const ValueKey('tile-bulk-cache'),
+      leading: const Icon(Icons.sd_storage),
+      title: Text('${locale.get('bulk_cache_title')} — '
+          '${_label(locale, widget.service.bulkCacheMb)}'),
+      subtitle: Text(locale.get('bulk_cache_consequence')),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => unawaited(_choose(context)),
     );
   }
 }

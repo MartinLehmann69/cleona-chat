@@ -6,8 +6,9 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/ip_address_class.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/core/rendezvous/rendezvous_provider.dart' show EndpointAddress;
-import 'package:cleona/core/update/binary_fragment_store.dart';
+import 'package:cleona/core/util/endpoint_address.dart';
+import 'package:cleona/core/update/update_binary_store.dart';
+import 'package:cleona/core/update/installed_binary.dart';
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
 /// Helper for physical binary transfer (§19.6.7).
@@ -17,7 +18,7 @@ import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 /// transport mechanism (USB copy, OBEX push, etc.) is OS-level and
 /// outside this class's scope.
 class PhysicalTransferHelper {
-  final BinaryFragmentStore _store;
+  final UpdateBinaryStore _store;
   final CLogger _log;
 
   PhysicalTransferHelper({
@@ -29,73 +30,39 @@ class PhysicalTransferHelper {
   /// Returns the SHA-256 hash of the exported file, or null on failure.
   ///
   /// Use case: user wants to copy the binary to USB stick for physical transfer.
+  ///
+  /// The source is the complete object in the store, or — on a phone, which
+  /// holds no copy (S407-UPDATEFRAGMENTE W9, §26.6.1 step 3) — the
+  /// installed binary [installedPath] the caller names for its own running
+  /// platform/version. Copied and hashed streaming (`copyWithHash`): until
+  /// S407 the whole object was read into memory (android ~390 MB).
   Future<String?> exportBinary({
     required String platform,
     required String version,
     required String outputPath,
+    String? installedPath,
   }) async {
     try {
-      final data = await _store.getComplete(platform, version);
-      if (data == null) {
+      final source = _store.getCompletePath(platform, version) ??
+          (installedPath != null && File(installedPath).existsSync()
+              ? installedPath
+              : null);
+      if (source == null) {
         _log.warn('exportBinary: no complete binary for $platform/$version');
         return null;
       }
-      await File(outputPath).writeAsBytes(data);
-      return bytesToHex(SodiumFFI().sha256(data));
+      return await copyWithHash(source, outputPath);
     } catch (e) {
       _log.error('exportBinary $platform/$version -> $outputPath failed: $e');
       return null;
     }
   }
 
-  /// Export a single fragment to a file. Used when the node doesn't have
-  /// the complete binary but has individual fragments.
-  Future<bool> exportFragment({
-    required String platform,
-    required String version,
-    required int index,
-    required String outputPath,
-  }) async {
-    try {
-      final data = await _store.getFragment(platform, version, index);
-      if (data == null) {
-        _log.warn('exportFragment: no fragment #$index for $platform/$version');
-        return false;
-      }
-      await File(outputPath).writeAsBytes(data);
-      return true;
-    } catch (e) {
-      _log.error('exportFragment $platform/$version#$index -> $outputPath failed: $e');
-      return false;
-    }
-  }
-
-  /// Export all available fragments to a directory.
-  /// Creates files named `fragment-NNN.bin` in the output directory.
-  /// Returns the number of fragments exported.
-  Future<int> exportAllFragments({
-    required String platform,
-    required String version,
-    required String outputDir,
-  }) async {
-    var exported = 0;
-    try {
-      final indices = await _store.availableFragments(platform, version);
-      if (indices.isEmpty) return 0;
-      final dir = Directory(outputDir);
-      if (!await dir.exists()) await dir.create(recursive: true);
-      for (final index in indices) {
-        final data = await _store.getFragment(platform, version, index);
-        if (data == null) continue;
-        final name = 'fragment-${index.toString().padLeft(3, '0')}.bin';
-        await File('$outputDir/$name').writeAsBytes(data);
-        exported++;
-      }
-    } catch (e) {
-      _log.error('exportAllFragments $platform/$version -> $outputDir failed: $e');
-    }
-    return exported;
-  }
+  // `exportFragment`, `exportAllFragments` and `importFragment` stood
+  // here: Reed-Solomon fragments of the 3.x layout handed over on a stick.
+  // v4_2 §26.6.6 hands over "the APK/binary" only, and nothing stores
+  // fragments any more (S407-UPDATEFRAGMENTE). None of the three had a
+  // caller.
 
   /// Import a binary from a file path (received via physical transfer).
   /// Verifies SHA-256 hash and Ed25519 maintainer signature before storing.
@@ -162,28 +129,6 @@ class PhysicalTransferHelper {
       return true;
     } catch (e) {
       _log.error('importAndVerifyBytes $platform/$version failed: $e');
-      return false;
-    }
-  }
-
-  /// Import a fragment from a file path.
-  Future<bool> importFragment({
-    required String filePath,
-    required String platform,
-    required String version,
-    required int index,
-  }) async {
-    try {
-      final file = File(filePath);
-      if (!await file.exists()) {
-        _log.warn('importFragment: file not found: $filePath');
-        return false;
-      }
-      final data = await file.readAsBytes();
-      await _store.storeFragment(platform, version, index, data);
-      return true;
-    } catch (e) {
-      _log.error('importFragment $filePath failed: $e');
       return false;
     }
   }

@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/platform/router_db.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 enum _CheckState { idle, running, success, fail }
 
@@ -191,7 +192,9 @@ class _NatWizardInstructionsScreenState
     final isChecking = _state == _CheckState.running;
 
     return Scaffold(
-      appBar: AppBar(title: Text(entry.displayName)),
+      appBar: AppBar(
+          title: Text(entry.displayName),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(
         top: false,
         child: ListView(

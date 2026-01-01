@@ -96,9 +96,8 @@ class HdWallet {
         'HdWallet.$site: identity derivation was handed a domain that is not '
         'kIdentityDomain ($kIdentityDomain). Identity derives EXCLUSIVELY '
         'from the public, channel-specific domain constant (architecture '
-        'v4.1 §4.1) — never from NetworkSecret, which is maintainer-key '
-        'material and would bind network access to that key. Drop the second '
-        'argument.',
+        'v4.1 §4.1) — never from maintainer-key material, which would bind '
+        'network access to that key. Drop the second argument.',
       );
     }
     final sodium = SodiumFFI();
@@ -193,12 +192,12 @@ class HdWallet {
     return sb.toString();
   }
 
-  /// V3 Node-ID: `SHA-256(network_secret ‖ pubkey)`.
+  /// V3 Node-ID: `SHA-256(secret ‖ pubkey)`.
   ///
   /// **Not an identity anchor in V4.** V4 has no Node-ID as identity anchor
-  /// (§4.1); this survives only for the V3 closed-network smoke corpus
-  /// (`smoke_network_secret`, `smoke_key_rotation`, `smoke_recovery`), which
-  /// measures the secret-binding property itself. It hashes exactly what it
+  /// (§4.1), and the network secret it was built for is removed (S407);
+  /// this survives only for two older smokes (`smoke_key_rotation`,
+  /// `smoke_recovery`) that hand it a fixed test value. It hashes exactly what it
   /// is given and is deliberately NOT routed through [_deriveIdentityId].
   /// No file under `lib/` may call it — enforced by
   /// `test/smoke/smoke_identity_secret_pin.dart`.
@@ -230,9 +229,9 @@ class HdWallet {
   /// call sites not yet migrated; see [_deriveIdentityId]. New code passes one
   /// argument.
   static Uint8List computeDeviceNodeId(Uint8List deviceEd25519Pk,
-          [Uint8List? deprecatedNetworkSecret]) =>
+          [Uint8List? suppliedDomain]) =>
       _deriveIdentityId(
-          deviceEd25519Pk, deprecatedNetworkSecret, 'computeDeviceNodeId');
+          deviceEd25519Pk, suppliedDomain, 'computeDeviceNodeId');
 
   // ── `deriveDbKey` — DROPPED ON 09.09.2026 (S378) ──────────────────
   //

@@ -13,9 +13,10 @@
 ///
 /// Two addresses belong to the same neighbour when it names them as its
 /// OWN in a sealed packet that comes from one of them (§5.5, §11.8a — the
-/// own entries of `address_entries.dart`). No node identifier: that one is
-/// drawn anew per start (`node_call.dart`) and would join nothing across a
-/// restart.
+/// own entries of `address_entries.dart`), or when, within ONE run, it names
+/// the same node identifier in answers to this node's requests from both
+/// (`Readiness.nodeLearn`, S407-N2). Across runs the identifier joins
+/// nothing: it is drawn anew per start (`node_call.dart`).
 ///
 /// ── WHAT IS KEPT PER ADDRESS ──────────────────────────────────────────
 ///
@@ -24,10 +25,12 @@
 /// leaves with its last address.
 ///
 /// Only addresses of an address family this node holds a socket for are
-/// [addresses] (§11.1, V1). What the neighbour names in another family is
-/// kept in [names]: never tried, never sent to, never written to a card or
-/// to memory — it only lets the forwarder recognise the node when a `0x22`
-/// names it that way (§8.1, V5).
+/// [addresses] (§11.1, V1). What the neighbour names in another family, and
+/// what it was confirmed under in a family this node has lost, is kept in
+/// [names] with its stamp: never tried, never sent to, never written to a
+/// card — it lets the forwarder recognise the node when a `0x22` names it
+/// that way (§8.1, V5), and it waits, in memory too, for the family to
+/// return (§11.8.5; S407-LB-P6, C-7).
 library;
 
 import 'dart:io';
@@ -92,9 +95,10 @@ class Neighbour {
   /// Newest stamp first; never empty.
   final List<NeighbourAddress> addresses;
 
-  /// Addresses the neighbour named as its own in an address family this
-  /// node has no socket for — only for recognition (§8.1, V5).
-  final List<CardAddress> names;
+  /// Addresses of the neighbour in an address family this node has no
+  /// socket for, each with its stamp — for recognition (§8.1, V5) and to
+  /// come back with the family (§11.8.5); newest stamp first.
+  final List<NeighbourAddress> names;
 
   /// The card's seat — the neighbour the own cards name (W7).
   final bool fixed;
@@ -117,11 +121,11 @@ class Neighbour {
   Neighbour.of(List<NeighbourAddress> addresses,
       {this.fixed = false,
       this.contactSeat = 0,
-      List<CardAddress> names = const [],
+      List<NeighbourAddress> names = const [],
       int? id})
       : id = id ?? _next++,
         addresses = List.unmodifiable(_ordered(addresses)),
-        names = List.unmodifiable(names) {
+        names = List.unmodifiable(_ordered(names)) {
     if (this.addresses.isEmpty) {
       throw ArgumentError('a neighbour has at least one address');
     }
@@ -194,14 +198,11 @@ class Neighbour {
 
   /// Whether [c] is one of [addresses] or [names] — the recognition of §8.1.
   bool knows(CardAddress c) =>
-      addresses.any((x) => x.asCardAddress.equal(c)) ||
-      names.any((x) => x.equal(c));
+      [...addresses, ...names].any((x) => x.asCardAddress.equal(c));
 
   /// Whether the neighbour has an address, or a name, of type [t].
   bool inFamily(InternetAddressType t) =>
-      addresses.any((x) => x.address.type == t) ||
-      names.any((x) => (x.kind == CardAddressType.ipv6) ==
-          (t == InternetAddressType.IPv6));
+      [...addresses, ...names].any((x) => x.address.type == t);
 
   /// The most recently confirmed address of type [t], or `null`.
   NeighbourAddress? confirmedIn(InternetAddressType t, DateTime notBefore) {
@@ -215,7 +216,7 @@ class Neighbour {
   /// Taking the card's seat gives up a contact seat (never both).
   Neighbour copy(
       {List<NeighbourAddress>? addresses,
-      List<CardAddress>? names,
+      List<NeighbourAddress>? names,
       bool? fixed,
       int? contactSeat}) {
     final f = fixed ?? this.fixed;

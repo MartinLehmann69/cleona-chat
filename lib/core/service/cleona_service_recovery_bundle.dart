@@ -54,6 +54,23 @@ const String kRecoveryBundleArea = 'recovery_bundle';
 /// 64 characters, so this key meets none.
 const String kRecoveryBundleHeadKey = '_';
 
+/// The row of [kRecoveryBundleArea] with the former fixed neighbours of a
+/// taken-over bundle ([CleonaService._recoveryFormer]); one character, so it
+/// meets neither a UserID nor [kRecoveryBundleHeadKey].
+const String kRecoveryFormerKey = '~';
+
+/// How long after a takeover the former fixed neighbours are still asked:
+/// what a contact laid there lies at most that long (§8.2, `kAtMostAge`).
+const Duration kRecoveryFormerAskFor = kAtMostAge;
+
+/// Whether a collection edge still asks the former fixed neighbours: some
+/// restored contact is not anchored yet ([waiting] > 0) — it may still lay
+/// post where the old device told it to (§13.2.1) — and [at] lies less than
+/// [kRecoveryFormerAskFor] before [now].
+bool recoveryFormerAsks(
+        {required DateTime at, required DateTime now, required int waiting}) =>
+    waiting > 0 && now.difference(at) < kRecoveryFormerAskFor;
+
 /// The name the state had as a file. No writer is left; the name is only
 /// asked for by [RecoveryBundleOps._stateFileIntoStore], which empties a
 /// file an earlier build of this line left in the profile.
@@ -125,7 +142,7 @@ extension RecoveryBundleOps on CleonaService {
     final contacts = <BundleContact>[];
     for (final c in _contacts.values) {
       final hex = bytesToHex(c.nodeId);
-      final anchor = v41PeerFoundingPk(c);
+      final anchor = peerFoundingPk(c);
       final waiting = _recoveryAnchors[hex];
       final k = p?.contactOrNull(hex);
       contacts.add(BundleContact(
@@ -299,6 +316,19 @@ extension RecoveryBundleOps on CleonaService {
       return (last: null, holders: 0);
     }
     final head = rows.remove(kRecoveryBundleHeadKey);
+    final former = rows.remove(kRecoveryFormerKey);
+    _recoveryFormer = null;
+    if (former != null) {
+      try {
+        _recoveryFormer = (
+          at: DateTime.fromMillisecondsSinceEpoch(former['at'] as int),
+          neighbours: _recoveryAnchorOf(former).neighbours,
+        );
+      } catch (e) {
+        _log.warn('Rescue bundle: former fixed neighbours not readable ($e) '
+            '— not asked');
+      }
+    }
     _recoveryAnchors.clear();
     for (final MapEntry(:key, :value) in rows.entries) {
       try {
@@ -344,6 +374,46 @@ extension RecoveryBundleOps on CleonaService {
       _log.warn('Rescue bundle: waiting contact ${_short8(hex)} not '
           'written ($e)');
     }
+  }
+
+  /// Writes [CleonaService._recoveryFormer] as its row, or removes the row.
+  void _recoveryFormerSave() {
+    try {
+      final f = _recoveryFormer;
+      if (f == null) {
+        store.removeEntry(kRecoveryBundleArea, kRecoveryFormerKey);
+      } else {
+        store.putEntry(kRecoveryBundleArea, kRecoveryFormerKey, {
+          ..._recoveryAnchorRow((pairRandom: null, neighbours: f.neighbours)),
+          'at': f.at.millisecondsSinceEpoch,
+        });
+      }
+    } catch (e) {
+      _log.warn('Rescue bundle: former fixed neighbours not written ($e)');
+    }
+  }
+
+  /// What every collection edge asks besides the own neighbours (§13.2.1,
+  /// V-RB): the former fixed neighbours of the taken-over bundle while
+  /// [recoveryFormerAsks] holds. When it no longer holds, the row goes and
+  /// the list stays empty — decided at the edge, no clock.
+  List<(InternetAddress, int)> _recoveryFormerAsked() {
+    final f = _recoveryFormer;
+    if (f == null) return const [];
+    if (!recoveryFormerAsks(
+        at: f.at,
+        now: recoveryBundleClock(),
+        waiting: _recoveryAnchors.length)) {
+      _recoveryFormer = null;
+      _recoveryFormerSave();
+      _log.info('Rescue bundle: former fixed neighbours no longer asked — '
+          '${_recoveryAnchors.isEmpty ? "every restored contact is anchored" : "${kRecoveryFormerAskFor.inDays} d since the takeover"}');
+      return const [];
+    }
+    return [
+      for (final n in f.neighbours)
+        (InternetAddress.fromRawAddress(n.ip), n.port)
+    ];
   }
 
   String _short8(String s) => s.length > 8 ? s.substring(0, 8) : s;
@@ -483,6 +553,41 @@ extension RecoveryBundleOps on CleonaService {
     }
     final rk = recoveryKey(seed, index);
     final state = _recoveryStateLoad();
+    // §13.2.1 (D-70) × §4.4.3: the pair of every restored contact from the
+    // bundle (its `s_AB`, the founding key the bundle named) until its first
+    // envelope anchors it ([_recoveryAnchor]) — the mailbox forms `K_AB`
+    // and the codes from it, registers and recognises them, and checks the
+    // tag of a contact that wrote tagged before the loss. Read live from
+    // [_recoveryAnchors] — an anchored contact is no longer there.
+    p.recoveryPairs = () => {
+          for (final MapEntry(key: hex, value: w) in _recoveryAnchors.entries)
+            if ((w.pairRandom, _contacts[hex]) case (final s?, final c?))
+              if (peerFoundingPk(c) case final founding?)
+                hex: (sAB: s, foundingPk: founding),
+        };
+    // §8.1, §9.2 (S407-R): a waiting contact's fixed neighbours as they come
+    // — in its `0x23` or with its first envelope, before that envelope
+    // anchors it — replace the bundle's; the anchor hands them on.
+    p.recoveryNeighbours = (hex, list) {
+      final w = _recoveryAnchors[hex];
+      if (w == null) return;
+      _recoveryAnchors[hex] = (
+        pairRandom: w.pairRandom,
+        neighbours: [for (final n in list) (ip: n.address, port: n.port)],
+      );
+      _recoveryAnchorSave(hex);
+    };
+    // §13.2.1, V-RB: after a takeover every edge asks the former fixed
+    // neighbours too, until the contacts know the new ones.
+    p.node.collectAlso(this, _recoveryFormerAsked);
+    // §13.2.1 (D-70): the same former fixed neighbours get the codes of the
+    // restored contacts at every registration edge (§8.1) — until each is
+    // anchored, at most 7 d ([recoveryFormerAsks]); a contact still sending
+    // step 3 to them then reaches this device as after a move (§11.8.9).
+    p.node.codeRoute.registerAlso(this, _recoveryFormerAsked);
+    // EDGE (§8.1): the host admitted the mailbox before this attach — its
+    // codes had no restored pair yet. Only while one waits.
+    if (_recoveryAnchors.isNotEmpty) p.node.codeRoute.codesChanged();
     final box = mycelium.BundleBox(p.node,
         keyFor: (d) => recoveryBoxKey(rk, d),
         sealed: recoveryBundleSealed,
@@ -569,16 +674,19 @@ extension RecoveryBundleOps on CleonaService {
     _log.info('Recovery bundle (§13.3): bundle of '
         '${DateTime.fromMillisecondsSinceEpoch(best.depositedAtMs).toUtc().toIso8601String()} '
         'taken over — $n contact(s) of ${best.contacts.length}');
+    // The post still waiting lies with the former fixed neighbours (§8.2),
+    // and the restored contacts keep laying it there until their first
+    // envelope tells them the new ones (§13.2.1): from now on every
+    // collection edge asks them ([_recoveryFormerAsked], V-RB).
+    _recoveryFormer = (at: _recoveryTaken!, neighbours: best.ownNeighbours);
+    _recoveryFormerSave();
     final p = myceliumMailbox;
     if (p != null) {
-      // The post still waiting lies with the former fixed neighbours (§8.2)
-      // — ask them at once, then the usual ones.
-      final former = [
-        for (final a in best.ownNeighbours)
-          (InternetAddress.fromRawAddress(a.ip), a.port)
-      ];
-      unawaited(p.node.collect(
-          withWhom: holdersJoin(former, p.node.collectNeighbours)));
+      // EDGE (§8.1, §13.2.1 D-70): the restored contacts' codes are new —
+      // registered now, and recognised from now on.
+      p.node.codeRoute.codesChanged();
+      // The edge of the takeover itself: ask them at once.
+      unawaited(p.node.collect());
     }
     // E5-a: the holder deleted it on our receipt — the device lays a fresh
     // one now, with everything it just took over.
@@ -624,7 +732,7 @@ extension RecoveryBundleOps on CleonaService {
         displayName: c.displayName,
         status: c.blocked ? 'blocked' : 'accepted',
         verificationLevel: c.verificationLevel,
-        // THE ANCHOR BELONGS IN `seedEpB64` (`v41PeerFoundingPk` looks for
+        // THE ANCHOR BELONGS IN `seedEpB64` (`peerFoundingPk` looks for
         // it there), URL-safe and without padding like every writer.
         seedEpB64: base64Url.encode(c.foundingEd25519Pk).replaceAll('=', ''),
       );
@@ -742,7 +850,7 @@ extension RecoveryBundleOps on CleonaService {
     final waiting = _recoveryAnchors[hex];
     if (waiting == null) return false;
     final founding = from.chain.founding?.ed25519Pk ?? from.ed25519Pk;
-    final held = v41PeerFoundingPk(c);
+    final held = peerFoundingPk(c);
     if (held == null || !constantTimeEquals(held, founding)) {
       _log.warn('Rescue bundle: envelope of ${hex.substring(0, 8)} does not '
           'carry the founding key the bundle named — not anchored');

@@ -17,15 +17,12 @@ export 'package:mycelium/neighbour.dart';
 /// 32 counts nodes. Each address carries its stamp, set only by [confirm]
 /// (an ANSWER under this address, W8); a hint is [unconfirmed].
 ///
-/// **Silence never removes** (§11.8): only a failed USE removes an address
-/// ([useFailed]), the neighbour goes with its last; a stale address is
-/// tried ONCE at the next edge ([stale]). Only address families with a
-/// socket ([speaks], §11.1 V1); the fixed seat follows `neighbourhood_seat.dart`.
-///
-/// A NEIGHBOUR leaving is an edge: [onUnderTarget] fires at most once per
-/// [refillInterval], a round inside it is DROPPED (§5.4;
-/// `berichte/S392-RCA-HANDSCHLAG-TAKT.md`, finding 3); [useFailed] comes
-/// only through `Readiness.mute` with a counter proof (E2).
+/// **Silence never removes** (§11.8.5): only a failed USE removes an address
+/// ([useFailed], via `Readiness.mute` with a counter proof, E2), the
+/// neighbour goes with its last — an edge: [onUnderTarget], at most once per
+/// [refillInterval], a round inside it DROPPED (§5.4; S392 finding 3). A
+/// lost family removes nothing, it [waiting]s (C-7). Used is only an address
+/// with a socket for it ([speaks], §11.1 V1); seats: `neighbourhood_seat.dart`.
 class Neighbourhood {
   /// The optimum (§11.8) and at the same time the cap — in NODES.
   static const int atMost = 32;
@@ -39,6 +36,7 @@ class Neighbourhood {
   final Duration refillInterval; // [kRefillInterval], shorter in probes
 
   final List<Neighbour> _list = [];
+  final Waiting _waiting = Waiting(atMost);
   final OpenSet _open;
 
   /// Neighbour id -> when it came into the list (memory only, for [_rank]).
@@ -77,10 +75,8 @@ class Neighbourhood {
 
   DateTime? _lastRound; // the only state the ceiling needs (§5.4)
 
-  /// For `readiness.dart`: reports every removal, every confirmation and
-  /// every join of two entries into one node, synchronously. [removed] and
-  /// [onConfirmed] get the PART concerned — the addresses that left, the
-  /// one address confirmed — with the neighbour's id and fixed seat.
+  /// For `readiness.dart`, synchronously: every removal and confirmation —
+  /// the PART concerned, with id and seat — and every join into one node.
   void observe({
     required void Function(Neighbour gone) removed,
     required void Function(Neighbour n) onConfirmed,
@@ -94,7 +90,9 @@ class Neighbourhood {
   /// All neighbours: the fixed one first (W7), then by [_rank]. Read only.
   List<Neighbour> get all => List.unmodifiable(_list);
 
-  int get count => _list.length; // NODES
+  int get count => _list.length; // NODES; [waiting] does not count
+  List<Neighbour> get waiting => _waiting.all; // no family: §11.8.1, C-7
+  List<Neighbour> get toRemember => forMemory(_list, _waiting.all, atMost);
 
   /// One address per neighbour — its [Neighbour.first], a family of this
   /// node — in the order of [all].
@@ -102,9 +100,8 @@ class Neighbourhood {
       List.unmodifiable(
           [for (final n in _list) (address: n.address, port: n.port)]);
 
-  /// Whether [address]:[port] CAN be a neighbour at all: a length that
-  /// the card knows (4 or 16 B), and a target that can be sent to
-  /// without destroying the wire (`wire_target.dart`, S389/S390).
+  /// Whether [address]:[port] CAN be a neighbour at all: a length the card
+  /// knows (4 or 16 B), a target safe for the wire (`wire_target.dart`).
   static bool possible(InternetAddress address, int port) =>
       CardAddressType.fromLength(address.rawAddress.length) != null &&
       impossibleTarget(address, port, 0) == null;
@@ -139,13 +136,13 @@ class Neighbourhood {
     return _admit(Neighbour(address, port, unconfirmed));
   }
 
-  /// Sets the stamp of [address]:[port] to [now] and creates a neighbour
-  /// if the address is unknown. Only for an ANSWER to a packet of this
-  /// node (W8). If there is no fixed neighbour, this one becomes fixed (W7).
+  /// Stamps [address]:[port] with [now], creates the neighbour if unknown; only for an
+  /// ANSWER (W8). Fixed places move only at their edge ([seatEdgeAt], §11.8.8, C-14).
   void confirm(InternetAddress address, int port, DateTime now) {
     if (!possible(address, port) || !speaks(address)) return;
     final i = _spot(address, port);
     final Neighbour n;
+    final edge = i < 0 || seatEdgeAt(_list[i], address, port, respondingNow, _public);
     if (i >= 0) {
       final old = _list[i];
       n = old.copy(
@@ -153,14 +150,14 @@ class Neighbourhood {
             NeighbourAddress(address, port, now),
             ...old.addresses.where((x) => !x.isAt(address, port)),
           ],
-          fixed: old.fixed || fixedNeighbour == null);
+          fixed: old.fixed || (edge && fixedNeighbour == null));
       _list[i] = n;
       _sort();
     } else {
       n = Neighbour(address, port, now, fixed: fixedNeighbour == null);
       if (!_admit(n)) return; // immediately fell over the cap
     }
-    final f = fixedNeighbour; // V6: a confirmation is the edge for the seat
+    final f = edge ? fixedNeighbour : null; // V6: the seat moves at its edge
     final to = f == null
         ? null
         : seatAfterConfirm(_list, f, n.id,
@@ -169,7 +166,7 @@ class Neighbourhood {
             public: _public,
             contact: isContactDevice); // 6.5: the card names no contact
     if (to != null) _seat(to.id);
-    contactSeatsCheck(n.id); // a confirmation is the edge for a contact seat
+    if (edge) contactSeatsCheck(n.id); // ... and the contact seats too
     // The listeners get the part that was confirmed: this one address.
     final part = holding(address, port)!
         .copy(addresses: [NeighbourAddress(address, port, now)]);
@@ -204,8 +201,8 @@ class Neighbourhood {
     return true;
   }
 
-  /// §5.5/§11.8a, V2–V4: [from]:[port] named [own] as its own addresses in a
-  /// sealed packet — ONE neighbour (`neighbourhood_join.dart`). `bound: false`:
+  /// §5.5/§11.8a, V2–V4: [from]:[port] named [own] as its own (sealed packet,
+  /// or one identifier in answers, `Readiness.nodeLearn`) — ONE neighbour. `bound: false`:
   /// not sent from one of them, the caller takes them as hints. `fresh`: a
   /// new neighbour arose — below the optimum only, a hint never displaces.
   ({bool bound, bool fresh}) ownAddresses(
@@ -224,27 +221,29 @@ class Neighbourhood {
     return (bound: true, fresh: j.joined.isEmpty);
   }
 
-  /// Edge: the wire gained or lost a socket (network change, §11.1) — see
-  /// [refamily]. A neighbour left without any address leaves the list, and
-  /// that is an edge for the refill.
+  /// Edge: the wire gained or lost a socket (§11.1), see [refamily]. Nothing
+  /// is removed (§11.8.5, C-7): without a usable address a neighbour
+  /// [waiting]s; the lost part is reported (it answers no more). No refill.
   void socketsChanged() {
-    var left = false;
     for (final r in refamily(_list, speaks)) {
       final i = _list.indexWhere((x) => x.id == r.old.id);
-      final now = r.now;
-      if (now == null) {
-        _list.removeAt(i);
-        left = true;
-      } else {
+      if (r.now case final now?) {
         _list[i] = now;
+      } else {
+        _waiting.add(_list.removeAt(i));
       }
       if (r.lost case final lost?) _report(lost);
     }
+    for (final a in _waiting.wake(speaks)) {
+      if (rejoin(_list, a)) _learned[a.id] = DateTime.now();
+    }
+    _sort();
+    _cap();
     if (fixedNeighbour == null) _moveUp();
     contactSeatsCheck();
     _open.draw(_list, DateTime.now());
-    if (left) _refill();
   }
+
 
   /// W7 "the next CONFIRMED one" (a reachable one first, V6): the emptied
   /// seat goes HERE, ahead of [_report], so the edge
@@ -268,9 +267,8 @@ class Neighbourhood {
 
   /// EDGE for the contact seats and, after them, the card's seat (S405 V1) — also by the host.
   void contactSeatsCheck([int? justNow]) {
-    final answered = respondingNow ?? (_) => false;
-    seatContacts(_list, justNow, answered, isContactDevice, neverFixedNeighbour, _public, v4OnlyOnMetered);
-    cardSeatHandOver(_list, answered, namedByCards, _public, isContactDevice);
+    seatAll(_list, justNow, respondingNow ?? (_) => false, namedByCards, isContactDevice,
+        neverFixedNeighbour, _public, v4OnlyOnMetered); // `neighbourhood_contacts.dart`, D-26
     _sort();
   }
 
@@ -298,14 +296,16 @@ class Neighbourhood {
   void openSetNewDraw(math.Random random) =>
       _open.draw(_list, DateTime.now(), random);
 
-  /// Sets the state from memory — exactly one call at start (edge: the
-  /// open set is drawn). Addresses of a family without socket stay out.
+  /// Sets the state from memory — exactly one call at start (edge: the open
+  /// set is drawn). What has no socket here [waiting]s or is a name (C-7).
   void outMemory(Iterable<Neighbour> remembered) {
     final old = List.of(_list);
+    final m = fromMemory(remembered, possible, speaks);
+    _waiting.clear();
+    m.wait.forEach(_waiting.add);
     _list
       ..clear()
-      ..addAll(seatsFromMemory(
-          remembered, (x) => possible(x.address, x.port) && speaks(x.address)));
+      ..addAll(seatsFromMemory(m.use, (_) => true));
     final now = DateTime.now();
     _learned
       ..clear()
@@ -318,13 +318,13 @@ class Neighbourhood {
     _open.draw(_list, DateTime.now());
   }
 
-  /// Network change or stop (`Readiness.reset`): the open set is redrawn
-  /// (§11.8). Nothing to cancel — a round is run at its edge or dropped.
+  /// Network change or stop (`Readiness.reset`): the open set is redrawn.
   void runLimit() => _open.draw(_list, DateTime.now());
 
   void empty() { // only for probes: forget everything
     final old = List.of(_list);
     _list.clear();
+    _waiting.clear();
     old.forEach(_report);
     runLimit();
   }

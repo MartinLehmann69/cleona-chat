@@ -27,6 +27,14 @@ enum SurfaceRenderMode {
   brutalist,  // Pure white surface (for Contrast)
 }
 
+/// Secondary text on the frosted-glass surfaces of a photo skin (bubbles and
+/// list tiles): timestamps, status ticks, preview and status lines, reply
+/// quotes, the "edited" mark, forwarded notes. One colour for all of them —
+/// 85% white. The earlier 60-80% fell to 2.32:1 on the own gold bubble over a
+/// bright photo region (S407, Inhaber 13.10.2026). Fill, accent and blur are
+/// not touched by this.
+const Color kPhotoSecondaryText = Color(0xD9FFFFFF); // 85% white
+
 @immutable
 class CharacterProfile extends ThemeExtension<CharacterProfile> {
   final AppBarIntensity appBarIntensity;

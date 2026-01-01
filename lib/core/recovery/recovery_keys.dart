@@ -128,7 +128,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 // **Both are wire-relevant.** Whoever changes them makes every recovery bundle
 // lying in the network unfindable — not broken, but
 // unfindable, which is worse, because nothing reports an error.
-// `smoke_v41_recovery_keys.dart` nails them down with test vectors.
+// `smoke_recovery_keys.dart` nails them down with test vectors.
 
 const String _salt = 'cleona-recovery';
 
@@ -179,16 +179,14 @@ List<int> _chain(List<Object> parts) {
 /// above warns against.
 const int kRecoveryEpochSeconds = 14 * 86400;
 
-/// §13.3.1: „harvests the line for **current + 2 previous** epochs
-/// (42 d coverage), which fully covers the bundle's 31-day TTL".
+/// Harvest window of the recovery line: current + 2 previous epochs (42 d).
+/// The rule came from the V4.1 record (a 31-day bundle); v4_2 §13.3 lets the
+/// bundle live 7 days. Used only by the superseded `tagline/` layer.
 const int kRecoveryHarvestEpochs = 3;
 
-/// §13.3.4: „The TTL is 31 days".
-const Duration kRecoveryBundleTtl = Duration(days: 31);
-
-/// §13.3.4: „renewal with every recovery-epoch change, i.e., every 14
-/// days … A renewal per epoch leaves a single missed date without
-/// consequence (14 + 14 < 31)".
+/// Renewal with every recovery-epoch change (14 days) — likewise from the
+/// V4.1 record, used only by the superseded `tagline/` layer and its smokes;
+/// not a rule of v4_2 (§13.3: the bundle lives 7 days).
 const Duration kRecoveryRenewalInterval =
     Duration(seconds: kRecoveryEpochSeconds);
 

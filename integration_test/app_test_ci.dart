@@ -1,7 +1,7 @@
 // CI Integration Test for Cleona Chat — macOS GitHub Actions Runner
 //
 // Phase 1: Startup smoke (always runs)
-//   - FFI loading (SodiumFFI, OqsFFI)
+//   - FFI loading and keyring (initUiCrypto, the same start as main())
 //   - App launch, Setup flow, Home screen
 //
 // Phase 2: Network integration (runs when BOOTSTRAP_CONTACT_SEED is set)
@@ -21,17 +21,18 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/crypto/oqs_ffi.dart';
 
 import 'package:cleona/main.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  // ── Phase 1.0: FFI Loading ──────────────────────────────────────
-  SodiumFFI();
-  OqsFFI().init();
+  // ── Phase 1.0: FFI loading and keyring — the same start as main() ──
+  // S407-7: this test loaded the FFI libraries itself and never started the
+  // keyring; the setup then failed with "No keyring available" (macOS
+  // workflow red since 25.09.2026). `initUiCrypto` is the one crypto start
+  // of the UI process.
+  setUpAll(initUiCrypto);
 
   FlutterError.onError = (details) {
     if (details.library == 'flutter test framework') {

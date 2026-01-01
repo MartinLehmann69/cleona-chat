@@ -314,6 +314,35 @@ abstract class EncryptedStore {
     return out;
   }
 
+  /// [loadAreaPrefix] one row at a time, through a cursor: only the row at
+  /// hand is unpacked, never the whole range at once (S407-BOOTSTRAPSPEICHER:
+  /// the post box, one row per held packet). An entry that cannot be
+  /// unpacked comes with `null`. Finish (or break) the iteration before the
+  /// next write on this connection.
+  Iterable<(String, Map<String, dynamic>?)> eachAreaPrefix(
+      String area, String prefix) sync* {
+    final statement = db.prepare(
+        'SELECT entry_key, data, data_zstd FROM state '
+        'WHERE area = ? AND entry_key >= ? AND entry_key < ? '
+        'ORDER BY entry_key;');
+    try {
+      final cursor =
+          statement.selectCursor([area, prefix, _afterPrefix(prefix)]);
+      while (cursor.moveNext()) {
+        final r = cursor.current;
+        Map<String, dynamic>? d;
+        try {
+          d = unpackJson(r['data'], r['data_zstd'] as int);
+        } on Object {
+          d = null;
+        }
+        yield (r['entry_key'] as String, d);
+      }
+    } finally {
+      statement.close();
+    }
+  }
+
   /// Removes every entry of an area whose key begins with [prefix], in ONE
   /// statement. Returns how many went.
   int removeAreaPrefix(String area, String prefix) {

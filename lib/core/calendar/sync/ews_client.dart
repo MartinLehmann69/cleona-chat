@@ -26,7 +26,7 @@ class EWSClient {
       'https://outlook.office365.com/EWS.AccessAsUser.All offline_access';
 
   // ── Autodiscover ─────────────────────────────────────────────────────
-  static const String _autodiscoverV2Url =
+  static const String _autodiscoverV2Url =  // version-name-ok: foreign API: Exchange Autodiscover v2
       'https://autodiscover-s.outlook.com/autodiscover/autodiscover.json';
 
   // ── SOAP XML namespaces ──────────────────────────────────────────────
@@ -302,7 +302,7 @@ class EWSClient {
   }
 
   /// Autodiscover v2 (JSON) — works for Microsoft 365 / Exchange Online.
-  static Future<String?> _autodiscoverV2(
+  static Future<String?> _autodiscoverV2(  // version-name-ok: foreign API: Exchange Autodiscover v2
       String email, String? accessToken) async {
     final uri = Uri.parse(
         '$_autodiscoverV2Url/v1.0/${Uri.encodeComponent(email)}?Protocol=EWS');

@@ -8,6 +8,7 @@ import 'package:cleona/core/crypto/media_cipher.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/media/media_store.dart';
+import 'package:meta/meta.dart';
 
 /// The decrypting reader on `127.0.0.1` (S362, variant B).
 ///
@@ -159,6 +160,11 @@ class MediaVault {
   /// every `build` and would run past its own image cache.
   final Map<String, String> _byPath = <String, String>{};
 
+  /// Set by the first [start]: the process wants a reader, so
+  /// [ensureRunning] may bring it back. Before that it does nothing.
+  bool _wanted = false;
+  String? _profileDir;
+
   bool get isRunning => _server != null;
   int? get port => _port;
 
@@ -168,11 +174,22 @@ class MediaVault {
   /// itself is process-wide and serves every registered profile.
   Future<void> start({String? profileDir}) async {
     if (_server != null) return;
+    _wanted = true;
+    _profileDir ??= profileDir;
     if (!_logSet) {
       _log = CLogger.get('mediavault', profileDir: profileDir);
       _logSet = true;
     }
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final HttpServer server;
+    try {
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    } catch (e) {
+      // Into the log file, not only to the console: on a phone the console
+      // is gone, and without this line a reader that never started shows
+      // up only as "placeholder instead of the image" (S407-IOS-BILD).
+      _log.error('Media reader could not bind the loopback: $e');
+      rethrow;
+    }
     server.autoCompress = false;
     _server = server;
     _port = server.port;
@@ -180,18 +197,73 @@ class MediaVault {
     // The port may go into the log, the secret may not.
     _log.info('Media reader runs on 127.0.0.1:$_port (loopback only, '
         'path secret per process start)');
-    unawaited(server.forEach(_handle).catchError((Object e) {
-      _log.warn('Medienleser: Annahmeschleife endete: $e');
-    }));
+    unawaited(server
+        .forEach(_handle)
+        .then((_) => _acceptLoopEnded(server, 'closed'))
+        .catchError((Object e) => _acceptLoopEnded(server, e)));
   }
 
-  Future<void> stop() async {
-    final s = _server;
+  /// The accept loop of [server] ended — closed by [stop], or by the
+  /// operating system (iOS releases the listening sockets of a suspended
+  /// app, Apple TN2277). Unless [stop] already replaced it, the reader is
+  /// marked as not running, so that [urlFor] hands out no URL to a dead port
+  /// and [ensureRunning] starts a new one.
+  void _acceptLoopEnded(HttpServer server, Object reason) {
+    if (!identical(_server, server)) return;
+    _log.warn('Media reader: accept loop ended ($reason) — reader marked '
+        'as stopped');
+    _reset();
+  }
+
+  void _reset() {
     _server = null;
     _port = null;
     _token = null;
     _handles.clear();
     _byPath.clear();
+  }
+
+  /// Makes sure the reader answers — called once at the edge "app back in
+  /// the foreground" and before the full-screen viewer opens, never on a
+  /// clock (working rule 5). Connects to its own port over the loopback;
+  /// if nobody answers, the old server is dropped and a new one started
+  /// (new port, new path secret, so old URLs die with it). Returns whether
+  /// a new reader was started. Does nothing before the first [start].
+  Future<bool> ensureRunning() async {
+    if (!_wanted) return false;
+    final server = _server;
+    final port = _port;
+    if (server != null && port != null) {
+      try {
+        final s = await Socket.connect(InternetAddress.loopbackIPv4, port,
+            timeout: const Duration(seconds: 1));
+        s.destroy();
+        return false;
+      } catch (e) {
+        _log.warn('Media reader: own port $port does not answer ($e) — '
+            'starting it anew');
+        if (identical(_server, server)) _reset();
+        unawaited(server.close(force: true).catchError((_) {}));
+      }
+    }
+    try {
+      await start(profileDir: _profileDir);
+      return _server != null;
+    } catch (_) {
+      return false; // logged in start()
+    }
+  }
+
+  /// Closes the listening socket the way the operating system does when it
+  /// releases it — without [stop], so the reader still believes it runs.
+  @visibleForTesting
+  Future<void> dropListenerForTesting() async =>
+      _server?.close(force: true);
+
+  Future<void> stop() async {
+    final s = _server;
+    _wanted = false;
+    _reset();
     await s?.close(force: true);
   }
 

@@ -15,6 +15,7 @@
 //   lib/core/update/physical_transfer_helper.dart:173  — only `isPrivateIp`
 //   lib/core/update/invite_link_service.dart:78        — only `isPrivateIp`
 //   lib/core/rendezvous/binary_rendezvous_manager.dart:192 — only `isPrivateIp`
+//     (deleted with V9 A1, 08.10.2026)
 //   lib/core/rendezvous/infra_rendezvous_manager.dart:96   — only `isPrivateIp`
 //
 // Four import edges of the application layer onto `lib/core/network/` for an

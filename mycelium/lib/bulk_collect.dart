@@ -2,44 +2,34 @@
 /// the announcement names, opens what comes back and assembles the object.
 ///
 /// `0x54` goes to each named holder when [BulkCollector.collect] is called
-/// and at the edges of §8.2 — start, network change, a new neighbour, the
-/// application opened. Those edges reach this file through
-/// `node_collect_edge.dart`; there is no timer here (§5.4, D-9).
-///
-/// ROUNDS (S398-W1, §11.3 pattern). A holder ends every pass with a `0x55`
-/// that carries its count ("end of pass", `bulk_piece.dart`). When EVERY
-/// named holder has ended the round (end of pass or "nothing here") and
-/// the object is still open, the collector asks again at once, naming the
-/// first open stripe (`0x54` "from stripe"). A round that completes no new
-/// stripe counts; after [kCollectRoundsAtMost] such rounds the collection
-/// fails "incomplete (x of y stripes)". A holder that sends no end mark at
-/// all leaves the round open — then the next edge asks again. The events
-/// are packets, never a clock.
-///
-/// A piece opens under `HKDF(K_T, "bulk/seal")` or is discarded. With
-/// seven pieces in every stripe the object is assembled and checked against
-/// the SHA-256 of the announcement.
-///
-/// ONE COLLECTOR PER IDENTITY (S401; §4.5.3, §21.4.1). A transfer belongs
-/// to one identity: its callbacks, and its opened blocks in THAT identity's
-/// folder under its key. Two identities of a device in one group collect
-/// the same `K_T` each for itself; the holder answers one address once.
-///
+/// and at the edges of §8.2 (start, network change, a new neighbour, the
+/// application opened; `node_collect_edge.dart`), repeated to a silent
+/// holder by the transport (§11.3a, `bulk_collect_ask.dart`).
+/// ROUNDS (S398-W1, §11.3 pattern): a holder ends every pass with a `0x55`
+/// ("end of pass", `bulk_piece.dart`). When EVERY named holder has ended the
+/// round (end of pass or "nothing here") and the object is still open, the
+/// collector asks again at once for the open stripes (`bulk_want.dart`, S407
+/// M-3). After [kCollectRoundsAtMost] rounds without a new stripe it fails
+/// "incomplete (x of y stripes)". A holder that stays silent leaves the
+/// round open — the next edge asks again. Packets, never a clock of its own.
+/// A piece opens under `HKDF(K_T, "bulk/seal")` or is discarded; seven per
+/// stripe assemble the object, checked against the announced SHA-256.
+/// ONE COLLECTOR PER IDENTITY (S401; §4.5.3, §21.4.1): callbacks and opened
+/// blocks in THAT identity's folder; two identities collect a `K_T` each.
 /// RESTART (S398-W1, S401): complete stripes survive — encrypted chunks
 /// ([BulkDisk.openedAppend]), at least [kOpenedChunkStripes] stripes or
 /// 1/32 of the object, and at every end of a pass. WHICH collections are
 /// open does NOT stand here: the layer above keeps them in the store of
 /// the identity — the one source — and hands each over again with
 /// [collect]; only then is it open here, takes what its chunks hold and
-/// asks from the first open stripe. [stash] keeps pieces of a fallen-back
-/// stream (§17.6) before the collection exists.
+/// asks for its open stripes. [stash] keeps the pieces of a fallen-back
+/// stream (§17.6) or says it cannot (S407-N4, `stream_receive.dart`).
 ///
 /// BOUNDS (§20.2): [kCollectionsAtMost] open collections per identity (one
 /// more evicts the oldest, "displaced"); older than `TTL_media` fails at
 /// the next edge; every named holder "nothing here" fails at once; opened
-/// blocks on disk at most [kOpenedOnDiskAtMost] (256 MiB) over all
-/// collections of all identities of the device — beyond that stripes stay
-/// in memory and are asked again after a restart.
+/// blocks on disk at most [kOpenedOnDiskAtMost] (256 MiB) per device;
+/// beyond it stripes stay in memory till a restart, a stash is refused.
 library;
 
 import 'dart:async';
@@ -47,29 +37,24 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:mycelium/bulk_collect_ask.dart';
 import 'package:mycelium/bulk_collection.dart';
 import 'package:mycelium/bulk_disk.dart';
 import 'package:mycelium/bulk_piece.dart';
+import 'package:mycelium/bulk_want.dart' show WantedSpeakers, collectWantedPacket;
 import 'package:mycelium/card.dart' show CardAddress;
+import 'package:mycelium/silence.dart' show Silence;
 import 'package:mycelium/media.dart'
     show kBlock, kPiecesPerStripe, kStripeWidth, objectFromPieces;
 
-/// The callback types stand with the collection (`bulk_collection.dart`);
-/// every existing caller still imports only this file.
+/// The callback types live in `bulk_collection.dart`; callers import this.
 export 'package:mycelium/bulk_collection.dart'
     show OnBulkObject, OnBulkFailure, OnBulkProgress;
 
-/// At most this many collections are open at once.
-const int kCollectionsAtMost = 32;
-
-/// Rounds without a new complete stripe before "incomplete".
-const int kCollectRoundsAtMost = 3;
-
-/// Opened blocks on disk over all collections (256 MiB).
-const int kOpenedOnDiskAtMost = 256 << 20;
-
-/// Complete stripes per chunk on disk, at least.
-const int kOpenedChunkStripes = 64;
+const int kCollectionsAtMost = 32; // open at once
+const int kCollectRoundsAtMost = 3; // without a new stripe: "incomplete"
+const int kOpenedOnDiskAtMost = 256 << 20; // opened blocks, per device
+const int kOpenedChunkStripes = 64; // complete stripes per chunk, at least
 
 class BulkCollector {
   final void Function(Uint8List packet, CardAddress to) _send;
@@ -84,16 +69,21 @@ class BulkCollector {
   int piecesReceived = 0;
 
   final Map<String, BulkCollection> _open = {};
+  final WantedSpeakers _speakers = WantedSpeakers(); // older 4.2 holders
   int _onDisk = 0;
 
   /// [disk]: the folder of THIS identity under its key. Nothing is open
   /// after construction — see RESTART in the header.
+  final Silence silence; // §11.3a for the round's `0x54` — the node's
+
   BulkCollector({
     required void Function(Uint8List packet, CardAddress to) send,
     BulkDisk? disk,
     int Function()? othersOnDisk,
     this.report,
+    Silence? silence,
   })  : _send = send,
+        silence = silence ?? Silence(),
         _disk = disk,
         _others = othersOnDisk {
     _disk?.openedOrphansDrop(const [], kTtlMedia);
@@ -102,8 +92,7 @@ class BulkCollector {
 
   int get openCollections => _open.length;
 
-  /// Bytes of opened blocks this identity has on disk.
-  int get openedOnDisk => _onDisk;
+  int get openedOnDisk => _onDisk; // bytes of opened blocks, this identity
 
   bool _full(int stripes) =>
       (_others?.call() ?? 0) + _onDisk + stripes * kPiecesPerStripe * (kBlock + 1) >
@@ -184,24 +173,25 @@ class BulkCollector {
     return tag;
   }
 
-  /// Keeps [pieces] of a fallen-back stream (§17.6): into the open
-  /// collection, or on disk for the one to come (survives a restart).
-  void stash(Uint8List tag, Map<int, Map<int, Uint8List>> pieces) {
-    final c = _open[tagHex(tag)];
-    if (c != null) {
-      if (_take(c, pieces, save: true)) {
-        scheduleMicrotask(() => _open[tagHex(tag)] == c ? _finish(c) : null);
-      }
-      _persist(c, force: true);
-      return;
+  /// Keeps [pieces] of a fallen-back stream (§17.6) on disk: into the open
+  /// collection, or for the one to come (survives a restart). `false` where
+  /// they cannot stay — no disk, or the bound: the stream then names all.
+  bool stash(Uint8List tag, Map<int, Map<int, Uint8List>> pieces) {
+    final c = _open[tagHex(tag)], disk = _disk;
+    if (disk == null || _full(pieces.length + (c?.unsaved.length ?? 0))) {
+      report?.call('Bulk: stash ${tagHex(tag).substring(0, 8)} not kept — '
+          'no disk, or opened blocks on disk at the bound');
+      return false;
     }
-    final disk = _disk;
-    if (disk == null || pieces.isEmpty) return;
-    if (_full(pieces.length)) {
-      return report?.call('Bulk: stash ${tagHex(tag).substring(0, 8)} not '
-          'kept — opened blocks on disk at the bound');
+    if (c == null) {
+      _onDisk += disk.openedAppend(tag, pieces);
+      return true;
     }
-    _onDisk += disk.openedAppend(tag, pieces);
+    if (_take(c, pieces, save: true)) {
+      scheduleMicrotask(() => _open[tagHex(tag)] == c ? _finish(c) : null);
+    }
+    _persist(c, force: true);
+    return true;
   }
 
   /// Takes [seed] into [c]; `true` if every stripe is then complete.
@@ -242,19 +232,24 @@ class BulkCollector {
     );
   }
 
-  /// Gives a collection up (user, or the layer above: the sender gave up).
-  /// Local only; ends with [onFailure], naming what was missing.
+  /// Gives a transfer up (user, or the layer above: it ends for good) —
+  /// [onFailure] naming what was missing if it is open — and drops what
+  /// lies on disk for it: a stash, chunks of a run, what a failure left.
   void abandon(Uint8List tag) {
     final c = _open[tagHex(tag)];
-    if (c == null) {
-      // Not open, but a stash or the chunks of the last run may lie there.
-      _disk?.openedDrop(tag);
-      _onDisk = _disk?.openedBytes() ?? 0;
-      return;
+    if (c != null) {
+      _fail(c, 'abandoned — ${c.stripes - c.complete} of ${c.stripes} stripes '
+          'below $kStripeWidth pieces');
     }
-    _fail(c, 'abandoned — ${c.stripes - c.complete} of ${c.stripes} stripes '
-        'below $kStripeWidth pieces');
+    _disk?.openedDrop(tag);
+    _onDisk = _disk?.openedBytes() ?? 0;
   }
+
+  /// Stripes complete on disk for [tag] — what a collection would take.
+  Set<int> held(Uint8List tag) => {
+        for (final e in (_disk?.openedLoad(tag) ?? const {}).entries)
+          if (e.value.length >= kStripeWidth) e.key,
+      };
 
   /// The edge (§8.2): every open collection asks its holders once.
   void ask() {
@@ -275,16 +270,16 @@ class BulkCollector {
       ..nothing.clear()
       ..ended.clear()
       ..roundStart = c.complete;
-    var from = 0;
-    while (from < c.stripes && (c.per[from]?.length ?? 0) >= kStripeWidth) {
-      from++;
-    }
+    final open = [ // by name, not "from the first open one on" (S407 M-3)
+      for (var s = 0; s < c.stripes; s++) if ((c.per[s]?.length ?? 0) < kStripeWidth) s
+    ];
+    final from = open.isEmpty ? c.stripes : open.first;
     report?.call('Bulk: collection ${c.short} asks ${c.holders.length} '
         'holder(s) from stripe $from (${c.complete} of ${c.stripes} complete, '
-        'round ${c.rounds + 1})');
-    for (final h in c.holders) {
-      _send(collectPacket(c.tag, from), h);
-    }
+        '${open.length} open, round ${c.rounds + 1})');
+    // §11.3a repeats; an older 4.2 holder: from-stripe form (`bulk_want.dart`).
+    bulkAskRound(silence, c, collectWantedPacket(c.tag, open, c.stripes),
+        collectPacket(c.tag, from), _speakers, _send);
   }
 
   void receive(Uint8List p, CardAddress from) {
@@ -295,6 +290,7 @@ class BulkCollector {
     final c = x == null ? null : _open[tagHex(x.tag)];
     if (x == null || c == null) return;
     if (x.stripe >= c.stripes || x.no >= kPiecesPerStripe) return;
+    bulkHeard(c, from);
     c.received++;
     piecesReceived++;
     final there = c.per[x.stripe] ??= {};
@@ -324,6 +320,7 @@ class BulkCollector {
   void _nothingOrEnd(({Uint8List tag, bool ended, int sent}) n, CardAddress from) {
     final c = _open[tagHex(n.tag)];
     if (c == null) return;
+    bulkHeard(c, from);
     c.ended.add('$from'); // this round: done (end of pass or nothing here)
     if (!n.ended) {
       c.nothing.add('$from');
@@ -384,14 +381,19 @@ class BulkCollector {
     c.onObject?.call(c.tag, object);
   }
 
+  /// [c] ends without its object; what it opened STAYS on disk — the
+  /// layer above ends the transfer ([abandon]) or goes on (S407-N4, D-34).
   void _fail(BulkCollection c, String why) {
-    _remove(c);
+    _persist(c, force: true);
+    _remove(c, drop: false);
     report?.call('Bulk: collection ${c.short} failed — $why');
     c.onFailure?.call(c.tag, why);
   }
 
-  void _remove(BulkCollection c) {
+  void _remove(BulkCollection c, {bool drop = true}) {
     if (_open.remove(tagHex(c.tag)) == null) return;
+    bulkAskEnd(c);
+    if (!drop) return;
     _disk?.openedDrop(c.tag);
     _onDisk = _disk?.openedBytes() ?? 0;
   }

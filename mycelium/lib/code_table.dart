@@ -3,7 +3,9 @@
 /// A device tells its fixed neighbour which codes belong to it —
 /// not who it is. The neighbour holds "code → device", and a device is
 /// its **device code** (16 B, `code_registration.dart`); the source address of the
-/// registration stands IN the entry and is updated on every registration:
+/// registration stands IN the entry. It moves to another address only once
+/// that address has answered one request (§8.1, §11.8.6, §11.8.9;
+/// `code_move.dart`) — a packet replayed from elsewhere moves nothing:
 ///
 /// | Limit | Value |
 /// |---|---|
@@ -48,8 +50,8 @@ const int kCodesPerDevice = 4096;
 const int kDevicesAtMost = 256;
 
 class _Device {
-  /// Where this device LAST registered — changeable, that is the
-  /// point (§8.1, S392).
+  /// Where this device LAST registered or kept alive from a confirmed
+  /// address — changeable, that is the point (§8.1, S392).
   InternetAddress address;
   int port;
 
@@ -71,9 +73,9 @@ class CodeTable {
   /// Code (hex) → Geraetecode (hex).
   final Map<String, String> _owner = {};
 
-  /// Device code (hex) + address type → where the device was last seen in
-  /// that family (registration or keep-alive, §8.1). Only for devices in
-  /// [_devices]; goes with them.
+  /// Device code (hex) + address type → the device's entry in that family:
+  /// its first registration, or an address that answered its request
+  /// (§8.1, §11.8.9). Only for devices in [_devices]; goes with them.
   final Map<String, (InternetAddress, int)> _seen = {};
 
   int _clearedAt = -1;
@@ -88,6 +90,11 @@ class CodeTable {
 
   int get countDevices => _devices.length;
   int get countCodes => _owner.length;
+
+  /// Where every device registered here was last — the devices whose fixed
+  /// neighbour this node is (§16.2.5 capability notice, `mailbox_channel.dart`).
+  Iterable<(InternetAddress, int)> get registeredAt =>
+      _devices.values.map((d) => (d.address, d.port));
 
   /// How many codes the device [device] holds here.
   int codesFrom(Uint8List device) => _devices[_hex(device)]?.codes.length ?? 0;
@@ -137,20 +144,22 @@ class CodeTable {
     }
     _clear(today);
     final who = _hex(device);
-    final g = _devices.remove(who) ?? _Device(address, port, now());
-    // THE point of S392: the same device under a new address keeps its
-    // codes, the entry moves along. No packet, no clock — just a field.
-    if (g.address.address != address.address || g.port != port) {
-      moves++;
-      report?.call('Device ${who.substring(0, 8)} now reports from '
-          '${address.address}:$port instead of ${g.address.address}:${g.port} — '
-          'entry moves along (§8.1)');
-      g
-        ..address = address
-        ..port = port;
+    final known = _devices.remove(who);
+    final g = known ?? _Device(address, port, now());
+    if (known == null || _holds(who, address, port)) {
+      // A new device, or a registration from an address this device has
+      // already confirmed in that family: the entry follows at once.
+      _follow(who, g, address, port, 'reports');
+    } else {
+      // THE point of S392 stays: the same device under a new address keeps
+      // its codes. The ENTRY moves only once that address has answered the
+      // one request of §11.8.6 ([moveConfirmed], `code_move.dart`) — a
+      // registration replayed from elsewhere moves nothing (§11.8.9).
+      report?.call('Device ${who.substring(0, 8)} registers from '
+          '${address.address}:$port, not its entry in that family — the '
+          'entry stays until that address answers (§11.8.9)');
     }
     g.last = now();
-    _seen[_seenKey(who, address)] = (address, port);
     _devices[who] = g; // to the end: most recent registration
     if (_devices.length > kDevicesAtMost) {
       final oldest = _devices.keys.first;
@@ -189,32 +198,55 @@ class CodeTable {
     return accepted;
   }
 
-  /// A keep-alive of [device] arrived from [address]:[port] (§8.1). The
-  /// entry follows it when it is of the entry's family — step 3 then
-  /// reaches the device at once, not only at its next registration.
-  /// Returns `true` if the device was seen in this family before under
-  /// ANOTHER address: its mapping has moved. A device that has not
-  /// registered here is none of this table's business — `false`.
-  bool sighted(Uint8List device, InternetAddress address, int port) {
+  /// Is [address]:[port] the entry of [device] in that address family —
+  /// nothing to move (§8.1)? A device that has not registered here is none
+  /// of this table's business: `true`.
+  bool holds(Uint8List device, InternetAddress address, int port) {
+    if (device.length != kCodeLength) return true;
+    final who = _hex(device);
+    return !_devices.containsKey(who) || _holds(who, address, port);
+  }
+
+  bool _holds(String who, InternetAddress address, int port) {
+    final w = _seen[_seenKey(who, address)];
+    return w != null && w.$1.address == address.address && w.$2 == port;
+  }
+
+  /// [address]:[port] answered the one request of §11.8.6 after a
+  /// keep-alive ([registration] `false`) or a registration of [device] came
+  /// from it (§8.1, §11.8.9). The entry of that family moves there; the
+  /// device's step-3 entry follows a registration in any family and a
+  /// keep-alive in its own. Returns `true` if the device had ANOTHER entry
+  /// in that family before: its mapping has moved.
+  bool moveConfirmed(Uint8List device, InternetAddress address, int port,
+      {required bool registration}) {
     if (device.length != kCodeLength) return false;
     final who = _hex(device);
     final g = _devices[who];
     if (g == null) return false;
-    final key = _seenKey(who, address);
-    final before = _seen[key];
-    _seen[key] = (address, port);
-    if (g.address.type == address.type &&
-        (g.address.address != address.address || g.port != port)) {
-      moves++;
-      report?.call('Device ${who.substring(0, 8)} keeps alive from '
-          '${address.address}:$port instead of ${g.address.address}:${g.port} — '
-          'entry moves along (§8.1)');
-      g
-        ..address = address
-        ..port = port;
+    final before = _seen[_seenKey(who, address)];
+    if (registration || g.address.type == address.type) {
+      _follow(who, g, address, port,
+          registration ? 'reports' : 'keeps alive');
+    } else {
+      _seen[_seenKey(who, address)] = (address, port);
     }
     return before != null &&
         (before.$1.address != address.address || before.$2 != port);
+  }
+
+  /// The entry of [g] and its family follow [address]:[port].
+  void _follow(String who, _Device g, InternetAddress address, int port,
+      String how) {
+    _seen[_seenKey(who, address)] = (address, port);
+    if (g.address.address == address.address && g.port == port) return;
+    moves++;
+    report?.call('Device ${who.substring(0, 8)} $how from '
+        '${address.address}:$port instead of ${g.address.address}:${g.port} — '
+        'entry moves along (§8.1)');
+    g
+      ..address = address
+      ..port = port;
   }
 
   static String _seenKey(String who, InternetAddress a) => '$who/${a.type.name}';

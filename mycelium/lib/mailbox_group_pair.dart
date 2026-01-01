@@ -39,6 +39,8 @@ import 'package:mycelium/group_member.dart';
 import 'package:mycelium/history.dart' show HistoryEntry;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/mailbox.dart';
+import 'package:mycelium/mailbox_envelope_tag.dart';
+import 'package:mycelium/mailbox_inbound.dart' show MailboxInbound;
 import 'package:mycelium/mailbox_outbound.dart' show MailboxOutbound;
 import 'package:mycelium/mailbox_pair.dart';
 import 'package:mycelium/mailbox_start.dart' show MailboxDetails;
@@ -72,7 +74,8 @@ extension MailboxGroupPair on Mailbox {
       a.directory.createSync(recursive: true);
       _stores[this] = GroupPairStore.empty(a.directory, a.key);
     }
-    identity.messages.onReceiptToMailbox = groupPairDayKeysAcked;
+    identity.messages.onReceiptToMailbox = receiptArrived; // §6.3, then day keys
+    envelopeTagWire(); // §4.4.3: the pairs' tag for the envelope (S407)
   }
 
   /// All group pairs of THIS identity.
@@ -82,15 +85,53 @@ extension MailboxGroupPair on Mailbox {
   GroupPair? groupPairOrNull(String identifier) => _store?.pairs[identifier];
 
   /// Contacts with `s_AB` and group pairs — everyone this identity forms a
-  /// `K_AB` with (§4.3), for codes and the `0x23`.
+  /// `K_AB` with (§4.3) — for what ARRIVES: the inbound codes, the `0x23`
+  /// and the nudge. A group pair comes once per seed it may arrive under
+  /// ([_groupPairInboundSeeds]); what is SENT uses [GroupPair.pairRandom]
+  /// alone (`mailbox_pair.dart`, `pairFrom`).
   List<({Address address, Uint8List s})> get pairPartners => [
         for (final k in contacts)
           if (k.pairRandom case final s?)
             if (k.address.foundingEd25519Pk != null) (address: k.address, s: s),
         for (final p in groupPairs)
           if (p.address.foundingEd25519Pk != null)
-            (address: p.address, s: p.pairRandom),
+            for (final s in _groupPairInboundSeeds(p).values)
+              (address: p.address, s: s),
       ];
+
+  /// The seeds [p] may arrive under, by hex: the seed of every group that
+  /// carries it and every seed waiting for its co-member. The two sides of
+  /// a pair learn of a new shared group one after the other — the joining
+  /// side at its own join, the other with the joiner's entry (§16.2.2) —
+  /// and in between each sends under the smallest group IT carries. The
+  /// receiver holds both seeds, so nothing sent in between is refused with
+  /// a `0x21` and left to the next collection (S407 B-12).
+  Map<String, Uint8List> _groupPairInboundSeeds(GroupPair p) {
+    final id = identifierFrom(p.address);
+    return {
+      for (final s in p.groupSeeds.values) _hex(s): s,
+      for (final e in [...?_store?.seeds.entries])
+        if (e.key.endsWith(':$id')) _hex(e.value): e.value,
+    };
+  }
+
+  /// The `K_AB` of every seed the group pair [id] (hex) may arrive under —
+  /// the tag of a tagged envelope from it is checked against these (§4.4.3,
+  /// `mailbox_envelope_tag.dart`); empty for no group pair.
+  List<Uint8List> groupPairInboundKeys(String id) => switch (_store?.pairs[id]) {
+        final p? when p.address.foundingEd25519Pk != null => [
+            for (final s in _groupPairInboundSeeds(p).values)
+              pairSecret(identity.postBox, p.address, s),
+          ],
+        _ => const [],
+      };
+
+  /// The seeds [id] arrives under, sorted — compared before and after a
+  /// change to know whether the codes changed.
+  String _groupPairInboundKey(String id) => switch (_store?.pairs[id]) {
+        final p? => (_groupPairInboundSeeds(p).keys.toList()..sort()).join(),
+        null => '',
+      };
 
   /// An `s_AB` for the co-member [identifier] in [group] arrived in an
   /// invitation leg (§16.2.2). It waits until [groupPairRemember] forms the
@@ -103,8 +144,12 @@ extension MailboxGroupPair on Mailbox {
     if (store == null || s.length != kPairRandomLength) return;
     if (contactOrNull(id) != null) return;
     if (store.pairs[id]?.groupSeeds.containsKey(g) ?? false) return;
+    final before = _groupPairInboundKey(id);
     store.seeds[GroupPairStore.seedKey(g, id)] = s;
     store.save();
+    // EDGE (§8.1): a seed for a pair that exists is a code it may arrive
+    // under from now on ([_groupPairInboundSeeds]).
+    if (_groupPairInboundKey(id) != before) node.codeRoute.codesChanged();
   }
 
   /// Forms the group pair with [a] for [group], or adds [group] to an
@@ -128,13 +173,15 @@ extension MailboxGroupPair on Mailbox {
     final known = store.pairs[id];
     final s = store.seeds.remove(GroupPairStore.seedKey(g, id));
     if (known != null) {
-      final before = _hex(known.pairRandom);
+      final before = '${_hex(known.pairRandom)}${_groupPairInboundKey(id)}';
       if (s != null) known.groupSeeds.putIfAbsent(g, () => s);
       if (!known.groupSeeds.containsKey(g)) return false;
       _adopt(known, a);
       _neighboursTake(known, neighbours);
       store.save();
-      if (_hex(known.pairRandom) != before) node.codeRoute.codesChanged();
+      if ('${_hex(known.pairRandom)}${_groupPairInboundKey(id)}' != before) {
+        node.codeRoute.codesChanged();
+      }
       return true;
     }
     if (s == null) return false;
@@ -152,12 +199,14 @@ extension MailboxGroupPair on Mailbox {
   /// E3); then the pair is formed or extended ([groupPairRemember]).
   /// `address == null`: the entry does not prove itself — no pair (the
   /// application shows it, proposal Z-5). `paired == false` with an address:
-  /// a contact, or no seed for it yet.
+  /// a contact, or no seed for it yet. [readsTag]: the entry says the
+  /// co-member reads the tagged envelope (§4.4.3, `mailbox_envelope_tag.dart`).
   ({Address? address, bool paired}) groupPairFromEntry(Uint8List group,
       Uint8List addressWire, Uint8List ed, Uint8List dsa,
-      {Uint8List? neighboursWire}) {
+      {Uint8List? neighboursWire, bool readsTag = false}) {
     final a = groupMemberCheck(group, addressWire, ed, dsa);
     if (a == null) return (address: null, paired: false);
+    if (readsTag) groupPairReadsTag(identifierFrom(a));
     return (
       address: a,
       paired: groupPairRemember(a, group,
@@ -175,19 +224,16 @@ extension MailboxGroupPair on Mailbox {
     if (store == null) return 0;
     final g = _hex(group);
     var changed = false;
-    var codes = false;
+    final inbound = {
+      for (final id in store.pairs.keys) id: _groupPairInboundKey(id),
+    };
     final ended = <String>[];
     for (final e in store.pairs.entries) {
       if (keep != null && keep.contains(e.key)) continue;
       if (!e.value.groupSeeds.containsKey(g)) continue;
-      final before = _hex(e.value.pairRandom);
       e.value.groupSeeds.remove(g);
       changed = true;
-      if (e.value.groupSeeds.isEmpty) {
-        ended.add(e.key);
-      } else if (_hex(e.value.pairRandom) != before) {
-        codes = true; // another group's seed is the pair's `s_AB` now
-      }
+      if (e.value.groupSeeds.isEmpty) ended.add(e.key);
     }
     for (final id in ended) {
       store.pairs.remove(id);
@@ -198,6 +244,10 @@ extension MailboxGroupPair on Mailbox {
     store.seeds.removeWhere((k, _) =>
         k.startsWith('$g:') && (keep == null || !keep.contains(k.substring(g.length + 1))));
     if (changed || store.seeds.length != before) store.save();
+    // Another group's seed may be the pair's `s_AB` now, and the seeds it
+    // arrives under are fewer: its codes changed.
+    final codes = store.pairs.keys
+        .any((id) => _groupPairInboundKey(id) != inbound[id]);
     if (ended.isNotEmpty || codes) node.codeRoute.codesChanged();
     return ended.length;
   }
@@ -281,38 +331,15 @@ extension MailboxGroupPair on Mailbox {
             p,
       ];
 
-  /// Sends the day-key notice [content] to [p]. It counts as sent only with
-  /// its receipt (§9.2; S398 N-1a: noted on leaving, a lost first notice was
-  /// never sent again) — until then [p] stays due at every edge.
-  void groupPairDayKeysSend(GroupPair p, Uint8List content) {
-    final out = node.send(content, p.address, null,
-        forField: identity, kind: kinds.kDayKey);
-    final id = identifierFrom(p.address);
-    (_dayKeyOpen[this] ??= {})[_hex(out.identifier)] = id;
-    report?.call('day keys to group pair ${id.substring(0, 8)} sent '
-        '(${_hex(out.identifier).substring(0, 6)}) — counted with its receipt');
-  }
-
-  /// A receipt of this identity (`Messages.onReceiptToMailbox`): if it is
-  /// one of a day-key notice, the pair's notice counts as sent now. Held in
-  /// memory only — after a restart the pair is due again, and the start edge
-  /// sends anew.
-  void groupPairDayKeysAcked(Outbound out) {
-    final open = _dayKeyOpen[this];
-    final id = open?.remove(_hex(out.identifier));
-    final p = id == null ? null : groupPairOrNull(id);
-    if (p == null) return;
-    p.dayKeySent = out.acknowledgedAt ?? DateTime.now();
+  /// The day-key notice to the group pair [identifier] counts as sent at
+  /// [at] (`day_key_notice.dart`: with its receipt or placing). `false`: no
+  /// such pair here.
+  bool groupPairDayKeysCounted(String identifier, DateTime at) {
+    final p = groupPairOrNull(identifier);
+    if (p == null) return false;
+    p.dayKeySent = at;
     _store!.save();
-    // The pair has our day keys: every other notice to it still under way is
-    // superseded and ends — evidence of THIS recipient (`node_helpers.dart`).
-    // A paused one resumed later and sent its keys once more (S398: a lost
-    // first notice, overtaken by the answer edge, went out in the idle).
-    for (final n in [...open!.entries.where((e) => e.value == id)]) {
-      open.remove(n.key);
-      node.shipmentEnd(n.key);
-    }
-    report?.call('day keys to group pair ${id!.substring(0, 8)} receipted');
+    return true;
   }
 
   bool _adopt(GroupPair p, Address fresh) {
@@ -340,10 +367,6 @@ Map<int, Uint8List> dayKeysMerge(
 }
 
 final Expando<GroupPairStore> _stores = Expando('groupPairStore');
-
-/// Per mailbox: identifier (hex) of a day-key notice without receipt yet ->
-/// the group pair it went to.
-final Expando<Map<String, String>> _dayKeyOpen = Expando('dayKeyOpen');
 
 String _hex(Uint8List b) =>
     b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();

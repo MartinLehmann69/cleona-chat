@@ -32,8 +32,9 @@
  * differs between the two paths is only the `library.name` argument: real
  * AEC3 ("aec/libspa-aec-webrtc") for the preferred path, or an explicit
  * passthrough ("aec/libspa-aec-null") for the fallback, over which this file
- * layers its own linked webrtc::AudioProcessing (voice_apm_shim.*) — same
- * duplex plumbing, different engine.
+ * layers its own webrtc::AudioProcessing (voice_apm_shim.*, webrtc 1.3 / AEC3
+ * in libcleona_voice_apm.so, opened only when this path is taken —
+ * cvl_apm_load()) — same duplex plumbing, different engine.
  *
  * Skipping the module entirely and opening two independent pw_streams
  * straight at the default source and default sink was considered and
@@ -84,8 +85,17 @@
  * playback thread, both distinct from the callback-owning loop thread).
  */
 
+/* dladdr() is a GNU extension (glibc <dlfcn.h>); it locates the fallback
+ * library next to this one (cvl_apm_load). */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "../cleona_voice.h"
 #include "voice_apm_shim.h"
+
+#include <dlfcn.h>
+#include <limits.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/impl-module.h>
@@ -114,6 +124,101 @@
 static pthread_mutex_t g_session_guard = PTHREAD_MUTEX_INITIALIZER;
 static int             g_session_active = 0;
 static uint32_t        g_open_seq = 0;
+
+/* ==========================================================================
+ * The fallback chain's library, opened on demand
+ * ==========================================================================
+ * v4_2 §17.5: "PipeWire duplex with the echo-cancel module, or failing that,
+ * a directly linked WebRTC APM". The APM lives in libcleona_voice_apm.so
+ * (voice_apm_shim.h, "WHY A SEPARATE LIBRARY"); this library does not link
+ * it, so the preferred chain runs even where the fallback library is missing
+ * or cannot be loaded (S410-I6-MESSUNG.md finding 2: a fixed link to the
+ * system's webrtc 0.3.1 kept this whole library from loading on Ubuntu 26.04).
+ *
+ * Opened by absolute path from the directory this library was loaded from
+ * (dladdr on one of its own objects), not by bare name: a bare name would go
+ * through LD_LIBRARY_PATH and the system cache too (dlopen(3), "search
+ * order") and could pick up a file of the same name that is not ours.
+ * Loaded at most once per process and never closed (its C++ runtime state
+ * lives as long as the process); a failed attempt is not remembered, so the
+ * next open() tries again. Every symbol is resolved before any is used — a
+ * library without one of them counts as missing.
+ */
+static pthread_mutex_t g_apm_lib_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    int loaded;
+    cleona_voice_apm_create_fn          create;
+    cleona_voice_apm_destroy_fn         destroy;
+    cleona_voice_apm_process_capture_fn process_capture;
+    cleona_voice_apm_process_render_fn  process_render;
+    cleona_voice_apm_enabled_fn         aec_enabled;
+    cleona_voice_apm_enabled_fn         ns_enabled;
+    cleona_voice_apm_enabled_fn         agc_enabled;
+} g_apm_lib;
+
+/* dlsym() returns an object pointer; the union converts it to a function
+ * pointer without the cast ISO C leaves undefined (-Wpedantic). */
+static void* cvl_apm_sym(void* handle, const char* name) {
+    void* p = dlsym(handle, name);
+    if (!p) fprintf(stderr, "cleona_voice: %s lacks %s\n", CLEONA_VOICE_APM_LIBRARY, name);
+    return p;
+}
+#define CVL_APM_BIND(field, type, name) do { \
+        union { void* p; type f; } u_; \
+        u_.p = cvl_apm_sym(handle, name); \
+        if (!u_.p) ok = 0; else g_apm_lib.field = u_.f; \
+    } while (0)
+
+/* 1 when the fallback library is loaded (now or earlier), 0 otherwise. */
+static int cvl_apm_load(void) {
+    pthread_mutex_lock(&g_apm_lib_lock);
+    if (g_apm_lib.loaded) {
+        pthread_mutex_unlock(&g_apm_lib_lock);
+        return 1;
+    }
+
+    char path[PATH_MAX];
+    Dl_info info;
+    if (!dladdr((const void*)&g_apm_lib, &info) || !info.dli_fname) {
+        fprintf(stderr, "cleona_voice: cannot locate its own library file (dladdr)\n");
+        pthread_mutex_unlock(&g_apm_lib_lock);
+        return 0;
+    }
+    const char* slash = strrchr(info.dli_fname, '/');
+    int dir_len = slash ? (int)(slash - info.dli_fname) : 1;
+    int n = slash
+        ? snprintf(path, sizeof(path), "%.*s/%s", dir_len, info.dli_fname, CLEONA_VOICE_APM_LIBRARY)
+        : snprintf(path, sizeof(path), "./%s", CLEONA_VOICE_APM_LIBRARY);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        pthread_mutex_unlock(&g_apm_lib_lock);
+        return 0;
+    }
+
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        fprintf(stderr, "cleona_voice: fallback chain unavailable: %s\n", dlerror());
+        pthread_mutex_unlock(&g_apm_lib_lock);
+        return 0;
+    }
+
+    int ok = 1;
+    CVL_APM_BIND(create,          cleona_voice_apm_create_fn,          "cleona_voice_apm_create");
+    CVL_APM_BIND(destroy,         cleona_voice_apm_destroy_fn,         "cleona_voice_apm_destroy");
+    CVL_APM_BIND(process_capture, cleona_voice_apm_process_capture_fn, "cleona_voice_apm_process_capture");
+    CVL_APM_BIND(process_render,  cleona_voice_apm_process_render_fn,  "cleona_voice_apm_process_render");
+    CVL_APM_BIND(aec_enabled,     cleona_voice_apm_enabled_fn,         "cleona_voice_apm_aec_enabled");
+    CVL_APM_BIND(ns_enabled,      cleona_voice_apm_enabled_fn,         "cleona_voice_apm_ns_enabled");
+    CVL_APM_BIND(agc_enabled,     cleona_voice_apm_enabled_fn,         "cleona_voice_apm_agc_enabled");
+    if (!ok) {
+        dlclose(handle);
+        pthread_mutex_unlock(&g_apm_lib_lock);
+        return 0;
+    }
+    g_apm_lib.loaded = 1;
+    pthread_mutex_unlock(&g_apm_lib_lock);
+    return 1;
+}
+#undef CVL_APM_BIND
 
 /* ==========================================================================
  * Session state
@@ -641,15 +746,28 @@ CLEONA_VOICE_API cleona_voice_session_t* cleona_voice_open(
         s->ec_module = pw_context_load_module(s->context, "libpipewire-module-echo-cancel",
                                               args, NULL);
     }
+    int apm_missing = 0;
     if (s->ec_module) {
         s->chain_origin = CLEONA_VOICE_CHAIN_PIPEWIRE_FILTER;
-    } else {
+    } else if (cvl_apm_load()) {
+        /* The fallback library is there BEFORE the passthrough module is
+         * loaded: a null-AEC session without an APM over it would be a duplex
+         * session without echo cancellation. */
         cvl_build_module_args(args, sizeof(args), "aec/libspa-aec-null", s->node_prefix);
         s->ec_module = pw_context_load_module(s->context, "libpipewire-module-echo-cancel",
                                               args, NULL);
         s->chain_origin = CLEONA_VOICE_CHAIN_LINKED_APM;
+    } else {
+        apm_missing = 1;
     }
     pw_thread_loop_unlock(s->loop);
+
+    if (apm_missing) {
+        /* Neither chain: no AEC plugin for the preferred one, and the
+         * fallback library could not be loaded (cvl_apm_load printed why). */
+        s->open_error = CLEONA_VOICE_ERR_BACKEND;
+        goto fail_backend;
+    }
 
     if (!s->ec_module) {
         /* Neither the AEC3 plugin nor the null passthrough could be loaded --
@@ -700,7 +818,9 @@ CLEONA_VOICE_API cleona_voice_session_t* cleona_voice_open(
     }
 
     if (s->chain_origin == CLEONA_VOICE_CHAIN_LINKED_APM) {
-        s->apm = cleona_voice_apm_create(s->fmt.sample_rate);
+        /* g_apm_lib is loaded: this path is only reached after cvl_apm_load()
+         * succeeded in the module step above. */
+        s->apm = g_apm_lib.create(s->fmt.sample_rate);
         if (!s->apm) {
             /* The rate PipeWire negotiated isn't one of APM's native rates.
              * Rather than resample (a whole new correctness surface) this
@@ -708,11 +828,11 @@ CLEONA_VOICE_API cleona_voice_session_t* cleona_voice_open(
             s->open_error = CLEONA_VOICE_ERR_BACKEND;
             goto fail_backend;
         }
-        s->aec_state = cleona_voice_apm_aec_enabled(s->apm)
+        s->aec_state = g_apm_lib.aec_enabled(s->apm)
                      ? CLEONA_VOICE_FX_ENABLED : CLEONA_VOICE_FX_AVAILABLE_OFF;
-        s->ns_state  = cleona_voice_apm_ns_enabled(s->apm)
+        s->ns_state  = g_apm_lib.ns_enabled(s->apm)
                      ? CLEONA_VOICE_FX_ENABLED : CLEONA_VOICE_FX_AVAILABLE_OFF;
-        s->agc_state = cleona_voice_apm_agc_enabled(s->apm)
+        s->agc_state = g_apm_lib.agc_enabled(s->apm)
                      ? CLEONA_VOICE_FX_ENABLED : CLEONA_VOICE_FX_AVAILABLE_OFF;
     } else {
         /* PIPEWIRE_FILTER: no client-visible readback exists -- see file doc. */
@@ -812,7 +932,7 @@ CLEONA_VOICE_API void cleona_voice_close(cleona_voice_session_t* s) {
     pw_thread_loop_destroy(s->loop);
     pw_deinit();
 
-    if (s->apm) cleona_voice_apm_destroy(s->apm);
+    if (s->apm) g_apm_lib.destroy(s->apm);
 
     pthread_mutex_destroy(&s->lock);
     pthread_cond_destroy(&s->cond);
@@ -830,9 +950,10 @@ CLEONA_VOICE_API void cleona_voice_close(cleona_voice_session_t* s) {
 /* Runs the LINKED_APM chain over one 20 ms frame already extracted from
  * cap_accum, in place. Splits into two 10 ms halves (APM's native unit) and,
  * for each half, feeds the matching render-reference half first so the
- * cancellor has something to cancel against -- see voice_apm_shim.h for what
- * "matching" does and does not guarantee here (no delay estimation beyond
- * APM's own internal handling; documented, not hidden). Never fails the read:
+ * cancellor has something to cancel against. "Matching" means the same FIFO
+ * position, nothing more: there is no delay estimation here beyond APM's own
+ * (AEC3 estimates the echo path delay itself: aec3/echo_path_delay_estimator.cc,
+ * aec3/render_delay_controller.cc in 1.3). Never fails the read:
  * an APM error degrades to "pass the samples through uncancelled" rather than
  * losing the frame, because a missed capture frame would itself violate I4. */
 static void cvl_apply_apm_capture(cleona_voice_session_t* s, int16_t* frame,
@@ -853,8 +974,8 @@ static void cvl_apply_apm_capture(cleona_voice_session_t* s, int16_t* frame,
         pthread_mutex_unlock(&s->lock);
         if (avail < half) memset(ref + avail, 0, (size_t)(half - avail) * sizeof(int16_t));
 
-        cleona_voice_apm_process_render(s->apm, ref, half);
-        cleona_voice_apm_process_capture(s->apm, frame + part * half, half);
+        g_apm_lib.process_render(s->apm, ref, half);
+        g_apm_lib.process_capture(s->apm, frame + part * half, half);
     }
 }
 

@@ -1,35 +1,22 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/channels/system_channels.dart';
-import 'package:cleona/core/channels/system_channel_records.dart'
-    show SysChanVote;
 import 'package:cleona/core/i18n/app_locale.dart';
 
-/// Renders a system channel post (crash report, duplicate, contact issue,
-/// log report, feature request) in a human-readable card format instead of
-/// raw JSON.
+/// Renders the content of a Bug Log report (crash report, contact issue,
+/// log report) in a human-readable card format instead of raw JSON. The
+/// group, its +1 count and the feature-request poll are drawn by
+/// `SystemChannelScreen` (§16.7).
 class SystemChannelPost extends StatefulWidget {
   final String text;
   final bool isOutgoing;
   final String timestamp;
-
-  /// §9.5.3 D3 (S119): FR tally (`ja`/`nein`/`egal`/`net`/`own`) + vote
-  /// callback — only set for feature-request cards.
-  final Map<String, int>? frTally;
-  final void Function(int option)? onVote;
-
-  /// All post texts in the channel — used by crash_report cards to count
-  /// crash_duplicate replies with the same fingerprint (F5-R1, §9.5.2).
-  final List<String>? channelPostTexts;
 
   const SystemChannelPost({
     super.key,
     required this.text,
     required this.isOutgoing,
     required this.timestamp,
-    this.frTally,
-    this.onVote,
-    this.channelPostTexts,
   });
 
   @override
@@ -43,8 +30,6 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
   String get text => widget.text;
   bool get isOutgoing => widget.isOutgoing;
   String get timestamp => widget.timestamp;
-  Map<String, int>? get frTally => widget.frTally;
-  void Function(int option)? get onVote => widget.onVote;
 
   @override
   void initState() {
@@ -80,115 +65,13 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
     if (type == 'crash_report') {
       return _buildCrashReport(context, json, colorScheme);
     }
-    if (type == 'crash_duplicate') {
-      return const SizedBox.shrink();
-    }
     if (type == 'contact_issue') {
       return _buildContactIssue(context, json, colorScheme);
     }
     if (type == 'log_report') {
       return _buildLogReport(context, json, colorScheme);
     }
-    if (type == 'feature_request') {
-      return _buildFeatureRequest(context, json, colorScheme);
-    }
     return _plainFallback(colorScheme);
-  }
-
-  /// §9.5.3 (S119 D3): Feature-Request card with the embedded auto-poll —
-  /// "Ja"/"Nein"/"Egal" vote buttons with live counts, own vote highlighted.
-  Widget _buildFeatureRequest(
-      BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
-    final locale = AppLocale.read(context);
-    final title = json['title'] as String? ?? '';
-    final body = json['body'] as String? ?? '';
-    final tally = frTally ?? const {'ja': 0, 'nein': 0, 'egal': 0, 'own': -1};
-    final own = tally['own'] ?? -1;
-
-    Widget voteButton(int option, String labelKey, int count) {
-      final selected = own == option;
-      final label = '${locale.get(labelKey)} ($count)';
-      return Expanded(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2),
-          child: selected
-              ? FilledButton(
-                  onPressed: onVote == null ? null : () => onVote!(option),
-                  child: Text(label,
-                      style: const TextStyle(fontSize: 12),
-                      overflow: TextOverflow.ellipsis),
-                )
-              : OutlinedButton(
-                  onPressed: onVote == null ? null : () => onVote!(option),
-                  child: Text(label,
-                      style: const TextStyle(fontSize: 12),
-                      overflow: TextOverflow.ellipsis),
-                ),
-        ),
-      );
-    }
-
-    return Card(
-      color: cs.primaryContainer.withValues(alpha: 0.3),
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.lightbulb_outline, size: 18, color: cs.primary),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            ),
-            if (body.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(body, style: const TextStyle(fontSize: 13)),
-            ],
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                voteButton(SysChanVote.yes, 'feature_vote_yes',
-                    tally['ja'] ?? 0),
-                voteButton(SysChanVote.no, 'feature_vote_no',
-                    tally['nein'] ?? 0),
-                voteButton(SysChanVote.irrelevant, 'feature_vote_neutral',
-                    tally['egal'] ?? 0),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Align(
-              alignment: AlignmentDirectional.centerEnd,
-              child: Text(timestamp,
-                  style: TextStyle(fontSize: 10, color: cs.outline)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  int _countDuplicates(String fingerprint) {
-    final texts = widget.channelPostTexts;
-    if (texts == null) return 0;
-    int count = 0;
-    for (final t in texts) {
-      if (!t.contains(fingerprint)) continue;
-      try {
-        final j = jsonDecode(t) as Map<String, dynamic>;
-        if (j['type'] == 'crash_duplicate' && j['fingerprint'] == fingerprint) {
-          count++;
-        }
-      } catch (_) {}
-    }
-    return count;
   }
 
   Widget _buildCrashReport(
@@ -264,9 +147,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                _chip(cs, '${report.peerCount} peers'),
-                if (_countDuplicates(report.fingerprint) > 0)
-                  _chip(cs, '${_countDuplicates(report.fingerprint)}× reported'),
+                _chip(cs, AppLocale.read(context).tr('issue_report_peers', {'count': '${report.peerCount}'})),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -322,9 +203,16 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Seed-Alter: ${ContactIssueReport.formatDuration(report.seedAgeSeconds)} · '
-              'NAT: ${report.natType} · '
-              'DHT: ${report.peerSeenInDht ? "sichtbar" : "nicht sichtbar"}',
+              AppLocale.read(context).tr('issue_report_contact_line', {
+                'age': ContactIssueReport.formatDuration(report.seedAgeSeconds),
+                'nat': report.natType,
+                // `peerSeenInDht` keeps its report-format name (4.2.x
+                // readers); in 4.2 it says whether the contact's keys are
+                // known (`isPeerKnownByUserId`) — there is no DHT.
+                'keys': AppLocale.read(context).get(report.peerSeenInDht
+                    ? 'issue_report_keys_known'
+                    : 'issue_report_keys_unknown'),
+              }),
               style: TextStyle(fontSize: 12, color: cs.onTertiaryContainer),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
@@ -336,7 +224,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                _chip(cs, '${report.peerCount} peers'),
+                _chip(cs, AppLocale.read(context).tr('issue_report_peers', {'count': '${report.peerCount}'})),
                 _chip(cs, report.hasPortMapping ? 'UPnP' : AppLocale.read(context).get('upnp_none')),
                 Text(
                   timestamp,
@@ -374,7 +262,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    'Log Report',
+                    AppLocale.read(context).get('log_report_title'),
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       color: cs.onSecondaryContainer,

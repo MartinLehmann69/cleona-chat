@@ -13,39 +13,41 @@
 ///   of the recipient, inside ONE `0x22` to the own fixed neighbour
 ///   (`code_send.dart`: no node is both hops);
 /// * the **route loss** — remember `0x21`, and if no receipt came from step 4 either
-///   within [kRouteLossWindow], ONE `0x23` (at most one per
-///   contact per [kSuchInterval]).
+///   within [kRouteLossWindow], ONE `0x23` (at most one per contact per [kSuchInterval]).
 ///
 /// The mailboxes deliver via four callbacks what only they know
 /// ([CodeRoute.inboundCodes], [CodeRoute.pairFrom], [CodeRoute.whereAreYouContent],
-/// [CodeRoute.whereAreYouAccept]).
-/// As long as nobody sets them, this node has no codes, and step 3
-/// is dropped for every sending. Since S392 they are set in
-/// `host_codes.dart` — there and only there, because only the host holds the node
-/// AND all mailboxes. Two of them take the sending identity
-/// along; the reasoning is at the fields.
+/// [CodeRoute.whereAreYouAccept]). As long as nobody sets them, this node has
+/// no codes, and step 3 is dropped for every sending. Since S392 they are set
+/// in `host_codes.dart` — there and only there, because only the host holds
+/// the node AND all mailboxes. Two of them take the sending identity along;
+/// the reasoning is at the fields.
 library;
 
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:mycelium/code_registration_former.dart';
 import 'package:mycelium/address.dart';
 import 'package:mycelium/code_own.dart';
 import 'package:mycelium/code_registration.dart';
 import 'package:mycelium/code_registrants.dart';
 import 'package:mycelium/code_registration_send.dart';
 import 'package:mycelium/code_table.dart';
+import 'package:mycelium/code_move.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/code_send.dart';
 import 'package:mycelium/code_send_retry.dart';
 import 'package:mycelium/node.dart';
-import 'package:mycelium/node_helpers.dart'
-    show hexFrom, shortFrom;
+import 'package:mycelium/neighbour_keys.dart';
+import 'package:mycelium/node_outside.dart' show NodeOutside;
+import 'package:mycelium/node_silence.dart';
+import 'package:mycelium/node_helpers.dart' show hexFrom, shortFrom;
 import 'package:mycelium/ladder.dart' show Shipment;
 import 'package:mycelium/pair.dart';
 import 'package:mycelium/kinds.dart' as kinds;
-import 'package:mycelium/split.dart' show kMaxPayload;
+import 'package:mycelium/split.dart' show kMaxPayload, SendEnd;
 import 'package:mycelium/forward.dart';
 import 'package:mycelium/forward_family.dart';
 
@@ -73,14 +75,12 @@ class CodeRoute {
   /// BOTH founding keys (§4.3); with only the contact the setter would guess
   /// the sending identity and, with more than one, deliver a silently WRONG
   /// code. The same rule as `Node.routesTo` (`host.dart`).
-  PairAnswer? Function(Address contact, Address from) pairFrom =
-      (_, __) => null;
+  PairAnswer? Function(Address contact, Address from) pairFrom = (_, __) => null;
 
   /// A `0x23` content that arrived under an own code: opened under `K_AB`,
   /// the sender's fixed neighbours remembered; `true` if it opened. Only the
   /// mailboxes know which contact sends under the code (`mailbox_pair.dart`).
-  bool Function(Uint8List code, Uint8List content) whereAreYouAccept =
-      (_, __) => false;
+  bool Function(Uint8List code, Uint8List content) whereAreYouAccept = (_, __) => false;
 
   /// The sealed content "my fixed neighbours" for a `0x23`, sealed BY the
   /// identity [from] to [contact] — [from] as with [pairFrom], and more
@@ -100,12 +100,12 @@ class CodeRoute {
 
   final CodeTable table;
   late final Forwarder forwarder;
-  late final Registrants registrants =
-      Registrants(() => Registrant(_ownAt, device: _k.devicesCode));
+  late final Registrants registrants = Registrants((n) => Registrant( // D-70
+      isFormerTarget(n) ? waitingCodesAt : _ownAt, device: _k.devicesCode));
 
   late final OwnCodes _own = OwnCodes(() => inboundCodes, () => now);
   final Map<String, List<({Shipment s, Address to, Address from})>> _open = {};
-  final Map<String, DateTime> _searched = {};
+  final Map<String, DateTime> searched = {}; // own 0x23 per contact (D-76 reads)
   final List<Timer> _clocks = [];
 
   /// A first hop that does not answer hands on (S405, `code_send_retry.dart`).
@@ -138,10 +138,10 @@ class CodeRoute {
         neighbour: (id) =>
             _k.neighbourhood.fixedNeighbours.where((n) => n.id == id).firstOrNull,
         speaks: _k.speaks,
-        stands: _k.stands,
-        mute: _k.readiness.mute,
+        silence: _k.silence, // §11.3a: repeats and failure in the transport
         confirm: (a, port) => _k.neighbourhood.confirm(a, port, DateTime.now()),
-        report: _k.report);
+        report: _k.report)
+      ..onRecordKey = _k.recordKeyLearn;
     // A new fixed neighbour is an edge (§8.1): registration anew.
     _k.neighbourhood.observe(removed: (_) => edge(), onConfirmed: (_) => edge());
     _day.arm();
@@ -163,9 +163,10 @@ class CodeRoute {
     return forwarder.receive(packet, from, fromPort);
   }
 
-  void _out(Uint8List packet, CardAddress destination, {bool foreign = false}) {
+  Future<SendEnd> _out(Uint8List packet, CardAddress destination,
+      {bool foreign = false}) {
     recording?.call(packet, true);
-    _k.rawSend(packet, destination, foreign: foreign);
+    return _k.rawSend(packet, destination, foreign: foreign);
   }
 
   // ── Own codes ───────────────────────────────────────────────────────
@@ -205,8 +206,10 @@ class CodeRoute {
       return false;
     }
     final taken = table.register(a.device, from, fromPort, a.day, a.codes);
-    _out(registeredPacket(a.day, a.piece),
-        CardAddress(Uint8List.fromList(from.rawAddress), fromPort));
+    codeMoveAsk(_k, a.device, from, fromPort); // §11.8.9: moves only on an answer
+    final by = CardAddress(Uint8List.fromList(from.rawAddress), fromPort);
+    if (a.readsKey) _k.readsKeysAt(by); // S407: a contact's device shows it
+    _out(registeredPacket(a.day, a.piece, a.readsKey ? _k.publisherKey : null), by);
     _k.report('0x24 registration from $at: piece ${a.piece + 1}/${a.pieces} day '
         '${a.day}, $taken/${a.codes.length} accepted, first '
         '${a.codes.isEmpty ? "-" : shortFrom(hexFrom(a.codes.first))}, table '
@@ -215,14 +218,16 @@ class CodeRoute {
   }
 
   /// An edge (list, day, fixed neighbours, network change): the pieces EACH
-  /// fixed neighbour lacks go out now as `0x24` (§8.1) — cover carries
-  /// none (§5.5), and delivery needs no cover (§3.1).
+  /// fixed neighbour — and each former one after a recovery (§13.2.1,
+  /// `code_registration_former.dart`) — lacks go out now as `0x24` (§8.1);
+  /// cover carries none (§5.5), and delivery needs no cover (§3.1).
   void edge() {
     final fixed = _k.neighbourhood.fixedNeighbours;
-    for (final f in fixed) {
+    final all = [...fixed, ...formerTargets(fixed)];
+    for (final f in all) {
       final pieces = <Uint8List>[];
       for (var i = 0; i < 2 * kCodesPerDay ~/ kCodesPerPiece; i++) {
-        final p = registrants.next(fixed, (f.address, f.port), _today);
+        final p = registrants.next(all, (f.address, f.port), _today);
         if (p == null) break;
         pieces.add(p);
         registrants.sent();
@@ -251,15 +256,16 @@ class CodeRoute {
 
   /// Sends [packet] under [code] to the recipient's fixed neighbours [next]
   /// — ONE `0x22` via the own fixed neighbour, without one directly (§8.1,
-  /// the choice of the first hop: `code_send.dart`).
-  void underCodeSendTo(Uint8List code, List<CardAddress> next, Uint8List packet) {
+  /// the choice of the first hop: `code_send.dart`; never [recipientAt], S408).
+  void underCodeSendTo(Uint8List code, List<CardAddress> next, Uint8List packet, {List<CardAddress> recipientAt = const []}) {
     final inside = Forwarder.build(code: code, content: packet);
     final n = _k.neighbourhood;
     final plan = stepThreePlan(
         fixed: n.fixedNeighbours,
         open: n.openSet(), live: _k.linkLive, // OP-23 live first; L2-2 note
-        recipient: next,
-        contact: n.isContactDevice,
+        answering: _k.readiness.answeringAddress, // §6.2: what answered first
+        recipient: next, recipientAt: recipientAt, // the recipient is no hop (S408)
+        contact: n.isContactDevice, sameNode: sameNodeBy(_k.readiness.nodeOf), // C17 U-2
         speaks: (c) => _k.speaks(InternetAddress.fromRawAddress(c.address)));
     if (plan == null) {
       _k.report('Step 3: no next address this node can reach '
@@ -273,8 +279,8 @@ class CodeRoute {
         _out(inside, a);
       }
     } else {
-      _out(Forwarder.buildDetour(plan.next, inside), hop);
       retry.sent(hop, inside, plan.next, plan.later, plan.resort, shortFrom(hexFrom(code)));
+      retry.watch(_out(Forwarder.buildDetour(plan.next, inside), hop), hop); // §11.3, fix B
     }
     // AFTER sending (S392 B-3). THE funnel of every `0x20`/`0x22` of this
     // node; the code prefix is the one handle to join two logs (proposal M).
@@ -284,13 +290,13 @@ class CodeRoute {
   }
 
   /// Step 3 of the ladder: [code] missing → the step is dropped.
-  void stepThree(Uint8List packet, List<CardAddress> next, Uint8List? code) {
+  void stepThree(Uint8List packet, List<CardAddress> next, Uint8List? code, {List<CardAddress> recipientAt = const []}) {
     if (code == null) {
       withoutCode++;
       _k.report('Neighbour step without code — not sent');
       return;
     }
-    underCodeSendTo(code, next, packet);
+    underCodeSendTo(code, next, packet, recipientAt: recipientAt);
   }
 
   /// Remember a sending from [from] to [to] that waits for a receipt under
@@ -359,7 +365,7 @@ class CodeRoute {
   /// [kSuchInterval]. `true` if it went out.
   bool whereAreYou(Address to, Address from) {
     final who = hexFrom(to.identifier);
-    final last = _searched[who];
+    final last = searched[who];
     final t = now();
     if (last != null && t.difference(last) < kSuchInterval) {
       _k.report('0x23 to ${shortFrom(who)} throttled (one per hour)');
@@ -372,7 +378,7 @@ class CodeRoute {
           '(${code == null ? "no code" : "no or too large content"})');
       return false;
     }
-    _searched[who] = t;
+    searched[who] = t;
     final packet = Forwarder.buildWhereAreYou(code: code, content: content);
     final all = _k.neighbourhood.asEntries;
     for (final n in all) {

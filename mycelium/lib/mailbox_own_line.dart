@@ -23,10 +23,19 @@ extension MailboxOwnLine on Mailbox {
   /// devices ([others]) — at start and at every change of the device set.
   /// With no other device the line is inactive: nothing is asked, nothing
   /// sent. Setting it is no collection edge of its own (§8.2 names them):
-  /// the device values are asked at the next one.
+  /// the device values are asked at the next one. It IS an edge of §8.1:
+  /// the own-device codes of a call signal's mirror (`own_ring.dart`) come
+  /// and go with the other devices, and the registration follows at once.
   void ownLineSet(Uint8List thisDevice, Iterable<Uint8List> others) {
     final line = OwnLine(thisDevice, others);
+    final before = ownLineOf(identity);
     ownLinePut(identity, line);
+    // Only a CHANGED set is an edge: the application tells the set at every
+    // change of its device records (a name, a time seen), and each
+    // `codesChanged` sends the registration anew (working rule 5).
+    if (before == null || !_sameSet(before, line)) {
+      node.codeRoute.codesChanged();
+    }
     report?.call('own line: ${line.others.length} other own device(s)'
         '${line.active ? '' : ' — inactive'}');
   }
@@ -64,6 +73,11 @@ extension MailboxOwnLine on Mailbox {
     return placed;
   }
 }
+
+bool _sameSet(OwnLine a, OwnLine b) =>
+    _same(a.device, b.device) &&
+    a.others.length == b.others.length &&
+    a.others.every((o) => b.others.any((p) => _same(o, p)));
 
 bool _same(Uint8List a, Uint8List b) {
   if (a.length != b.length) return false;

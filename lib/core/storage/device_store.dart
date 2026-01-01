@@ -142,6 +142,25 @@ class DeviceStore extends EncryptedStore {
   /// [areaDevice]: the identity the GUI showed last.
   static const String keyActiveIdentity = 'active_identity';
 
+  /// [areaDevice]: the highest monotone sequence of an update manifest this
+  /// device has accepted (`{'v': n}`, §26.5) — the downgrade bound. Only
+  /// ever raised.
+  static const String keyUpdateMonotoneSeq = 'update_monotone_seq';
+
+  /// [areaDevice]: an in-network update is available (`{'v': true}`);
+  /// absent when none is.
+  static const String keyUpdateInNetwork = 'update_in_network';
+
+  /// [areaDevice]: how the app was installed (`{'v': 'playstore' |
+  /// 'sideload' | 'unknown'}`), detected once.
+  static const String keyInstallSource = 'install_source';
+
+  /// [areaDevice]: Windows only — the result of the last check of the
+  /// daemon's inbound firewall rule (`{'state': 'allowed' | 'missing' |
+  /// 'blocked' | 'unknown', 'at': ms}`), checked at every start. Rows of
+  /// 4.2.3 and earlier (`{'v': true}`) are overwritten by the next check.
+  static const String keyWindowsFirewallRule = 'windows_firewall_rule';
+
   /// The device keys (§4.4.2): ONE row, key [keySingle], the container of
   /// `DeviceKeysStore` as base64.
   static const String areaDeviceKeys = 'device_keys';
@@ -166,6 +185,39 @@ class DeviceStore extends EncryptedStore {
   /// is `{'b': <the record's bytes as base64>}`, written as a whole
   /// (`MyceliumDeviceRecords`, `mycelium_device_records.dart`).
   static const String areaNode = 'node';
+
+  /// The objects of the system channels this device holds or has read
+  /// (§16.7, §21.3.1): one row per object, key `<channel>:<hash hex>`, value
+  /// `{'b': base64, 'a': accepted (minutes), 's': seen, 'o': eviction time
+  /// of a tombstone}` (`SystemObjectStore`). Bounded per channel by the
+  /// budget — 25 MB on a desktop, 5 MB read cache on a phone.
+  static const String areaSystemObjects = 'system_objects';
+
+  /// The rejected set of the system channels (§16.0): one row per refused
+  /// identifier, key `<channel>:<hash hex>`, value `{'t': minutes}`. Bounded
+  /// per channel by `SystemObjectStore.kRejectedAtMost`.
+  static const String areaSystemRejected = 'system_rejected';
+
+  /// The +1 count of a crash fingerprint (§16.7: distinct pseudonyms, it
+  /// outlives a retraction): one row per fingerprint, key `<fp hex>`,
+  /// value `{'p': [pseudonym hex, …]}`. Bounded with the Bug Log: a row
+  /// whose fingerprint no held object names any more is dropped with the
+  /// last such object.
+  static const String areaSystemPlusOnes = 'system_plus_ones';
+
+  /// The own system-channel objects this device deposits (§16.7 "How a
+  /// report leaves the device"): one row per object, key `<hash hex>`,
+  /// value `{'b': base64, 'c': channel, 't': saved (ms), 'h': [holders that
+  /// acknowledged], 'k': a holder was ever known, 'r': last end reason,
+  /// 'f': failure}` (`SystemChannelHub`). A row goes when the object is
+  /// retracted, or once it is published (two acknowledgements) and no
+  /// longer in this device's store; bounded by the own limits of §16.7.
+  static const String areaSystemReports = 'system_reports';
+
+  /// [areaDevice]: the nodes that showed the capability of the
+  /// durable-object class (§16.0), `{'v': ['address:port', …]}`, at most
+  /// `kCapableRemembered` (mycelium `durable_node.dart`).
+  static const String keySystemCapable = 'system_capable';
 
   /// The key of the one row of an area that holds a single record.
   static const String keySingle = '_';

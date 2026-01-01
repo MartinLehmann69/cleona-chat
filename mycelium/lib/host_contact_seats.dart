@@ -33,6 +33,7 @@
 /// A separate file because `host.dart` stands at the 400-line limit.
 library;
 
+import 'package:mycelium/neighbour_keys.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/envelope.dart' show Address;
 import 'package:mycelium/host.dart';
@@ -92,13 +93,13 @@ extension HostContactSeats on Host {
     bool own(Neighbour n) => p.contacts.any((k) => deviceOfContact(k, n));
     final seats = [
       for (final n in fixed)
-        if (n.contactSeat > 0 && own(n)) n.asCardAddress,
+        if (n.contactSeat > 0 && own(n)) node.keyedOf(n, n.asCardAddress),
     ];
     if (seats.isNotEmpty) return seats;
     return [
       for (final n in fixed)
         if (n.fixed && (own(n) || !node.neighbourhood.isContactDevice(n)))
-          n.asCardAddress,
+          node.keyedOf(n, n.asCardAddress),
     ];
   }
 }

@@ -6,7 +6,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// A shared file entry in the call.
 class SharedFileEntry {
@@ -96,7 +96,7 @@ class CallFileManager {
   final List<ClipboardEntry> clipboardHistory = [];
 
   /// Callback to send to all call participants.
-  void Function(proto.MessageTypeV3 type, Uint8List payload)? onSendToAll;
+  void Function(proto.MessageType type, Uint8List payload)? onSendToAll;
 
   /// UI callback when a file is shared.
   void Function(SharedFileEntry file)? onFileShared;
@@ -154,7 +154,7 @@ class CallFileManager {
     }
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_FILE_EXCHANGE,
+      proto.MessageType.MT_FILE_EXCHANGE,
       share.writeToBuffer(),
     );
 
@@ -215,7 +215,7 @@ class CallFileManager {
     if (imageData != null) exchange.imageData = imageData;
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_CLIPBOARD_EXCHANGE,
+      proto.MessageType.MT_CLIPBOARD_EXCHANGE,
       exchange.writeToBuffer(),
     );
 

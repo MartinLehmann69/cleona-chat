@@ -5,7 +5,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/util/hex.dart' show hexToBytes;
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
-/// Invite link for initial installation (§19.6.4): bootstraps a fresh device
+/// Invite link for initial installation (v4_2 §26.6.3): bootstraps a fresh device
 /// with both the P2P ContactSeed and maintainer-signed per-platform binary
 /// hashes, so the recipient can verify a binary obtained via any distribution
 /// channel (in-network download, physical transfer, fallback URL) without
@@ -31,12 +31,13 @@ class InviteLink {
   final String version;
   final String? fallbackUrl;
 
-  /// Per-platform binary sizes in bytes, from the maintainer-signed
-  /// UpdateManifest (§19.6.4). The browser assembler needs the original size
-  /// to trim Reed-Solomon block padding; carrying it in the link removes the
-  /// HEAD request against the serving node's complete-binary endpoint, which
-  /// failed precisely when the fragment path was needed. A tampered size
-  /// yields a SHA-256 mismatch, so no separate signature is required.
+  /// Per-platform binary sizes in bytes (`z=`), from the maintainer-signed
+  /// UpdateManifest (v4_2 §26.6.3): "assemblers of earlier 4.2 versions trim
+  /// block padding with it". The current assembler downloads the complete
+  /// binary and does not read it; it stays in the link because the page a
+  /// v4.2.3 node serves still reads it (compatibility within 4.2). A
+  /// tampered size yields a SHA-256 mismatch, so no separate signature is
+  /// required.
   final Map<String, int>? binarySizes;
 
   const InviteLink({
@@ -115,8 +116,7 @@ class InviteLink {
       final sigMap = jsonDecode(mJson) as Map<String, dynamic>;
       final sigs = sigMap.map((k, v) => MapEntry(k, v as String));
 
-      // `z=` is optional: links generated before it existed simply omit it,
-      // and the assembler falls back to a HEAD request.
+      // `z=` is optional (v4_2 §26.6.3): links without it still work.
       Map<String, int>? sizes;
       final zParam = params['z'];
       if (zParam != null && zParam.isNotEmpty) {

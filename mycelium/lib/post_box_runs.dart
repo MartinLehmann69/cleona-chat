@@ -8,9 +8,10 @@
 /// Both run on events, never on a clock (§8.2, D-44): a deposit ends when
 /// every holder has acknowledged or its transmission has ended; a
 /// collection is a conversation per holder, and a holder is done when it
-/// has handed out what it announced, its link has ended unanswered, or one
-/// request for what is missing has brought nothing (the quiet period of
-/// §11.3 — no timer runs while answers are arriving).
+/// has handed out what it announced, its link has ended unanswered, or a
+/// request for what is missing and its repeats have brought nothing (the
+/// quiet period of §11.3, the repeats of §11.3a — no timer runs while
+/// answers are arriving).
 library;
 
 import 'dart:async';
@@ -18,11 +19,34 @@ import 'dart:typed_data';
 
 import 'package:mycelium/post_box_proof.dart' show Question;
 import 'package:mycelium/post_box_holder.dart' show Neighbour;
+import 'package:mycelium/silence.dart' show SilentRounds;
 
 class DepositRun {
   /// Who was addressed — only set AFTER dispatch: if already the
-  /// computation fails, nobody was asked, and nobody is mute.
+  /// computation fails, nobody was asked, and nobody is mute. A holder that
+  /// gave way adds its replacement here ([reserve]).
   List<Neighbour> asked = const [];
+
+  /// The candidates not addressed yet, in their order (§8.2 "once failed,
+  /// gives way to the next holder"): the recipient's named fixed
+  /// neighbours, then the sender's own neighbours by rank. A holder that
+  /// ended without a receipt gives way to the first of them while the run
+  /// is not placed; when it is empty and every holder has ended, the run is
+  /// not placed.
+  final List<Neighbour> reserve = [];
+
+  /// The next candidate of [reserve] not asked yet, moved into [asked];
+  /// `null` when none is left.
+  Neighbour? giveWay() {
+    while (reserve.isNotEmpty) {
+      final n = reserve.removeAt(0);
+      final k = neighbourKey(n);
+      if (asked.any((a) => neighbourKey(a) == k)) continue;
+      asked = [...asked, n];
+      return n;
+    }
+    return null;
+  }
 
   /// `adresse:port` -> node identifier of the receipt. Placed is by
   /// NODES, not by addresses (B1, S388): a holder under two addresses
@@ -36,17 +60,20 @@ class DepositRun {
   /// (`split.dart`), so a holder that ended without a receipt gives none.
   final Set<String> ended = {};
 
-  /// One per holder whose `0x30` left as a single part: it has no end mark,
-  /// so its transmission has ended 1.1 s after it (§11.3). Cancelled when
-  /// the run ends.
-  final List<Timer> waits = [];
+  /// `adresse:port` of the holders that answered `0x37`: not taken, but
+  /// answered — not mute (§11.3a).
+  final Set<String> refused = {};
 
-  /// The run leaves: no timer stays behind.
+  /// `adresse:port` the `0x30` went to -> the answer its holder's request
+  /// waits for (`silence.dart`, §11.3a). A receipt from that address
+  /// completes it. Completed when the run ends: nothing waits any more.
+  final Map<String, Completer<void>> answers = {};
+
+  /// The run leaves: the waits of its requests end, no timer stays behind.
   void release() {
-    for (final w in waits) {
-      w.cancel();
+    for (final a in answers.values) {
+      if (!a.isCompleted) a.complete();
     }
-    waits.clear();
   }
 
   /// Every addressed holder has acknowledged or its transmission has ended:
@@ -60,7 +87,7 @@ class DepositRun {
   /// how many ms each holder's receipt came, and which came after the run
   /// was already placed.
   DateTime? sentAt;
-  String valueShort = '';
+  String value = '', valueShort = '';
   final Map<String, int> ackMs = {};
   final Set<String> afterPlaced = {};
   final Completer<(bool done, int acknowledged)> result = Completer();
@@ -235,10 +262,12 @@ class Conversation {
 
   /// The quiet period (§8.2, as §11.3) — only while this conversation is
   /// open. [progress] counts the holder's answers; [progressAtRequest] is
-  /// its value when the one request for what is missing last went out.
+  /// its value when the request for what is missing last went out; [rounds]
+  /// counts the requests that brought nothing (§11.3a, `silence.dart`).
   Timer? quiet;
   int progress = 0;
   int? progressAtRequest;
+  final SilentRounds rounds = SilentRounds();
 
   /// `null`: waiting in the holder's row, or open.
   TalkEnd? end;

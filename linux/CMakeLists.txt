@@ -130,6 +130,16 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_voice" "${CMAKE_BINARY_DI
 set(CLEONA_LINK_BUILD_SMOKE OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_link" "${CMAKE_BINARY_DIR}/cleona_link_build")
 
+# === liboqs (liboqs.so) — S410, finding I-6 ===
+# Packaged by no distribution Cleona targets, so every Linux bundle carries
+# it. Built from the pinned 0.15.0 source (SHA-256 of the archive, the same
+# commit Windows pins) by linux/liboqs, which scripts/build-daemon.sh
+# builds too — one pin for window and daemon. The loader looks for it in
+# bundle/lib FIRST (lib/core/platform/linux_native_libraries.dart).
+# scripts/release-build.sh (linux_bundle_check) refuses a bundle without it.
+add_subdirectory("${CMAKE_SOURCE_DIR}/liboqs" "${CMAKE_BINARY_DIR}/cleona_oqs_build")
+add_dependencies(${BINARY_NAME} cleona_oqs)
+
 # === cleona_video — NOT wired in (open: BUGFIX_CURRENT.md AV-V0.3 §2) ===
 # docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership).
 #
@@ -201,9 +211,20 @@ install(TARGETS opus LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
 install(TARGETS cleona_voice LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
+# cleona_voice_apm — the fallback chain (webrtc-audio-processing 1.3, static),
+# opened by libcleona_voice.so from the same directory only when the PipeWire
+# AEC plugin is missing (S410, native/cleona_voice/linux/voice_apm_shim.h).
+install(TARGETS cleona_voice_apm LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
 # cleona_link — same install pattern as cleona_net.
 install(TARGETS cleona_link LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
+
+# liboqs (S410, I-6) — the real file under the name the loader opens; one
+# file, no symlink chain (linux/liboqs/CMakeLists.txt, OUTPUT).
+install(FILES "${CLEONA_OQS_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  RENAME "liboqs.so" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)

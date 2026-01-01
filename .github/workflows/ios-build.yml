@@ -438,7 +438,28 @@ jobs:
             fi
           }
 
-          check_key CoreLocation   NSLocationWhenInUseUsageDescription
+          # K23-2: Cleona uses no location, and the plist carries no
+          # NSLocationWhenInUseUsageDescription. mobile_scanner 6 pulled
+          # CoreLocation in through GoogleMLKit; 7.x scans with Apple Vision.
+          # CoreLocation linked anywhere in the bundle (Runner or an embedded
+          # framework) means a dependency brought it back — an error to fix
+          # at that dependency, not a reason to re-add the key.
+          APP_DIR=$(dirname "$RUNNER")
+          CL_HITS=""
+          for bin in "$RUNNER" "$APP_DIR"/Frameworks/*.framework; do
+            [ -d "$bin" ] && bin="$bin/$(basename "$bin" .framework)"
+            [ -f "$bin" ] || continue
+            if otool -L "$bin" 2>/dev/null | grep -q "CoreLocation.framework"; then
+              CL_HITS="$CL_HITS ${bin#"$APP_DIR"/}"
+            fi
+          done
+          if [ -n "$CL_HITS" ]; then
+            echo "::error::CoreLocation.framework is linked by:$CL_HITS — Cleona uses no location (K23-2)"
+            FAIL=1
+          else
+            echo "OK: CoreLocation.framework is linked nowhere in Runner.app"
+          fi
+
           check_key AVFoundation   NSCameraUsageDescription
           check_key AVFoundation   NSMicrophoneUsageDescription
           check_key Photos         NSPhotoLibraryUsageDescription

@@ -54,7 +54,7 @@ List<NeighbourAddress> fixedV6Targets(Neighbourhood hood, DateTime now) {
 /// Whether [n] could reach the node only over IPv4 on a [metered] link —
 /// then it does not count as a fixed contact neighbour (§8.1, 6.3).
 /// [ownV6]: the node has an IPv6 socket and a global IPv6 address.
-bool v4OnlyOnMetered(Neighbour n,
+bool v4OnlyOnMetered(Neighbour n,  // version-name-ok: IP address family
         {required bool metered,
         required bool ownV6,
         required bool Function(InternetAddress a) public}) =>

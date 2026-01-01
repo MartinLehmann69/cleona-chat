@@ -28,9 +28,11 @@ extension MailboxParked on Mailbox {
 
   /// Opens the parked cells with the generations held now and feeds each as
   /// if just collected: a message is acknowledged to its sender and reaches
-  /// the application like any other (which mirrors it, §14.2). What still
-  /// does not open at the KEM goes back, keeping its time; anything else is
-  /// dropped and reported. Returns how many opened.
+  /// the application like any other (which mirrors it, §14.2) — with the
+  /// time it ARRIVED here, when it was parked, not the time it opened
+  /// (§22.5.3; §17.2 counts an INVITE's age from its own arrival). What
+  /// still does not open at the KEM goes back, keeping its time; anything
+  /// else is dropped and reported. Returns how many opened.
   int parkedOpen() {
     final store = parkedOf(identity);
     if (store == null || store.held == 0) return 0;
@@ -39,9 +41,9 @@ extension MailboxParked on Mailbox {
     for (final c in store.takeAll()) {
       try {
         if (kinds.isAmendment(c.cell[0])) {
-          identity.amendments.receive(c.cell, c.origin);
+          identity.amendments.receive(c.cell, c.origin, arrivedAt: c.at);
         } else {
-          identity.messages.receive(c.cell, null);
+          identity.messages.receive(c.cell, null, arrivedAt: c.at);
         }
         opened++;
       } on EnvelopeBroken catch (e) {

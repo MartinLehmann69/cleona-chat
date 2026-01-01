@@ -56,6 +56,21 @@ class NotificationSettings {
   bool defaultGroupNotify;
   bool defaultChannelNotify;
 
+  /// Quiet hours of this identity (§22.8 "quiet hours (per identity, plus a
+  /// master mute)"). Within the window no message rings, vibrates or shows
+  /// a system notification; the message itself and its unread count are
+  /// untouched. A purely local check at the moment of notifying — no clock,
+  /// no traffic (§5.4).
+  bool quietHoursEnabled;
+
+  /// Start of the window, minutes after local midnight (0..1439).
+  int quietFromMinute;
+
+  /// End of the window, minutes after local midnight (0..1439); a window
+  /// whose end lies before its start runs across midnight. Start equal to
+  /// end is an empty window.
+  int quietToMinute;
+
   NotificationSettings({
     this.soundEnabled = true,
     this.vibrationEnabled = true,
@@ -65,6 +80,9 @@ class NotificationSettings {
     this.defaultDirectNotify = true,
     this.defaultGroupNotify = true,
     this.defaultChannelNotify = false,
+    this.quietHoursEnabled = false,
+    this.quietFromMinute = 22 * 60,
+    this.quietToMinute = 7 * 60,
   });
 
   factory NotificationSettings.fromJson(Map<String, dynamic> json) {
@@ -77,7 +95,24 @@ class NotificationSettings {
       defaultDirectNotify: json['defaultDirectNotify'] as bool? ?? true,
       defaultGroupNotify: json['defaultGroupNotify'] as bool? ?? true,
       defaultChannelNotify: json['defaultChannelNotify'] as bool? ?? false,
+      quietHoursEnabled: json['quietHoursEnabled'] as bool? ?? false,
+      quietFromMinute: _minuteOfDay(json['quietFromMinute'], 22 * 60),
+      quietToMinute: _minuteOfDay(json['quietToMinute'], 7 * 60),
     );
+  }
+
+  static int _minuteOfDay(Object? v, int fallback) {
+    final m = (v as num?)?.toInt();
+    return (m == null || m < 0 || m >= 24 * 60) ? fallback : m;
+  }
+
+  /// Whether [now] (local time) lies inside the quiet hours.
+  bool quietAt(DateTime now) {
+    if (!quietHoursEnabled || quietFromMinute == quietToMinute) return false;
+    final m = now.hour * 60 + now.minute;
+    return quietFromMinute < quietToMinute
+        ? m >= quietFromMinute && m < quietToMinute
+        : m >= quietFromMinute || m < quietToMinute;
   }
 
   Map<String, dynamic> toJson() => {
@@ -89,6 +124,9 @@ class NotificationSettings {
     'defaultDirectNotify': defaultDirectNotify,
     'defaultGroupNotify': defaultGroupNotify,
     'defaultChannelNotify': defaultChannelNotify,
+    'quietHoursEnabled': quietHoursEnabled,
+    'quietFromMinute': quietFromMinute,
+    'quietToMinute': quietToMinute,
   };
 
   bool defaultForType({bool isGroup = false, bool isChannel = false}) {

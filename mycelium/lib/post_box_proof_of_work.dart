@@ -44,6 +44,25 @@ const int kDifficultyDeposit = 18;
 const int kProofOfWorkLength = ProofOfWork.randomValueLength + 8;
 
 final Uint8List _kDeposit = utf8.encode('mycelium-deposit-2');
+final Uint8List _kDepositId = utf8.encode('mycelium-deposit-id-1');
+
+/// The id of a 0x30, bound to the packet instead of rolled per call (S407
+/// B-18): `SHA-256("mycelium-deposit-id-1" ‖ day value ‖ content)[0:length]`.
+/// The same packet left again under the same value — an edge of §8.2 sends
+/// again what is neither acknowledged nor placed (§9.3, D-44) — is the same
+/// deposit: a holder that holds it acknowledges it (`0x31`, §8.2 "one it
+/// already holds is acknowledged") and takes no second copy. Until B-18 a
+/// holder that had taken the first, unplaced deposit kept both, and the
+/// collector found the request twice. A holder of 4.2.3 reads the id as
+/// opaque bytes and deduplicates by it already; nothing on the wire changes.
+Uint8List depositId(Uint8List value, Uint8List content, int length) =>
+    Uint8List.fromList(SodiumFFI()
+        .sha256((BytesBuilder()
+              ..add(_kDepositId)
+              ..add(value)
+              ..add(content))
+            .toBytes())
+        .sublist(0, length));
 
 Uint8List _code(Uint8List id, Uint8List value, Uint8List content) =>
     Uint8List.fromList(SodiumFFI()
@@ -94,4 +113,27 @@ bool depositProofOfWorkCarries(
           timeWindow: now) ||
       ProofOfWork.check(code, randomValue, counter, kDifficultyDeposit,
           timeWindow: now - 1);
+}
+
+/// For the log of a discarded deposit only: the window, relative to the
+/// holder's current one, for which [header] does carry the proof — a sender
+/// whose clock runs ahead or behind shows here (`+1`, `-3`, …) — or that it
+/// fits none within ±[span]. At most 2 × [span] + 1 hashes, and the holder
+/// asks only for the lines it writes (`post_box_holder_answers.dart`).
+String depositProofOfWorkWindow(
+    Uint8List id, Uint8List value, Uint8List content, Uint8List header,
+    {int span = 3}) {
+  if (header.length != kProofOfWorkLength) return 'proof field of ${header.length} B';
+  final code = _code(id, value, content);
+  final randomValue = header.sublist(0, ProofOfWork.randomValueLength);
+  final counter = ByteData.sublistView(header)
+      .getUint64(ProofOfWork.randomValueLength, Endian.little);
+  final now = ProofOfWork.windowNow();
+  for (var d = -span; d <= span; d++) {
+    if (ProofOfWork.check(code, randomValue, counter, kDifficultyDeposit,
+        timeWindow: now + d)) {
+      return 'proof fits window ${d > 0 ? '+' : ''}$d of ${ProofOfWork.windowSeconds} s';
+    }
+  }
+  return 'proof fits no window within ±$span';
 }

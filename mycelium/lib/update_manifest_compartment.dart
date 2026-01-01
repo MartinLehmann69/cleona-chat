@@ -105,7 +105,7 @@ class ManifestCompartment {
   final Future<List<Uint8List>?> Function(
       Uint8List compartment, void Function(Uint8List piece) onPiece) collect;
 
-  /// Deposits [content] under the value [compartment] (`NodePostBox.deposit`).
+  /// Deposits [content] under the value [compartment] (`NodeDeposit.deposit`).
   final Future<(bool done, int acknowledged)> Function(
       Uint8List content, Uint8List compartment) deposit;
 

@@ -12,7 +12,8 @@
 // secure/speed switch; `setSecureMode` is dropped, S384-NAHT-GEGEN-API),
 // no own-device line (it has its own part since B-4, D-37:
 // `cleona_service_own_line.dart`),
-// no pair key (`Envelope.seal` seals per message against the address), no
+// no pair key (`Envelope.seal` seals per message against the address; the
+// pair tag of §4.4.3 comes from the mailbox, `mailbox_envelope_tag.dart`), no
 // own resubmission (the mailbox history IS the ledger and resubmits by
 // itself at the edges), no acceptance policy: the request waits until the
 // user decides (§12.5, `takeMyceliumContactRequest`,
@@ -23,9 +24,44 @@ part of 'cleona_service.dart';
 
 /// Cap of the identifier index app `messageId` -> mycelium [mycelium.Outbound]. A
 /// displaced entry only loses the display source, not the message:
-/// `_v41StatusFor` then falls back to "unknown", the previous value
+/// `_statusFor` then falls back to "unknown", the previous value
 /// stays.
 const int _kMyceliumOutboundsMax = 4096;
+
+/// The call signals of §17.2 — exactly its list: "`INVITE`, `RING_ACK`,
+/// `ANSWER`, `REJECT`, `HANGUP`, `CANCEL_OTHERS`, `CALL_MEDIA_STATE`, and the
+/// signals of a running call: `CALL_KEYFRAME_REQUEST`, `CALL_GROUP_LEAVE`,
+/// `CALL_REJOIN`, `CALL_GROUP_SENDER_KEY`". Decided by the TYPE, not by the
+/// caller: a sender that forgets a flag must not put a signal into a post
+/// box (the keyframe request did, S407-B6CALL). The missed-call message is
+/// not here — it is an ordinary message (§17.2 "Missed call").
+/// Live media (`CALL_AUDIO`/`VIDEO`, group too) belongs to Plane D and is
+/// refused as [kOffDeliveryTypes]; the control records (RTT, tree) ride Plane D
+/// sessions (§17.1.1).
+const _kCallSignalTypes = <proto.MessageType>{
+  proto.MessageType.MT_CALL_INVITE,
+  proto.MessageType.MT_CALL_RING_ACK,
+  proto.MessageType.MT_CALL_ANSWER,
+  proto.MessageType.MT_CALL_REJECT,
+  proto.MessageType.MT_CALL_HANGUP,
+  proto.MessageType.MT_CALL_CANCEL_OTHERS,
+  proto.MessageType.MT_CALL_MEDIA_STATE,
+  proto.MessageType.MT_CALL_KEYFRAME_REQUEST,
+  proto.MessageType.MT_CALL_GROUP_LEAVE,
+  proto.MessageType.MT_CALL_REJOIN,
+  proto.MessageType.MT_CALL_GROUP_SENDER_KEY,
+};
+
+/// The signals that END a call for their sender (§17.2: "terminal types
+/// (`REJECT`, `HANGUP`) dominate"; a leave ends it for the leaver). They are
+/// sent while or right after the call ends, so that end does not stop them:
+/// they end with their acknowledgement, with the transport's silence
+/// (§11.3a), or at the latest with the end of the next call.
+const _kCallSignalsTerminal = <proto.MessageType>{
+  proto.MessageType.MT_CALL_REJECT,
+  proto.MessageType.MT_CALL_HANGUP,
+  proto.MessageType.MT_CALL_GROUP_LEAVE,
+};
 
 extension CleonaServiceMycelium on CleonaService {
   // ── Connection ────────────────────────────────────────────────────────
@@ -36,15 +72,14 @@ extension CleonaServiceMycelium on CleonaService {
   /// From here on the service's port is the host's — `ShareCleonaDialog`
   /// and the invitation card read `service.port` (S386 part A).
   ///
-  /// From here on the node seam of the network change is
-  /// `Host.networkChanged` (§11.8, §22.7.1). It only applies to callers
-  /// that call `onNetworkChanged(triggerNodeReset: true)` INDIVIDUALLY
-  /// ("Reconnect" in the connection sheet); the start paths run it themselves once per
-  /// event and pass `false`.
+  /// The network change needs no seam here (S407-LB-P12): its one entry
+  /// `networkChangeEdge` (`mycelium_seam.dart`) runs the host part once and
+  /// reaches this service as subscriber ([CleonaService.onNetworkChanged])
+  /// through the host's set of services, which `hostStart`/`serviceRegister`
+  /// keep.
   void myceliumAttach(mycelium.Mailbox p) {
     myceliumMailbox = p;
     port = p.port;
-    v41OnNetworkChanged = () => p.host.networkChanged();
     _log.info('mycelium:mailbox ${p.ownIdentifier.substring(0, 8)} '
         'attached, port ${p.port}');
     // BEFORE the parked messages: a contact ended here must not be made
@@ -74,6 +109,12 @@ extension CleonaServiceMycelium on CleonaService {
     // §15.3 "lives 60 s": the mailbox closed at its start what was due; a
     // face-to-face invitation shown shortly before a restart gets its rest.
     _faceToFaceArm();
+    // §16.2.5: the nudge sink of this identity, the start edge (what is not
+    // placed, collection), the capability notices owed.
+    _skAttach(p);
+    // §4.4.3 (S407-UMSCHLAG): group pairs read the tag again from the member
+    // state; an own entry from before this release is renewed once.
+    _pairTagAttach(p);
     onStateChanged?.call();
   }
 
@@ -82,7 +123,6 @@ extension CleonaServiceMycelium on CleonaService {
   mycelium.Mailbox? myceliumDetach() {
     final p = myceliumMailbox;
     myceliumMailbox = null;
-    v41OnNetworkChanged = null;
     p?.onCarried = null; // the callback belongs to this run of the app
     _faceToFaceClock?.cancel(); // its invitations belong to that mailbox
     _faceToFaceClock = null;
@@ -163,14 +203,14 @@ extension CleonaServiceMycelium on CleonaService {
     // left the compartment and stayed `resting` for good (S401).
     ensureLoaded(hex);
     var parked = 0;
-    for (final e in v41Outbox.entries.toList()) {
+    for (final e in localOutbox.entries.toList()) {
       if (!constantTimeEquals(e.recipientUserId, c.nodeId)) continue;
-      v41Outbox.remove(e.messageIdHex);
+      localOutbox.remove(e.messageIdHex);
       parked++;
       final owner = _parkedOwner(e);
       if (owner != null) _seamRefused(owner, 'contact ended (format reset)');
     }
-    if (parked > 0) saveV41Outbox();
+    if (parked > 0) saveLocalOutbox();
     _addSystemMessage(hex, kNoticeReconnectAfterUpdate,
         type: UiMessageType.identityDeleted); // system message type
     _log.event('mycelium: contact ${hex.substring(0, 8)} ended after the '
@@ -192,10 +232,19 @@ extension CleonaServiceMycelium on CleonaService {
   /// compartment — a `failed` message must not go out at a later attach.
   /// Every other refused entry stays, as before, for the next attach.
   void _myceliumParkedHandedOver() {
-    if (v41Outbox.length == 0) return;
+    if (localOutbox.length == 0) return;
     var handedOver = 0;
     var closed = 0;
-    for (final e in v41Outbox.entries.toList()) {
+    for (final e in localOutbox.entries.toList()) {
+      // A call signal parked before S407-B6CALL (a 4.2.3 compartment) rings
+      // now or never (§17.2): it leaves the compartment unsent.
+      if (_kCallSignalTypes.any((t) => t.name == e.messageType)) {
+        localOutbox.remove(e.messageIdHex);
+        closed++;
+        _log.info('mycelium: parked ${e.messageType} dropped at the attach — '
+            'a call signal is not sent late (§17.2)');
+        continue;
+      }
       final contact = _contacts[e.recipientUserId.hex];
       final a = _myceliumFrameSend(
         recipientUserId: e.recipientUserId,
@@ -207,18 +256,18 @@ extension CleonaServiceMycelium on CleonaService {
       if (a == null) {
         final owner = _parkedOwner(e);
         if (owner == null) continue;
-        v41Outbox.remove(e.messageIdHex);
+        localOutbox.remove(e.messageIdHex);
         closed++;
         _seamRefused(owner, 'refused at the attach');
         continue;
       }
-      v41Outbox.remove(e.messageIdHex);
+      localOutbox.remove(e.messageIdHex);
       handedOver++;
     }
     if (handedOver > 0 || closed > 0) {
-      saveV41Outbox();
+      saveLocalOutbox();
       _log.event('mycelium:$handedOver parked message(s) handed over to the '
-          'mailbox, $closed refused and closed as failed, ${v41Outbox.length} '
+          'mailbox, $closed refused and closed as failed, ${localOutbox.length} '
           'remain in the compartment');
     }
   }
@@ -227,11 +276,11 @@ extension CleonaServiceMycelium on CleonaService {
   /// `null`: only a text and a lane 1 file carry their OWN identifier (an
   /// edit, a deletion or a reaction carries the identifier of the message it
   /// refers to — that message is not theirs to close), and a group leg is
-  /// aggregated over all legs (`_v41ApplyOutgoingStatus`), not closed alone.
-  UiMessage? _parkedOwner(V41OutboxEntry e) {
+  /// aggregated over all legs (`_applyOutgoingLegStatus`), not closed alone.
+  UiMessage? _parkedOwner(LocalOutboxEntry e) {
     if (e.groupIdHex != null) return null;
-    if (e.messageType != proto.MessageTypeV3.MTV3_TEXT.name &&
-        e.messageType != proto.MessageTypeV3.MTV3_MEDIA_INLINE.name) {
+    if (e.messageType != proto.MessageType.MT_TEXT.name &&
+        e.messageType != proto.MessageType.MT_MEDIA_INLINE.name) {
       return null;
     }
     final owner = _fileOrderOwner(e.recipientUserId.hex, e.messageIdHex);
@@ -278,7 +327,7 @@ extension CleonaServiceMycelium on CleonaService {
     required Uint8List recipientUserId,
     required bool isSelfSend,
     required ContactInfo? contact,
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
     Uint8List? groupId,
     Uint8List? messageId,
@@ -295,7 +344,7 @@ extension CleonaServiceMycelium on CleonaService {
       return _myceliumOwnSend(
           messageType: messageType, payload: payload, messageId: messageId);
     }
-    if (kV3InfraTypes.contains(messageType)) {
+    if (kOffDeliveryTypes.contains(messageType)) {
       _log.error('mycelium: ${messageType.name} is V3 infrastructure and has no '
           'subject in V4.2. Not sent.');
       return false;
@@ -303,7 +352,7 @@ extension CleonaServiceMycelium on CleonaService {
     final id = (messageId != null && messageId.isNotEmpty)
         ? messageId
         : SodiumFFI().randomBytes(16);
-    final inner = _v41InnerFrame(
+    final inner = _innerFrame(
       recipientUserId: recipientUserId,
       senderUserId: identity.userId,
       messageId: id,
@@ -323,7 +372,7 @@ extension CleonaServiceMycelium on CleonaService {
       frame: Uint8List.fromList(inner.writeToBuffer()),
       messageIdHex: id.hex,
       typeName: messageType.name,
-      ephemeral: CleonaService.kV41Ephemeral.contains(messageType),
+      ephemeral: CleonaService.kEphemeralTypes.contains(messageType),
       messageType: messageType,
       groupId: groupId,
     );
@@ -339,7 +388,7 @@ extension CleonaServiceMycelium on CleonaService {
     required String messageIdHex,
     required String typeName,
     bool ephemeral = false,
-    proto.MessageTypeV3? messageType,
+    proto.MessageType? messageType,
     Uint8List? groupId,
   }) {
     final p = myceliumMailbox;
@@ -353,6 +402,7 @@ extension CleonaServiceMycelium on CleonaService {
       final a = _groupPairFrameSend(p,
           recipientHex: bytesToHex(recipientUserId),
           frame: frame,
+          messageIdHex: messageIdHex,
           messageType: messageType,
           groupId: groupId);
       if (a == null) {
@@ -361,6 +411,11 @@ extension CleonaServiceMycelium on CleonaService {
         _log.warn('mycelium: $typeName to $short — neither a contact nor a '
             'group pair for this group. Not sent (failed).');
         return null;
+      }
+      // A call signal has no delivery display (§17.2); `_groupPairFrameSend`
+      // noted it as running until its call ends.
+      if (messageType != null && _kCallSignalTypes.contains(messageType)) {
+        return a;
       }
       return _myceliumOutboundNote(a, messageIdHex, typeName, short, frame,
           groupPair: true);
@@ -396,21 +451,30 @@ extension CleonaServiceMycelium on CleonaService {
       _log.info('mycelium: contact $short made known to the mailbox (without route)');
     }
     final identifier = mycelium.identifierFrom(address);
-    // Since S390 no way means: NONE of the three addresses from §7.1 is
-    // there. An ephemeral indicator does not take the post box either —
-    // hours later it would claim someone is typing right now.
-    if (ephemeral && mycelium.routesEmpty(p.routesToAddress(address))) {
-      // A typing indicator that rests and goes out later claims someone is
-      // typing right now (`kV41Ephemeral`). Without a way: do not send.
-      _log.debug('mycelium:$typeName to $short without a path — ephemeral, not '
-          'sent');
-      return null;
+    // A CALL SIGNAL is never left in a post box (§17.2, D-45): steps 1 and
+    // 3 only, no history entry, so no edge sends it again (§9.3). Until
+    // S407-B6CALL it took the full ladder below — proof of work, three
+    // holders, and every edge for 14 days (finding B-6).
+    if (messageType != null && _kCallSignalTypes.contains(messageType)) {
+      return _myceliumSignalSend(p, identifier, frame,
+          messageIdHex: messageIdHex, type: messageType, short: short);
     }
-    final mycelium.Outbound a;
+    final mycelium.Outbound? a;
     try {
-      a = mycelium.MailboxOutbound(p).send(identifier, frame);
+      // An ephemeral indicator never rests: hours later it would claim
+      // someone is typing right now. Whether a way exists (§7.1: one of the
+      // three addresses) the delivery layer decides (`sendIfWay`,
+      // S408-LEBENSLAUF P18); the app asks nothing before it.
+      a = ephemeral
+          ? mycelium.MailboxOutbound(p).sendIfWay(identifier, frame)
+          : mycelium.MailboxOutbound(p).send(identifier, frame);
     } on mycelium.MailboxError catch (e) {
       _log.warn('mycelium:$typeName to $short — $e. Not sent.');
+      return null;
+    }
+    if (a == null) {
+      _log.debug('mycelium:$typeName to $short without a path — ephemeral, not '
+          'sent');
       return null;
     }
     return _myceliumOutboundNote(a, messageIdHex, typeName, short, frame);
@@ -429,7 +493,7 @@ extension CleonaServiceMycelium on CleonaService {
     // or a post box took it, `resting` until then — V11, §9.1) goes into
     // the display at once — not only when the caller of `sendToUser` gets
     // control back (§12.2: the ONE tick must be visible).
-    _v41ReflectStatus(messageIdHex);
+    _reflectLegStatus(messageIdHex);
     // VISIBLE like "V4.1 SENDEN": without the counterpart to reception it
     // is impossible to tell in the field whether nothing went out at all.
     _log.event('mycelium SEND$typeName to $short (${frame.length} B'
@@ -437,12 +501,61 @@ extension CleonaServiceMycelium on CleonaService {
     return a;
   }
 
+  /// Hands the call signal [frame] to the mailbox as a signal (§17.2):
+  /// steps 1 and 3, no post box, no history entry. It has no delivery
+  /// display (§17.2) — it is therefore not entered in the display index
+  /// ([_myceliumOutbounds]) — and is noted as running until its call ends
+  /// ([_myceliumCallEnded]). `null` if the mailbox refused it.
+  mycelium.Outbound? _myceliumSignalSend(
+      mycelium.Mailbox p, String identifier, Uint8List frame,
+      {required String messageIdHex,
+      required proto.MessageType type,
+      required String short,
+      bool groupPair = false}) {
+    final mycelium.Outbound a;
+    try {
+      a = mycelium.MailboxSignal(p).signal(identifier, frame);
+    } on mycelium.MailboxError catch (e) {
+      _log.warn('mycelium:${type.name} to $short — $e. Not sent.');
+      return null;
+    }
+    _myceliumSignals[messageIdHex] =
+        (sent: a, terminal: _kCallSignalsTerminal.contains(type));
+    _log.event('mycelium SEND${type.name} to $short (${frame.length} B'
+        '${groupPair ? ', group pair' : ''}) — call signal, steps 1 and 3 '
+        'only (§17.2)');
+    return a;
+  }
+
+  /// A call has ended (1:1 or group, answered or not): its signals end with
+  /// it (§17.2: "it ends with its acknowledgement (§9.2) or with its call,
+  /// whichever comes first") — step 1 is not asked again, and a `0x21` for
+  /// its code starts no search for the callee afterwards (§8.1). An
+  /// acknowledged signal only leaves the note. A terminal signal
+  /// ([_kCallSignalsTerminal]) is the call's last word and is sent while or
+  /// after the call ends; it outlives this end once and ends at the next.
+  void _myceliumCallEnded() {
+    final p = myceliumMailbox;
+    for (final e in _myceliumSignals.entries.toList()) {
+      final s = e.value;
+      if (s.sent.state == mycelium.DeliveryState.delivered) {
+        _myceliumSignals.remove(e.key);
+        _myceliumSignalsOutlived.remove(e.key);
+        continue;
+      }
+      if (s.terminal && _myceliumSignalsOutlived.add(e.key)) continue;
+      if (p != null) mycelium.MailboxSignal(p).signalEnd(s.sent);
+      _myceliumSignals.remove(e.key);
+      _myceliumSignalsOutlived.remove(e.key);
+    }
+  }
+
   /// V11 (§9.1, §21.5.3): the mailbox has carried [a] — a way demonstrably
   /// transported the packet or a post box took it, and the message flips
   /// from `resting` to `in transit` only NOW. The display state and the
   /// start of the sender-side auto-delete deadline (§21.5.3: "when sent")
   /// hang on this flip, so it must not wait for the next receipt that may
-  /// never come: `_v41ReflectStatus` carries the state into the `UiMessage`
+  /// never come: `_reflectLegStatus` carries the state into the `UiMessage`
   /// at once, and `UiMessage.set status` sets `sentAt`.
   ///
   /// A message whose app run ended while it rested has no note here any
@@ -452,7 +565,7 @@ extension CleonaServiceMycelium on CleonaService {
   void _myceliumMessageCarried(mycelium.Outbound a) {
     final messageIdHex = _myceliumOutboundIds[a];
     if (messageIdHex == null) return;
-    _v41ReflectStatus(messageIdHex);
+    _reflectLegStatus(messageIdHex);
   }
 
   // ── Deletion (§21.5.2 level 1, §9.3) ──────────────────────────────────
@@ -474,7 +587,7 @@ extension CleonaServiceMycelium on CleonaService {
   /// WHAT IS FORGOTTEN: every frame that carries one of the identifiers as
   /// its own — the message and its edits (`editMessage` sends under the
   /// identifier of its target) — and every reaction that names one. NOT the
-  /// deletion request (MTV3_DELETE, the same identifier): it is the own
+  /// deletion request (MT_DELETE, the same identifier): it is the own
   /// message that tells the other side, and it must stay open until it is
   /// acknowledged (§21.5.2 level 2). Receipts name the identifier in their
   /// payload and carry no content; they stay.
@@ -531,13 +644,13 @@ extension CleonaServiceMycelium on CleonaService {
           // Without a frame there is nothing to forget and nothing to
           // read: only an open own entry carries one.
           if (e.content.isEmpty) return false;
-          final proto.ApplicationFrameV3 frame;
+          final proto.ApplicationFrame frame;
           try {
-            frame = proto.ApplicationFrameV3.fromBuffer(e.content);
+            frame = proto.ApplicationFrame.fromBuffer(e.content);
             switch (frame.messageType) {
-              case proto.MessageTypeV3.MTV3_DELETE:
+              case proto.MessageType.MT_DELETE:
                 return false;
-              case proto.MessageTypeV3.MTV3_REACTION:
+              case proto.MessageType.MT_REACTION:
                 return ids.contains(bytesToHex(Uint8List.fromList(
                     proto.EmojiReaction.fromBuffer(frame.payload).messageId)));
               default:
@@ -814,9 +927,9 @@ extension CleonaServiceMycelium on CleonaService {
 
   Future<void> _myceliumInboundAccept(mycelium.Inbound e) async {
     if (_disposed) return;
-    final proto.ApplicationFrameV3 frame;
+    final proto.ApplicationFrame frame;
     try {
-      frame = proto.ApplicationFrameV3.fromBuffer(e.content);
+      frame = proto.ApplicationFrame.fromBuffer(e.content);
     } catch (_) {
       // Silent (E-83): an unreadable frame carries no information.
       _log.debug('mycelium:inbound without a readable application frame '
@@ -930,7 +1043,7 @@ extension CleonaServiceMycelium on CleonaService {
         state == 'pending_outgoing' ||
         (state == 'pending' &&
             frame.messageType ==
-                proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE &&
+                proto.MessageType.MT_CONTACT_REQUEST_RESPONSE &&
             _myceliumJoinRunsTo(contact!));
     // §15.7 (B-3, D-36): a GROUP PAIR is not an unknown party for a group
     // type naming a group both belong to in the current member state.
@@ -966,7 +1079,7 @@ extension CleonaServiceMycelium on CleonaService {
         '${viaGroupPair ? 'group pair' : trust.name})');
 
     final verdict = await handleApplicationFrame(
-      event: HarvestEvent.fromV3Frame(
+      event: HarvestEvent.fromApplicationFrame(
         frame: frame,
         // The delivery layer addresses identities, not devices.
         senderDeviceId: null,
@@ -1001,10 +1114,10 @@ extension CleonaServiceMycelium on CleonaService {
   /// For CONTACT_REQUEST_RESPONSE: the keys in the body must be those of
   /// the envelope. Every other kind: `true`.
   bool _myceliumBodyKeysMatch(
-      proto.ApplicationFrameV3 frame, mycelium.Address from) {
+      proto.ApplicationFrame frame, mycelium.Address from) {
     final List<int> ed, dsa, x, kem;
     switch (frame.messageType) {
-      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE:
+      case proto.MessageType.MT_CONTACT_REQUEST_RESPONSE:
         final r = proto.ContactRequestResponse.fromBuffer(frame.payload);
         if (!r.accepted) return true;
         (ed, dsa, x, kem) = (r.ed25519PublicKey, r.mlDsaPublicKey,
@@ -1447,10 +1560,10 @@ extension CleonaServiceMycelium on CleonaService {
         profile.description = _profileDescription!;
       }
       _detachedSend(
-          'MTV3_PROFILE_UPDATE',
+          'MT_PROFILE_UPDATE',
           sendToUser(
             recipientUserId: c.nodeId,
-            messageType: proto.MessageTypeV3.MTV3_PROFILE_UPDATE,
+            messageType: proto.MessageType.MT_PROFILE_UPDATE,
             payload: Uint8List.fromList(profile.writeToBuffer()),
           ));
     }

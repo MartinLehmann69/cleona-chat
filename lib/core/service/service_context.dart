@@ -6,7 +6,7 @@ import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Shared context interface for extracted service modules.
 ///
@@ -40,7 +40,7 @@ abstract class ServiceContext {
 
   Future<bool> sendToUser({
     required Uint8List recipientUserId,
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
     // S368: here stood `Uint8List? senderUserId` — the
     // override parameter of the send site. Measured with a
@@ -72,7 +72,7 @@ abstract class ServiceContext {
     //
     // It is a parameter of the SEND SITE and not a property of the
     // message type: routine and emergency rotation share
-    // `MTV3_KEY_ROTATION_BROADCAST`, and only the second is
+    // `MT_KEY_ROTATION_BROADCAST`, and only the second is
     // management class (v4_1 l. 1007-1008 against §4.5.4 "an ordinary
     // delivery"). A classifier over `messageType` would therefore be
     // demonstrably wrong.
@@ -89,6 +89,10 @@ abstract class ServiceContext {
   });
 
   void saveChannels();
+
+  /// §14.7 Type 22 CHANNEL_JOINED: the identity created, joined or changed
+  /// [channel] on this device — its state goes to the other own devices.
+  void mirrorChannelToOwnDevices(ChannelInfo channel);
   void saveConversations();
 
   /// Loads the history of a conversation lazily (S366, stage B).
@@ -116,11 +120,31 @@ abstract class ServiceContext {
 
   Future<void> sendEncryptedPayload(
     Uint8List recipientUserId,
-    proto.MessageTypeV3 messageType,
+    proto.MessageType messageType,
     Uint8List payload, {
     Uint8List? groupId,
   });
 
   void addMessageToConversation(String conversationId, UiMessage msg,
       {bool isGroup = false, bool isChannel = false});
+
+  /// §16.2.5: serves a post of [groupIdHex] (a poll, a vote …) on the shared
+  /// key — once, deposited and nudged. Returns the members still to be
+  /// served on pairwise legs, or `null` when the group or channel runs on
+  /// pairwise legs here.
+  Future<Set<String>?> sharedKeyServe(
+      String groupIdHex, proto.MessageType messageType, Uint8List payload);
+
+  /// §16.2.1, §18.4.3: whether an anonymous poll can be built in the group
+  /// or channel [entityIdHex] — only on pairwise legs.
+  bool anonymousPollPossible(String entityIdHex);
+
+  /// §16.2.2: whether this identity may post into the group [entityIdHex] —
+  /// `false` for a member of a group in announcement mode.
+  bool mayPostInGroup(String entityIdHex);
+
+  /// §16.2.4/§16.2.5: whether votes in [entityIdHex] go 1:1 to the poll's
+  /// creator, who publishes the tally — a private channel, and a group in
+  /// announcement mode on the shared key.
+  bool tallyAtCreator(String entityIdHex);
 }

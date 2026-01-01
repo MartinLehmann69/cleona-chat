@@ -21,12 +21,14 @@
 /// The recipient sends a mark every [kTallyEvery] frames it receives (a
 /// count, not a clock; about every 2 s at 256/s). While streaming, the
 /// sender checks before each frame whether it has heard the volunteer
-/// within 10 s plus one mark window; after a pass it waits 10 s for the
-/// recipient's list (§17.4 rule). Without an answer the volunteer counts as
-/// lost. Nothing runs between transfers.
+/// within 10 s plus one mark window; after a pass it sends the end of the
+/// pass (`0x5A` form 4, S407 M-1) and waits 10 s for the recipient's list
+/// (§17.4 rule), repeating the end once after [kPassEndAgain]. Without an
+/// answer the volunteer counts as lost. Nothing runs between transfers.
 library;
 
 import 'dart:async';
+import 'dart:io' show InternetAddress;
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -35,9 +37,12 @@ import 'package:mycelium/bulk_piece.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/media.dart' show kPiecesPerStripe, stripeForm, stripeNumber;
+import 'package:mycelium/silence.dart';
 import 'package:mycelium/split.dart' show kAtMostAttempts;
 import 'package:mycelium/stream_frame.dart';
-import 'package:mycelium/stream_volunteer.dart' show kStreamLoss;
+import 'package:mycelium/stream_volunteer.dart' show kStreamConnect, kStreamLoss;
+
+const String kRecipientGaveUp = 'the recipient gave up after its request and three repeats';
 
 /// Frames per second at the start of a stream (setting, see above).
 const int kStreamRate = 256;
@@ -52,6 +57,10 @@ const Duration kAskWait = Duration(seconds: 10);
 /// After a retry: how long the sender waits for the recipient's list of what
 /// it still lacks before streaming everything again.
 const Duration kResumeWait = Duration(seconds: 2);
+
+/// After an end of pass without an answer: when it is sent once more
+/// (setting; the recipient answers 300 ms after the last frame, §11.3).
+const Duration kPassEndAgain = Duration(seconds: 1);
 
 typedef StreamSession = ({
   CardAddress volunteer,
@@ -84,6 +93,10 @@ class StreamResult {
 
   /// Take lane 3 for the remainder (§17.6).
   bool get fallback => !done;
+
+  /// The recipient gave up and kept what it opened: [missingStripes] is its
+  /// final word, so lane 3 needs to carry only those (S407 M-2).
+  bool get recipientGaveUp => reason == kRecipientGaveUp;
 }
 
 enum _End { done, gaveUp, lost, noJoin }
@@ -109,8 +122,15 @@ class StreamSender {
   int _bytes = 0;
   List<int>? _known;
 
-  StreamSender({required void Function(Uint8List, CardAddress) send, this.report})
-      : _send = send;
+  /// Where the ask is repeated and given up (§11.3a) — the node's.
+  final Silence silence;
+
+  StreamSender(
+      {required void Function(Uint8List, CardAddress) send,
+      this.report,
+      Silence? silence})
+      : _send = send,
+        silence = silence ?? Silence();
 
   /// Handles a lane-2 packet meant for a sender; `false` otherwise.
   bool receive(Uint8List p, CardAddress from) {
@@ -172,12 +192,20 @@ class StreamSender {
       final random = SodiumFFI().randomBytes(kAskRandomLength);
       final w = Completer<StreamAnswer>();
       _asks[tagHex(random)] = (at, w);
-      _send(askPacket(size, random), at);
+      final ask = askPacket(size, random);
       StreamAnswer? a;
       try {
-        a = await w.future.timeout(kAskWait);
-      } on TimeoutException {
-        a = null;
+        // The ask and its repeats share the candidate's 10 s (§17.6,
+        // §11.3a); the volunteer answers a repeat as the first.
+        final ip = InternetAddress.fromRawAddress(Uint8List.fromList(at.address));
+        final got = await silence.ask(w.future,
+            to: ip,
+            port: at.port,
+            send: (_, __) => _send(ask, at),
+            wait: kAskWait ~/ kSendingsAtMost,
+            others: false,
+            what: 'stream ask 0x56');
+        a = got == null ? null : await w.future;
       } finally {
         _asks.remove(tagHex(random));
       }
@@ -234,7 +262,7 @@ class StreamSender {
         case _End.done:
           return out(true, 'done');
         case _End.gaveUp:
-          return out(false, 'the recipient gave up after 3 rounds', _known);
+          return out(false, kRecipientGaveUp, _known);
         case _End.noJoin:
           return out(false, 'no pairing within the connect window',
               _sent == 0 ? all : _known);
@@ -254,16 +282,16 @@ class StreamSender {
       void Function(int sent, int total)? progress) async {
     final r = _run = _Run(s)..sentAtMark = _sent;
     try {
+      // The join expects its echo: repeated by the transport within the
+      // connect window (§17.6, §11.3a — until S407 its own 3/7/20 s).
       final join = joinPacket(s.senderCookie);
-      for (final w in const [3, 7, 20]) {
-        _send(join, s.volunteer);
-        try {
-          await r.paired.future.timeout(Duration(seconds: w));
-          break;
-        } on TimeoutException {
-          continue;
-        }
-      }
+      await silence.ask(r.paired.future,
+          to: InternetAddress.fromRawAddress(Uint8List.fromList(s.volunteer.address)),
+          port: s.volunteer.port,
+          send: (_, __) => _send(join, s.volunteer),
+          wait: kStreamConnect ~/ kSendingsAtMost,
+          others: false,
+          what: 'stream join 0x58');
       if (!r.paired.isCompleted) return _End.noJoin;
       r.heard = DateTime.now();
       final tag = bulkTag(transferKey);
@@ -274,7 +302,7 @@ class StreamSender {
         final m = await _next(r, kResumeWait);
         if (m != null && m.form == kMissingRequest) todo = _listed(m.request);
       }
-      var rounds = 0;
+      var pass = 0;
       while (true) {
         for (final i in todo) {
           final window = Duration(
@@ -290,7 +318,7 @@ class StreamSender {
           _bytes += kFrameLength;
           progress?.call(_sent, total);
         }
-        final m = await _next(r, kStreamLoss);
+        final m = await _passEnd(r, s, pass);
         if (m == null) return _End.lost;
         if (m.form == kMissingDone) return _End.done;
         if (m.form == kMissingGiveUp) {
@@ -299,10 +327,8 @@ class StreamSender {
         }
         todo = _listed(m.request);
         _known = m.request.keys.toList()..sort();
-        if (m.round > 0) {
-          if (++rounds > kAtMostAttempts) todo = const [];
-          if (todo.length > total * 0.1) _halve('request: ${todo.length} of $total');
-        }
+        if (++pass > kAtMostAttempts) todo = const [];
+        if (todo.length > total * 0.1) _halve('request: ${todo.length} of $total');
       }
     } finally {
       if (_run == r) _run = null;
@@ -315,15 +341,41 @@ class StreamSender {
             if (e.value & (1 << no) != 0) e.key * kPiecesPerStripe + no
       ];
 
-  Future<MissingRead?> _next(_Run r, Duration limit) async {
-    if (r.lists.isEmpty) {
+  /// §11.3 "after the last frame": the end of [pass], then the recipient's
+  /// answer to it. Repeated [kPassEndAgain] apart without one, at most
+  /// [kRepeatsAtMost] times (§17.6, §11.3a) — a lost end would otherwise
+  /// cost the whole loss deadline.
+  Future<MissingRead?> _passEnd(_Run r, StreamSession s, int pass) async {
+    final p = streamPassEndPacket(s.senderCookie, pass, _sent);
+    for (var n = 0; n < kRepeatsAtMost; n++) {
+      _send(p, s.volunteer);
+      final m = await _next(r, kPassEndAgain, pass);
+      if (m != null) return m;
+    }
+    _send(p, s.volunteer);
+    return _next(r, kStreamLoss - kPassEndAgain * kRepeatsAtMost, pass);
+  }
+
+  /// The next list within [limit]. After [pass] only its own answer counts:
+  /// a request of another round is a repeat for an earlier end and is
+  /// dropped, so that it is never taken for the answer to this one.
+  Future<MissingRead?> _next(_Run r, Duration limit, [int? pass]) async {
+    final end = DateTime.now().add(limit);
+    for (;;) {
+      while (r.lists.isNotEmpty) {
+        final m = r.lists.removeAt(0);
+        if (pass == null || m.form != kMissingRequest || m.round == pass + 1) {
+          return m;
+        }
+      }
+      final left = end.difference(DateTime.now());
+      if (left <= Duration.zero) return null;
       final w = r.waiting = Completer<void>();
       try {
-        await w.future.timeout(limit);
+        await w.future.timeout(left);
       } on TimeoutException {
         return null;
       }
     }
-    return r.lists.removeAt(0);
   }
 }

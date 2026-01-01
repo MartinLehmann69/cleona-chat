@@ -29,6 +29,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/update/update_carrier.dart';
 import 'package:mycelium/card.dart' show CardAddress;
+import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_post_box.dart';
 import 'package:mycelium/node_collect_queue.dart' show NodeCollectQueue;
@@ -65,6 +66,12 @@ class Update implements UpdateCarrier {
   late final UpdateHolder holder;
   late final UpdateAssembler assembler;
 
+  /// The fetch of a foreign platform's binary (§26.6.3) — a second
+  /// assembler with its own directory, so the update target's state is
+  /// never deleted for it and vice versa. Pieces name their object, so the
+  /// two never take each other's.
+  late final UpdateAssembler foreign;
+
   Update(
     this.node, {
     required int channel,
@@ -77,6 +84,8 @@ class Update implements UpdateCarrier {
     holder = UpdateHolder(send: send, report: report);
     assembler =
         UpdateAssembler(send: send, partialDir: partialDir, report: report);
+    foreign = UpdateAssembler(
+        send: send, partialDir: '$partialDir-foreign', report: report);
     compartment = ManifestCompartment(
       compartment: manifestValue(channel),
       check: manifestCheck,
@@ -98,6 +107,7 @@ class Update implements UpdateCarrier {
       holder.receive(packet, from, fromPort);
     } else {
       assembler.receive(packet, from, fromPort);
+      foreign.receive(packet, from, fromPort);
     }
   }
 
@@ -136,11 +146,22 @@ class Update implements UpdateCarrier {
   void objectExpect(Uint8List contentHash, int length) =>
       assembler.expect(contentHash, length);
 
+  /// Whom the fetch path asks, in order (§26.6.1 "after three answers
+  /// without a new piece the node turns to the next holder, and after the
+  /// last holder it waits for the next moment"): EVERY neighbour, one entry
+  /// per node, in the holder rank of a deposit (live link, answered,
+  /// confirmed, hint). Not the three holders of a deposit (§8.2): the norm
+  /// fixes no count here (OPEN L-3), and with three a collector whose three
+  /// best neighbours do not hold the object never asked one that does — at
+  /// every moment again the same three (S407-UPDATETARGET).
+  List<UpdateNeighbour> get fetchHolders =>
+      node.ownHolders(n: Neighbourhood.atMost);
+
   @override
   Future<String?> objectFetch(
           {required Uint8List contentHash, required int length}) =>
       assembler.fetch(
-          object: contentHash, length: length, withWhom: node.depositNeighbours);
+          object: contentHash, length: length, withWhom: fetchHolders);
 
   @override
   set onObjectComplete(void Function(Uint8List contentHash, String path)? f) =>
@@ -154,6 +175,22 @@ class Update implements UpdateCarrier {
 
   @override
   void fetchAbort() => assembler.abort();
+
+  @override
+  Future<String?> foreignFetch(
+          {required Uint8List contentHash, required int length}) =>
+      foreign.fetch(
+          object: contentHash, length: length, withWhom: fetchHolders);
+
+  @override
+  void foreignTaken(Uint8List contentHash) => foreign.taken(contentHash);
+
+  @override
+  double? foreignProgress(Uint8List contentHash) {
+    final p = foreign.partial;
+    if (p == null || !sameBytes(p.object, contentHash)) return null;
+    return p.progress;
+  }
 
   @override
   void objectHold(

@@ -12,17 +12,19 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/shell_start.dart' show Start;
+import 'package:mycelium/silence.dart' show kSendingsAtMost;
 import 'package:mycelium/wire.dart' show PacketRoute;
 
-/// How long flight 2 is waited for before flight 1 is repeated ONCE.
-/// No clock: the timer exists only while a handshake is running,
-/// and is not set anew after the second attempt (§1.2).
+/// How long flight 2 is waited for before flight 1 is repeated — the answer
+/// wait of §11.6. No clock: the timer exists only while a handshake is
+/// running, and is not set anew after the last attempt (§1.2).
 const Duration kAnswerDeadline = Duration(milliseconds: 800);
 
-/// This many attempts, then the neighbour counts as not reachable and the
-/// waiting packets drop. A failure is not an error of delivery —
-/// the ladder has three further steps (§7.1).
-const int kAttempts = 2;
+/// Flight 1 is a packet that expects an answer: it and its repeats
+/// (§11.3a, `silence.dart`), then that address has failed and the waiting
+/// packets drop. A failure is not an error of delivery — the ladder has
+/// three further steps (§7.1).
+const int kAttempts = kSendingsAtMost;
 
 /// How a handshake the shell held packets for ended (§20.2 "packets waiting
 /// for a link"): [unreachable] `false` — it completed and they left;
@@ -31,18 +33,22 @@ const int kAttempts = 2;
 /// There is no count bound on the waiting packets and nothing is displaced
 /// (D-41 as amended, S399 step 2): the bound is what the flow of §11.3 lets
 /// through — at most one transmission of two or more parts per hop, plus
-/// single parts —, and only while the handshake runs, two answer deadlines
+/// single parts —, and only while the handshake runs, four answer deadlines
 /// at most. Until S399 a queue of 32 displaced the rest of a large
 /// transmission (measured: 335 of 367 parts, `smoke_burst_loss`).
 typedef HopEnd = void Function(InternetAddress target, int targetPort, bool unreachable);
 
-/// A handshake towards [target]:[targetPort] got no answer — with waiting
-/// packets after its repetitions, or a one-shot start (cover, fresh start)
-/// after its deadline. Each is a request without an answer, i.e. a failed
-/// use of the address (V4.2 §11.8 "two uses failed"); until S405 the one-shot
-/// case was forgotten silently, and a dead neighbour stayed in the open set
-/// for good — two handshake packets per cover draw towards it (S404-7) and
-/// the first hop of step 3 (S404-6).
+/// A handshake towards [target]:[targetPort] got no answer to flight 1 and
+/// its repeats ([kAttempts]): that address has failed (V4.2 §11.3a,
+/// `Silence.failedAddress`). A one-shot start (cover, fresh start) is not
+/// repeated — §11.6 forbids the amplification — and so declares nothing:
+/// a single packet without an answer is no failure (§11.3a). A cover draw
+/// towards a dead neighbour is a real sending's business: the first real
+/// packet to it starts a handshake with repeats (S404-6, S404-7).
+///
+/// One case is no silence but proof, and it declares for every start,
+/// one-shot or not, at once: the own flight 1 came back (`startOf` in
+/// `shell_start.dart`) — that address is this node (S407-SHELLSELF).
 typedef Silent = void Function(InternetAddress target, int targetPort);
 
 /// Maximum number of held links. Above the neighbour number (§11.8: 32), because
@@ -74,27 +80,6 @@ const int kLinksAtMost = 64;
 /// immediately.
 const Duration kLinkSilence = Duration(seconds: 120);
 
-/// This many real payloads a link keeps in order to send them once more after a
-/// key change.
-///
-/// **Why this exists.** If the counterpart restarts, the packets that
-/// we already sent under the old key are nonsense to it —
-/// it discards them. The shell has accepted them ([send] returned `true`) and
-/// thereby owes them to the wire; sending them once more under the new key
-/// is the same duty that the splitter fulfils with its
-/// re-request. COVER is never kept: it carries nothing,
-/// and a repeated cover packet would be a pattern.
-///
-/// The stack empties as soon as something ARRIVES under this key —
-/// that is the evidence that the counterpart still has it. In a running
-/// conversation it is therefore almost always empty.
-///
-/// **The price, named: duplicates.** If the counterpart did receive the packets
-/// and restarted ONLY AFTERWARDS, we send them a second
-/// time. The shell cannot distinguish that, and the layers above
-/// discard duplicates anyway (§9.2: "duplicate → ignore"). A duplicate
-/// packet is the cheaper error than a lost one.
-const int kResendAtMost = 16;
 
 /// After two non-matching packets from someone for whom no
 /// key stands, THIS side starts a handshake.
@@ -208,10 +193,6 @@ class Link {
   /// own sending says nothing about whether the counterpart lives.
   DateTime lastReal;
 
-  /// What went out since the last sign of life, for the case that the
-  /// counterpart no longer has the key ([kResendAtMost]).
-  final List<Uint8List> resend = [];
-
   /// The companion of the current silence is used up (sent, or not needed
   /// because a second real packet followed). Reset when a packet is heard.
   bool companionSpent = false;
@@ -248,7 +229,7 @@ void companion(Link l, DateTime now, void Function() sendEmpty) {
 /// Only when both hold: nothing heard under the key for [silence], AND an
 /// own REAL sending pause longer than [kFreshStartLock]. In a running stream
 /// a renewal only held packets back for a round trip and resent up to
-/// [kResendAtMost] duplicates (measured .201, S398: every 120.03 s during
+/// up to 16 duplicates (the resend buffer, removed S407) (measured .201, S398: every 120.03 s during
 /// a 25-MB transfer); a counterpart that restarted meanwhile notices the
 /// stream itself — two unreadable packets, and it starts ([kFreshStartLock]).
 ///

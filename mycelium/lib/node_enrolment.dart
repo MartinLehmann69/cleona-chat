@@ -15,10 +15,11 @@
 /// ── THE DIRECT HANDOVER ──────────────────────────────────────────────────
 ///
 /// "Directly while both are present, otherwise in the post box"
-/// (§14.6.1 step 4): [NodeEnrolment.enrolDirect] sends every piece once to
-/// the address the request named and waits for its acknowledgement until a
-/// deadline; what is not acknowledged is returned, and the caller deposits
-/// it. No retry here, no clock after the deadline.
+/// (§14.6.1 step 4): [NodeEnrolment.enrolDirect] sends every piece to the
+/// address the request named as a packet that expects its acknowledgement —
+/// repeated by the transport (§11.3a) within the deadline; what is not
+/// acknowledged is returned, and the caller deposits it. No retry of its own
+/// here, no clock after the deadline.
 ///
 /// Next to the node in [Expando]s: `node.dart` is at its line budget.
 library;
@@ -32,6 +33,8 @@ import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/identity.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
+import 'package:mycelium/node_silence.dart';
+import 'package:mycelium/silence.dart' show kSendingsAtMost;
 
 /// The length of a value (§8.2) and of a piece digest in `0x83`.
 const int kEnrolValueLength = 16;
@@ -102,21 +105,38 @@ extension NodeEnrolment on Node {
   Future<bool> enrolCallHeard(Uint8List value, Duration deadline) =>
       _await('call:${_hex(value)}', deadline);
 
-  /// Sends [pieces] directly to [to] under [value] and waits up to
-  /// [deadline] for their acknowledgements. Returns the pieces NOT
+  /// Sends [pieces] directly to [to] under [value]; each piece is a packet
+  /// that expects its acknowledgement, repeated by the transport within
+  /// [deadline] (§11.3a, `silence.dart`). Returns the pieces NOT
   /// acknowledged — for the post box. Does not throw.
   Future<List<Uint8List>> enrolDirect(
       CardAddress to, Uint8List value, List<Uint8List> pieces,
       {Duration deadline = kEnrolDirectDeadline}) async {
+    final ip = InternetAddress.fromRawAddress(Uint8List.fromList(to.address));
     final waits = <Future<bool>>[];
     for (final p in pieces) {
       final key = '${_hex(value)}:${_hex(enrolDigest(p))}';
-      waits.add(_await(key, deadline));
-      try {
-        enrolSend(kinds.kEnrolPiece, value, p, to);
-      } on Object catch (e) {
-        report('enrolment: direct piece not sent — $e');
-      }
+      final c = Completer<void>();
+      (_waiting[this] ??= {})[key] = c;
+      waits.add(silence
+          .ask(c.future,
+              to: ip,
+              port: to.port,
+              send: (_, __) {
+                try {
+                  enrolSend(kinds.kEnrolPiece, value, p, to);
+                } on Object catch (e) {
+                  report('enrolment: direct piece not sent — $e');
+                }
+                return null;
+              },
+              wait: deadline ~/ kSendingsAtMost,
+              others: false,
+              what: 'enrolment piece 0x82')
+          .then((at) {
+        _waiting[this]?.remove(key);
+        return at != null;
+      }));
     }
     final heard = await Future.wait(waits);
     final rest = [

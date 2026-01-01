@@ -25,7 +25,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart' show CardAddress;
-import 'package:mycelium/forward_family.dart' show isSelf;
 import 'package:mycelium/identity.dart';
 import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 import 'package:mycelium/node.dart';
@@ -53,10 +52,15 @@ extension NodeFirstContactBox on Node {
     }
   }
 
-  /// The holders a deposit addresses: [named] first where usable, then the
-  /// own holders ranked — three NODES in all (§8.2; OP-19 parts A/B, S398).
-  /// [at]: the recipient's own addresses — no node of them holds, named or
-  /// own: the recipient never asks itself.
+  /// The candidates of a deposit, one per NODE, in their order: [named]
+  /// first where usable, then the own holders ranked (§8.2; OP-19 parts A/B,
+  /// S398). The first three are addressed, the rest stand in for a holder
+  /// that fails (S407-VB20). [at]: the recipient's own addresses — no node of them holds, named or
+  /// own: the recipient never asks itself. This node may be one of the
+  /// [named]: a sender that is itself a fixed neighbour of the recipient is a
+  /// holder the recipient asks (§8.2 "First the recipient's fixed
+  /// neighbours"), and it holds without the wire (`postBoxSend`,
+  /// `node_split.dart`; S407-VB20).
   List<Neighbour> holdersNamedFirst(List<CardAddress> named,
       {List<CardAddress> at = const []}) {
     final not = [
@@ -64,24 +68,39 @@ extension NodeFirstContactBox on Node {
         (InternetAddress.fromRawAddress(Uint8List.fromList(c.address)), c.port),
     ];
     final away = {for (final (a, p) in not) readiness.nodeOf(a, p)};
+    // A named holder that is one of the own neighbours takes the address of
+    // that node that answered in this run (§6.2, §11.8; field 09.10.2026).
+    final live = [
+      for (final c in named)
+        switch (readiness.answeringFor(
+            InternetAddress.fromRawAddress(Uint8List.fromList(c.address)),
+            c.port)) {
+          (final a, final p) => CardAddress(Uint8List.fromList(a.rawAddress), p),
+        },
+    ];
     return depositHolders(
-        named,
-        ownHolders(not: not, n: 2 * kDepositHolders),
+        live,
+        ownHolders(not: not, n: neighbourhood.all.length),
         (a) =>
             speaks(a.$1) &&
             Neighbourhood.possible(a.$1, a.$2) &&
-            !isSelf(this, a.$1, a.$2) &&
             !away.contains(readiness.nodeOf(a.$1, a.$2)),
-        node: (a) => readiness.nodeOf(a.$1, a.$2));
+        node: (a) => readiness.nodeOf(a.$1, a.$2),
+        atMost: null);
   }
 
   /// Leaves [content] under [value] with [named] holders first, none at
-  /// [at]. Does not throw (see [NodePostBox.deposit]).
+  /// [at]; a holder that fails gives way to the next candidate (§8.2). Does
+  /// not throw (see [NodeDeposit.deposit]).
   Future<(bool done, int acknowledged)> depositNamed(
-          Uint8List content, Uint8List value, List<CardAddress> named,
-          {List<CardAddress> at = const [], bool Function()? ended}) =>
-      deposit(content, value,
-          withWhom: holdersNamedFirst(named, at: at), ended: ended);
+      Uint8List content, Uint8List value, List<CardAddress> named,
+      {List<CardAddress> at = const [], bool Function()? ended}) {
+    final c = holdersNamedFirst(named, at: at);
+    return deposit(content, value,
+        withWhom: c.take(kDepositHolders).toList(),
+        reserve: c.skip(kDepositHolders).toList(),
+        ended: ended);
+  }
 
   /// The questions under which [i]'s invitation post boxes are collected:
   /// per invitation that still accepts (standing or in its grace period,

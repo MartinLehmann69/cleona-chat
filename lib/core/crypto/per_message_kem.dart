@@ -7,7 +7,7 @@ import 'package:meta/meta.dart';
 
 /// Plain-Dart KEM-header tuple returned by [PerMessageKem.encrypt] and
 /// consumed by [PerMessageKem.decrypt]. Field names mirror the V3 wire
-/// shape ([proto.PerMessageKemV3]); the codec layer is responsible for
+/// shape ([proto.PerMessageKemEnvelope]); the codec layer is responsible for
 /// packing/unpacking against the wire type.
 ///
 /// This deliberately replaces the historical V2 wire-message
@@ -66,13 +66,13 @@ class PerMessageKem {
 
   /// HKDF salt for v2: SHA-256("cleona-per-message-kem/salt/v2").
   /// Pinned-at-build-time in `_saltV2` for runtime efficiency.
-  static final Uint8List _saltV2 = _sodium.sha256(
+  static final Uint8List _saltV2 = _sodium.sha256(  // version-name-ok: format version: KEM salt v2
     Uint8List.fromList(utf8.encode('cleona-per-message-kem/salt/v2')),
   );
 
   /// Test-only accessor for `_saltV2`. Not for production use.
   @visibleForTesting
-  static Uint8List get saltV2ForTest => _saltV2;
+  static Uint8List get saltV2ForTest => _saltV2;  // version-name-ok: format version: KEM salt v2
 
   static Uint8List _saltForVersion(int v) {
     switch (v) {

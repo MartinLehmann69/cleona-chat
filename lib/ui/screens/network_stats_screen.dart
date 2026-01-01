@@ -241,12 +241,15 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // question that the four never answered: if the
         // readiness is at `searching`, it says WHETHER the cascade
         // has anything at all to start with.
-        _StatTile(
-          icon: Icons.hub,
-          label: locale.get('stats_entry_records'),
-          value: '${_stats.entryRecords}',
-          note: locale.get('stats_entry_records_note'),
-        ),
+        // S407-N2: from the V4.1 node only — the 4.2 layer has no entry
+        // records; without a source the tile is not shown (§25.2 rule 4).
+        if (_stats.nodeGauges)
+          _StatTile(
+            icon: Icons.hub,
+            label: locale.get('stats_entry_records'),
+            value: '${_stats.entryRecords}',
+            note: locale.get('stats_entry_records_note'),
+          ),
         _StatTile(
           icon: Icons.timer,
           label: locale.get('stats_uptime'),
@@ -269,52 +272,65 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // arrived at all", "pieces arrived, the payload was never
         // finished" and "the payload was finished but could not be
         // opened" (`v41_node.dart`, comment at `verworfeneStuecke`).
-        _SectionHeader(locale.get('stats_delivery')),
-        _StatTile(
-          icon: Icons.av_timer,
-          label: locale.get('stats_slots_emitted'),
-          value: '${_stats.slotsEmitted}',
-          note: locale.get('stats_slots_emitted_note'),
-        ),
-        _StatTile(
-          icon: Icons.timer_off,
-          label: locale.get('stats_slots_missed'),
-          value: '${_stats.slotsSkipped} / ${_stats.slotsFailed}',
-          color: _stats.slotsFailed > 0 ? colorScheme.error : null,
-        ),
-        _StatTile(
-          icon: Icons.download_for_offline,
-          label: locale.get('stats_harvest_runs'),
-          value: '${_stats.harvestRuns}',
-        ),
-        _StatTile(
-          icon: Icons.travel_explore,
-          label: locale.get('stats_lookup_runs'),
-          value: '${_stats.lookupRuns}',
-        ),
-        _StatTile(
-          icon: Icons.extension,
-          label: locale.get('stats_payloads_assembled'),
-          value: '${_stats.payloadsAssembled}',
-        ),
-        _StatTile(
-          icon: Icons.mark_email_read,
-          label: locale.get('stats_payloads_opened'),
-          value: '${_stats.payloadsOpened}',
-          note: locale.get('stats_payloads_opened_note'),
-        ),
-        _StatTile(
-          icon: Icons.hourglass_bottom,
-          label: locale.get('stats_open_transfers'),
-          value: '${_stats.openTransfers}',
-        ),
-        _StatTile(
-          icon: Icons.delete_sweep,
-          label: locale.get('stats_pieces_discarded'),
-          value: '${_stats.piecesDiscarded}',
-        ),
+        //
+        // S407-N2 — WHICH TILES HAVE A SOURCE. Under the 4.2 delivery layer
+        // (`deliveryCounters`) the cover stream's sent and skipped points in
+        // time are measured; "failed" is not (the 4.2 cover stream counts no
+        // send errors) and shows "–", not a 0 that looks like a measurement.
+        // The six assembler/lookup tiles exist only with a V4.1 node
+        // (`nodeGauges`) and are otherwise not shown (§25.2 rule 4).
+        if (_stats.nodeGauges || _stats.deliveryCounters) ...[
+          _SectionHeader(locale.get('stats_delivery')),
+          _StatTile(
+            icon: Icons.av_timer,
+            label: locale.get('stats_slots_emitted'),
+            value: '${_stats.slotsEmitted}',
+            note: locale.get('stats_slots_emitted_note'),
+          ),
+          _StatTile(
+            icon: Icons.timer_off,
+            label: locale.get('stats_slots_missed'),
+            value: _stats.nodeGauges
+                ? '${_stats.slotsSkipped} / ${_stats.slotsFailed}'
+                : '${_stats.slotsSkipped} / –',
+            color: _stats.slotsFailed > 0 ? colorScheme.error : null,
+          ),
+        ],
+        if (_stats.nodeGauges) ...[
+          _StatTile(
+            icon: Icons.download_for_offline,
+            label: locale.get('stats_harvest_runs'),
+            value: '${_stats.harvestRuns}',
+          ),
+          _StatTile(
+            icon: Icons.travel_explore,
+            label: locale.get('stats_lookup_runs'),
+            value: '${_stats.lookupRuns}',
+          ),
+          _StatTile(
+            icon: Icons.extension,
+            label: locale.get('stats_payloads_assembled'),
+            value: '${_stats.payloadsAssembled}',
+          ),
+          _StatTile(
+            icon: Icons.mark_email_read,
+            label: locale.get('stats_payloads_opened'),
+            value: '${_stats.payloadsOpened}',
+            note: locale.get('stats_payloads_opened_note'),
+          ),
+          _StatTile(
+            icon: Icons.hourglass_bottom,
+            label: locale.get('stats_open_transfers'),
+            value: '${_stats.openTransfers}',
+          ),
+          _StatTile(
+            icon: Icons.delete_sweep,
+            label: locale.get('stats_pieces_discarded'),
+            value: '${_stats.piecesDiscarded}',
+          ),
+        ],
 
-        const Divider(),
+        if (_stats.nodeGauges || _stats.deliveryCounters) const Divider(),
 
         // ── Section 3: faults ────────────────────────────────
         //
@@ -324,24 +340,28 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // they stood only in the node's status line — a
         // log line that no user sees.
         _SectionHeader(locale.get('stats_disturbances')),
-        _StatTile(
-          icon: Icons.queue,
-          label: locale.get('stats_control_queue'),
-          value: '${_stats.controlQueueDepth} / ${_stats.controlQueueMax}',
-        ),
-        _StatTile(
-          icon: Icons.report_gmailerrorred,
-          label: locale.get('stats_control_dropped'),
-          value: '${_stats.droppedControl} + ${_stats.droppedEphemeral}',
-          color: _stats.droppedControl > 0 ? Colors.orange : null,
-          note: locale.get('stats_control_dropped_note'),
-        ),
-        _StatTile(
-          icon: Icons.error_outline,
-          label: locale.get('stats_control_failures'),
-          value: '${_stats.controlFailures}',
-          color: _stats.controlFailures > 0 ? Colors.orange : null,
-        ),
+        // S407-N2: the three control-queue tiles and "refused" below come
+        // from the V4.1 cover stream / blind placements only.
+        if (_stats.nodeGauges) ...[
+          _StatTile(
+            icon: Icons.queue,
+            label: locale.get('stats_control_queue'),
+            value: '${_stats.controlQueueDepth} / ${_stats.controlQueueMax}',
+          ),
+          _StatTile(
+            icon: Icons.report_gmailerrorred,
+            label: locale.get('stats_control_dropped'),
+            value: '${_stats.droppedControl} + ${_stats.droppedEphemeral}',
+            color: _stats.droppedControl > 0 ? Colors.orange : null,
+            note: locale.get('stats_control_dropped_note'),
+          ),
+          _StatTile(
+            icon: Icons.error_outline,
+            label: locale.get('stats_control_failures'),
+            value: '${_stats.controlFailures}',
+            color: _stats.controlFailures > 0 ? Colors.orange : null,
+          ),
+        ],
         // §21.3.3 no. 4, verbatim: „a node that evicts under budget
         // pressure shows this visibly in the network statistics (§25). A
         // silently shrinking delivery layer is the storage variant of the
@@ -361,11 +381,12 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
               : null,
           note: locale.get('stats_store_evicted_note'),
         ),
-        _StatTile(
-          icon: Icons.block,
-          label: locale.get('stats_store_refused'),
-          value: '${_stats.blindRefused}',
-        ),
+        if (_stats.nodeGauges)
+          _StatTile(
+            icon: Icons.block,
+            label: locale.get('stats_store_refused'),
+            value: '${_stats.blindRefused}',
+          ),
 
         const Divider(),
 
@@ -424,17 +445,21 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
         // THE V4.1 COUNTERPART TO "STORED FRAGMENTS". There it was
         // Reed-Solomon fragments of foreign messages; here it is
         // cells on foreign taglines that lie until the harvest.
-        _StatTile(
-          icon: Icons.inventory_2,
-          label: locale.get('stats_stored_cells'),
-          value: '${_stats.storedCells}',
-          note: locale.get('stats_stored_cells_note'),
-        ),
-        _StatTile(
-          icon: Icons.visibility_off,
-          label: locale.get('stats_blind_held'),
-          value: '${_stats.blindHeld}',
-        ),
+        // S407-N2: under the 4.2 layer this is the post box packets held
+        // (§25.6, `PostBoxDeposit.held`).
+        if (_stats.nodeGauges || _stats.deliveryCounters)
+          _StatTile(
+            icon: Icons.inventory_2,
+            label: locale.get('stats_stored_cells'),
+            value: '${_stats.storedCells}',
+            note: locale.get('stats_stored_cells_note'),
+          ),
+        if (_stats.nodeGauges)
+          _StatTile(
+            icon: Icons.visibility_off,
+            label: locale.get('stats_blind_held'),
+            value: '${_stats.blindHeld}',
+          ),
         _StatTile(
           icon: Icons.dataset,
           label: locale.get('stats_db_size'),

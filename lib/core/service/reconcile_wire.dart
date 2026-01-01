@@ -23,7 +23,7 @@ const int kReconcilePacketAtMost = 32768;
 /// (`smoke_reconcile_budget` 2a: 7 779 B at 0, 1 000 and 24 000 B content).
 const int kReconcileSealOverhead = 7779;
 
-/// Room for ApplicationFrameV3 → TwinSyncEnvelope → ReconcilePacket around
+/// Room for ApplicationFrame → TwinSyncEnvelope → ReconcilePacket around
 /// the body (measured together with the seal by `smoke_reconcile_wire` 2a).
 const int kReconcileFramingReserve = 512;
 
@@ -292,7 +292,7 @@ List<List<Uint8List>> reconcileFetchBatches(
 // of a pair (§4.3) instead of over the own-device line. There is no second
 // mechanism." The request is a fetch of the kind SINCE, the answer deliver
 // packets, the report a progress packet; the carrier is the ordinary
-// message `MTV3_CATCH_UP` instead of twin-sync Type 20.
+// message `MT_CATCH_UP` instead of twin-sync Type 20.
 
 /// §9.5: "written or changed since 14 days before the named moment (§9.3)"
 /// — so long a message may have rested with its sender before it left.

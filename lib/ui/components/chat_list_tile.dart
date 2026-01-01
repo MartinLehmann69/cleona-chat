@@ -92,7 +92,7 @@ class ChatListTile extends StatelessWidget {
   Color _previewColor(SurfaceRenderMode mode) {
     switch (mode) {
       case SurfaceRenderMode.photo:
-        return const Color(0xCCFFFFFF); // 80% white
+        return kPhotoSecondaryText;
       case SurfaceRenderMode.cssTeal:
         return const Color(0xCC000000); // 80% black
       case SurfaceRenderMode.cssSlate:
@@ -105,7 +105,7 @@ class ChatListTile extends StatelessWidget {
   Color _timestampColor(SurfaceRenderMode mode) {
     switch (mode) {
       case SurfaceRenderMode.photo:
-        return const Color(0xC7FFFFFF); // ~78% white
+        return kPhotoSecondaryText;
       case SurfaceRenderMode.cssTeal:
         return const Color(0xC7000000);
       case SurfaceRenderMode.cssSlate:

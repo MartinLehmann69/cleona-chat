@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Screen share quality presets (Architecture §10.5.4).
 ///
@@ -68,7 +68,7 @@ class ScreenShareManager {
   ScreenSharePreset currentPreset = ScreenSharePreset.high;
   bool optimizeForText = false;
 
-  void Function(proto.MessageTypeV3 type, Uint8List payload)? onSendToAll;
+  void Function(proto.MessageType type, Uint8List payload)? onSendToAll;
   void Function()? onShareStateChanged;
 
   /// Called when screen share starts, stops, or the quality preset changes.
@@ -104,7 +104,7 @@ class ScreenShareManager {
       ..sharerId = hexToBytes(ownUserIdHex);
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME,
+      proto.MessageType.MT_SCREEN_SHARE_FRAME,
       control.writeToBuffer(),
     );
 
@@ -126,7 +126,7 @@ class ScreenShareManager {
       ..sharerId = hexToBytes(ownUserIdHex);
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME,
+      proto.MessageType.MT_SCREEN_SHARE_FRAME,
       control.writeToBuffer(),
     );
 

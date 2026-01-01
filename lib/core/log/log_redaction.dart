@@ -76,7 +76,7 @@ import '../util/ip_address_class.dart';
 /// prevented here.
 ///
 /// The 8 hex digits are the same length that `shortPairLabel`
-/// (`lib/core/service/v41_routing.dart:419`) uses for identifiers.
+/// (`lib/core/service/delivery_routing.dart:64`) uses for identifiers.
 /// Unlike there, however, the marker here is NOT a prefix of the value: a
 /// prefix of "Martin Lehmann" still names a person. A prefix
 /// is fit for a public identifier, not for a name.

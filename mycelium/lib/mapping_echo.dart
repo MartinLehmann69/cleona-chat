@@ -10,11 +10,13 @@
 ///   (`mapping_probe.dart`). If the device's translator still holds the
 ///   probe port's mapping, the echo arrives; if not, it is dropped on the
 ///   way. That is the whole measurement.
-/// * A keep-alive (cover content `0x04`) names the device code. The code
-///   table follows the device to the address it came from
-///   (`CodeTable.sighted`); if the address in that family changed, the
-///   neighbour reports it ONCE with `0x47` and the keep-alive's token —
-///   the mapping lapsed despite the interval.
+/// * A keep-alive (cover content `0x04`) names the device code. From
+///   another address than the device's entry in that family, the neighbour
+///   sends that address ONE request (`code_move.dart`, §11.8.6); only on its
+///   answer does the code table follow the device there
+///   (`CodeTable.moveConfirmed`) and the neighbour report the move ONCE with
+///   `0x47` and the keep-alive's token — the mapping lapsed despite the
+///   interval. A keep-alive replayed from elsewhere moves nothing.
 ///
 /// ── WHY NOBODY CAN AIM IT ────────────────────────────────────────────
 ///
@@ -22,14 +24,15 @@
 /// itself, once per question, and is exactly as long as the request
 /// (17 B, both 1200 B on the wire). The identifier travels inside the
 /// shell (§4.2) — only the asker knows it. A move report goes to the
-/// address the keep-alive itself came from, at most once a minute per
-/// device and family.
+/// address the keep-alive itself came from, after that address answered,
+/// at most once a minute per device (§8.1) — whatever the family.
 library;
 
 import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:mycelium/code_move.dart';
 import 'package:mycelium/cover_stream_content.dart' show kKeepAliveContent;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
@@ -43,7 +46,7 @@ const Duration kAskedLife = Duration(seconds: 180);
 /// How many answered `0x40` are remembered; the oldest gives way.
 const int kAskedAtMost = 256;
 
-/// At most one move report per device and family in this time.
+/// At most one move report per device in this time (§8.1).
 const Duration kMovedAtMostEvery = Duration(minutes: 1);
 
 /// The token of a keep-alive (§8.1).
@@ -112,23 +115,40 @@ class MappingEcho {
     echoes++;
   }
 
-  /// A keep-alive (cover content `0x04`) from [from]:[fromPort].
+  /// A keep-alive (cover content `0x04`) from [from]:[fromPort]. From an
+  /// address that is not the device's entry in that family, the entry moves
+  /// only once that address answered one request (`code_move.dart`).
   void keepAlive(Uint8List content, InternetAddress from, int fromPort) {
     if (content.length != kKeepAliveContent) return;
-    final device = Uint8List.sublistView(content, 0, kCodeLength);
-    if (!_k.codeRoute.table.sighted(device, from, fromPort)) return;
+    final device = Uint8List.fromList(content.sublist(0, kCodeLength));
+    final token = Uint8List.fromList(content.sublist(kCodeLength));
+    codeMoveAsk(_k, device, from, fromPort,
+        answered: () => answered(device, token, from, fromPort));
+  }
+
+  /// [from]:[fromPort] answered the request a keep-alive of [device] with
+  /// [token] caused: the entry moves there, and if the device had another
+  /// entry in that family — its mapping moved — `0x47` goes back once, at
+  /// most once a minute per device whatever the family (§8.1).
+  void answered(Uint8List device, Uint8List token, InternetAddress from,
+      int fromPort) {
+    if (token.length != kTokenLength) return;
+    if (!_k.codeRoute.table
+        .moveConfirmed(device, from, fromPort, registration: false)) {
+      return;
+    }
     final t = now();
     _reported.removeWhere((_, v) => t.difference(v) >= kMovedAtMostEvery);
-    final who = '${_hex(device)}/${from.type.name}';
+    final who = _hex(device);
     if (_reported.containsKey(who)) return;
     _reported[who] = t;
     final report = Uint8List(1 + kTokenLength)
       ..[0] = kinds.kMoved
-      ..setRange(1, 1 + kTokenLength, content, kCodeLength);
+      ..setRange(1, 1 + kTokenLength, token);
     _k.outsideRoute.send(report, from, fromPort);
     movedSent++;
     _k.report('Keep-alive of device ${who.substring(0, 8)} from a new address '
-        '${from.address}:$fromPort — move reported (0x47, §8.1)');
+        '${from.address}:$fromPort answered — move reported (0x47, §8.1)');
   }
 }
 

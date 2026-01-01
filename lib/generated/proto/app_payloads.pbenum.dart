@@ -119,6 +119,7 @@ class TwinSyncType extends $pb.ProtobufEnum {
   static const TwinSyncType KEM_ROTATED = TwinSyncType._(19, _omitEnumNames ? '' : 'KEM_ROTATED');
   static const TwinSyncType RECONCILE = TwinSyncType._(20, _omitEnumNames ? '' : 'RECONCILE');
   static const TwinSyncType GROUP_LEFT = TwinSyncType._(21, _omitEnumNames ? '' : 'GROUP_LEFT');
+  static const TwinSyncType CHANNEL_JOINED = TwinSyncType._(22, _omitEnumNames ? '' : 'CHANNEL_JOINED');
 
   static const $core.List<TwinSyncType> values = <TwinSyncType> [
     CONTACT_ADDED,
@@ -140,6 +141,7 @@ class TwinSyncType extends $pb.ProtobufEnum {
     KEM_ROTATED,
     RECONCILE,
     GROUP_LEFT,
+    CHANNEL_JOINED,
   ];
 
   static final $core.Map<$core.int, TwinSyncType> _byValue = $pb.ProtobufEnum.initByValue(values);
@@ -321,19 +323,19 @@ class DeviceDelegationCapability extends $pb.ProtobufEnum {
 /// a device set change would thus be confirmed under a false description
 /// (§7.5). Field 6 default 0 = rotation, so that old senders
 /// are interpreted unchanged.
-class ApprovalKindV3 extends $pb.ProtobufEnum {
-  static const ApprovalKindV3 APPROVAL_KIND_KEY_ROTATION = ApprovalKindV3._(0, _omitEnumNames ? '' : 'APPROVAL_KIND_KEY_ROTATION');
-  static const ApprovalKindV3 APPROVAL_KIND_DEVICE_SET_CHANGE = ApprovalKindV3._(1, _omitEnumNames ? '' : 'APPROVAL_KIND_DEVICE_SET_CHANGE');
+class ApprovalKind extends $pb.ProtobufEnum {
+  static const ApprovalKind APPROVAL_KIND_KEY_ROTATION = ApprovalKind._(0, _omitEnumNames ? '' : 'APPROVAL_KIND_KEY_ROTATION');
+  static const ApprovalKind APPROVAL_KIND_DEVICE_SET_CHANGE = ApprovalKind._(1, _omitEnumNames ? '' : 'APPROVAL_KIND_DEVICE_SET_CHANGE');
 
-  static const $core.List<ApprovalKindV3> values = <ApprovalKindV3> [
+  static const $core.List<ApprovalKind> values = <ApprovalKind> [
     APPROVAL_KIND_KEY_ROTATION,
     APPROVAL_KIND_DEVICE_SET_CHANGE,
   ];
 
-  static final $core.Map<$core.int, ApprovalKindV3> _byValue = $pb.ProtobufEnum.initByValue(values);
-  static ApprovalKindV3? valueOf($core.int value) => _byValue[value];
+  static final $core.Map<$core.int, ApprovalKind> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static ApprovalKind? valueOf($core.int value) => _byValue[value];
 
-  const ApprovalKindV3._($core.int v, $core.String n) : super(v, n);
+  const ApprovalKind._($core.int v, $core.String n) : super(v, n);
 }
 
 class ReconcileFetch_Kind extends $pb.ProtobufEnum {

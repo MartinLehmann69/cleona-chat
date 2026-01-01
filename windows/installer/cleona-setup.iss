@@ -35,6 +35,10 @@ RestartApplications=no
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+german.FirewallStatus=Windows-Firewall: eingehende Verbindungen für Cleona erlauben (einmalige Zustimmung) ...
+english.FirewallStatus=Windows Firewall: allowing incoming connections for Cleona (one consent) ...
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "autostart"; Description: "Cleona Chat beim Windows-Start automatisch starten"; GroupDescription: "Autostart:"
@@ -67,6 +71,37 @@ Filename: "taskkill"; Parameters: "/IM cleona.exe /F"; Flags: runhidden; RunOnce
 var
   ResultCode: Integer;
 
+{ The inbound firewall rule of the daemon (v4_2 section 22, "Windows
+  Desktop"; S407). The setup installs without administrator rights; this is
+  the ONE step that asks for them. It runs the helper shipped in the bundle,
+  cleona-firewall.cmd - the same one the app's "Allow in firewall" runs -
+  so there is one definition of the rule: inbound allow for
+  bin\cleona-daemon.exe, UDP and TCP, all network profiles, after removing
+  every inbound rule naming the program (including the blocking "Query User"
+  rules Windows leaves when its own prompt was cancelled).
+  A declined consent does not stop the installation: the app checks the
+  rule at every start and offers the same step. }
+procedure RunFirewallHelper(const Action: String);
+var
+  Code: Integer;
+  Daemon: String;
+begin
+  Daemon := ExpandConstant('{app}\bin\cleona-daemon.exe');
+  { Through cmd.exe /d /s /c ""<helper>" <action> "<daemon>"": started
+    directly with "runas", Windows runs the .cmd as cmd.exe /C "<helper>"
+    <action> "<daemon>", cmd.exe strips the first and last quote, the path
+    breaks at the space of "Cleona Chat" and nothing is set (exit 1,
+    measured on the lab VM 14.10.2026). }
+  if ShellExec('runas', ExpandConstant('{cmd}'),
+      '/d /s /c ""' + ExpandConstant('{app}\cleona-firewall.cmd') + '" ' + Action + ' "' + Daemon + '""',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log(Format('Firewall helper "%s" ended with %d', [Action, Code]))
+  else
+    { One line: a line beginning with "[" is read as a section tag, even
+      inside [Code]. }
+    Log(Format('Firewall helper "%s" not run: %s (%d)', [Action, SysErrorMessage(Code), Code]));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
@@ -75,4 +110,17 @@ begin
     Exec('taskkill', '/IM cleona.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(1000);
   end;
+  if CurStep = ssPostInstall then
+  begin
+    WizardForm.StatusLabel.Caption := CustomMessage('FirewallStatus');
+    RunFirewallHelper('allow');
+  end;
+end;
+
+{ Uninstall removes the rule, elevated as well. It may fail (consent
+  declined): a rule naming a program that no longer exists admits nothing. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RunFirewallHelper('remove');
 end;

@@ -7,12 +7,12 @@
 // `CallTransport.sendSecuredToParticipant`; its only real
 // implementation is a no-op that returns for EVERY call
 // `MediaSendFailure.noCarrier` — reasoning in the code itself
-// (`lib/core/calls/call_transport_v41.dart:451-468`): "NO CARRIER, AND
+// (`lib/core/calls/plane_d_call_transport.dart:451-468`): "NO CARRIER, AND
 // NO INVENTED ONE … §17.5 explicitly lists the group topology as
 // open (C-9/C-10/C-11, K31-3)". A screen that opens this widget
 // would be the promise that strokes/messages/files arrive at the other
 // side — that is true today for none of the four managers. The
-// RECEIVE PATH (`handleWhiteboardStrokeV3` & siblings,
+// RECEIVE PATH (`handleWhiteboardStroke` & siblings,
 // group_call_manager.dart:1531-1619) is independently real and only waits
 // for the carrier. The translation layer for it is already finished
 // in `lib/ui/components/call_collaboration_bridge.dart`.

@@ -13,6 +13,7 @@ import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/components/language_selector.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 class SetupScreen extends StatefulWidget {
   const SetupScreen({super.key});
@@ -393,7 +394,9 @@ class _RestoreScreenState extends State<_RestoreScreen> {
     final locale = AppLocale.read(context);
 
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('restore'))),
+      appBar: AppBar(
+          title: Text(locale.get('restore')),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(top: false, child: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),

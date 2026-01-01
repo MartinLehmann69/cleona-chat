@@ -35,7 +35,7 @@ import 'entry_record.dart';
 /// expensive").
 abstract final class Partition {
   /// Prefix length for IPv4.
-  static const int v4Prefix = 24;
+  static const int v4Prefix = 24;  // version-name-ok: IP address family
 
   /// Prefix length for IPv6.
   static const int v6Prefix = 48;
@@ -50,7 +50,7 @@ abstract final class Partition {
     return _v4(host);
   }
 
-  static String? _v4(String host) {
+  static String? _v4(String host) {  // version-name-ok: IP address family
     final parts = host.split('.');
     if (parts.length != 4) return null;
     for (final t in parts) {

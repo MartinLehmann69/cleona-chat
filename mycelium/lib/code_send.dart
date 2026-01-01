@@ -23,6 +23,19 @@
 ///     post box cannot place either (two acknowledgements, §8.2). The
 ///     report says so each time.
 ///
+/// ── THE RECIPIENT ITSELF IS NO HOP (S408) ───────────────────────────────
+///
+/// Since contact seats (§5.2) a sender's fixed neighbour is often the
+/// recipient's own device. As first hop it takes the inner packet as its own
+/// AND hands it on to the neighbours it named (`Forwarder._onDetour`), and
+/// the one of them that holds its code hands it back: the recipient got the
+/// packet by step 1, by its own unpacking and once more from its neighbour —
+/// measured on `smoke_large_channel` (`berichte/S408-ROT-APP.md`, I6-2b): a
+/// nudge three times, 37 packets for a post computed at 36 (§5.6). Step 3
+/// runs via the fixed neighbours (§8.1); the recipient is reached by step 1.
+/// [recipientAt] names the addresses where the recipient itself is; a
+/// neighbour under one of them is never a first hop.
+///
 /// ── A HOP THAT DOES NOT ANSWER IS NO POSSIBLE HOP (S405) ────────────────
 ///
 /// §8.1 takes the last resort where "the only POSSIBLE first hop" is a named
@@ -35,7 +48,7 @@
 /// the shared node as [StepThreePlan.resort]; when the shell reports that a
 /// hop did not answer (`Shell.onSilent`), `code_send_retry.dart` hands the
 /// same sending to the next, after the last to the shared node directly.
-/// Cost: at most 1.6 s per silent candidate (two answer deadlines), at most
+/// Cost: at most 3.2 s per silent candidate (four answer deadlines), at most
 /// [kOpenSetAtMost] − 1 of them. A live link is tried first (OP-23).
 ///
 /// Of the next addresses, one that is an own fixed neighbour is left out
@@ -49,6 +62,8 @@
 /// Pure function over lists; `node_codes.dart` applies it. A separate file
 /// because `node_codes.dart` stands at the line budget.
 library;
+
+import 'dart:io';
 
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/neighbour.dart';
@@ -76,11 +91,26 @@ typedef StepThreePlan = ({
 List<Neighbour> liveFirst(List<Neighbour> open, bool Function(Neighbour) live) =>
     [...open.where(live), ...open.where((n) => !live(n))];
 
+/// Whether the list entry [n] is the node under [c] beyond its own
+/// addresses — two entries of one node (§11.8 "A neighbour is a node, not an
+/// address").
+typedef SameNode = bool Function(Neighbour n, CardAddress c);
+
+/// [SameNode] by [nodeOf] (`Readiness.nodeOf`: the addresses of one entry
+/// and, within this run, those that named the same node identifier, §11.8).
+/// Until C17 step 3 compared per entry: N fixed under 127.0.0.1 and named
+/// by the recipient was the first hop under its segment address (P4 O-1).
+SameNode sameNodeBy(String Function(InternetAddress a, int port) nodeOf) =>
+    (n, c) {
+      final k = nodeOf(InternetAddress.fromRawAddress(c.address), c.port);
+      return n.addresses.any((x) => nodeOf(x.address, x.port) == k);
+    };
+
 /// Why the open neighbour [o] cannot be the first hop of step 3, or `null`
 /// if it can: it holds a seat, is a contact's device, or the recipient
-/// named it (no node may be both hops). [reach]: its address this node can
-/// send to.
-String? _openBar(Neighbour o, CardAddress? reach, List<CardAddress> named,
+/// named it — under any address of its node (no node may be both hops).
+/// [reach]: its address this node can send to.
+String? _openBar(Neighbour o, CardAddress? reach, bool Function(Neighbour n) named,
         bool Function(Neighbour n) contact) =>
     reach == null
         ? 'no socket'
@@ -88,7 +118,7 @@ String? _openBar(Neighbour o, CardAddress? reach, List<CardAddress> named,
             ? 'seated'
             : contact(o)
                 ? 'contact'
-                : named.any(o.knows)
+                : named(o)
                     ? 'named'
                     : null;
 
@@ -100,7 +130,7 @@ const int _kNoteMax = 8;
 /// whether a live one existed): the open set in the order step 3 tried it,
 /// each with its live marker and, if it cannot be the hop, why. Log only.
 String _openNote(List<Neighbour> open, bool Function(Neighbour n) live,
-    CardAddress? Function(Neighbour n) reach, List<CardAddress> named,
+    CardAddress? Function(Neighbour n) reach, bool Function(Neighbour n) named,
     bool Function(Neighbour n) contact) {
   final shown = [
     for (final o in open.take(_kNoteMax))
@@ -122,6 +152,8 @@ String _openNote(List<Neighbour> open, bool Function(Neighbour n) live,
 /// [live]: `Node.linkLive` — given, the open set is taken live first
 /// ([liveFirst], OP-23) and the report of an open hop or the last resort
 /// names the open set with its live markers (S398 lab run 2, finding 2).
+/// [sameNode]: given, "named" and "own fixed neighbour" are judged per node
+/// ([sameNodeBy]), not per list entry (C17 U-2).
 /// `null`: no next address, or none this node could send to.
 StepThreePlan? stepThreePlan({
   required List<Neighbour> fixed,
@@ -130,6 +162,9 @@ StepThreePlan? stepThreePlan({
   required bool Function(Neighbour n) contact,
   required bool Function(CardAddress a) speaks,
   bool Function(Neighbour n)? live,
+  NeighbourAddress? Function(Neighbour n)? answering,
+  SameNode? sameNode,
+  List<CardAddress> recipientAt = const [],
 }) {
   final named = neighbourListClean(recipient);
   if (named.isEmpty) return null;
@@ -146,8 +181,21 @@ StepThreePlan? stepThreePlan({
             resort: null,
           );
   }
-  bool clear(Neighbour n) => !named.any(n.knows);
+  bool isNode(Neighbour n, CardAddress c) =>
+      n.knows(c) || (sameNode?.call(n, c) ?? false);
+  bool isNamed(Neighbour n) => named.any((c) => isNode(n, c));
+  bool clear(Neighbour n) => !isNamed(n);
+  bool isRecipient(Neighbour n) => recipientAt.any((c) => isNode(n, c));
+  // The address that answered in this run first (§6.2, §11.8; field
+  // 09.10.2026: a named public address silent from the own LAN, the
+  // private one of the same node answering), then the first one that can
+  // be sent to.
+  CardAddress? answered(Neighbour n) => switch (answering?.call(n)) {
+        final a? when speaks(a.asCardAddress) => a.asCardAddress,
+        _ => null,
+      };
   CardAddress? reach(Neighbour n) {
+    if (answered(n) case final c?) return c;
     for (final a in n.addresses) {
       final c = a.asCardAddress;
       if (speaks(c)) return c;
@@ -157,20 +205,22 @@ StepThreePlan? stepThreePlan({
 
   final ownLeftOut = [
     for (final a in named)
-      if (!fixed.any((f) => f.knows(a))) a,
+      if (!fixed.any((f) => isNode(f, a))) a,
   ];
   final next = ownLeftOut.isEmpty ? named : ownLeftOut;
   // The shared node, sent to directly — the last resort (§8.1): the first
   // own fixed neighbour the recipient named.
   //
-  // The ADDRESS is the one the recipient named (for a first contact: the
-  // card's), not the first one remembered for that neighbour. Field test
+  // The ADDRESS is the one of that node that answered in THIS run, then the
+  // one the recipient named (for a first contact: the card's), not the
+  // first one remembered for that neighbour. Field test
   // 06.10.2026: the phone (LTE, WLAN off) remembered the bootstrap first
   // under its old private LAN address and sent the last resort there —
   // nothing arrived. Up to 9a1bced5 the 0x20 went to the card's address.
   CardAddress? resort;
   for (final f in fixed) {
     if (clear(f)) continue;
+    resort ??= answered(f);
     for (final a in named) {
       if (f.knows(a) && speaks(a)) {
         resort ??= a;
@@ -180,17 +230,18 @@ StepThreePlan? stepThreePlan({
   }
   final viaFixed = [
     for (final f in fixed)
-      if (clear(f) && reach(f) != null) reach(f)!,
+      if (clear(f) && !isRecipient(f) && reach(f) != null) reach(f)!,
   ];
   final viaOpen = [
     for (final o in open)
-      if (_openBar(o, reach(o), named, contact) == null) reach(o)!,
+      if (!isRecipient(o) && _openBar(o, reach(o), isNamed, contact) == null)
+        reach(o)!,
   ];
   final hops = [...viaFixed, ...viaOpen];
   if (hops.isNotEmpty) {
     final note = viaFixed.isNotEmpty || live == null
         ? ''
-        : _openNote(open, live, reach, named, contact);
+        : _openNote(open, live, reach, isNamed, contact);
     return (
       hop: hops.first,
       next: next,
@@ -204,7 +255,7 @@ StepThreePlan? stepThreePlan({
   }
   if (resort != null) {
     final note =
-        live == null ? '' : _openNote(open, live, reach, named, contact);
+        live == null ? '' : _openNote(open, live, reach, isNamed, contact);
     return (
       hop: null,
       next: [resort],

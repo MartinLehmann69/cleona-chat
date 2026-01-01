@@ -2,7 +2,6 @@
 /// take over what they hand out, acknowledge it for deletion.
 ///
 /// **A conversation per holder** (v4_2 §8.2 "collection ends", D-44):
-///
 /// * **no holder waits for another** — every holder has a row of its own
 ///   with the questions put to it. The first is open (its `0x32` is out),
 ///   the others follow one another: the next goes out when the one before
@@ -14,16 +13,15 @@
 ///   [beforeRequest]).
 /// * **what a conversation still lacks is asked for the way §11.3 asks for
 ///   missing parts** (owner decision 01.10.2026): after a quiet period of
-///   [kRestPeriod] without a new answer of that holder the collector asks
-///   ONCE more for everything still open — the question, if no task has
-///   come; otherwise the proofs of the values still unanswered. If that
-///   brings nothing within another quiet period, the holder is done for this
-///   edge with what it has handed out for that question, and the next
-///   question in its row goes out; if it answered nothing at all, that is
-///   ONE use without an answer per holder and edge (§11.8); an unreachable
-///   holder drops what waits for it (§20.2). No timer runs while answers are
-///   arriving ([arriving]). "Done" ends the waiting, not the taking over: an
-///   answer that comes afterwards is processed as if the question were open.
+///   [kRestPeriod] without a new answer the collector asks again for
+///   everything still open — the question, if no task has come; otherwise
+///   the proofs still unanswered — repeated as §11.3a says ([SilentRounds]).
+///   If that brings nothing, the holder is done for this edge and the next
+///   question in its row goes out; if it answered nothing at all, its
+///   address has failed, once per holder and edge ([Silence]); an
+///   unreachable holder drops what waits for it (§20.2). No timer runs while
+///   answers arrive ([arriving]). "Done" ends the waiting, not the taking
+///   over: a later answer is processed as if the question were open.
 /// * **every piece at once** — handed to its consumer and, if that took it,
 ///   acknowledged for deletion when it arrives, to every holder asked whose
 ///   task is answered (M-2).
@@ -46,17 +44,18 @@ import 'package:mycelium/post_box_log.dart'
     show collectOutcome, holdersNamed, talkOpen;
 import 'package:mycelium/post_box_proof.dart';
 import 'package:mycelium/post_box_runs.dart';
+import 'package:mycelium/silence.dart' show Silence, SilentRounds;
 import 'package:mycelium/split.dart' show kRestPeriod;
 import 'package:mycelium/split_flow.dart' show SendEnd;
 import 'package:mycelium/update_manifest_compartment.dart' show isManifestValue;
 
 class PostBoxCollector {
   final Send send;
-  final void Function(List<Neighbour> withoutAnswer)? onMute;
+  final Silence silence; // §11.3a: declares a silent holder's address failed
   final void Function(InternetAddress from, int port, String node)? onNode;
   final void Function(String)? report;
   PostBoxCollector(
-      {required this.send, this.onMute, this.onNode, this.report});
+      {required this.send, required this.silence, this.onNode, this.report});
 
   /// Per holder (`adresse:port`): the questions put to it, in turn. The
   /// first is open, the others wait; a holder without a question has no row.
@@ -67,9 +66,8 @@ class PostBoxCollector {
   /// has gone to that holder. At most [kLateAtMost]; the oldest drops (§20.2).
   final List<Conversation> _late = [];
 
-  /// The holders whose silence was counted as a use without an answer
-  /// (§11.8) — ONE per holder and edge, not one per question in its row:
-  /// emptied by [edge] (an edge begins), and a holder leaves when it answers.
+  /// The holders declared failed (§11.3a) — ONE per holder and edge, not per
+  /// question; emptied by [edge], and a holder leaves when it answers.
   final Set<String> _silent = {};
   void edge() => _silent.clear();
 
@@ -90,8 +88,8 @@ class PostBoxCollector {
     open.map((t) => t.of).toSet().forEach(_check);
   }
 
-  /// Called before a request goes to a holder — in the node the shell's
-  /// `renewIfSilent` (§11.6 variant A, owner 30.09.2026).
+  /// Called before a request or a repeat of proofs goes to a holder — in the
+  /// node the shell's `renewIfSilent` (§11.8.7: `0x32` and `0x36`).
   void Function(Neighbour holder)? beforeRequest;
 
   /// Whether a transmission of [holder] is arriving right now — in the node
@@ -167,15 +165,16 @@ class PostBoxCollector {
   /// [kRestPeriod] without a new answer of [t]'s holder (§8.2, as §11.3).
   void _quiet(Conversation t) {
     if (t.end != null) return;
-    // Parts of a transmission are arriving: no timer runs meanwhile.
-    if (arriving?.call(t.holder) ?? false) return _listen(t);
-    // The one request for what is missing brought nothing.
-    if (t.progressAtRequest == t.progress) return _end(t, TalkEnd.quiet);
+    if (arriving?.call(t.holder) ?? false) return _listen(t); // parts arriving
+    if ((t.progressAtRequest ?? 0) != t.progress) { // else: repeats (§11.3a)
+      t.rounds.progress();
+    } else if (!t.rounds.again()) {
+      return _end(t, TalkEnd.quiet);
+    }
     t.progressAtRequest = t.progress;
-    final key = neighbourKey(t.holder);
-    final random = t.random;
+    final key = neighbourKey(t.holder), random = t.random;
     if (random == null) {
-      report?.call('collect: $key silent — the question is asked once more');
+      report?.call('collect: $key silent — the question is asked again');
       return _request(t);
     }
     final open = [
@@ -183,7 +182,8 @@ class PostBoxCollector {
         if (!t.done(asHex(f.value))) f
     ];
     report?.call('collect: $key silent — the proofs of ${open.length} '
-        'value(s) still unanswered go out once more');
+        'value(s) still unanswered go out again');
+    beforeRequest?.call(t.holder); // repeats alike (§11.8.7, C-11)
     for (final f in open) {
       t.restart(asHex(f.value));
       _send(t, proofPacket(f, random));
@@ -279,15 +279,15 @@ class PostBoxCollector {
     }
     _check(t.of);
     if (how == TalkEnd.unreachable) {
-      report?.call('collect: $key unreachable — one use without an answer');
-      onMute?.call([t.holder]);
+      // The handshake and its repeats failed: the shell has declared it.
+      report?.call('collect: $key unreachable — its handshake failed');
     } else if (how == TalkEnd.quiet) {
-      // ONE use per holder and edge, however many questions it leaves.
+      // ONE failure per holder and edge, however many questions it leaves.
       final counts = !t.answered && _silent.add(key);
-      report?.call('collect: one request for what is missing brought nothing '
-          '— this question is done for this edge; open: ${talkOpen(t)}'
-          '${counts ? ' — one use without an answer' : ''}');
-      if (counts) onMute?.call([t.holder]);
+      report?.call('collect: the request for what is missing and its repeats '
+          'brought nothing — this question is done for this edge; open: '
+          '${talkOpen(t)}${counts ? ' — the holder never answered' : ''}');
+      if (counts) silence.failedAddress(t.holder.$1, t.holder.$2, 'collect 0x32');
     }
   }
 

@@ -168,7 +168,7 @@ extension DeviceSetAnnouncementOps on CleonaService {
       newSeq: seq,
     );
 
-    final ann = proto.DeviceSetAnnounceV3()
+    final ann = proto.DeviceSetAnnounce()
       ..seq = seq
       ..issuedAtMs = Int64(DateTime.now().millisecondsSinceEpoch)
       ..previousDeviceCount = _devices.length
@@ -197,10 +197,10 @@ extension DeviceSetAnnouncementOps on CleonaService {
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
       sent++;
       _detachedSend(
-          'MTV3_DEVICE_SET_ANNOUNCE',
+          'MT_DEVICE_SET_ANNOUNCE',
           sendToUser(
             recipientUserId: contact.nodeId,
-            messageType: proto.MessageTypeV3.MTV3_DEVICE_SET_ANNOUNCE,
+            messageType: proto.MessageType.MT_DEVICE_SET_ANNOUNCE,
             payload: payload,
           ));
     }
@@ -219,7 +219,7 @@ extension DeviceSetAnnouncementOps on CleonaService {
   /// ourselves), and only last the expensive quorum check. None of it may
   /// be skipped, because every later check takes the earlier ones as
   /// given.
-  void _handleDeviceSetAnnounceV3(HarvestEvent event) {
+  void _handleDeviceSetAnnounce(HarvestEvent event) {
     final senderHex = event.senderUserId.hex;
     final contact = _contacts[senderHex];
     if (contact == null || contact.status != 'accepted') {
@@ -228,9 +228,9 @@ extension DeviceSetAnnouncementOps on CleonaService {
       return;
     }
 
-    proto.DeviceSetAnnounceV3 ann;
+    proto.DeviceSetAnnounce ann;
     try {
-      ann = proto.DeviceSetAnnounceV3.fromBuffer(event.payload);
+      ann = proto.DeviceSetAnnounce.fromBuffer(event.payload);
     } catch (e) {
       _log.warn('DEVICE_SET_ANNOUNCE from ${_short(senderHex)}: '
           'not readable ($e) — discarded.');
@@ -249,7 +249,7 @@ extension DeviceSetAnnouncementOps on CleonaService {
     // sender wrote them (`writeToBuffer` writes by field number, so the
     // order is not intent but a property). NO `deepCopy()` followed by
     // `clear…`: that is marked as deprecated in this protobuf version.
-    final withoutSig = proto.DeviceSetAnnounceV3()
+    final withoutSig = proto.DeviceSetAnnounce()
       ..seq = ann.seq
       ..issuedAtMs = ann.issuedAtMs
       ..previousDeviceCount = ann.previousDeviceCount

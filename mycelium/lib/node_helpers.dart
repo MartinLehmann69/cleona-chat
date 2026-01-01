@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -11,6 +12,7 @@ import 'package:mycelium/wire.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/cover_stream.dart' as cover;
 import 'package:mycelium/card.dart';
+import 'package:mycelium/envelope.dart' show Address;
 import 'package:mycelium/node_amendment.dart';
 import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
 import 'package:mycelium/node_invitation.dart';
@@ -18,6 +20,7 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/board_proof.dart';
 import 'package:mycelium/board_node.dart';
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/durable_node.dart' show durableDispatch;
 import 'package:mycelium/trace.dart';
 import 'package:mycelium/trace_first_contact.dart' show firstContactMatch;
 
@@ -190,6 +193,32 @@ bool outTheSegment(InternetAddress a) {
 List<NetworkInterface> get interfaces => _immediateInterfaces;
 List<NetworkInterface> _immediateInterfaces = const [];
 
+/// Whether [to] is [k] itself — the ONE rule "own address" for every layer
+/// (the neighbourhood's admission, the channel keepers, lane 3; S407 B-19,
+/// B22-2, INTEGRATION3 N-1). A packet to it must not go to the wire: the
+/// shell cannot carry a packet to its own address (S407-B19) and declares
+/// such an address failed at once (S407-SHELLSELF).
+///
+/// Own are: under the data port, every loopback address and every
+/// interface address. The WHOLE of 127/8, not 127.0.0.1 alone: the data
+/// socket is bound to the wildcard, so 127.0.0.2 under the own port reaches
+/// this very node (measured, `smoke_neighbour_sources` N-1); smokes use
+/// 127.0.0.2 for OTHER nodes only under other ports. Interface addresses
+/// also of a family without a socket now: the address is no less this node
+/// for it, and a waiting address comes back with its family (§11.8.5).
+/// Further the confirmed public address (§7.3) under the port a neighbour
+/// outside saw, which a translator may have changed; another node behind
+/// the same public address has another port.
+bool ownTarget(Node k, CardAddress to) {
+  final a = InternetAddress.fromRawAddress(to.address);
+  if (to.port == k.port &&
+      (a.isLoopback ||
+          interfaces.any((s) => s.addresses.any((x) => x.address == a.address)))) {
+    return true;
+  }
+  return k.publicAddress?.equal(to) ?? false;
+}
+
 /// Must be called once before the first card generation —
 /// `NetworkInterface.list` is asynchronous, [cardFor] is not supposed to be.
 ///
@@ -255,6 +284,23 @@ Future<(Wire, Shell, cover.CoverStream)> socketBuild(
 /// and siblings); an own enumeration of numbers would be exactly the
 /// second place per number that `check-mycelium-rules.sh` rule 4 prevents.
 extension Assignment on Node {
+  /// Whether [to] is ANOTHER identity of this node than the sending [from]
+  /// (§4.5.1; S407 B-22) — then the ladder takes the local step alone. An
+  /// identity's packet to itself is never local: it is meant for its other
+  /// devices (§14.7).
+  bool hostsOther(Address to, Address from) =>
+      !to.sameIdentity(from) &&
+      identities.any((i) => i.postBox.address.sameIdentity(to));
+
+  /// The local step (`LadderStep.local`, `ladder.dart`): [packet] goes to this node's own
+  /// receive side in the next microtask — after the sending has noted its
+  /// shipment, so the receipt finds it — exactly as it would have arrived.
+  /// It comes without a return route: the loopback address is no address of
+  /// the sender that a receipt or a learned route could use (§6.3, D-66);
+  /// the receipt is local again, by [hostsOther].
+  void deliverHere(Uint8List packet) => scheduleMicrotask(() => feed(
+      packet, InternetAddress.loopbackIPv4, port, withoutReturnRoute: true));
+
   void assign(Uint8List data, InternetAddress from, int fromPort,
       {bool withoutReturnRoute = false}) {
     if (data.isEmpty) return;
@@ -301,11 +347,16 @@ extension Assignment on Node {
       } else if (kinds.isMedia(s)) {
         mediaReception?.call(data, from, fromPort);
       } else if (kinds.isGroup(s)) {
-        groupsReception?.call(data);
+        // §16.2.5: a forwarded or collected packet carries no address of
+        // its asker — only a nudge is taken that way (host_channel.dart).
+        groupsReception?.call(data, from, fromPort, withoutReturnRoute);
       } else if (kinds.isUpdate(s)) {
         updateReception?.call(data, from, fromPort);
       } else if (kinds.isEnrolment(s)) {
         if (!withoutReturnRoute) enrolmentReceive(data, from, fromPort);
+      } else if (kinds.isDurable(s)) {
+        // §16.0: without an attached stock dropped silently, as 4.2.3 does.
+        if (!withoutReturnRoute) durableDispatch(this, data, from, fromPort);
       } else {
         report('unknown kind $s discarded');
       }

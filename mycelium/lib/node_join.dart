@@ -8,7 +8,9 @@ import 'package:mycelium/card.dart';
 import 'package:mycelium/address_class.dart' show routesFromCard;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart' show hexFrom, shortFrom;
+import 'package:mycelium/node_join_plea.dart';
 import 'package:mycelium/ladder.dart';
+import 'package:mycelium/card_text_key.dart' show cardWithNeighbour;
 import 'package:mycelium/neighbourhood_card.dart' show cardSeatForStrangers;
 import 'package:mycelium/pair.dart' show dayValue, firstContactCode;
 import 'package:mycelium/proof_of_work.dart' show ProofOfWork;
@@ -77,13 +79,14 @@ extension NodeJoin on Node {
     // S394: the code went with the next cover packet, 25 s after the request
     // (handset, 24.09.). Since F-B the request leaves when the `0x25` for the
     // piece carrying the code is back, or after its re-send stayed
-    // unanswered — two answer deadlines at most — and it names the address
+    // unanswered at every address (§11.3a) — and it names the address
     // that answered (`RegistrationSend.namedAddress`). Field 06.10.2026: the
     // code went to a dead first address, the answer arrived before it.
     codeRoute.codesChanged();
     final seat = cardSeatForStrangers(neighbourhood);
     if (seat == null) {
       b.start();
+      joinStartedMark(b);
     } else {
       final t0 = DateTime.now();
       codeRoute.registration.whenRegistered(seat, b.answerCode, (at) {
@@ -91,6 +94,7 @@ extension NodeJoin on Node {
             '${at == null ? "not confirmed by the fixed neighbour" : "registered at $at"} '
             'after ${DateTime.now().difference(t0).inMilliseconds} ms — request leaves');
         b.start();
+        joinStartedMark(b);
       });
     }
     return b;
@@ -102,18 +106,21 @@ extension NodeJoin on Node {
   /// the waiting ended: the join lived on, sent its request when a bundle
   /// came late, and was gone after the next restart, so the issuer's
   /// acceptance found no code (`berichte/S405-ERSTKONTAKT-GESAMTANALYSE.md`
-  /// E-1). A bundle that arrives later finds no join and is reported.
+  /// E-1). A bundle that arrives later finds no join and is reported. Since
+  /// S408 also when the request (2) failed at its only step ([why]).
   ///
   /// An ended join sends NOTHING any more ([_viaTheLadder]): the waiter on
   /// its reply code's registration would otherwise still start it (Fable,
   /// `berichte/S405-FABLE-F1-OOB.md` 1b). Only for the QR/NFC round trip —
   /// an out-of-band join has no deadline (§15.1, S405 F-1).
-  void joinAbandon(Join b, {Identity? forField}) {
+  void joinAbandon(Join b,
+      {Identity? forField, String why = 'no bundle within the deadline'}) {
     _ended[b] = true;
     (forField ?? main).joins.remove(b);
     _running[b]?.giveUp();
+    _sentTo[b]?.giveUp();
     codeRoute.codesChanged();
-    report('Join: no bundle within the deadline — join '
+    report('Join: $why — join '
         '${shortFrom(hexFrom(b.answerCode))} ended, its reply code deregistered');
   }
 
@@ -140,6 +147,7 @@ extension NodeJoin on Node {
     _watch[b] = (onRequest: null, onPlaced: onPlaced);
     if (request != null && underInvitation != null) {
       _pending[b] = request;
+      _request[b] = request;
       _again[b] = () => _viaTheLadder(b, request, card, asValue, null, underInvitation);
     }
     asValue.joins.add(b);
@@ -174,6 +182,58 @@ extension NodeJoin on Node {
   /// the caller saves with the join (`memory_first_contact.dart` version 3).
   Uint8List? joinPendingRequest(Join b) => _pending[b];
 
+  /// The out-of-band joins of [i] whose issuer is looked up at this edge
+  /// (§15.2, S407 V2): request out, no answer yet, its window still
+  /// accepted, not looked up before in this run. Each is returned — and
+  /// noted — ONCE; a restart is a start edge and may look it up again.
+  List<Join> joinsToLookUp(Identity i) {
+    final now = ProofOfWork.windowNow();
+    final out = <Join>[];
+    for (final b in List.of(i.joins)) {
+      final w = b.requestWindow;
+      if (_request[b] == null || b.done || b.declined || _ended[b] == true) continue;
+      if (_lookedUp[b] == true || w == null || !ProofOfWork.windowAccepted(w, now)) {
+        continue;
+      }
+      _lookedUp[b] = true;
+      out.add(b);
+    }
+    return out;
+  }
+
+  /// [b]'s out-of-band request once more, to the addresses [moved] names
+  /// (the issuer's record, `publisher_lookup.dart`) — directly only: the
+  /// card's neighbour did not answer and the post box keeps its own rule
+  /// ([joinsSendAgain]). The same packet: the issuer takes it once. Step 1
+  /// is repeated until the issuer's end mark (§11.3a, as in [_viaTheLadder];
+  /// S408, FLAKERCA O-2) — until S408 it left once.
+  void joinSendTo(Join b, Card moved) {
+    final packet = _request[b];
+    if (packet == null || b.done || b.declined || _ended[b] == true) return;
+    report('Join: out-of-band request ${shortFrom(hexFrom(b.answerCode))} '
+        "sent to the issuer's current addresses (§15.2)");
+    _sentTo[b]?.giveUp();
+    _sentTo[b] = ladder.send(
+        packet,
+        Target.outDueTo(routesFromCard(moved),
+            identifier: b.card.fingerprint,
+            code: firstContactCode(b.card.code),
+            postBoxApplicable: false),
+        answeredByEndMark: true);
+  }
+
+  /// [b]'s card neighbour moved: the record under its key names [now]
+  /// (`neighbour_find.dart`). Every later packet of [b] takes it, and the
+  /// request goes again at once — the same packet (D-44): step 3 by the
+  /// first-contact code and, for a line, the post box with [now] as holder.
+  void joinNeighbourMoved(Join b, CardAddress now) {
+    if (b.done || b.declined || _ended[b] == true) return;
+    _moved[b] = cardWithNeighbour(b.card, now);
+    report('Join ${shortFrom(hexFrom(b.answerCode))}: card neighbour found '
+        'again at $now under its record key (§11.9) — request again');
+    _again[b]?.call();
+  }
+
   /// Put a first-contact packet on the ladder (§7.1).
   ///
   /// [proof] is the address from which the packet just answered came.
@@ -197,8 +257,10 @@ extension NodeJoin on Node {
   /// „The fingerprint is the identifier"); the code is the
   /// first-contact code of the card (proposal M 5.7), which the issuer registers with
   /// his fixed neighbour (S391: registration builds M1).
-  void _viaTheLadder(Join b, Uint8List packet, Card card,
+  void _viaTheLadder(Join b, Uint8List packet, Card given,
       Identity asValue, CardAddress? proof, [Uint8List? underInvitation]) {
+    // S407 a': the card's neighbour found again under its record key.
+    final card = _moved[b] ?? given;
     if (_ended[b] == true) {
       // S405 F-1: an ended join sends nothing (the line above it may still
       // have reported building the packet).
@@ -212,7 +274,22 @@ extension NodeJoin on Node {
     // would still deposit into three post boxes after [kVersatzBriefkasten], although the
     // bundle (1) has long been there — three deposits with 18 bits of
     // proof of work each (§8.2) for a packet that nobody needs any more.
-    _running[b]?.acknowledged();
+    //
+    // The SAME packet again (an edge of §8.2 re-sends the out-of-band
+    // request, D-44) is no answer: the previous sending is replaced, not
+    // acknowledged. Until S407 it was reported "delivered … acknowledged"
+    // without any receipt (Windows lab 07.10.2026 20:47:53, ladder b25f9fae).
+    final previous = _running[b];
+    if (previous != null && bytesEqual(previous.packet, packet)) {
+      previous.giveUp();
+    } else {
+      _sentTo[b]?.giveUp(); // the next link answers it as well
+      // [proof]: where the answering link came from — it stamps the step-1
+      // address of the previous link, else the plea's (§11.8.4, O-2), once.
+      final stamped = previous?.acknowledged(from: proof) ?? false;
+      // a new link of the chain answers the plea (§11.3a)
+      joinPleaAnswered(b, from: stamped ? null : proof);
+    }
     // The ONE line that makes the first contact via step 3 measurable: the
     // code under which the issuer should be registered with his fixed neighbour,
     // and whether the card names a neighbour at all —
@@ -227,7 +304,7 @@ extension NodeJoin on Node {
     report('Join: first-contact code '
         '${shortFrom(hexFrom(firstContactCode(card.code)))}, card neighbour $where, '
         'proof ${proof == null ? "none" : "present"}');
-    final s = _running[b] = ladder.send(
+    Shipment out() => _running[b] = ladder.send(
         packet,
         Target.outDueTo(routesFromCard(card),
             lan: proof,
@@ -235,7 +312,27 @@ extension NodeJoin on Node {
             code: firstContactCode(card.code),
             postBoxApplicable:
                 proof == null && (underInvitation != null || b.done),
-            boxValue: b.done ? null : underInvitation));
+            boxValue: b.done ? null : underInvitation,
+            recipientOwn: card.ownAddresses),
+        // §15.1, §11.3a: the request is repeated until the issuer holds it whole
+        answeredByEndMark: packet[0] == PacketKind.request.code);
+    // The QR/NFC plea expects the bundle: a request under §11.3a
+    // (`node_join_plea.dart`, F-3) — every repeat goes all applicable steps.
+    final to = proof ?? card.ownAddresses.firstOrNull ?? card.neighbourAddress;
+    if (packet[0] == PacketKind.bundlePlea.code && underInvitation == null) {
+      if (to == null) {
+        out();
+        return joinPleaNoWay(b);
+      }
+      return joinPleaAsk(b, to, () {
+        _running[b]?.giveUp();
+        out();
+      }, () => _ended[b] == true);
+    }
+    final s = out();
+    if (packet[0] == PacketKind.request.code && underInvitation == null && !b.done) {
+      joinRequestWatch(b, s); // QR/NFC: answered or failed (§11.3a, O-1)
+    }
     if (underInvitation != null && !b.done && packet[0] == PacketKind.request.code) {
       _requestOut(b, packet, s,
           () => _viaTheLadder(b, packet, card, asValue, null, underInvitation));
@@ -248,6 +345,7 @@ extension NodeJoin on Node {
   /// until then it rests, never an error (§12.2). Placed is final (§9.3).
   void _requestOut(Join b, Uint8List packet, Shipment s, void Function() again) {
     _pending[b] = packet;
+    _request[b] = packet;
     _again[b] = again;
     final w = _watch[b];
     void tell(bool inTransit) {
@@ -278,6 +376,12 @@ final Expando<({void Function(bool)? onRequest, void Function()? onPlaced})>
 final Expando<Uint8List> _pending = Expando('pending out-of-band request');
 final Expando<void Function()> _again = Expando('send the request again');
 
+/// Per out-of-band join: its request, kept after a post box took it, and
+/// whether its issuer was looked up in this run (S407 V2).
+final Expando<Uint8List> _request = Expando('out-of-band request');
+final Expando<bool> _lookedUp = Expando('issuer looked up');
+final Expando<Card> _moved = Expando('card with its neighbour found again');
+
 /// Whether the out-of-band request's state was told ([NodeJoin._requestOut]).
 final Expando<bool> _told = Expando('request state told');
 
@@ -288,3 +392,6 @@ final Expando<bool> _ended = Expando('ended join');
 /// node: the key is weak, so an abandoned join takes
 /// its entry with it without anyone having to clean up.
 final Expando<Shipment> _running = Expando('running first contact send');
+
+/// The request sent to the issuer's current addresses ([NodeJoin.joinSendTo]).
+final Expando<Shipment> _sentTo = Expando('request to current addresses');

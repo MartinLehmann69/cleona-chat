@@ -26,11 +26,18 @@
 /// (`test/smoke_board.dart`).
 ///
 /// ── WHO ANSWERS (W6) ────────────────────────────────────────────────────
-/// Only a node that has PROVEN its reachability: by a mapping
-/// that the router has granted, or by an unsolicited packet from the
-/// open network (`board_proof.dart`). The address class alone is
-/// no proof — a global IPv6 behind a stateful firewall
-/// accepts nothing. Without proof: no answer, no packet.
+/// Only a node that has PROVEN its reachability keeps a board: by a
+/// mapping that the router has granted, or by an unsolicited packet from
+/// the open network (`board_proof.dart`). The address class alone is no
+/// proof. Without proof the node answers with its own addresses and no
+/// entry (S407, D-21): a 4.2.3 node reads it as an empty board.
+///
+/// ── SILENCE (§11.3a, S407-STILLE F-12) ───────────────────────────────────
+/// A 4.2.3 node without proof keeps silent on a question. So the question
+/// goes as a request under §11.3a ([Silence]) only to a peer that has
+/// answered a `0x43` before — it has the new answer side and its silence
+/// means silence. Towards every other peer it goes once, as before, and
+/// its silence fails nothing.
 ///
 /// ── WHEN IT IS ASKED ─────────────────────────────────────────────────────
 /// Once per edge, after sources 1–3 and before the external entries
@@ -53,6 +60,7 @@ import 'package:mycelium/board_proof.dart';
 import 'package:mycelium/neighbourhood.dart' show Neighbour;
 import 'package:mycelium/shell_start.dart' show kPayloadAtMost;
 import 'package:mycelium/kinds.dart' as kinds;
+import 'package:mycelium/silence.dart' show Silence;
 import 'package:mycelium/split.dart' show kHeader;
 
 /// Length of the random value that connects question and answer (§11.8a).
@@ -71,6 +79,9 @@ const int kAnswerAnswerAtMost = 1 +
 /// answer keeps no board (W6) — that is not an error.
 const Duration kBoardAnswerDeadline = Duration(seconds: 2);
 
+/// Peers remembered as having the answer side of S407 ([Board]).
+const int kAnsweringAtMost = 64;
+
 /// How many neighbours are asked at most per edge, one after the
 /// other, until one answers. §5.6 reckons with ONE exchange per edge
 /// (≤ 0.7 KB); the limit caps the questions to neighbours without a board.
@@ -80,13 +91,18 @@ const int kAnswerAskPerEdge = 3;
 /// in an answer, even if the callback should deliver them.
 const Duration kConfirmedAtMost = Duration(days: 1);
 
-typedef AnswerSend = void Function(
+typedef AnswerSend = FutureOr<Object?> Function(
     Uint8List packet, InternetAddress target, int targetPort);
 
 class _Open {
   final InternetAddress address;
   final int port;
   final Completer<AddressList> done = Completer();
+
+  /// Where the answer actually came from (§11.8: binding needs "a sealed
+  /// packet that arrives from one of them", S407-LB-P1 C-15).
+  late InternetAddress from;
+  late int fromPort;
   _Open(this.address, this.port);
 }
 
@@ -97,6 +113,11 @@ class Board {
   final List<CardAddress> Function(InternetAddress asker) _own;
   final ReachabilityProof? _passive;
   final Duration _deadline;
+  final Silence _silence; // §11.3a, only towards peers in [_answering]
+
+  /// Peers (`address:port`) that answered a `0x43` — they have the answer
+  /// side of S407. At most [kAnsweringAtMost]; the oldest goes (§20.2).
+  final Set<String> _answering = {};
   final void Function(String)? _report;
 
   /// Learned addresses — own ones of [from] and candidates for the
@@ -110,7 +131,7 @@ class Board {
 
   /// Counters for probes and network statistics (§25) — read only.
   int answered = 0;
-  int withoutProofSilent = 0;
+  int withoutProofEmpty = 0;
   int dropped = 0;
   int sentAsk = 0;
 
@@ -123,7 +144,9 @@ class Board {
     this.onBoardAnswer,
     Duration deadline = kBoardAnswerDeadline,
     void Function(String)? report,
+    Silence? silence,
   })  : _send = send,
+        _silence = silence ?? Silence(),
         _confirmed = confirmed,
         _mappingProven = mappingProven,
         _own = own ?? ((_) => const []),
@@ -144,8 +167,10 @@ class Board {
     edgeStarts();
   }
 
-  /// Asks [to] — at most once per edge. `true` if a valid
-  /// answer came; its entries have then gone to [onBoardAnswer].
+  /// Asks [to] — at most once per edge. `true` if a valid answer came (with
+  /// entries, or from a node without proof its own addresses only); they
+  /// have then gone to [onBoardAnswer]. Towards a peer in [_answering] the
+  /// question is repeated and given up as §11.3a says.
   Future<bool> ask(Neighbour to) async {
     if (!_asked.add(_who(to.address, to.port))) return false;
     final random = Uint8List(kAnswerRandom);
@@ -159,13 +184,39 @@ class Board {
       ..[0] = kinds.kAnswerQuestion
       ..setRange(1, 1 + kAnswerRandom, random);
     sentAsk++;
-    _send(question, to.address, to.port);
+    final peer = '${to.address.address}:${to.port}';
     try {
-      final entries = await open.done.future.timeout(_deadline);
+      final AddressList entries;
+      if (_answering.contains(peer)) {
+        final at = await _silence.ask(open.done.future,
+            to: to.address,
+            port: to.port,
+            send: (a, p) => _send(question, a, p),
+            others: false,
+            what: 'board question 0x43');
+        if (at == null) return false;
+        entries = await open.done.future;
+      } else {
+        _send(question, to.address, to.port); // as on main: once, no verdict
+        entries = await open.done.future.timeout(_deadline);
+        // §11.8.4: a board answer stamps the address the question went to —
+        // under §11.3a the transport does it; here, for the question sent
+        // once, the same one place does (S407-LB-P1 C-1). Its silence still
+        // decides nothing (F-12).
+        _silence.answeredBy(to.address, to.port);
+      }
+      _answering
+        ..remove(peer)
+        ..add(peer);
+      while (_answering.length > kAnsweringAtMost) {
+        _answering.remove(_answering.first);
+      }
       _report?.call('Board from ${to.address.address}:${to.port}: '
           '${entries.own.length} own, ${entries.neighbours.length} '
           'entry/entries');
-      onBoardAnswer?.call(entries, to.address, to.port);
+      // The own addresses are bound against the answer's real origin, not
+      // the asked address (C-15); the stamp above went to the asked one.
+      onBoardAnswer?.call(entries, open.from, open.fromPort);
       return true;
     } on TimeoutException {
       return false;
@@ -214,13 +265,11 @@ class Board {
       dropped++;
       return;
     }
-    if (!reachableProven) {
-      withoutProofSilent++; // W6: no proof, no packet
-      return;
-    }
+    final proven = reachableProven;
+    if (!proven) withoutProofEmpty++; // keeps no board: own addresses only
     final now = DateTime.now();
     final entries = <AddressEntry>[];
-    for (final n in _confirmed(now)) {
+    for (final n in proven ? _confirmed(now) : const <Neighbour>[]) {
       if (entries.length >= kAddressEntriesAtMost) break;
       if (!_fresh(n, now)) continue;
       // The asker does not need itself.
@@ -253,12 +302,13 @@ class Board {
       dropped++;
       return;
     }
+    // §11.8a: the 16 bytes bind the answer to its question — not the
+    // sender's address (a node may answer from another of its addresses;
+    // the pairwise seal says who sent it). Where it came from is kept: it
+    // decides whether the named own addresses bind (§11.8, C-15).
     final open = _open[_hex(packet.sublist(1, 1 + kAnswerRandom))];
-    if (open == null ||
-        open.address.address != from.address ||
-        open.port != fromPort ||
-        open.done.isCompleted) {
-      dropped++; // never asked, wrong sender or already answered
+    if (open == null || open.done.isCompleted) {
+      dropped++; // never asked or already answered
       return;
     }
     var spot = 1 + kAnswerRandom;
@@ -274,7 +324,10 @@ class Board {
       if (spot != packet.length) {
         throw CardFormatError('${packet.length - spot} B zu viel');
       }
-      open.done.complete(entries);
+      open
+        ..from = from
+        ..fromPort = fromPort
+        ..done.complete(entries);
     } on CardFormatError catch (e) {
       dropped++;
       _report?.call('Board answer discarded: $e');

@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/platform/router_db.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 class NatWizardRouterSelectScreen extends StatefulWidget {
   final RouterDb routerDb;
@@ -85,7 +86,9 @@ class _NatWizardRouterSelectScreenState
     final entries = widget.routerDb.selectableEntries;
 
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('nat_wizard_title'))),
+      appBar: AppBar(
+          title: Text(locale.get('nat_wizard_title')),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(
         top: false,
         child: Padding(

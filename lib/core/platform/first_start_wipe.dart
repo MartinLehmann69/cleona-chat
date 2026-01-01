@@ -122,7 +122,7 @@ import 'package:cleona/core/storage/device_store.dart';
 /// it belongs: to the FIRST V4.1 WRITER of the profile directory.
 /// `IdentityManager.generateSeedPhrase`, `createIdentity`,
 /// `createIdentityAtIndex` and `restoreFromPhrase` call [writeMarker]
-/// (justification there, `identity_manager.dart` `_stampV41Profile`).
+/// (justification there, `identity_manager.dart` `_stampProfileMarker`).
 /// Expressly NOT `saveIdentities` — that would also run on `setSkinId`
 /// and would undermine the deletion path on a genuine 3.x profile.
 ///
@@ -244,7 +244,7 @@ class FirstStartWipe {
 
   /// Is the directory a profile of this line? One mark suffices (see
   /// header).
-  static bool isV41Profile(String baseDir) =>
+  static bool isCurrentProfile(String baseDir) =>
       hasMarker(baseDir) || hasDeviceStore(baseDir);
 
   /// Files at the profile root directory whose mere existence proves an
@@ -466,7 +466,7 @@ class FirstStartWipe {
   /// was deleted. Without that, the genuine fresh start would have no marker at the SECOND
   /// start and (then with profile content) would have triggered the deletion path.
   static WipeReport? runFirstStartWipe(String baseDir) {
-    if (isV41Profile(baseDir)) {
+    if (isCurrentProfile(baseDir)) {
       writeMarker(baseDir);
       return null;
     }

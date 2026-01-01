@@ -7,6 +7,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/calendar/calendar_manager.dart';
+import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/calendar/sync/android_calendar_bridge.dart';
 import 'package:cleona/core/calendar/sync/caldav_discovery.dart';
 import 'package:cleona/core/calendar/sync/in_process_bridge.dart';
@@ -17,6 +19,7 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/save_text_file.dart';
 
 /// Calendar Sync settings screen (§23.8).
 ///
@@ -750,6 +753,7 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
       context: context,
       builder: (_) => _LocalIcsDialog(
         ipc: _ipc,
+        service: widget.service,
         initial: initial,
         onDone: _refreshStatus,
       ),
@@ -1646,11 +1650,13 @@ class _ExchangeDialogState extends State<_ExchangeDialog> {
 
 class _LocalIcsDialog extends StatefulWidget {
   final dynamic ipc;
+  final ICleonaService service;
   final Map<String, dynamic>? initial;
   final VoidCallback onDone;
 
   const _LocalIcsDialog({
     required this.ipc,
+    required this.service,
     required this.initial,
     required this.onDone,
   });
@@ -1684,14 +1690,14 @@ class _LocalIcsDialogState extends State<_LocalIcsDialog> {
 
   Future<void> _browseSavePath() async {
     final locale = AppLocale.read(context);
-    final path = await FilePicker.platform.saveFile(
-      dialogTitle: locale.get('calendar_sync_local_ics_pick_file'),
-      fileName: 'cleona-calendar.ics',
-      type: FileType.custom,
-      allowedExtensions: ['ics'],
-    );
-    if (path != null && mounted) {
+    final saved = await pickLocalIcsTarget(widget.service.calendarManager,
+        locale.get('calendar_sync_local_ics_pick_file'));
+    if (!mounted) return;
+    final path = saved.path;
+    if (path != null) {
       setState(() => _path.text = path);
+    } else if (saved.outcome == SaveTextOutcome.failed) {
+      setState(() => _error = '${saved.error}');
     }
   }
 
@@ -2393,4 +2399,26 @@ class _IdentityScopeHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Lets the user pick the file the local `.ics` sync writes to.
+///
+/// On Android and iOS the picker itself creates the file and needs its
+/// content: the same snapshot `LocalIcsPublisher.export` writes. On desktop
+/// only the path is chosen — the publisher writes it atomically and refuses
+/// symlinks, so the picker must not write there first.
+@visibleForTesting
+Future<SaveTextResult> pickLocalIcsTarget(
+    CalendarManager calendar, String dialogTitle) {
+  final events = calendar.events.values
+      .where((e) => !e.cancelled)
+      .toList(growable: false);
+  return saveTextFile(
+    text: ICalEngine.exportToIcs(events, calendarName: 'Cleona'),
+    dialogTitle: dialogTitle,
+    fileName: 'cleona-calendar.ics',
+    type: FileType.custom,
+    allowedExtensions: ['ics'],
+    writeOnDesktop: false,
+  );
 }

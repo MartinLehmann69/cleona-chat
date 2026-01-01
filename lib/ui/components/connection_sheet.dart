@@ -2,7 +2,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 
@@ -77,14 +76,9 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     final locale = AppLocale.read(context);
     try {
       final svc = widget.service;
-      Map<String, dynamic> result;
-      if (svc is IpcClient) {
-        result = await svc.manualReconnect();
-      } else {
-        // In-process fallback (direct service)
-        await svc.onNetworkChanged();
-        result = {'debounced': false, 'peersFound': svc.peerCount};
-      }
+      // §25.7: the edge "network change" (§11.8.2) through its one entry —
+      // over IPC in the daemon, in process on the phone (S407-LB-P12).
+      final result = await svc.reconnect();
 
       if (!mounted) return;
 

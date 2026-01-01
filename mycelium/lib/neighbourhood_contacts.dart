@@ -34,7 +34,8 @@
 library;
 
 import 'package:mycelium/neighbour.dart';
-import 'package:mycelium/neighbourhood_seat.dart' show reachableNeighbour;
+import 'package:mycelium/neighbourhood_seat.dart'
+    show cardSeatHandOver, reachableNeighbour;
 
 /// At most this many fixed seats go to devices of contacts (D1).
 const int kContactSeats = 3;
@@ -49,7 +50,7 @@ Map<int, int> contactSeatsAfter(
   required bool Function(Neighbour n) contact,
   required bool Function(Neighbour n) never,
   required bool Function(NeighbourAddress a) public,
-  bool Function(Neighbour n)? v4Only,
+  bool Function(Neighbour n)? v4Only,  // version-name-ok: IP address family
 }) {
   bool keeps(Neighbour n) =>
       !n.fixed && contact(n) && !never(n) && !(v4Only?.call(n) ?? false);
@@ -90,6 +91,26 @@ void seatContacts(
   for (var j = 0; j < list.length; j++) {
     final s = seats[list[j].id] ?? 0;
     if (list[j].contactSeat != s) list[j] = list[j].copy(contactSeat: s);
+  }
+}
+
+/// The edge for all fixed places, in place: the contact seats (S405 V1: a
+/// device no longer a contact's frees its seat first), then the card's seat
+/// (`cardSeatHandOver`), and once more the contact seats when the card's
+/// seat moved — a contact's device it freed takes its contact seat at THIS
+/// edge (§5.2 "one such contact holds one place"; D-26).
+void seatAll(
+    List<Neighbour> list,
+    int? justNow,
+    bool Function(Neighbour n) answered,
+    bool Function(Neighbour n) named,
+    bool Function(Neighbour n) contact,
+    bool Function(Neighbour n) never,
+    bool Function(NeighbourAddress a) public,
+    [bool Function(Neighbour n)? v4Only]) {
+  seatContacts(list, justNow, answered, contact, never, public, v4Only);
+  if (cardSeatHandOver(list, answered, named, public, contact)) {
+    seatContacts(list, justNow, answered, contact, never, public, v4Only);
   }
 }
 

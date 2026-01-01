@@ -4,6 +4,7 @@ import 'package:cleona/main.dart';
 import 'package:cleona/core/calendar/reminder_text.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/contact_name.dart';
@@ -443,14 +444,19 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     );
   }
 
-  String _participantSummary(dynamic service, AppLocale locale) {
+  // S410 B2-7: both methods read the service through [ICleonaService] only.
+  // They took `dynamic` and read `service.contacts`, a getter only the
+  // in-process CleonaService has; on the desktop the service is the IPC
+  // client, the read threw at the tap and the participant dialog never
+  // opened (Linux, Windows, macOS).
+  String _participantSummary(ICleonaService service, AppLocale locale) {
     if (_selectedGroupId != null) {
       final group = service.groups[_selectedGroupId];
       return '${locale.get("calendar_group_event")}: ${group?.name ?? "?"}';
     }
     if (_selectedAttendeeIds.isNotEmpty) {
       final names = _selectedAttendeeIds.map((id) {
-        final c = service.contacts[id];
+        final c = service.getContact(id);
         return c?.effectiveName ?? id.substring(0, 8);
       }).toList();
       if (names.length <= 2) return names.join(', ');
@@ -459,14 +465,13 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     return locale.get('calendar_personal_event');
   }
 
-  void _showParticipantSelector(BuildContext context, AppLocale locale, dynamic service) {
-    final groups = service.groups as Map<String, dynamic>;
-    final contacts = (service.contacts as Map<String, ContactInfo>)
-        .entries
-        .where((e) => e.value.status == 'accepted')
-        .toList()
-      ..sort((a, b) => a.value.effectiveName.toLowerCase()
-          .compareTo(b.value.effectiveName.toLowerCase()));
+  void _showParticipantSelector(
+      BuildContext context, AppLocale locale, ICleonaService service) {
+    final groups = service.groups;
+    final contacts = [...service.acceptedContacts]
+      ..sort((a, b) => a.effectiveName
+          .toLowerCase()
+          .compareTo(b.effectiveName.toLowerCase()));
 
     var tempAttendees = List<String>.from(_selectedAttendeeIds);
     String? tempGroupId = _selectedGroupId;
@@ -502,15 +507,15 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
                       child: Text(locale.get('tab_chats'),
                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                     ),
-                    ...contacts.map((entry) => CheckboxListTile(
-                      title: Text(shownContactName(entry.value.effectiveName, locale)),
-                      value: tempAttendees.contains(entry.key),
+                    ...contacts.map((contact) => CheckboxListTile(
+                      title: Text(shownContactName(contact.effectiveName, locale)),
+                      value: tempAttendees.contains(contact.nodeIdHex),
                       onChanged: (checked) => setDialogState(() {
                         if (checked == true) {
-                          tempAttendees.add(entry.key);
+                          tempAttendees.add(contact.nodeIdHex);
                           tempGroupId = null;
                         } else {
-                          tempAttendees.remove(entry.key);
+                          tempAttendees.remove(contact.nodeIdHex);
                         }
                       }),
                       dense: true,
@@ -525,7 +530,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
                             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                       ),
                       ...groups.entries.map((e) => RadioListTile<String?>(
-                        title: Text((e.value as dynamic).name as String),
+                        title: Text(e.value.name),
                         value: e.key,
                         dense: true,
                       )),

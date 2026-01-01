@@ -1,9 +1,10 @@
-import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+
+import 'package:cleona/core/platform/capture_exclusion.dart';
 
 /// The result of the application's own screenshot function.
 class AppScreenshotResult {
@@ -43,10 +44,11 @@ class AppScreenshot {
   static final GlobalKey boundaryKey = GlobalKey(debugLabel: 'app-screenshot');
 
   /// Whether this platform offers the function: where the window is
-  /// excluded from capture AND the saving side is built. Android today;
-  /// Windows and macOS follow with their capture exclusion. Linux excludes
-  /// nothing (§23.10), the system's own screenshot works there.
-  static bool get isOffered => Platform.isAndroid;
+  /// excluded from capture (§23.10) — Android, Windows, macOS. The saving
+  /// side (`savePng` on [_channel]) is built on each of them. iOS cannot
+  /// prevent a single screenshot and Linux excludes nothing (§23.10); the
+  /// system's own screenshot works there.
+  static bool get isOffered => CaptureExclusion.excludesWindow;
 
   /// PNG of what the application shows right now, in device pixels, or null
   /// when the boundary is not in the tree.
@@ -66,7 +68,8 @@ class AppScreenshot {
 
   /// Makes the picture and saves it as `Pictures/Cleona/cleona_<time>.png`.
   ///
-  /// Returns [AppScreenshotResult.saved] with the `content://` URI on success,
+  /// Returns [AppScreenshotResult.saved] with the location on success (a
+  /// `content://` URI on Android, a file path on Windows and macOS),
   /// or [AppScreenshotResult.failure] with a stable error code on failure.
   static Future<AppScreenshotResult> capture() async {
     if (!isOffered) return AppScreenshotResult.notAvailable();

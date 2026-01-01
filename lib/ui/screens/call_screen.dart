@@ -7,6 +7,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/cleona_service.dart'
     show CleonaService, PeerCallMediaState;
+import 'package:cleona/ui/components/call_status.dart';
 import 'package:cleona/ui/components/peer_video_status.dart';
 
 /// In-Call Screen — shows audio/video call with PiP layout and controls.
@@ -411,9 +412,10 @@ class _CallScreenState extends State<CallScreen> {
 
             // Status text
             Text(
-              isRinging
-                  ? (isIncoming ? locale.get('call_incoming') : locale.get('call_ringing'))
-                  : _formatDuration(_duration),
+              switch (callStatusKey(appState.service?.currentCall)) {
+                final String key => locale.get(key),
+                null => _formatDuration(_duration),
+              },
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),

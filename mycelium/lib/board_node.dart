@@ -7,7 +7,7 @@
 ///
 /// Sending goes via [Node.rawSend] — splitter and shell, like every
 /// packet. Without an attached board 0x43/0x44 are silently discarded: a
-/// node without a board gives none (W6).
+/// node without a board answers with its own addresses only (S407, D-21).
 library;
 
 import 'dart:io';
@@ -16,6 +16,7 @@ import 'dart:typed_data';
 import 'package:mycelium/address_entries.dart' show AddressList;
 import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/node.dart';
+import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/board.dart';
 import 'package:mycelium/board_proof.dart';
 import 'package:mycelium/neighbourhood.dart' show Neighbour;
@@ -45,6 +46,7 @@ extension NodeAnswer on Node {
         confirmed: confirmed,
         mappingProven: mappingProven,
         own: (asker) => ownEntriesFor(this, asker), // S394 V3
+        silence: silence, // §11.3a towards peers with the S407 answer side
         passive: passiveProof,
         onBoardAnswer: onBoardAnswer,
         deadline: deadline,

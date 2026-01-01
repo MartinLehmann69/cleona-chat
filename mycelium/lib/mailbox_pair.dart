@@ -39,8 +39,10 @@ import 'package:mycelium/first_contact_pair.dart';
 import 'package:mycelium/invitation.dart' as inv show kGracePeriodSeconds;
 import 'package:mycelium/memory.dart' show Reader;
 import 'package:mycelium/mailbox_group_pair.dart';
+import 'package:mycelium/mailbox_recovery_pairs.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/message.dart' show Inbound;
+import 'package:mycelium/neighbour_keys.dart' show NeighbourKeysContact;
 import 'package:mycelium/neighbour_list.dart';
 import 'package:mycelium/neighbourhood_card.dart';
 import 'package:mycelium/pair.dart';
@@ -49,9 +51,10 @@ import 'package:mycelium/node_first_contact_box.dart';
 import 'package:mycelium/host_contact_seats.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/envelope.dart';
+import 'package:mycelium/where_are_you_answer.dart';
+import 'package:mycelium/day_key_notice.dart';
 
-/// Earlier than after this interval no new shipment of the day keys
-/// goes out to the same contact.
+/// No new shipment of the day keys to the same contact before this interval.
 const Duration kDayKeyInterval = Duration(days: 14);
 
 extension MailboxPair on Mailbox {
@@ -114,6 +117,7 @@ extension MailboxPair on Mailbox {
             fromPk: foundingPk(k.address),
             toPk: foundingPk(me.address),
             day: day),
+      ...recoveryInboundCodes(day), // §13.2.1, D-70: restored, not anchored
       for (final e in identity.invitations.all)
         if (!e.revoke &&
             now <= e.expiryUnixSeconds + inv.kGracePeriodSeconds)
@@ -157,7 +161,7 @@ extension MailboxPair on Mailbox {
   /// hint costs a `0x21`, no error (§15.2).
   bool neighboursHeard(Address from, List<CardAddress> list) {
     final k = contactOrNull(identifierFrom(from));
-    if (k == null) return groupPairNeighbours(from, list);
+    if (k == null) return recoveryNeighboursHeard(from, list) || groupPairNeighbours(from, list);
     if (list.isEmpty || neighbourListEqual(k.neighbours, list)) {
       return false;
     }
@@ -181,13 +185,13 @@ extension MailboxPair on Mailbox {
     final p = pairFrom(contact);
     final n = ownNeighbours;
     if (p == null || n.isEmpty) return null;
-    return suchContentSeal(p.kAB, n);
+    return suchContentSeal(p.kAB, n, keys: readsKeysOf(contact)); // S407
   }
 
   /// Opposite direction to [whereAreYouContent]: a `0x23` content has arrived here
   /// under [code] (§8.1). Which contact of THIS mailbox sends under
   /// this code — and does its seal open? Then its fixed neighbours stand
-  /// in it; they are remembered and returned, otherwise `null`.
+  /// in it; they are remembered, answered and returned, else `null`.
   ///
   /// The packet names no identifier, only the code (proposal M) — the
   /// assignment therefore runs via the code, not via a sender.
@@ -210,7 +214,7 @@ extension MailboxPair on Mailbox {
             toPk: foundingPk(me.address),
             day: day);
         if (!_equal(c, code)) continue;
-        final n = suchContentOpen(kAB, content);
+        final o = suchContentOpen(kAB, content), n = o?.list;
         if (n == null) {
           report?.call('0x23 from ${identifierFrom(k.address).substring(0, 8)}: '
               'seal does not open — discarded');
@@ -218,11 +222,13 @@ extension MailboxPair on Mailbox {
         }
         contactOrNull(identifierFrom(k.address)) == null
             ? groupPairNeighbours(k.address, n) // never makes a contact
-            : contactRemember(k.address, neighbours: n);
+            : contactRemember(k.address,
+                neighbours: n, readsKeys: o!.keyed ? true : null);
+        whereAreYouAnswer(k.address); // §8.1: the recipient answers (W-1)
         return n;
       }
     }
-    return null;
+    return recoveryWhereAreYou(code, content, today); // §13.2.1, D-70
   }
 
   /// The public day key of a contact for the day, or `null`.
@@ -254,12 +260,10 @@ extension MailboxPair on Mailbox {
         t: deriveDayKey(identity.postBox, t).pk,
     });
     for (final k in due) {
-      node.send(content, k.address, routeTo(k),
-          forField: identity, kind: kinds.kDayKey);
-      contactRemember(k.address, dayKeySent: at);
+      dayKeyNoticeSend(k.address, content, routeTo(k)); // W-2b: counted later
     }
     for (final p in pairs) {
-      groupPairDayKeysSend(p, content);
+      dayKeyNoticeSend(p.address, content, null);
     }
     return due.length + pairs.length;
   }
@@ -324,9 +328,10 @@ extension MailboxPair on Mailbox {
 /// — the neighbour address adds nothing to that which they would not
 /// already have. The exception stands here at the code; the owner enters it into the architecture document
 /// himself.
-Uint8List suchContentSeal(Uint8List kAB, List<CardAddress> neighbours) {
+Uint8List suchContentSeal(Uint8List kAB, List<CardAddress> neighbours,
+    {bool keys = false}) {
   final clear = BytesBuilder();
-  neighbourListWrite(clear, neighbourListClean(neighbours), least: 1);
+  neighbourListWrite(clear, neighbourListClean(neighbours), least: 1, withKeys: keys);
   final na = SodiumFFI();
   final nonce = na.randomBytes(cryptoSecretBoxNonceBytes);
   return (BytesBuilder()
@@ -340,16 +345,19 @@ Uint8List suchContentSeal(Uint8List kAB, List<CardAddress> neighbours) {
 /// [kAB] or if behind it there is not EXACTLY one list of 1..3 —
 /// a foreign key, a twisted byte and an appended remainder
 /// all fall through the same door.
-List<CardAddress>? suchContentOpen(Uint8List kAB, Uint8List content) {
+({List<CardAddress> list, bool keyed})? suchContentOpen(
+    Uint8List kAB, Uint8List content) {
   if (content.length <= cryptoSecretBoxNonceBytes) return null;
   try {
-    final l = Reader(SodiumFFI().secretBoxDecrypt(
+    final clear = SodiumFFI().secretBoxDecrypt(
         Uint8List.sublistView(content, cryptoSecretBoxNonceBytes),
         suchSealKey(kAB),
-        Uint8List.sublistView(content, 0, cryptoSecretBoxNonceBytes)));
-    final a = neighbourListRead(l.bytes, 'neighbours of the search', least: 1);
+        Uint8List.sublistView(content, 0, cryptoSecretBoxNonceBytes));
+    final l = Reader(clear);
+    final a = neighbourListRead(l.bytes, 'neighbours of the search',
+        least: 1, withKeys: true);
     l.done();
-    return a;
+    return (list: a, keyed: neighbourListShowsKeys(clear[0]));
   } on Object {
     return null;
   }

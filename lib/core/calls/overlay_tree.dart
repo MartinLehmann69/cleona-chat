@@ -100,6 +100,96 @@ class OverlayTree {
   /// Parent of a node in the tree.
   String? parentOf(String hex) => _nodes[hex]?.parentHex;
 
+  // ── Tree links (§17.7) ──────────────────────────────────────────────
+  //
+  // A LAN member is not a node of its own: it hangs off its cluster head
+  // (`TreeNode.lanMemberHex`). For forwarding and for the edge binding of
+  // §17.5 the head-member pair is a tree link like parent-child, so the
+  // three functions below treat it as one. Everything that asks "over
+  // which links does a frame go" asks them, never `childrenHex` alone.
+
+  /// The cluster head [hex] hangs off, or `null` if it is no LAN member.
+  String? _lanHeadOf(String hex) {
+    if (_nodes.containsKey(hex)) return null;
+    for (final n in _nodes.values) {
+      if (n.lanMemberHex.contains(hex)) return n.nodeIdHex;
+    }
+    return null;
+  }
+
+  /// The link of [hex] towards the root: its parent, or for a LAN member
+  /// its cluster head. `null` at the root and for an unknown node.
+  String? upLinkOf(String hex) => _nodes[hex]?.parentHex ?? _lanHeadOf(hex);
+
+  /// The links of [hex] away from the root: its children and, for a
+  /// cluster head, its LAN members.
+  List<String> downLinksOf(String hex) {
+    final n = _nodes[hex];
+    if (n == null) return const <String>[];
+    return <String>[...n.childrenHex, ...n.lanMemberHex];
+  }
+
+  /// Every tree link of [hex] — what §17.7 forwards over ("a node forwards
+  /// a frame over every tree link except the one it came by").
+  List<String> linksOf(String hex) {
+    return <String>[?upLinkOf(hex), ...downLinksOf(hex)];
+  }
+
+  /// The tree link of [fromHex] on the path towards [targetHex] (§17.5:
+  /// a receiver takes a sender's frames "over its tree link towards that
+  /// sender").
+  ///
+  /// Walks from [targetHex] towards the root. If the walk passes
+  /// [fromHex], the node just below it is the link; if it ends at the root
+  /// without passing it, the target lies outside [fromHex]'s subtree and
+  /// the link is [fromHex]'s own up-link. `null` if [targetHex] is not in
+  /// this view of the tree, or is [fromHex] itself — the caller decides
+  /// what an unknown target means, because only it knows whether its
+  /// view of the tree is complete.
+  String? linkTowards(String fromHex, String targetHex) {
+    if (fromHex == targetHex) return null;
+    if (!_nodes.containsKey(targetHex) && _lanHeadOf(targetHex) == null) {
+      return null;
+    }
+    var current = targetHex;
+    // Bounded: a view with a cycle (S376/A-3) must not hang the receive
+    // path; it yields "unknown" instead.
+    for (var steps = 0; steps <= _nodes.length + 1; steps++) {
+      final up = upLinkOf(current);
+      if (up == fromHex) return current;
+      if (up == null) return upLinkOf(fromHex);
+      current = up;
+    }
+    return null;
+  }
+
+  /// Hangs [hex] below [parentHex] in a PARTIAL view of the tree.
+  ///
+  /// Used by a participant that knows its own place only (the tree
+  /// assignment, §17.1.1) and learns which participants lie behind each
+  /// of its down-links ([ControlRecordType.treeSubtree]). Where exactly
+  /// below the link a participant hangs does not matter to it; that it
+  /// lies behind THIS link is the whole statement. No version change:
+  /// the view grows, the tree does not change.
+  void attachBelow(String hex, String parentHex) {
+    if (_nodes.containsKey(hex) || !_nodes.containsKey(parentHex)) return;
+    _nodes[hex] = TreeNode(nodeIdHex: hex, parentHex: parentHex);
+    _nodes[parentHex]!.childrenHex.add(hex);
+  }
+
+  /// Every participant in the subtree below the down-link [linkHex],
+  /// including [linkHex] itself and the LAN members on the way.
+  Set<String> subtreeOf(String linkHex) {
+    final out = <String>{};
+    final queue = Queue<String>()..add(linkHex);
+    while (queue.isNotEmpty) {
+      final current = queue.removeFirst();
+      if (!out.add(current)) continue;
+      queue.addAll(downLinksOf(current));
+    }
+    return out;
+  }
+
   // ── Tree Construction ───────────────────────────────────────────────
 
   /// Build the overlay tree from scratch.

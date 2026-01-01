@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Signed donation configuration.
 /// The signature covers the address string signed by the maintainer key.
@@ -130,6 +131,7 @@ class _DonationScreenState extends State<DonationScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(locale.get('donate_title')),
+        actions: const [AppScreenshotButton()],
       ),
       body: SafeArea(
         child: ListView(

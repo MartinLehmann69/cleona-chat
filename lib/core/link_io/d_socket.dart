@@ -61,7 +61,7 @@
 /// candidates, the port prediction, and the 10 s loss timeout. The first
 /// three live in `lib/core/calls/punch_window.dart` and
 /// `address_candidates.dart`, the loss timeout in
-/// `lib/core/calls/call_transport_v41.dart` (`watchMediaLoss`); this
+/// `lib/core/calls/plane_d_call_transport.dart` (`watchMediaLoss`); this
 /// module carries only what a punch needs from the socket.
 ///
 /// **What S361 ADDED here, and why it belongs here and nowhere else.** A
@@ -86,7 +86,7 @@
 /// [DSession.lastFrameAt] is the time of the last AUTHENTICATED frame of any
 /// kind. Nothing in `lib/` reads it: the 10 s loss rule counts MEDIA frames
 /// and stamps them where the transport separates them from probes, path
-/// validation and control frames (`call_transport_v41.dart`), and the punch
+/// validation and control frames (`plane_d_call_transport.dart`), and the punch
 /// window reads [DSession.confirmedPath].
 library;
 
@@ -183,7 +183,7 @@ final class DSession {
   /// but what a peer (or an attacker with suppressed
   /// originals) can order in responses: at most three per address.
   /// Three, because the migration burst of the other side
-  /// (`call_transport_v41.dart`, `kMigrationRounds`) runs exactly three rounds
+  /// (`plane_d_call_transport.dart`, `kMigrationRounds`) runs exactly three rounds
   /// — each round may challenge once, and there are no more rounds
   /// that could.
   static const int kMaxPathChallenges = 3;
@@ -245,7 +245,7 @@ final class DSession {
   /// leaves [peerAddress] untouched.
   ///
   /// The difference is measured and not theoretical: the
-  /// migration burst (`call_transport_v41.dart`) aborted on [lastFrameAt]
+  /// migration burst (`plane_d_call_transport.dart`) aborted on [lastFrameAt]
   /// and, after validation was built, did so after ONE instead of three
   /// rounds — `smoke_call_path_migration.dart` section 2 reported this as
   /// "1 instead of 3". Cause: a burst addresses several candidates,

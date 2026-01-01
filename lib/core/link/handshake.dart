@@ -210,7 +210,7 @@ final class ObservedAddress {
     return ObservedAddress._(true, Uint8List.fromList(rawAddress), port);
   }
 
-  static bool _isV4Mapped(Uint8List a) {
+  static bool _isV4Mapped(Uint8List a) {  // version-name-ok: IP address family
     for (var i = 0; i < 10; i++) {
       if (a[i] != 0) return false;
     }

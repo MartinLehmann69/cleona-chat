@@ -13,7 +13,6 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/rendezvous/rendezvous_provider.dart';
 import 'package:cleona/core/sync/external_entry.dart';
-import 'package:cleona/core/util/uplink_state.dart';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -232,25 +231,14 @@ class NostrProvider implements RendezvousProvider {
   // Publish (§4.11.6 — Publish flow, pooled connections)
   // -------------------------------------------------------------------------
 
-  /// Publish with an externally provided secp256k1 secret key (deterministic).
-  ///
-  /// Replaces the own previous record under the same tag in place
-  /// (NIP-33). When that is wanted and when not: contract in
-  /// `rendezvous_provider.dart`.
-  @override
-  Future<void> publishWithKey(Uint8List lookupTag, SignedEndpointRecord record,
-      Uint8List nostrSecretKey) async {
-    final kp = secp256k1PubkeyFromSecret(nostrSecretKey);
-    await _publishEvent(lookupTag, record, nostrSecretKey, kp);
-  }
-
   /// Throwaway key pair per event — the stores lie NEXT to each other.
   ///
   /// Unlinkable over time, but not replacing: every renewed store
   /// under the same tag is an additional record on the relay.
   /// The AEAD nonce is new each time, so the deduplication by
-  /// ciphertext in [resolveMulti] does not apply either. Whoever
-  /// stores more often than once per tag takes [publishWithKey].
+  /// ciphertext in [resolveMulti] does not apply either. The variant with
+  /// a caller-derived key (`publishWithKey`) fell with the binary
+  /// distribution's relay path (V9 A1, 08.10.2026).
   ///
   /// CORRECTED 02.09.2026 (S362). Here it additionally said "no `limit` in the
   /// REQ filter, so every query loads the whole heap". That no longer
@@ -328,26 +316,6 @@ class NostrProvider implements RendezvousProvider {
     _log.info('Nostr publish: $successCount/${relays.length} relays '
         '(${relayUris.length - relays.length} in cooldown) '
         'for tag ${tagHex.substring(0, 8)}…');
-
-    // ── THE EDGE OF THE INTERNET LEG (S373) ──────────────────────────
-    //
-    // This number has always stood here and had NO reader in `lib/` —
-    // re-measured. It IS the observation "I get outside":
-    // no additional packet, no timer, no own probe, only the
-    // evaluation of an event that takes place anyway
-    // (working rule #5). An own reachability check would be the
-    // obvious alternative and is rejected — it would cost traffic,
-    // put a regular pattern on the exit and answer
-    // a different question.
-    //
-    // ONLY WITH A NON-EMPTY RELAY LIST. A round without a single
-    // queried peer (all in cool-down) is not an observation
-    // about the NETWORK but one about the own configuration. Booking it
-    // as a failure would let a node lose its internet leg
-    // because its relay list is currently cooling down.
-    if (relays.isNotEmpty) {
-      UplinkState.instance.note(reached: successCount > 0);
-    }
   }
 
   // -------------------------------------------------------------------------

@@ -57,6 +57,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
+  /// The badge's tooltip: the name of the level (S410 C1-7).
+  static String _verificationLabel(AppLocale locale, String level) =>
+      locale.get(ContactTile.verificationLabelKey(_mapVerification(level)));
+
   /// Same rendering as `home_screen.dart`'s `_lastMessagePreview` (the
   /// inline tab this screen replaces) — kept in sync deliberately rather
   /// than shared, since that method is private to `_ConversationListView`,
@@ -68,7 +72,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (msg.senderNodeIdHex.isEmpty) {
       return systemNoticeText(locale, msg.text); // System message
     }
-    return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
+    return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${messageShownText(locale, msg)}';
   }
 
   @override
@@ -196,6 +200,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   name: shownContactName(contact.displayName, locale),
                   status: contact.nodeIdHex.substring(0, 16),
                   verificationLevel: _mapVerification(contact.verificationLevel),
+                  verificationLabel:
+                      _verificationLabel(locale, contact.verificationLevel),
                   avatarOverride: ProfileAvatar(
                     base64: contact.profilePictureBase64,
                     radius: 22,
@@ -243,6 +249,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       ? 'contact_request_not_collected'
                       : 'contact_issue_waiting_status'),
                   verificationLevel: _mapVerification(contact.verificationLevel),
+                  verificationLabel:
+                      _verificationLabel(locale, contact.verificationLevel),
                   avatarOverride: ProfileAvatar(
                     base64: contact.profilePictureBase64,
                     radius: 22,
@@ -290,6 +298,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   name: shownContactName(contact.displayName, locale),
                   status: locale.get('contact_stored_status'),
                   verificationLevel: _mapVerification(contact.verificationLevel),
+                  verificationLabel:
+                      _verificationLabel(locale, contact.verificationLevel),
                   avatarOverride: ProfileAvatar(
                     base64: contact.profilePictureBase64,
                     radius: 22,
@@ -421,6 +431,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       name: tileName,
       status: statusLine,
       verificationLevel: _mapVerification(contact.verificationLevel),
+      verificationLabel: _verificationLabel(locale, contact.verificationLevel),
       avatarOverride: ProfileAvatar(
         base64: contact.profilePictureBase64,
         radius: 22,
@@ -446,6 +457,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   _showBirthdayDialog(context, svc, contact);
                 case 'never_fixed_neighbour':
                   _showNeverFixedNeighbourDialog(context, svc, contact);
+                case 'calls_allowed':
+                  _showCallsAllowedDialog(context, svc, contact);
                 case 'delete':
                   _confirmDelete(context, svc, contact.nodeIdHex, contact.effectiveName);
               }
@@ -475,6 +488,16 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 ),
                 const SizedBox(width: 8),
                 Flexible(child: Text(locale.get('contact_never_fixed_neighbour'))),
+              ])),
+              PopupMenuItem(value: 'calls_allowed', child: Row(children: [
+                Icon(
+                  contact.callsAllowed
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank,
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Flexible(child: Text(locale.get('contact_calls_allowed'))),
               ])),
               PopupMenuItem(value: 'delete', child: Text(locale.get('delete_contact'))),
             ],
@@ -544,6 +567,39 @@ class _ContactsScreenState extends State<ContactsScreen> {
             onChanged: (v) {
               setDialogState(() => never = v);
               svc.setContactNeverFixedNeighbour(contact.nodeIdHex, v);
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(locale.get('close')),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// §17 principle, RL-7, D-69: "allow calls = disclose IP", labeled in the
+  /// UI. On unless switched off; the switch applies at once, like the other
+  /// contact properties in this menu.
+  void _showCallsAllowedDialog(
+      BuildContext context, ICleonaService svc, ContactInfo contact) {
+    final locale = AppLocale.read(context);
+    var allowed = contact.callsAllowed;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(shownContactName(contact.effectiveName, locale)),
+          content: SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: allowed,
+            title: Text(locale.get('contact_calls_allowed')),
+            subtitle: Text(locale.get('contact_calls_allowed_hint')),
+            onChanged: (v) {
+              setDialogState(() => allowed = v);
+              svc.setContactCallsAllowed(contact.nodeIdHex, v);
             },
           ),
           actions: [
@@ -628,13 +684,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
     if (!context.mounted) return;
     final locale = AppLocale.read(context);
-    if (result == ContactIssueDialogResult.exported) {
+    final key = switch (result) {
+      ContactIssueDialogResult.exported => 'contact_issue_exported',
+      ContactIssueDialogResult.posted => 'contact_issue_posted',
+      ContactIssueDialogResult.exportFailed => 'report_not_saved',
+      ContactIssueDialogResult.cancelled => null,
+    };
+    if (key != null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(locale.get('contact_issue_exported'))),
-      );
-    } else if (result == ContactIssueDialogResult.posted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(locale.get('contact_issue_posted'))),
+        SnackBar(content: Text(locale.get(key))),
       );
     }
   }

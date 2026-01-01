@@ -6,6 +6,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/identity/rotation_chain.dart';
 import 'package:mycelium/address.dart';
 import 'package:mycelium/anchor_book.dart';
+import 'package:mycelium/envelope_tag.dart';
 import 'package:mycelium/post_box.dart';
 
 /// [Address] has stood in `address.dart` since S385 (E1), [PostBox] in
@@ -57,11 +58,14 @@ class Envelope {
   static const int _outsideHeader =
       4 + 1 + 32 + OqsFFI.mlKemCiphertextLength + 12;
 
-  /// Inside, before the plaintext: sender address 3240 + chain (at least its
-  /// count byte, 1) + length of the ML-DSA signature 2 + Ed25519 signature
-  /// 64 = 3307 B, plus the chain's links (5357 B each) and the ML-DSA
-  /// signature itself (up to 3309 B).
-  static const int _insideHeader = Address.length + 1 + 2 + _edSigLength;
+  /// Inside, before the plaintext — signed form: sender address 3240 + chain
+  /// (at least its count byte, 1) + length of the ML-DSA signature 2 +
+  /// Ed25519 signature 64 = 3307 B, plus the chain's links (5357 B each) and
+  /// the ML-DSA signature itself (up to 3309 B). Tagged form (§4.4.3): the
+  /// mark [kEnvelopeTagMark] 2 and the tag 32 in place of the length and both
+  /// signatures = 3275 B, the shortest inside there is.
+  static const int _insideHeaderTagged =
+      Address.length + 1 + 2 + kEnvelopeTagLength;
 
   /// Closes [plaintext] for [recipient], signed by [sender].
   ///
@@ -78,30 +82,43 @@ class Envelope {
   ///
   /// The chain rides along while [PostBox.carriesChainTo] says so — the
   /// sender has rotated and [recipient] has not acknowledged one yet (E-A7).
+  ///
+  /// [pairTag] (a message or a group leg, §4.4.3): where [recipient] is a
+  /// pair that has shown it reads the tagged form, the two signatures give
+  /// way to the pair tag (`envelope_tag.dart`) — length field
+  /// [kEnvelopeTagMark], then 32 B. Everything else stays signed: first
+  /// contact, twin sync, a pair that showed nothing, a post box with no pairs.
   static Uint8List seal({
     required Uint8List plaintext,
     required Address recipient,
     required PostBox sender,
+    bool pairTag = false,
   }) {
-    final signed = _charsData(
+    final bound = _charsData(
       sender: sender.address,
       recipient: recipient,
       plaintext: plaintext,
     );
-    final sig = sender.sign(signed);
+    final kAB = pairTag ? envelopePairsOf(sender)?.tagKeyTo(recipient) : null;
     final chain = sender.carriesChainTo(recipient)
         ? sender.address.chain.toWire()
         : Uint8List(1);
 
     final inside = BytesBuilder()
       ..add(sender.address.toBytes())
-      ..add(chain)
-      ..add((ByteData(2)..setUint16(0, sig.dsa.length, Endian.big))
-          .buffer
-          .asUint8List())
-      ..add(sig.ed)
-      ..add(sig.dsa)
-      ..add(plaintext);
+      ..add(chain);
+    if (kAB != null) {
+      inside
+        ..add(_u16(kEnvelopeTagMark))
+        ..add(envelopeTag(kAB, bound));
+    } else {
+      final sig = sender.sign(bound);
+      inside
+        ..add(_u16(sig.dsa.length))
+        ..add(sig.ed)
+        ..add(sig.dsa);
+    }
+    inside.add(plaintext);
 
     final (header, ciphertext) = PerMessageKem.encrypt(
       plaintext: inside.toBytes(),
@@ -131,7 +148,20 @@ class Envelope {
   /// connects them (`anchor_book.dart`, [senderAccept] — superseded keys and
   /// a fork end here, before any acknowledgement). The address is complete —
   /// one can answer it immediately without looking it up elsewhere.
+  ///
+  /// A tagged envelope (§4.4.3) holds when its tag holds under the `K_AB` of
+  /// the pair the asserted sender address names — the sender the tag knows
+  /// is the one the application gets (the implementation note of §4.4.3).
   static (Uint8List plaintext, Address sender) unseal({
+    required Uint8List envelope,
+    required PostBox recipient,
+  }) {
+    final o = open(envelope: envelope, recipient: recipient);
+    return (o.plaintext, o.sender);
+  }
+
+  /// [unseal], and whether the envelope was the tagged form.
+  static ({Uint8List plaintext, Address sender, bool tagged}) open({
     required Uint8List envelope,
     required PostBox recipient,
   }) {
@@ -185,7 +215,7 @@ class Envelope {
     }
     if (inside == null) throw EnvelopeBroken(EnvelopeBroken.kemClosed);
 
-    if (inside.length < _insideHeader) {
+    if (inside.length < _insideHeaderTagged) {
       throw EnvelopeBroken('inside too short: ${inside.length} B');
     }
     var p = 0;
@@ -203,11 +233,31 @@ class Envelope {
     // `proven`: [senderAccept] below decides — with the book it may spare
     // the chain check for keys it already holds.
     final sender = Address.outBytes(addressBytes, chain: chain, proven: true);
-    if (p + 2 + _edSigLength > inside.length) {
+    if (p + 2 + kEnvelopeTagLength > inside.length) {
       throw EnvelopeBroken('inside too short: ${inside.length} B');
     }
     final dsaSigLength = ByteData.sublistView(inside).getUint16(p, Endian.big);
     p += 2;
+    if (dsaSigLength == kEnvelopeTagMark) {
+      final tag = _cut(inside, p, p += kEnvelopeTagLength);
+      final plaintext = _cut(inside, p, inside.length);
+      final pairs = envelopePairsOf(recipient);
+      final keys = pairs?.tagKeysOf(sender) ?? const <Uint8List>[];
+      if (pairs == null || keys.isEmpty) {
+        throw EnvelopeBroken('tagged envelope from no pair');
+      }
+      final bound = _charsData(
+          sender: sender, recipient: recipient.address, plaintext: plaintext);
+      if (!keys.any((kAB) => envelopeTagHolds(kAB, bound, tag))) {
+        throw EnvelopeBroken('pair tag does not hold');
+      }
+      final accepted = senderAccept(recipient.book, sender);
+      pairs.tagShown(accepted);
+      return (plaintext: plaintext, sender: accepted, tagged: true);
+    }
+    if (p + _edSigLength > inside.length) {
+      throw EnvelopeBroken('inside too short: ${inside.length} B');
+    }
     final edSig = _cut(inside, p, p += _edSigLength);
     if (dsaSigLength > OqsFFI.mlDsaSignatureLength ||
         p + dsaSigLength > inside.length) {
@@ -229,12 +279,17 @@ class Envelope {
       throw EnvelopeBroken('ML-DSA signature does not verify');
     }
 
-    return (plaintext, senderAccept(recipient.book, sender));
+    return (
+      plaintext: plaintext,
+      sender: senderAccept(recipient.book, sender),
+      tagged: false
+    );
   }
 
   /// What is signed: header code, the complete sender address, the
   /// recipient's IDENTIFIER, plaintext. Both signatures — Ed25519 and
-  /// ML-DSA-65 — go over exactly these bytes.
+  /// ML-DSA-65 — go over exactly these bytes, and so does the pair tag of
+  /// the tagged form (`envelope_tag.dart`).
   ///
   /// Identifier instead of recipient address (S385, E1): the sender seals
   /// against ITS copy, the recipient checks with ITS current address.
@@ -263,6 +318,9 @@ class Envelope {
     return b;
   }
 }
+
+Uint8List _u16(int x) =>
+    (ByteData(2)..setUint16(0, x, Endian.big)).buffer.asUint8List();
 
 /// Real copy of a view. `sublistView` shares the buffer — that
 /// would be wrong here, because the views outlive the envelope.

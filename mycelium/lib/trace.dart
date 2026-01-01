@@ -90,8 +90,11 @@ const Map<int, String> _names = {
   kinds.kWhatIsMyAddress: 'what-is-my-address',
   kinds.kYourAddressIs: 'your-address-is', kinds.kKnock: 'knock',
   kinds.kMediaAnnouncement: 'media-announcement',
-  kinds.kMediaPiece: 'media-piece', kinds.kGroupsMessage: 'group-message',
-  kinds.kKeyDelivery: 'key-delivery',
+  kinds.kMediaPiece: 'media-piece', kinds.kChannelHold: 'channel-hold',
+  kinds.kChannelHeld: 'channel-held', kinds.kChannelQuestion: 'channel-question',
+  kinds.kChannelSame: 'channel-same', kinds.kChannelList: 'channel-list',
+  kinds.kChannelFetch: 'channel-fetch', kinds.kChannelEntry: 'channel-entry',
+  kinds.kChannelEnd: 'channel-end', kinds.kChannelNudge: 'channel-nudge',
 };
 
 /// A whole packet in one phrase: id, kind, length — and for a step-3

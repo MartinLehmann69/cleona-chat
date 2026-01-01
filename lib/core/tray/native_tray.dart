@@ -5,6 +5,7 @@ import 'package:ffi/ffi.dart';
 import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/readiness_names.dart';
+import 'package:cleona/core/tray/gobject_signal.dart';
 import 'package:cleona/core/tray/native_tray_windows.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 
@@ -37,10 +38,6 @@ typedef _GtkWidgetSetSensitiveDart = void Function(Pointer, int);
 typedef _GMainContextIterationC = Int32 Function(Pointer, Int32);
 typedef _GMainContextIterationDart = int Function(Pointer, int);
 
-typedef _GSignalConnectC = Uint64 Function(
-    Pointer, Pointer<Utf8>, Pointer, Pointer);
-typedef _GSignalConnectDart = int Function(
-    Pointer, Pointer<Utf8>, Pointer, Pointer);
 
 typedef _AppIndicatorNewC = Pointer Function(Pointer<Utf8>, Pointer<Utf8>, Int32);
 typedef _AppIndicatorNewDart = Pointer Function(Pointer<Utf8>, Pointer<Utf8>, int);
@@ -106,7 +103,7 @@ class NativeTray {
   late _GtkMenuShellAppendDart _gtkMenuShellAppend;
   late _GtkWidgetShowAllDart _gtkWidgetShowAll;
   late _GMainContextIterationDart _gMainContextIteration;
-  late _GSignalConnectDart _gSignalConnect;
+  late GObjectSignal _gSignalConnect; // full signature (S409, gobject_signal.dart)
   late _AppIndicatorSetMenuDart _appIndicatorSetMenu;
   late _AppIndicatorSetTitleDart _appIndicatorSetTitle;
   late _GtkWidgetSetSensitiveDart _gtkWidgetSetSensitive;
@@ -278,8 +275,7 @@ class NativeTray {
               'gtk_widget_set_sensitive');
       _gMainContextIteration = glib.lookupFunction<_GMainContextIterationC, _GMainContextIterationDart>(
           'g_main_context_iteration');
-      _gSignalConnect = gobject.lookupFunction<_GSignalConnectC, _GSignalConnectDart>(
-          'g_signal_connect_data');
+      _gSignalConnect = GObjectSignal(gobject);
       _gObjectUnref = gobject.lookupFunction<Void Function(Pointer), void Function(Pointer)>(
           'g_object_unref');
       _gtkWidgetDestroy = gtk.lookupFunction<Void Function(Pointer), void Function(Pointer)>(
@@ -531,7 +527,7 @@ class NativeTray {
     calloc.free(lbl);
     if (!enabled) _gtkWidgetSetSensitive(item, 0);
     _gtkMenuShellAppend(menu, item);
-    _gSignalConnect(item, signal, callback, nullptr);
+    _gSignalConnect.connect(item, signal, callback);
   }
 
   void processEvents() {

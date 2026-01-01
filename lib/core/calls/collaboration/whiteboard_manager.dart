@@ -7,7 +7,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Whiteboard tool types -- matches proto WhiteboardStroke.tool enum.
 enum WhiteboardTool { pen, highlighter, eraser, text, shape, laser }
@@ -86,8 +86,8 @@ class WhiteboardManager {
   final List<double> _pendingPoints = [];
 
   /// Callback to send collaboration data to call participants.
-  /// Signature: (proto.MessageTypeV3 type, Uint8List payload) -> void
-  void Function(proto.MessageTypeV3 type, Uint8List payload)? onSendToAll;
+  /// Signature: (proto.MessageType type, Uint8List payload) -> void
+  void Function(proto.MessageType type, Uint8List payload)? onSendToAll;
 
   /// UI callback when strokes change (repaint needed).
   void Function()? onStrokesChanged;
@@ -248,7 +248,7 @@ class WhiteboardManager {
       ..pageIndex = totalPages - 1
       ..totalPages = totalPages;
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE,
+      proto.MessageType.MT_WHITEBOARD_PAGE,
       page.writeToBuffer(),
     );
     onPageChanged?.call(currentPage, totalPages);
@@ -264,7 +264,7 @@ class WhiteboardManager {
       ..pageIndex = pageIndex
       ..totalPages = totalPages;
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE,
+      proto.MessageType.MT_WHITEBOARD_PAGE,
       page.writeToBuffer(),
     );
     onPageChanged?.call(currentPage, totalPages);
@@ -277,7 +277,7 @@ class WhiteboardManager {
       ..action = 2 // SNAPSHOT_REQUEST
       ..requesterId = hexToBytes(requesterIdHex);
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE,
+      proto.MessageType.MT_WHITEBOARD_PAGE,
       req.writeToBuffer(),
     );
   }
@@ -296,7 +296,7 @@ class WhiteboardManager {
       }
 
       onSendToAll?.call(
-        proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE,
+        proto.MessageType.MT_WHITEBOARD_PAGE,
         page.writeToBuffer(),
       );
     }
@@ -418,7 +418,7 @@ class WhiteboardManager {
     stroke.points.addAll(_pendingPoints);
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE,
+      proto.MessageType.MT_WHITEBOARD_STROKE,
       stroke.writeToBuffer(),
     );
     _pendingPoints.clear();
@@ -428,7 +428,7 @@ class WhiteboardManager {
       WhiteboardStrokeData stroke, WhiteboardActionType action) {
     final protoStroke = _strokeToProto(stroke, action);
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE,
+      proto.MessageType.MT_WHITEBOARD_STROKE,
       protoStroke.writeToBuffer(),
     );
   }

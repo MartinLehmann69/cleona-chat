@@ -12,10 +12,9 @@ import 'package:mycelium/publisher_lookup.dart' show cardFromPublisher;
 import 'package:mycelium/memory.dart' show Contact;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/card_text.dart';
-import 'package:mycelium/code_send_retry.dart' show kStepThreeHandOnAtMost;
-import 'package:mycelium/shell_link.dart' show kAnswerDeadline;
 import 'package:mycelium/node_outside.dart';
 import 'package:mycelium/node_join.dart';
+import 'package:mycelium/node_join_plea.dart';
 import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node_helpers.dart' show outTheSegment, cardChannel;
 import 'package:mycelium/mailbox.dart';
@@ -211,11 +210,11 @@ extension MailboxInvitation on Mailbox {
         onPlaced: () => scheduleMicrotask(() => joinRemember(joining, pkInv: line.pkInv)))
       ..onCompletion = (b) => unawaited(joinComplete(b, card, result));
     if (issuer != null) {
-      // The request exists once its window is set — after the reply code's
-      // registration (§15.5, F-B: two answer deadlines at most). From here
-      // the join survives a restart; nothing ends it but the answer (3).
-      await waitFor(() => joining.requestWindow != null,
-          kAnswerDeadline * 2 + const Duration(seconds: 1));
+      // The request exists once the join has started — after the reply
+      // code's registration was answered or failed (§15.5, F-B, §11.3a): an
+      // event of the transport, no deadline here (S407-STILLE F-3). From
+      // here the join survives a restart; nothing ends it but the answer (3).
+      await node.joinStartedEvent(joining);
       joinRemember(joining, pkInv: line.pkInv);
       return result.future;
     }
@@ -236,24 +235,34 @@ extension MailboxInvitation on Mailbox {
       throw MailboxError('Join did not come about '
           '(no bundle from the other side)');
     }
+    // §11.3a: the request (2) is answered (the issuer holds it) or failed.
+    // Failed, the issuer is off and the QR/NFC join ends (§15.1, S405 V4) —
+    // until S408 it waited for the answer (3) without end (FLAKERCA O-1).
+    if (!await node.joinRequestOutcome(current)) {
+      node.joinAbandon(current,
+          forField: identity, why: 'the issuer did not take the request (§11.3a)');
+      throw MailboxError('Join did not come about '
+          '(the issuer did not take the request)');
+    }
     // Proposal E: the request is out — the join survives a restart until
-    // the answer (3) comes (`mailbox_first_contact.dart`).
+    // the answer (3) comes (`mailbox_first_contact.dart`). Answered already
+    // (the answer can overtake a lost end mark): nothing to restore.
+    if (current.done || current.declined) return result.future;
     joinRemember(current);
     onSent?.call(counterpart);
     return result.future;
   }
 
   /// The QR/NFC round trip of [b]: its counterpart once the bundle came, or
-  /// `null` after the deadline — and then [b] has ended entirely (S405 V4).
-  /// 5 s for the answer itself, plus the time step 3 may spend handing the
-  /// request on past silent candidates (S405 field test 06.10.2026), plus the
-  /// wait for the reply code's registration before the request leaves
-  /// (§15.5, two answer deadlines at most — `node_join.dart`, F-B).
+  /// `null` once the transport says its plea failed — and then [b] has ended
+  /// entirely (S405 V4). No deadline here (§11.3a, S407-STILLE F-3): the
+  /// plea is a request the transport repeats and gives up
+  /// (`node_join_plea.dart`); until S407 this waited 5 s plus the longest
+  /// step-3 hand-on plus the registration of the reply code.
   Future<Address?> _roundTrip(Join b) async {
-    final sent = await waitFor(() => b.counterpart != null || b.declined,
-        const Duration(seconds: 5) + kStepThreeHandOnAtMost + kAnswerDeadline * 2);
+    final answered = await node.joinPleaOutcome(b);
     final counterpart = b.counterpart;
-    if (sent && counterpart != null) return counterpart;
+    if (answered && counterpart != null) return counterpart;
     node.joinAbandon(b, forField: identity); // S405 V4 (QR/NFC): ends entirely
     return null;
   }
@@ -335,6 +344,7 @@ extension MailboxInvitation on Mailbox {
         dayKeySent: DateTime.fromMillisecondsSinceEpoch(
             b.requestWindow! * ProofOfWork.windowSeconds * 1000),
         pairRandom: b.pairRandom, // proposal M: s_AB from the acceptance
+        readsKeys: card.readsKeys ? true : null, // S407: behind its line
         // S394-11: the name from the introduction in answer (3) — until then
         // the requester showed a placeholder until a later profile message.
         displayName: (b.counterpartIntroduction?.name ?? '').isEmpty

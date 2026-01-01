@@ -135,6 +135,22 @@ class Identity {
 /// Manages multiple identity profiles.
 /// All identities share a single daemon/node/port.
 /// Supports HD-Wallet key derivation from a master seed.
+/// At most this many identities on one device (§20.2; owner decision
+/// 08.10.2026, S403 V17 = B). Every identity starts a service of its own
+/// with its own post-box collection and code registrations; cover and
+/// keep-alive run once per device regardless (§5.1, §8.1).
+const int kMaxIdentitiesPerDevice = 16;
+
+/// Thrown when an identity is to be created on a device that already holds
+/// [kMaxIdentitiesPerDevice] of them.
+class IdentityLimitReached implements Exception {
+  final int held;
+  const IdentityLimitReached(this.held);
+  @override
+  String toString() => 'IdentityLimitReached: $held identities on this '
+      'device, at most $kMaxIdentitiesPerDevice (§20.2)';
+}
+
 class IdentityManager {
   final String baseDir; // ~/.cleona
   int _maxHdIndex = -1;
@@ -347,18 +363,18 @@ class IdentityManager {
   //
   // Idempotent: [FirstStartWipe.writeMarker] is a no-op as soon as the
   // marker stands, and carries the time of its FIRST write.
-  void _stampV41Profile() => FirstStartWipe.writeMarker(baseDir);
+  void _stampProfileMarker() => FirstStartWipe.writeMarker(baseDir);
 
   // ── Seed Phrase Management ──────────────────────────────────────
 
   /// Generate a new seed phrase and store the master seed encrypted.
   /// Returns the 24 words (user must back them up).
   List<String> generateSeedPhrase() {
-    // First writer of the profile directory — see [_stampV41Profile].
+    // First writer of the profile directory — see [_stampProfileMarker].
     // Stands BEFORE the first write, so that the marker also lies there
     // if storing the seed fails: a half-written directory is not a 3.x
     // profile.
-    _stampV41Profile();
+    _stampProfileMarker();
     final words = SeedPhrase.generate();
     final entropy = SeedPhrase.wordsToEntropy(words);
     final masterSeed = SeedPhrase.entropyToSeed(entropy);
@@ -370,12 +386,12 @@ class IdentityManager {
   /// Restore from a 24-word phrase. Stores the derived master seed.
   /// Returns the master seed for key derivation.
   Uint8List restoreFromPhrase(List<String> words) {
-    // First writer of the profile directory — see [_stampV41Profile].
+    // First writer of the profile directory — see [_stampProfileMarker].
     // On the recovery path [FirstStartWipe.wipeBeforeRecovery] has
     // already set the marker immediately before
     // (`setup_screen.dart:596`); the call is a no-op there. It stands
     // here for EVERY other caller of this method.
-    _stampV41Profile();
+    _stampProfileMarker();
     final entropy = SeedPhrase.wordsToEntropy(words); // validates checksum
     final masterSeed = SeedPhrase.entropyToSeed(entropy);
     _storeMasterSeed(masterSeed);
@@ -894,7 +910,7 @@ class IdentityManager {
       // keyring — would stay for good. (Until S403 the same case threw
       // because the old list file lay there unreadable; the statement is
       // kept, without asking for that file's name.)
-      if (!FirstStartWipe.isV41Profile(baseDir) &&
+      if (!FirstStartWipe.isCurrentProfile(baseDir) &&
           FirstStartWipe.hasLegacyProfileEvidence(baseDir)) {
         throw IdentitiesFileCorruptException(
             'the profile in $baseDir stems from an earlier line and is not '
@@ -1122,11 +1138,12 @@ class IdentityManager {
   /// Async because PQ keygen runs in a background isolate (ANR prevention).
   Future<Identity> createIdentity(String displayName,
       {bool restoredFromPhrase = false}) async {
-    // First writer of the profile directory — see [_stampV41Profile].
+    // First writer of the profile directory — see [_stampProfileMarker].
     // Without this line the daemon would delete, at the next
     // `initCrypto`, the identity that comes into existence here.
-    _stampV41Profile();
+    _stampProfileMarker();
     final identities = loadIdentities();
+    _checkIdentityLimit(identities.length);
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';
@@ -1197,9 +1214,18 @@ class IdentityManager {
   /// If a row of this id is there already, another program created an
   /// identity in the same seconds and drew the same number. That is named,
   /// not overwritten.
+  /// Before any key is generated: refuses a further identity on a device
+  /// that holds [kMaxIdentitiesPerDevice] already.
+  void _checkIdentityLimit(int held) {
+    if (held >= kMaxIdentitiesPerDevice) throw IdentityLimitReached(held);
+  }
+
   void _addIdentity(Identity identity) {
     final store = _deviceStoreForWrite('the new identity');
     store.transaction(() {
+      // Checked again inside the transaction: another program may have
+      // added identities while the keys of this one were generated.
+      _checkIdentityLimit(store.countArea(DeviceStore.areaIdentities));
       if (store.entry(DeviceStore.areaIdentities, identity.id) != null) {
         throw StateError(
             'An identity "${identity.id}" was entered into the device '
@@ -1225,12 +1251,13 @@ class IdentityManager {
   /// Unlike [createIdentity], this targets an exact [hdIndex] instead of auto-incrementing.
   Future<Identity> createIdentityAtIndex(int hdIndex, String displayName,
       {bool restoredFromPhrase = false}) async {
-    // First writer of the profile directory — see [_stampV41Profile].
-    _stampV41Profile();
+    // First writer of the profile directory — see [_stampProfileMarker].
+    _stampProfileMarker();
     final identities = loadIdentities();
     if (identities.any((i) => i.hdIndex == hdIndex)) {
       throw StateError('Identity with hdIndex=$hdIndex already exists');
     }
+    _checkIdentityLimit(identities.length);
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';

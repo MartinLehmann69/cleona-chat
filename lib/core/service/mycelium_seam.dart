@@ -44,9 +44,9 @@ import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/mycelium_device_records.dart';
 import 'package:cleona/core/service/mycelium_history_store.dart';
-import 'package:cleona/core/service/port_mapping.dart';
 import 'package:cleona/core/service/port_mapping_setting.dart';
 import 'package:cleona/core/service/cover_reduce_setting.dart';
+import 'package:cleona/core/service/bulk_cache_setting.dart';
 import 'package:cleona/core/update/binary_http_server.dart';
 import 'package:cleona/core/update/data_port_http.dart';
 import 'package:cleona/core/sync/cover_stream.dart' show CoverSaver;
@@ -56,7 +56,6 @@ import 'package:mycelium/bulk_piece.dart' show BulkClass;
 import 'package:mycelium/device_records.dart' show DeviceRecords;
 import 'package:mycelium/update.dart' show updateAttach;
 import 'package:mycelium/readiness.dart' show ReadinessState;
-import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/node_helpers.dart' show cardChannel;
 import 'package:mycelium/node_cover.dart' show NodeCover;
 import 'package:mycelium/node_collect_answered.dart' show NodeCollectAnswered;
@@ -66,8 +65,8 @@ import 'package:mycelium/envelope.dart';
 import 'package:mycelium/history_store.dart' show historyStoreGive;
 import 'package:mycelium/update_cover_route.dart' show updateCoverRouteAttach;
 import 'package:mycelium/host.dart';
+import 'package:cleona/core/service/system_channel_seam.dart';
 import 'package:mycelium/host_stream.dart' show HostStreamOn;
-import 'package:mycelium/invitation_way_in.dart' show wayInEdge;
 import 'package:mycelium/trace.dart' show kTraceLinePrefix;
 
 /// The contact does not carry all three keys — then there is no address,
@@ -330,10 +329,14 @@ List<CleonaService> servicesOnHost(Host host, CleonaService self) {
 /// when those yield nothing, the external entries (§11.9).
 ///
 /// [bulkCacheBytes] is the bulk cache of lane 3 (§9.4, §21.3.3): what this
-/// device holds for others. The start paths pass [bulkCacheBytesForPlatform];
+/// device holds for others. The start paths pass [bulkCacheBytesConfigured];
 /// the default 0 holds nothing (probes). [bulkClass] is
 /// what a `0x53` states ([bulkClassForPlatform]); [bulkServeAllowed] tells a
 /// phone whether it may hold and hand out now ([bulkServeAllowedNow], D-32).
+///
+/// [askRouter]: the host asks the own router for a mapping and a pinhole at
+/// its edges (§7.3), under the switch of §12.7 — the start paths pass `true`;
+/// the default asks no router (probes), like the bulk cache's 0.
 ///
 /// [traceReport] takes the diagnosis lines of the beta network (every line
 /// that starts with [kTraceLinePrefix], `mycelium/lib/trace.dart`) instead
@@ -349,6 +352,7 @@ Future<Host> hostStart({
   int bulkCacheBytes = 0,
   BulkClass bulkClass = BulkClass.desktop,
   bool Function()? bulkServeAllowed,
+  bool askRouter = false,
   void Function(String)? report,
   void Function(String)? traceReport,
 }) async {
@@ -424,6 +428,11 @@ Future<Host> hostStart({
     bulkCacheBytes: bulkCacheBytes,
     bulkClass: bulkClass,
     bulkServeAllowed: bulkServeAllowed,
+    // §12.7 "router mapping": the device database's row, read when the host
+    // first asks the router (§7.3, A-4: the host holds the mapping). Only
+    // the start paths ask a router ([askRouter]); a probe asks none.
+    routerMapping:
+        askRouter ? () => portMappingConfigured(baseDir, key) : null,
   );
   _servicesPerHost[host] = attached;
   // §8.2 "After more than 7 days" (D-48): the node says when a collection of
@@ -473,6 +482,12 @@ Future<Host> hostStart({
   for (final d in services.skip(1)) {
     serviceRegister(host, d);
   }
+  // §16.0/§16.7 (S407 SK-4): the system channels — the edge "start" is
+  // the attachment, "a new neighbour" is this callback (the update adds
+  // its moment to it in [attachUpdateToService]), "network change" is
+  // [hostNetworkChanged] inside the one entry [networkChangeEdge].
+  host.onNewNeighbours = () => systemChannelsEdge(host);
+  systemChannelsAttach(host, first, report: report);
   return host;
 }
 
@@ -490,10 +505,37 @@ Future<void> hostStop(Host host) async {
   await host.stop();
 }
 
-/// The bulk cache of lane 3 for this platform (§21.3.1, §21.3.3 item 3,
-/// D-32): 1 GB on desktop installations, 100 MB on phones. It lies in the
-/// device folder of the host (`hostDirectoryIn`), on every platform.
-int bulkCacheBytesForPlatform() => _mobile ? 100 << 20 : 1 << 30;
+/// The default bulk cache of lane 3 for this platform (§21.3.1, §21.3.3
+/// item 3, D-32): 1 GB on desktop installations, 100 MB on phones. It lies
+/// in the device folder of the host (`hostDirectoryIn`), on every platform.
+int bulkCacheBytesForPlatform() => bulkCacheDefaultMb(mobile: _mobile) << 20;
+
+/// The bulk cache the start paths pass to [hostStart]: the user's tier
+/// (`bulk_cache_setting.dart`, device database of [baseDir] under the
+/// host's [key]), else [bulkCacheBytesForPlatform].
+int bulkCacheBytesConfigured(String baseDir, Uint8List key) {
+  final mb = bulkCacheConfiguredMb(baseDir, key);
+  return mb == null ? bulkCacheBytesForPlatform() : mb << 20;
+}
+
+/// The size of the running bulk cache in MB.
+int bulkCacheMb(Host host) => host.bulk.holder.budget >> 20;
+
+/// The user's tier (§21.3.3 item 3) — ONLY from a user action. Stored in
+/// the device database and taken by the running holder at once; a smaller
+/// tier frees the space now (`BulkHolder.budgetSet`). `false` without a
+/// started host, for a size that is no tier, and for a host started
+/// without bulk (probes) — then nothing is stored either.
+bool bulkCacheSet(Host host, int mb) {
+  final at = _switchPlace[host];
+  if (at == null ||
+      !kBulkCacheTiersMb.contains(mb) ||
+      host.bulk.holder.budget <= 0) {
+    return false;
+  }
+  bulkCacheConfigure(at.baseDir, at.key, mb);
+  return host.bulk.holder.budgetSet(mb << 20);
+}
 
 /// The class this device states in `0x53` (§9.4, D-30).
 BulkClass bulkClassForPlatform() =>
@@ -521,8 +563,9 @@ bool bulkServeAllowedNow() =>
 ///   `Host.start` in the same sequence).
 /// * new neighbour: [Host.onNewNeighbours], set here — it calls [moment]
 ///   like every other moment.
-/// * network change and app open: the start paths call [moment] after the
-///   end of `networkChanged` or `collect` respectively.
+/// * network change: [networkChangeEdge] calls [moment] after the end of the
+///   host part (S407-LB-P12: the moment is remembered here for that);
+/// * app open: the start paths call [moment] after the end of `collect`.
 ///
 /// [moment] is the start path's ONE moment function: it asks the manifest
 /// of every service AND presents the known target to the offer again
@@ -539,6 +582,9 @@ void attachUpdateToService(Host host, CleonaService service,
       channel: cardChannel,
       partialDir: '${service.profileDir}${Platform.pathSeparator}update-target',
       report: report);
+  // The update objects a desktop holds for others belong to the bulk-cache
+  // class (§31.3 tier 1, S407-UPDATEFRAGMENTE): the pieces get the rest.
+  host.bulk.holder.reserved = () => service.heldObjectBytes;
   service.updateCarrier = a;
   // §5.5 rule 2: a drawn cover packet carries a piece of the update instead
   // of filling. That is NOT a delivery path — the fetch path above runs
@@ -553,7 +599,13 @@ void attachUpdateToService(Host host, CleonaService service,
   final mobil = Platform.isAndroid || Platform.isIOS;
   updateCoverRouteAttach(host.node.coverStream, a.holder, a.assembler,
       pushes: () => !mobil);
-  host.onNewNeighbours = () => unawaited(moment('new neighbour'));
+  final before = host.onNewNeighbours; // the system channels (hostStart)
+  host.onNewNeighbours = () {
+    before?.call();
+    unawaited(moment('new neighbour'));
+  };
+  // The moment "network change" hangs on the one entry (S407-LB-P12).
+  _updateMomentPerHost[host] = moment;
 }
 
 /// Registers the mailbox of [service] at runtime at the running host —
@@ -619,77 +671,121 @@ Future<DataPortHttp?> deliveryForServices(
   return null;
 }
 
-// ── THE PORT MAPPING (task D, V4.2 §7.3, §5.4) ─────────────────────
+// ── THE PORT MAPPING (task D, V4.2 §7.3) ───────────────────────────────
 //
-// An `Expando`, for the same reason as `_servicesPerHost` above: the port
-// mapping belongs to the HOST (one router, one port), not to an identity,
-// and `Host` gets no field of its own for it — it is a property of the
-// APP seam, not of the delivery layer.
+// Since S408-LEBENSLAUF P15 (finding A-4) the HOST holds the router mapping
+// and pinhole (`mycelium/lib/host_router.dart`): asked at its edges start and
+// network change, laid down when it stops, and only the host writes the
+// keep-alive flags and the own public address. Here stays the switch of §12.7
+// alone — [hostStart] hands the stored setting over, [portMappingSet] turns
+// it. The Expando that held the mapping beside the host is gone.
 
-final Expando<PortMapping> _portMappingPerHost = Expando('port_mapping');
+// ── THE EDGE "NETWORK CHANGE": ONE ENTRY (S407-LB-P12, finding A-3) ─────────
+//
+// v4_2 §11.8.2 has ONE edge "network change — another interface, a new or
+// lost own address, a return from sleep, or the user's 'reconnect'
+// (§25.7)", and every section that hangs work on it says so (§7.3 the
+// router, §8.2 the post box, §16.0 the system channels, …). Until this
+// package the app had four ways in, written out by hand at each place:
+// daemon (poll, `ip monitor`) and app (`connectivity_plus`) ran the host
+// part, the router, the update moment and a loop over the services; the
+// "reconnect" of IPC and connection sheet ran ONE service's
+// `onNetworkChanged`, which reached the host through a per-service seam —
+// without the router mapping, without the update moment, and the other
+// identities on the host never heard of the edge.
 
-/// The port mapping of this host, or `null` as long as [portMappingToEdge]
-/// has not yet seen it. An integrator who wants to publish a confirmed
-/// mapping (§11.9, the board) attaches to [PortMapping.onMapping] here.
-PortMapping? portMappingFrom(Host host) => _portMappingPerHost[host];
+/// The update's moment function per host ([attachUpdateToService]) — the
+/// moment "network change" belongs to the edge, not to each source.
+final Expando<Future<void> Function(String moment)> _updateMomentPerHost =
+    Expando('update-moment');
 
-/// Binds the port mapping to [host] and triggers it — at start AND at every
-/// network change (§7.3: the same call at both edges, [PortMapping.toEdge]
-/// decides itself whether it is the first or a later one).
-/// [baseDir]/[key] are the same as for [hostStart] — the setting W9 lies
-/// device-wide, under the same key as the host, no second secret.
+/// THE ONE entry into the edge "network change" of this process (v4_2
+/// §11.8.2, §25.7), unconditionally — the user's "reconnect" (IPC command,
+/// connection sheet). A platform EVENT goes through [networkEvent], the
+/// heartbeat through [networkHeartbeat]; none runs a step of the edge
+/// itself. [reason] names the source for the log.
 ///
-/// Does NOT query the router (no `await` on the result) — the RFC 6886
-/// backoff takes eight and a half minutes in the worst case, and neither a
-/// node start nor a network change may wait for it.
-Future<PortMapping> portMappingToEdge(
-  Host host, {
-  required String baseDir,
-  required Uint8List key,
-  void Function(String)? report,
-}) async {
-  var p = _portMappingPerHost[host];
-  if (p == null) {
-    final active = portMappingConfigured(baseDir, key);
-    if (!active) {
-      report?.call('mycelium:port mapping off by setting (W9) — '
-          'no router is asked');
-    }
-    p = PortMapping(port: host.port, active: active, log: report);
-    _portMappingPerHost[host] = p;
-    // S391: the proof goes to the board (§11.8a, W6), and a granted mapping
-    // is a reachable address that is published (§11.9). An IPv4 mapping IS
-    // the public address; an IPv6 pinhole opens the own address, which
-    // already stands in the interface list — only republish there.
-    final pa = p;
-    host.network.mappingProven = () => pa.mappingProven;
-    host.network.keepAlive
-      ..ipv4Mapped = (() => pa.ipv4Proven)
-      ..ipv6Mapped = (() => pa.ipv6Proven);
-    pa.onMapping = (outside, outsidePort) {
-      if (outside.type == InternetAddressType.IPv4) {
-        host.node.publicAddress =
-            CardAddress(Uint8List.fromList(outside.rawAddress), outsidePort);
-      }
-      host.addressLearned();
-      wayInEdge(host.node); // §12.4: a granted mapping can be a way in
-    };
+/// Since S407-LB-P14 the delivery layer decides (`NetworkWatch` at
+/// `host.network.watch`, `mycelium/lib/network_watch.dart`): edges do not
+/// overlap — one runs, at most one follows, and every request before it
+/// starts is folded into it. The future completes when the edge that covers
+/// this request has ended.
+Future<void> networkChangeEdge(Host host,
+        {required String reason, void Function(String)? report}) =>
+    host.network.watch.run(reason,
+        () => _networkChangeSteps(host, reason: reason, report: report));
+
+/// A platform event — the daemon's poll (Windows, macOS), `ip monitor`
+/// (Linux), `connectivity_plus` (app): something may have changed. The
+/// delivery layer settles the burst, reads the own addresses and runs the
+/// edge only on a change of them; the first report after the start is no
+/// change (finding A-1). Completes with whether the edge runs.
+Future<bool> networkEvent(Host host,
+        {required String reason, void Function(String)? report}) =>
+    host.network.watch.nudge(reason,
+        () => _networkChangeSteps(host, reason: reason, report: report));
+
+/// The heartbeat's tick (daemon and in-process app, every [period]): the
+/// wall clock moved [gap] since the last one. Away longer than the
+/// keep-alive interval, the process returned from sleep and the edge runs
+/// (S407-LB-P13; the decision lies in the delivery layer since
+/// S407-LB-P14). Returns whether it did. No clock is added: the heartbeat
+/// ran before.
+bool networkHeartbeat(Host host,
+        {required Duration gap,
+        required Duration period,
+        void Function(String)? report}) =>
+    host.network.watch.heartbeat(
+        gap: gap,
+        period: period,
+        steps: () => _networkChangeSteps(host,
+            reason: 'return from sleep', report: report));
+
+/// The steps of the edge, run by the delivery layer's watch only.
+///
+/// What runs, each ONCE per edge, for the whole process:
+///  1. the host part: [hostNetworkChanged] (`Host.networkChanged`, then the
+///     edge of the system channels);
+///  2. every service on the host as SUBSCRIBER, for the application
+///     consequences only (`CleonaService.onNetworkChanged`: running calls,
+///     resends of §5.8 and §16.2.5). Started right behind the host part's
+///     synchronous start (the readiness is reset by then), not behind its
+///     end: a running call has a loss deadline of 10 s (§17.4), and the
+///     host part reads interfaces, which can take seconds;
+///  3. after the host part: the update moment "network change" (S388: after
+///     the end of the network change, before it the old neighbourhood still
+///     applies). The router is the host part's own (§7.3, S408 P15).
+///
+/// No repeat, no clock (working rule 5): one call, one run.
+Future<void> _networkChangeSteps(Host host,
+    {required String reason, void Function(String)? report}) async {
+  report?.call('mycelium:network change ($reason)');
+  final hostPart = hostNetworkChanged(host);
+  for (final d in List.of(_servicesPerHost[host] ?? const <CleonaService>{})) {
+    unawaited(d.onNetworkChanged().catchError(
+        (Object e) => report?.call('Network change (service part): $e')));
   }
-  await p.toEdge();
-  return p;
+  try {
+    await hostPart;
+  } catch (e) {
+    report?.call('mycelium network change failed: $e');
+  }
+  final moment = _updateMomentPerHost[host];
+  if (moment != null) {
+    unawaited(moment('network change').catchError(
+        (Object e) => report?.call('Update moment (network change): $e')));
+  }
 }
 
-/// MANDATORY when shutting down [host]. Without this call the
-/// coordinator's renewal timer keeps the Dart VM alive for up to an hour
-/// (see `port_mapping.dart`). A host without port mapping
-/// (`active: false`, or [portMappingToEdge] never called) makes this call a
-/// no-op.
-Future<void> portMappingLayDown(Host host) async {
-  final p = _portMappingPerHost[host];
-  if (p == null) return;
-  await p.layDown();
-  _portMappingPerHost[host] = null;
-}
+// ── A RETURN FROM SLEEP IS THE EDGE (S407-LB-P13, finding A-2) ──────────────
+//
+// §11.8.2 lists "a return from sleep" among the network changes. Until this
+// package the heartbeats of daemon and app saw it (a wall-clock gap between
+// two ticks) and only logged it. The heartbeats now hand their gap to
+// [networkHeartbeat] — no new clock: the heartbeat ran before. Since
+// S407-LB-P14 the decision (`isReturnFromSleep`, threshold = the shortest
+// keep-alive interval in force, §8.1) lies in the delivery layer
+// (`NetworkWatch.heartbeat`); it stood here before.
 
 // ── THE NETWORK SWITCHES OF §12.7 (S398-W4) ─────────────────────────────
 //
@@ -718,10 +814,7 @@ Future<bool> portMappingSet(Host host, bool on,
   final at = _switchPlace[host];
   if (at == null) return false;
   portMappingConfigure(at.baseDir, at.key, on);
-  await portMappingLayDown(host);
-  unawaited(portMappingToEdge(host,
-          baseDir: at.baseDir, key: at.key, report: report)
-      .then((_) {}, onError: (Object e) => report?.call('Port mapping: $e')));
+  await host.network.router.switched(); // the host lays down and asks anew
   return true;
 }
 

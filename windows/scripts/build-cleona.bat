@@ -82,6 +82,16 @@ if errorlevel 1 (
     echo FAIL_DAEMON > %MARK%
     exit /b 1
 )
+REM S407: the daemon runs without a console window (v4_2 section 22,
+REM "Windows Desktop") — marked as a GUI-subsystem program in the staging
+REM directory, so the copy below (and the SHA check of win-deploy.sh) sees
+REM the same file. Rationale in set-gui-subsystem.ps1.
+powershell -NoProfile -ExecutionPolicy Bypass -File windows\scripts\set-gui-subsystem.ps1 -Path build\.daemon-cli\bundle\bin\cleona_daemon.exe >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] daemon subsystem not set >> %LOG%
+    echo FAIL_DAEMON > %MARK%
+    exit /b 1
+)
 if not exist %RELEASE%\bin mkdir %RELEASE%\bin
 if not exist %RELEASE%\lib mkdir %RELEASE%\lib
 copy /Y build\.daemon-cli\bundle\bin\cleona_daemon.exe %RELEASE%\bin\cleona-daemon.exe >> %LOG% 2>&1

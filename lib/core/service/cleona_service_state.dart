@@ -11,7 +11,7 @@
 
 part of 'cleona_service.dart';
 
-extension V3StateSnapshotOps on CleonaService {
+extension StateSnapshotOps on CleonaService {
 
 
   /// Get full state snapshot for IPC.
@@ -57,12 +57,6 @@ extension V3StateSnapshotOps on CleonaService {
       'syncPartnersOutbound': syncPartnersOutbound,
       'syncPartnersInbound': syncPartnersInbound,
       'independentSyncPartners': independentSyncPartners,
-      // §9.2: the MEASURED responsibility set. It must cross the IPC
-      // boundary, because the consent dialog from §9.3 is in the GUI and
-      // the delivery layer in the daemon — without this field the display
-      // on daemon platforms would compute with the nominal size and be off
-      // by a factor of 6.7 in the lab.
-      'reachableResponsibleRelays': reachableResponsibleRelays,
       // §24.4.2/§25.4: the data saver mode is a metric of the readiness
       // section and must cross the IPC boundary — otherwise the GUI on
       // daemon platforms would show a state that the daemon keeps and that
@@ -72,6 +66,16 @@ extension V3StateSnapshotOps on CleonaService {
       // "with its reason named".
       'dataSaverActive': dataSaverActive,
       'dataSaverLockedBySecure': dataSaverLockedBySecure,
+      // The device switches (§11.9 source 4, §12.7) and the bulk-cache size
+      // (§21.3.3 item 3) — in the snapshot, not only in `state_changed`: a
+      // GUI that connects reads them from here (`IpcClient
+      // ._readNetworkSwitches`) and would otherwise show its own defaults
+      // until the next event (S407-MASSENCACHE, finding B-3).
+      'externalRecordsEnabled': externalRecordsEnabled,
+      'coverReduceEnabled': coverReduceEnabled,
+      'coverReduceActive': coverReduceActive,
+      'portMappingEnabled': portMappingEnabled,
+      'bulkCacheMb': bulkCacheMb,
       'peerCount': peerCount,
       'confirmedPeerCount': confirmedPeerCount,
       'reachablePeerCount': reachablePeerCount,
@@ -88,7 +92,6 @@ extension V3StateSnapshotOps on CleonaService {
       // means "this concept no longer exists" (gap G-6, together with the
       // multi-interface mode).
       'mobileFallbackActive': false,
-      'fragmentCount': fragmentCount,
       'isRunning': isRunning,
       // B-4b (§14.6.1, D-39, D-40): the enrolment for the interface.
       'enrolment': enrolmentView.toJson(),
@@ -108,7 +111,14 @@ extension V3StateSnapshotOps on CleonaService {
       // GUI's chat screen blocks writing on this mark — over the IPC
       // trench only the snapshot crosses, not the store.
       'groupsRemovedFrom': _groupsRemovedFrom().toList(),
-      'channels': _channels.map((k, v) => MapEntry(k, v.toJson())),
+      // §16.2.1, §18.4.3 (S407 group list): where an anonymous poll cannot
+      // be built — the poll editor of the GUI disables the switch.
+      'anonymousPollsImpossible': [
+        for (final id in [..._groups.keys, ..._channels.keys])
+          if (!anonymousPollPossible(id)) id,
+      ],
+      'channels':
+          _channels.map((k, v) => MapEntry(k, v.toJson(withEntries: false))),
       'conversations': conversations.map((k, v) => MapEntry(k, v.toJson())),
       'acceptedContacts': acceptedContacts.map((c) => c.toJson()).toList(),
       'pendingContacts': pendingContacts.map((c) => c.toJson()).toList(),
@@ -135,7 +145,8 @@ extension V3StateSnapshotOps on CleonaService {
       // never carried it, so the GUI on daemon platforms always showed the
       // defaults.
       'linkPreviewSettings': _linkPreviewSettings.toJson(),
-      'multiInterfaceMode': MultiInterfaceMode.modeToString(_multiInterfaceMode),
+      'guiDeviceSettings': guiDeviceSettings,
+      'masterMute': masterMute,
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),
       'localDeviceId': _localDeviceId,

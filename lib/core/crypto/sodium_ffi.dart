@@ -8,6 +8,7 @@ library;
 import 'dart:ffi';
 import 'dart:io' show Platform;
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -365,15 +366,14 @@ class SodiumFFI {
   /// [AppPaths.bundleDir] instead of via the own directory. Under Linux
   /// `dlopen` does not look in the program directory anyway; the bundle
   /// path stands there as a fallback, not as a repair.
+  ///
+  /// Linux (S410, I-6): the candidate list lives in
+  /// `platform/linux_native_libraries.dart` — the runtime sonames of the
+  /// distribution packages first, then the bundle, the unversioned
+  /// development name last.
   static DynamicLibrary _openLibsodium() {
     if (Platform.isLinux) {
-      for (final p in [
-        'libsodium.so',
-        '${AppPaths.bundleLibDir}/libsodium.so',
-      ]) {
-        try { return DynamicLibrary.open(p); } catch (_) {}
-      }
-      throw const SodiumException('libsodium.so not found');
+      return openLinuxNativeLibrary(linuxSodium);
     } else if (Platform.isMacOS) {
       for (final p in [
         'libsodium.dylib',

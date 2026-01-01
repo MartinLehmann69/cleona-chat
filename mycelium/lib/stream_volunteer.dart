@@ -14,7 +14,9 @@
 ///   Anything else is silence. A join is echoed (9 B for 9 B) once both
 ///   sides stand; a frame and a missing list are forwarded to the other
 ///   side under ITS cookie — the only packets larger than what they answer,
-///   and they answer nothing: they are the other side's packets.
+///   and they answer nothing: they are the other side's packets. From the
+///   sender only the end of a pass (form 4) is a missing packet; the
+///   recipient's lists go the other way.
 ///
 /// ## Bounds (§20.2)
 /// ONE session at a time (V-b); per session two cookies, two addresses and
@@ -95,6 +97,13 @@ class StreamVolunteer {
       _join(s, fromSender, from);
     } else if (k == kinds.kStreamFrame && fromSender && s.paired &&
         _at(s.sender, from) && p.length == kFrameLength) {
+      _live(s);
+      _send(cookieSwap(p, s.recipientCookie), s.recipient!);
+    } else if (k == kinds.kStreamMissing && fromSender && s.paired &&
+        _at(s.sender, from)) {
+      // The sender's end of a pass (S407 M-1) — the one 0x5A form that
+      // travels towards the recipient.
+      if (readMissing(p)?.form != kMissingPassEnd) return true;
       _live(s);
       _send(cookieSwap(p, s.recipientCookie), s.recipient!);
     } else if (k == kinds.kStreamMissing && fromRecipient && s.paired &&

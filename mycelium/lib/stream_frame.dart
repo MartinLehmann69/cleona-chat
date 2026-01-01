@@ -27,8 +27,16 @@
 ///
 /// `0x5A` forms: 0 request — round u8, n u16, n × (stripe u16, mask u16 of
 /// the missing piece numbers); 1 done; 2 give up — n u16, n × stripe u16
-/// (the stripes still undecodable); 3 mark — frames received u32. A long
+/// (the stripes still undecodable); 3 mark — frames received u32; 4 end of
+/// pass — pass u8, frames sent u32 (S407 M-1). Forms 0–3 go from the
+/// recipient to the sender, form 4 from the sender to the recipient. A long
 /// request is split into parts like any packet (`split.dart`).
+///
+/// The END OF A PASS is the lane-2 form of lane 3's `0x55` with a count
+/// (`bulk_piece.dart`): §11.3 asks again "after the last frame and 300 ms",
+/// and only the sender knows which frame was the last. Without it the
+/// recipient took every pause on the path for the end and spent its three
+/// rounds in the middle of the first pass (S407-MEDIEN-LANGSAM M-1).
 library;
 
 import 'dart:typed_data';
@@ -64,6 +72,7 @@ const int kMissingRequest = 0;
 const int kMissingDone = 1;
 const int kMissingGiveUp = 2;
 const int kMissingMark = 3;
+const int kMissingPassEnd = 4;
 
 bool cookieSame(Uint8List a, Uint8List b) {
   if (a.length != b.length) return false;
@@ -199,6 +208,15 @@ Uint8List markPacket(Uint8List cookie, int received) {
   return p;
 }
 
+/// The sender's end of pass [pass] after [sent] frames in all (form 4).
+Uint8List streamPassEndPacket(Uint8List cookie, int pass, int sent) {
+  final p = _missingHead(cookie, kMissingPassEnd, 5);
+  ByteData.sublistView(p)
+    ..setUint8(10, pass & 0xFF)
+    ..setUint32(11, sent, Endian.big);
+  return p;
+}
+
 typedef MissingRead = ({
   int form,
   int round,
@@ -226,6 +244,10 @@ MissingRead? readMissing(Uint8List p) {
       return p.length == 10 ? r() : null;
     case kMissingMark:
       return p.length == 14 ? r(received: b.getUint32(10, Endian.big)) : null;
+    case kMissingPassEnd:
+      return p.length == 15
+          ? r(round: p[10], received: b.getUint32(11, Endian.big))
+          : null;
     case kMissingGiveUp:
       if (p.length < 12) return null;
       final n = b.getUint16(10, Endian.big);

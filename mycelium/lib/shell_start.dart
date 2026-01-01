@@ -163,6 +163,22 @@ class Start {
       this.partB);
 }
 
+/// The key in [running] whose start sent [uniform] as its share, or `null`.
+///
+/// A foreign flight 1 never carries it: the share is drawn fresh for every
+/// start. When it arrives all the same, this node's own flight 1 came back —
+/// it went to an address of this node (loopback, an own interface, the own
+/// public address through the router). Answering it set up a link as callee
+/// only, sealing under the one direction key and opening under the other:
+/// nothing ever arrived, and the caller was told the handshake had completed
+/// (S407-B19, `delivered_up=0`). `shell.dart` lets that start fail instead.
+String? startOf(Map<String, Start> running, Uint8List uniform) {
+  for (final e in running.entries) {
+    if (equal(e.value.uniform, uniform)) return e.key;
+  }
+  return null;
+}
+
 /// Creates a handshake and builds flight 1.
 Start beginShellHandshake() {
   _oqs.init();

@@ -83,9 +83,10 @@ extension CleonaServiceKemLine on CleonaService {
         'mlKemSk': bytesToHex(identity.mlKemSecretKey),
         'at': at.millisecondsSinceEpoch,
       }))),
+      where: _ownWhereWires(), // §14.7, D-46
     );
     final placed = await _myceliumOwnSend(
-        messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC, payload: envelope);
+        messageType: proto.MessageType.MT_TWIN_SYNC, payload: envelope);
     if (placed) {
       _log.info('KEM rotation: Type 19 placed for ${others.length} other own '
           'device(s) — now the announcement to contacts (D-40)');

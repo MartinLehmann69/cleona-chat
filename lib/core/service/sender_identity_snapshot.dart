@@ -39,7 +39,7 @@ import 'dart:typed_data';
 ///
 /// Per-packet ephemeral — never persisted.
 class SenderIdentitySnapshot {
-  /// Wire-level senderDeviceId from `NetworkPacketV3.senderDeviceId`.
+  /// Wire-level senderDeviceId from `NetworkPacket.senderDeviceId`.
   ///
   /// **Optional, and honestly so since S351.** This is a V3 PACKET field.
   /// The V4.1 delivery path has no device level (§14.2: "One delivery serves
@@ -54,7 +54,7 @@ class SenderIdentitySnapshot {
   /// over `lib/`: the three V3 paths set it, nobody reads it).
   final Uint8List? senderDeviceId;
 
-  /// Wire-level senderUserId from `ApplicationFrameV3.senderUserId`.
+  /// Wire-level senderUserId from `ApplicationFrame.senderUserId`.
   /// Empty for `InfrastructureFrame` (no user-identity claim).
   final Uint8List senderUserId;
 

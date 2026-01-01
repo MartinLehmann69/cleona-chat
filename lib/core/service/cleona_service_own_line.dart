@@ -20,13 +20,26 @@ part of 'cleona_service.dart';
 /// The contact deliveries mirrored to the other own devices (§14.2, Type 18):
 /// the conversation itself. Not mirrored (open, `S398-B4-BAU.md`): media and
 /// voice (their objects travel lanes 2/3 with their own receipts, §9.4),
-/// calls, group/channel management, contact requests, key rotation.
-const _kMirrored = <proto.MessageTypeV3>{
-  proto.MessageTypeV3.MTV3_TEXT,
-  proto.MessageTypeV3.MTV3_REPLY,
-  proto.MessageTypeV3.MTV3_REACTION,
-  proto.MessageTypeV3.MTV3_EDIT,
-  proto.MessageTypeV3.MTV3_DELETE,
+/// group/channel membership, contact requests, key rotation. The chat
+/// configuration is mirrored (§21.5.4, D-72). A call signal
+/// is mirrored too, but on steps 1 and 3 and not through the post box
+/// (§17.2, D-46, `_kCallSignalTypes`, `cleona_service_own_ring.dart`).
+const _kMirrored = <proto.MessageType>{
+  proto.MessageType.MT_TEXT,
+  proto.MessageType.MT_REPLY,
+  proto.MessageType.MT_REACTION,
+  // §16.2.4: the totals of a private channel are shown on every own device.
+  proto.MessageType.MT_CHANNEL_REACTION_TOTALS,
+  proto.MessageType.MT_EDIT,
+  proto.MessageType.MT_DELETE,
+  // §17.2: the missed-call message is "mirrored like any message".
+  proto.MessageType.MT_CALL_MISSED,
+  // §21.5.4, D-72 "per-chat values travel by mirroring the chat-configuration
+  // message to the own devices": a contact's proposal, acceptance or
+  // rejection, and an owner's or admin's group/channel settings — also from
+  // a co-member who is no contact (group pair, `_handleDeliveryMirror`). The
+  // own changes travel as Type 2 (`_ownChatConfigMirror`).
+  proto.MessageType.MT_CHAT_CONFIG_UPDATE,
 };
 
 extension CleonaServiceOwnLine on CleonaService {
@@ -50,20 +63,21 @@ extension CleonaServiceOwnLine on CleonaService {
     }
     if (me == null) return; // no local device registered yet
     mycelium.MailboxOwnLine(p).ownLineSet(me, others);
+    _ownWhereSync(); // where the others are, and the watch (§14.7, D-46)
   }
 
   /// The body of `sendToUser` to one's own UserID (§22.5.2). `true` when at
   /// least one deposit was placed (§8.2) — the observation, not a delivery
   /// claim. Only twin sync travels this line.
   Future<bool> _myceliumOwnSend({
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
     Uint8List? messageId,
     Uint8List? targetDeviceId,
   }) async {
     final p = myceliumMailbox;
     if (p == null) return false;
-    if (messageType != proto.MessageTypeV3.MTV3_TWIN_SYNC) {
+    if (messageType != proto.MessageType.MT_TWIN_SYNC) {
       _log.warn('mycelium: self-send ${messageType.name} — only twin sync '
           'travels the own line (§14.7). Not sent.');
       return false;
@@ -82,7 +96,7 @@ extension CleonaServiceOwnLine on CleonaService {
     final id = (messageId != null && messageId.isNotEmpty)
         ? messageId
         : SodiumFFI().randomBytes(16);
-    final frame = _v41InnerFrame(
+    final frame = _innerFrame(
       recipientUserId: identity.userId,
       senderUserId: identity.userId,
       messageId: id,
@@ -104,7 +118,7 @@ extension CleonaServiceOwnLine on CleonaService {
   /// other keys, is discarded. The device comes from the twin-sync envelope
   /// and only when it is in the own device set (§22.5.3 `senderDeviceId`).
   Future<void> _myceliumOwnInbound(
-      mycelium.Inbound e, proto.ApplicationFrameV3 frame) async {
+      mycelium.Inbound e, proto.ApplicationFrame frame) async {
     final ownKeys = e.from.sameIdentity(e.to) &&
         constantTimeEquals(e.from.ed25519Pk, identity.ed25519PublicKey) &&
         constantTimeEquals(e.from.mlDsaPk, identity.mlDsaPublicKey);
@@ -113,24 +127,28 @@ extension CleonaServiceOwnLine on CleonaService {
           'signed by other keys. Discarded.');
       return;
     }
-    if (frame.messageType != proto.MessageTypeV3.MTV3_TWIN_SYNC) {
+    if (frame.messageType != proto.MessageType.MT_TWIN_SYNC) {
       _log.warn('mycelium drop: ${frame.messageType.name} from the own '
           'identity — only twin sync travels the own line. Discarded.');
       return;
     }
     Uint8List? device;
     try {
-      final d = Uint8List.fromList(
-          proto.TwinSyncEnvelope.fromBuffer(frame.payload).deviceId);
-      if (_devices.containsKey(bytesToHex(d))) device = d;
+      final envelope = proto.TwinSyncEnvelope.fromBuffer(frame.payload);
+      final d = Uint8List.fromList(envelope.deviceId);
+      if (_devices.containsKey(bytesToHex(d))) {
+        device = d;
+        // §14.7 (D-46): every own-line deposit names where its device is.
+        _ownWhereFrom(d, envelope);
+      }
     } catch (_) {
       // Unreadable envelope: the twin handler logs and drops it.
     }
-    _log.event('mycelium RECEIVE own line MTV3_TWIN_SYNC '
+    _log.event('mycelium RECEIVE own line MT_TWIN_SYNC '
         '(${e.content.length} B, device '
         '${device == null ? 'unknown' : CleonaService._hexShort(device)})');
     await handleApplicationFrame(
-      event: HarvestEvent.fromV3Frame(
+      event: HarvestEvent.fromApplicationFrame(
         frame: frame,
         senderDeviceId: device,
         // An own-line delivery is a received delivery too (§20.2); the
@@ -248,10 +266,13 @@ extension CleonaServiceOwnLine on CleonaService {
           ],
       };
     }
+    final sk = _skTwinState(group.groupIdHex);
     _sendTwinSync(proto.TwinSyncType.GROUP_CREATED,
         Uint8List.fromList(utf8.encode(jsonEncode({
       ...group.toJson(),
       if (pairs.isNotEmpty) 'groupPairs': pairs,
+      // §14.7 Type 6, §16.2.5: the key state this device holds.
+      'sharedKey': ?sk,
     }))));
   }
 
@@ -268,6 +289,28 @@ extension CleonaServiceOwnLine on CleonaService {
         Uint8List.fromList(utf8.encode(jsonEncode({
       'group': gid,
       'epoch': epochAtLeaving,
+    }))));
+  }
+
+  /// Type 22 CHANNEL_JOINED (§14.7, S407 owner decision 08.10.2026 E17 = A):
+  /// the identity created, joined or changed [channel] on this device — its
+  /// state as it stands here, so that every own device holds the channel
+  /// the way it holds a group after Type 6. Sent only while the identity is
+  /// a member: the state a leaving device sends to the remaining members no
+  /// longer names it, and its leaving travels as Type 21 GROUP_LEFT.
+  void _sendTwinChannelJoined(ChannelInfo channel) {
+    if (!channel.members.containsKey(identity.userIdHex)) return;
+    final sk = _skTwinState(channel.channelIdHex);
+    // §14.7 Type 22 "name and settings" (S407-EINSTELLUNGEN A-5): the
+    // settings in force here (§21.5.4) — they live at the conversation, not
+    // at the channel object.
+    final settings = conversations[channel.channelIdHex]?.config.toJson();
+    _sendTwinSync(proto.TwinSyncType.CHANNEL_JOINED,
+        Uint8List.fromList(utf8.encode(jsonEncode({
+      ...channel.toJson(),
+      // §14.7 Type 22, §16.2.5: the key state this device holds.
+      'sharedKey': ?sk,
+      'chatConfig': ?settings,
     }))));
   }
 
@@ -336,12 +379,11 @@ extension CleonaServiceOwnLine on CleonaService {
 
   /// Sets the transcription language of this identity (§21.7 "language
   /// setting per identity") and tells the other own devices (§14.7 Type 8
-  /// SETTINGS_CHANGED, field `transcriptionLanguage`).
+  /// SETTINGS_CHANGED, field `transcriptionLanguage`, with the time of the
+  /// change — `cleona_service_shared_settings.dart`).
   void setTranscriptionLanguage(String language) {
     _transcriptionLanguageStore(language);
-    _sendTwinSync(proto.TwinSyncType.SETTINGS_CHANGED,
-        Uint8List.fromList(
-            utf8.encode(jsonEncode({'transcriptionLanguage': language}))));
+    _sharedLanguageSend(language);
   }
 
   /// Stores [language] next to this device's own retention and model size
@@ -369,7 +411,14 @@ extension CleonaServiceOwnLine on CleonaService {
   /// — whichever of the devices meets a second copy of that delivery, the
   /// identifier is known everywhere and the copy is refused everywhere.
   void _myceliumMirror(
-      proto.ApplicationFrameV3 frame, Uint8List content, Uint8List identifier) {
+      proto.ApplicationFrame frame, Uint8List content, Uint8List identifier) {
+    // §17.2, D-46: a call signal goes to the other own devices at once, on
+    // steps 1 and 3 only — never through the post box, which would ring
+    // for nobody (`cleona_service_own_ring.dart`).
+    if (_kCallSignalTypes.contains(frame.messageType)) {
+      _ownCallMirror(content, identifier);
+      return;
+    }
     if (!_kMirrored.contains(frame.messageType)) return;
     _sendTwinSync(proto.TwinSyncType.DELIVERY_MIRROR, content,
         deliveryId: identifier);
@@ -387,28 +436,59 @@ extension CleonaServiceOwnLine on CleonaService {
   /// kept, per the null contract of [HarvestEvent.deliveryId].
   Future<void> _handleDeliveryMirror(
       List<int> payload, Uint8List? deliveryId) async {
-    final proto.ApplicationFrameV3 frame;
+    final proto.ApplicationFrame frame;
     try {
-      frame = proto.ApplicationFrameV3.fromBuffer(payload);
+      frame = proto.ApplicationFrame.fromBuffer(payload);
     } catch (_) {
       _log.warn('Twin DELIVERY_MIRROR: unreadable frame — discarded');
       return;
     }
     final sender = Uint8List.fromList(frame.senderUserId);
     final contact = _contacts[bytesToHex(sender)];
-    if (!_kMirrored.contains(frame.messageType) ||
+    final isContact =
+        contact != null && !contact.isDeleted && contact.status == 'accepted';
+    // §17.2, D-46: the mirror of a call signal — from a contact, or over a
+    // group pair for a group both belong to (§4.3, §16.2.2), as the
+    // collecting device admitted it.
+    final callSignal = _kCallSignalTypes.contains(frame.messageType) &&
+        (isContact || _groupPairAdmits(frame, bytesToHex(sender)));
+    // §21.5.4: a group's or channel's settings from an owner or admin who
+    // is no contact came over a group pair (§4.3) — admitted the same way.
+    // For a group or channel this device does not hold yet the pair cannot
+    // be checked here: the settings go to the group gate and wait for the
+    // group (§21.5.4 "settings for it … are buffered", N-1a); the sender's
+    // role is checked when they are applied (`_handleChatConfigUpdate`).
+    final gid = frame.groupId.isEmpty
+        ? null
+        : bytesToHex(Uint8List.fromList(frame.groupId));
+    final groupNotHeld = gid != null &&
+        !_groups.containsKey(gid) &&
+        !_channels.containsKey(gid) &&
+        !SystemChannels.isSystemChannel(gid);
+    final configOverPair =
+        frame.messageType == proto.MessageType.MT_CHAT_CONFIG_UPDATE &&
+            !isContact &&
+            (groupNotHeld || _groupPairAdmits(frame, bytesToHex(sender)));
+    // §17.2 "mirrored like any message" (S408): the missed-call message of a
+    // group call from a co-member who is no contact came over the group pair,
+    // as the INVITE it follows did — admitted the same way as that INVITE's
+    // mirror above, so that every own device that rang shows the entry.
+    final missedOverPair =
+        frame.messageType == proto.MessageType.MT_CALL_MISSED &&
+            !isContact &&
+            _groupPairAdmits(frame, bytesToHex(sender));
+    if (!(callSignal ||
+            _kMirrored.contains(frame.messageType) &&
+                (isContact || configOverPair || missedOverPair)) ||
         !constantTimeEquals(
-            Uint8List.fromList(frame.recipientUserId), identity.userId) ||
-        contact == null ||
-        contact.isDeleted ||
-        contact.status != 'accepted') {
+            Uint8List.fromList(frame.recipientUserId), identity.userId)) {
       _log.warn('Twin DELIVERY_MIRROR: ${frame.messageType.name} from '
           '${CleonaService._hexShort(sender)} — not a mirrored delivery of '
           'a contact. Discarded.');
       return;
     }
     await handleApplicationFrame(
-      event: HarvestEvent.fromV3Frame(
+      event: HarvestEvent.fromApplicationFrame(
         frame: frame,
         senderDeviceId: null,
         deliveryId: deliveryId,
@@ -419,11 +499,140 @@ extension CleonaServiceOwnLine on CleonaService {
           verifiedDeviceEd25519Pk: null,
           verifiedDeviceMlDsaPk: null,
           newKeyDetectedForSenderUser: false,
+          // This device's own arrival: a mirrored INVITE counts its 10 s
+          // from here (§17.2 "counts from its own arrival time").
           receivedAt: DateTime.now(),
         ),
       ),
       mirrored: true,
     );
+  }
+
+  /// §14.2 "what any device sends … reaches the others as `MESSAGE_SENT`",
+  /// D-72: a chat configuration this device sent — a 1:1 proposal,
+  /// acceptance or rejection, or a group's or channel's settings — goes to
+  /// the other own devices as Type 2 carrying the `ChatConfigUpdate` as
+  /// sent. A v4.2.3 device finds no `text` in it and drops it with a
+  /// warning (`398a6e40:lib/core/service/cleona_service.dart:9680-9686`).
+  ///
+  /// [group]: the settings of a group or channel — so that a device that
+  /// does not hold it yet keeps them for it (§21.5.4 "settings for it",
+  /// N-1a) instead of taking the identifier for an unknown contact.
+  void _ownChatConfigMirror(String conversationId, Uint8List configBytes,
+      {bool group = false}) {
+    _sendTwinSync(proto.TwinSyncType.MESSAGE_SENT,
+        Uint8List.fromList(utf8.encode(jsonEncode({
+      'conversationId': conversationId,
+      'chatConfigUpdate': base64Encode(configBytes),
+      if (group) 'group': true,
+    }))));
+  }
+
+  /// A configuration change another own device sent ([_ownChatConfigMirror]):
+  /// applied as there — a group's or channel's settings where the identity
+  /// is owner or admin, in 1:1 the identity's own proposal (shown as open),
+  /// its acceptance (applied, proposal closed) or its rejection (proposal
+  /// closed).
+  ///
+  /// [forGroup]: the sender marked it as a group's or channel's settings
+  /// ([_ownChatConfigMirror]). For one this device does not hold yet they
+  /// wait in the identity's store like the settings of a member that arrive
+  /// before the invitation (§21.5.4 "settings for it … are buffered", N-1a)
+  /// and are applied with the group (`_groupWaitingApply`), where the own
+  /// role is checked as for every settings change.
+  void _ownChatConfigApply(String conversationId, Uint8List bytes,
+      {bool forGroup = false}) {
+    final proto.ChatConfigUpdate m;
+    try {
+      m = proto.ChatConfigUpdate.fromBuffer(bytes);
+    } catch (_) {
+      _log.warn('Twin MESSAGE_SENT: unreadable configuration — discarded');
+      return;
+    }
+    final config = _chatConfigOf(m);
+    final me = identity.userIdHex;
+    final group = _groups[conversationId];
+    final channel = group == null ? _channels[conversationId] : null;
+    final short = conversationId.length >= 8
+        ? conversationId.substring(0, 8)
+        : conversationId;
+    if (group != null || channel != null) {
+      final role = group?.members[me]?.role ?? channel?.members[me]?.role;
+      final conv = conversations[conversationId];
+      if ((role != 'owner' && role != 'admin') || conv == null) {
+        _log.warn('Twin configuration for $short: not owner/admin here or '
+            'no conversation — discarded');
+        return;
+      }
+      if (group != null) {
+        config.announcementOnly = m.hasAnnouncementOnly()
+            ? m.announcementOnly
+            : conv.config.announcementOnly;
+      }
+      final modeChanged =
+          group != null && config.announcementOnly != conv.config.announcementOnly;
+      conv.config = config;
+      _saveConversations();
+      if (modeChanged) _groupAnnouncementChanged(conversationId);
+      onStateChanged?.call();
+      _log.info('Twin-synced ${group != null ? 'group' : 'channel'} '
+          'configuration for $short');
+      return;
+    }
+    if (forGroup) {
+      final verdict = _groupGate(HarvestEvent(
+        senderUserId: identity.userId,
+        senderDeviceId: null,
+        type: proto.MessageType.MT_CHAT_CONFIG_UPDATE,
+        payload: bytes,
+        messageId: SodiumFFI().randomBytes(16),
+        harvestedAt: DateTime.now(),
+        claimedSentAt: null,
+        groupId: hexToBytes(conversationId),
+        rosterVersion: null,
+        contentMetadata: null,
+        senderTrust: SenderTrust.verified,
+      ));
+      if (verdict != GroupGateVerdict.waits) {
+        _log.info('Twin configuration for the group $short not held here — '
+            '${verdict.name}');
+      }
+      return;
+    }
+    final contact = _contacts[conversationId];
+    if (contact == null) {
+      _log.info('Twin configuration for the unknown $short — dropped');
+      return;
+    }
+    final conv = conversations.putIfAbsent(conversationId,
+        () => Conversation(id: conversationId, displayName: contact.displayName));
+    // O-1: the partner's acceptance this device kept because the proposal
+    // had not arrived yet. The identity's own proposal of exactly its values
+    // completes the consent (§21.5.4) — applied now; an own proposal of
+    // other values or an own answer drops it.
+    final kept = conv.parkedConfigAcceptance;
+    conv.parkedConfigAcceptance = null;
+    var keptApplied = false;
+    if (m.isRequest) {
+      if (kept != null && _sameDmConfig(kept, config)) {
+        conv.config = config;
+        conv.pendingConfigProposal = null;
+        conv.pendingConfigProposer = null;
+        keptApplied = true;
+      } else {
+        conv.pendingConfigProposal = config;
+        conv.pendingConfigProposer = me;
+      }
+    } else {
+      if (m.accepted) conv.config = config;
+      conv.pendingConfigProposal = null;
+      conv.pendingConfigProposer = null;
+    }
+    _saveConversations();
+    onStateChanged?.call();
+    _log.info('Twin-synced 1:1 configuration for $short '
+        '(${keptApplied ? 'proposal, applied with the acceptance kept here' : m.isRequest ? 'proposal' : m.accepted ? 'accepted' : 'rejected'}'
+        '${kept != null && !keptApplied ? '; kept acceptance dropped' : ''})');
   }
 
   /// The DeviceID of the own device [target] names — its UUID key or its

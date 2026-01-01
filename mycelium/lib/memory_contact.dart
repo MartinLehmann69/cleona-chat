@@ -18,13 +18,20 @@
 /// | since (u64 ms)
 /// | lastSeen (flag + address)                — version 12
 /// | card addresses (count byte + addresses)  — version 13
-/// | neighbours (count byte 0..3 + addresses) — version 16 (was one, v11)
+/// | neighbours (`neighbour_list.dart`, with record keys S407) — version 16
 /// | s_AB: flag (1 B) + 32 B                  — version 14
 /// | day keys: count (1 B), per day (u32) + key 32 B
 /// | own day keys last sent (u64 ms, 0 = never)
-/// | never a fixed neighbour (1 B, 0x00/0x01) — version 16
+/// | never a fixed neighbour (1 B, 0x00/0x01) — version 16;
+///   bit 0x02: reads keyed neighbour lists (S407, still version 17);
+///   bit 0x04: `lastSuccess` follows (S407 P11, still version 17)
 /// | own chain acknowledged (1 B, 0x00/0x01)  — version 17
+/// | lastSuccess (u64 ms) — only with bit 0x04 (§6.3)
 /// ```
+///
+/// Bit 0x04 and its eight bytes stand only once a delivery to the contact was
+/// acknowledged: a contact without one is written byte for byte as before, and
+/// a file without the bit reads as before (D-21, within 4.2).
 library;
 
 import 'dart:convert';
@@ -34,6 +41,7 @@ import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/identity/rotation_chain.dart';
 import 'package:mycelium/memory_invitation.dart' show MemoryError, Reader;
 import 'package:mycelium/card_address.dart';
+import 'package:mycelium/neighbour_list.dart';
 import 'package:mycelium/pair.dart' show kPairRandomLength;
 import 'package:mycelium/envelope.dart';
 
@@ -75,6 +83,10 @@ class Contact {
   /// The last OBSERVED address (§6.2 „received packets").
   final CardAddress? lastSeen;
 
+  /// The last acknowledged delivery to the contact (§6.3 `lastSuccess`) —
+  /// `null`: none yet. Local, travels nowhere (§6.3 "never exchanged").
+  final DateTime? lastSuccess;
+
   /// The addresses that the peer has named for itself in its card
   /// — in ITS order of preference, at most four (§15.2),
   /// without classification.
@@ -110,11 +122,16 @@ class Contact {
   /// (`mailbox_rotation.dart`).
   final bool chainAcked;
 
+  /// The contact showed it reads keyed neighbour lists (S407, owner
+  /// 09.10.2026 "B"): only then do lists to it carry record keys.
+  final bool readsKeys;
+
   Contact({
     required this.address,
     required this.displayName,
     required this.since,
     this.lastSeen,
+    this.lastSuccess,
     List<CardAddress> cardsAddresses = const [],
     List<CardAddress> neighbours = const [],
     this.neverFixedNeighbour = false,
@@ -122,6 +139,7 @@ class Contact {
     Map<int, Uint8List> dayKey = const {},
     this.dayKeySent,
     this.chainAcked = false,
+    this.readsKeys = false,
   })  : cardsAddresses = List.unmodifiable(cardsAddresses),
         neighbours = List.unmodifiable(neighbours),
         dayKey = Map.unmodifiable(dayKey) {
@@ -146,13 +164,15 @@ class Contact {
       displayName: displayName,
       since: since,
       lastSeen: lastSeen,
+      lastSuccess: lastSuccess,
       cardsAddresses: cardsAddresses,
       neighbours: neighbours,
       neverFixedNeighbour: neverFixedNeighbour,
       pairRandom: pairRandom,
       dayKey: dayKey,
       dayKeySent: dayKeySent,
-      chainAcked: chainAcked);
+      chainAcked: chainAcked,
+      readsKeys: readsKeys);
 }
 
 /// The same contact with the chain acknowledgement [acked] and — with
@@ -165,13 +185,15 @@ Contact contactWithChainState(Contact k,
         displayName: k.displayName,
         since: k.since,
         lastSeen: k.lastSeen,
+        lastSuccess: k.lastSuccess,
         cardsAddresses: k.cardsAddresses,
         neighbours: k.neighbours,
         neverFixedNeighbour: k.neverFixedNeighbour,
         pairRandom: k.pairRandom,
         dayKey: k.dayKey,
         dayKeySent: dayKeysDue ? null : k.dayKeySent,
-        chainAcked: acked);
+        chainAcked: acked,
+        readsKeys: k.readsKeys);
 
 /// An address as memory keeps it: its bytes, then its rotation chain in the
 /// wire form (`rotation_chain.dart`, 1 B for none). Every place that keeps
@@ -214,7 +236,8 @@ void contactWrite(BytesBuilder b, Contact k) {
   b.add(_u64(k.since.millisecondsSinceEpoch));
   optionalAddressWrite(b, k.lastSeen);
   addressesWrite(b, k.cardsAddresses);
-  addressesWrite(b, k.neighbours);
+  // With record keys when known (S407 a'); without, byte for byte as before.
+  neighbourListWrite(b, k.neighbours, withKeys: true);
   final s = k.pairRandom;
   b.addByte(s == null ? 0 : 1);
   if (s != null) b.add(s);
@@ -225,8 +248,12 @@ void contactWrite(BytesBuilder b, Contact k) {
     b.add(k.dayKey[t]!);
   }
   b.add(_u64(k.dayKeySent?.millisecondsSinceEpoch ?? 0));
-  b.addByte(k.neverFixedNeighbour ? 1 : 0);
+  final success = k.lastSuccess;
+  b.addByte((k.neverFixedNeighbour ? 1 : 0) |
+      (k.readsKeys ? 2 : 0) |
+      (success != null ? 4 : 0));
   b.addByte(k.chainAcked ? 1 : 0);
+  if (success != null) b.add(_u64(success.millisecondsSinceEpoch));
 }
 
 /// Reads a contact. Throws [MemoryError] (via [Reader]) or
@@ -237,13 +264,7 @@ Contact contactRead(Reader l) {
   final since = DateTime.fromMillisecondsSinceEpoch(l.u64());
   final seen = optionalAddressRead(l.bytes, 'zuletztGesehen');
   final card = addressesRead(l.bytes);
-  final many = l.byte();
-  if (many > kContactNeighboursAtMost) {
-    throw MemoryError('$many neighbours, at most $kContactNeighboursAtMost');
-  }
-  final neighbours = [
-    for (var i = 1; i <= many; i++) addressRead(l.bytes, 'neighbour $i')
-  ];
+  final neighbours = neighbourListRead(l.bytes, 'neighbours', withKeys: true);
   final Uint8List? s = switch (l.byte()) {
     0 => null,
     1 => l.bytes(kPairRandomLength),
@@ -259,22 +280,26 @@ Contact contactRead(Reader l) {
     days[l.u32()] = l.bytes(32);
   }
   final sent = l.u64();
-  final never = switch (l.byte()) {
-    0 => false,
-    1 => true,
-    final f => throw MemoryError('invalid never-fixed flag $f'),
-  };
+  final flags = l.byte();
+  if (flags > 7) throw MemoryError('invalid never-fixed flag $flags');
+  final never = flags & 1 != 0;
   final acked = switch (l.byte()) {
     0 => false,
     1 => true,
     final f => throw MemoryError('invalid chain-acknowledged flag $f'),
   };
+  // Bit 0x04 (S407 P11): without it, the layout before `lastSuccess` (D-21).
+  final success = flags & 4 != 0 ? l.u64() : null;
   return Contact(
     chainAcked: acked,
+    readsKeys: flags & 2 != 0,
     address: address,
     displayName: name,
     since: since,
     lastSeen: seen,
+    lastSuccess: success == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(success),
     cardsAddresses: card,
     neighbours: neighbours,
     neverFixedNeighbour: never,
@@ -298,10 +323,12 @@ Contact contactWithoutLastSeen(Contact k) => Contact(
     address: k.address,
     displayName: k.displayName,
     since: k.since,
+    lastSuccess: k.lastSuccess,
     cardsAddresses: k.cardsAddresses,
     neighbours: k.neighbours,
     neverFixedNeighbour: k.neverFixedNeighbour,
     pairRandom: k.pairRandom,
     dayKey: k.dayKey,
     dayKeySent: k.dayKeySent,
-    chainAcked: k.chainAcked);
+    chainAcked: k.chainAcked,
+    readsKeys: k.readsKeys);

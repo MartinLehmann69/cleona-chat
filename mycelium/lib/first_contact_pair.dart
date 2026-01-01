@@ -207,7 +207,8 @@ Acceptance acceptanceContentRead(Uint8List content, int fromDay) {
   try {
     final sAB = read(kPairRandomLength);
     final dayKeys = _dayKeysRead(read, fromDay);
-    final neighbours = neighbourListRead(read, 'neighbours of the acceptance');
+    final neighbours =
+        neighbourListRead(read, 'neighbours of the acceptance', withKeys: true);
     return (
       sAB: sAB,
       dayKeys: dayKeys,

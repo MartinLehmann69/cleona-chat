@@ -11,8 +11,16 @@
 // the network — streamed to the end, or placed with holders AND its
 // announcement handed over — or once it is `failed`. The waiting message
 // carries the file's identifier (8 B: the first 8 bytes of the file's
-// message identifier on this leg, `ApplicationFrameV3.after_file`). Lane 1
+// message identifier on this leg, `ApplicationFrame.after_file`). Lane 1
 // is one ordinary message and is in the network at once; it takes no slot.
+//
+// A text with a link holds its line the same way while the sender fetches
+// its preview (S410 E5 A; v4_2 "The sender fetches link previews,
+// embedded"): it is shown at once, takes a slot marked `fetching`, and goes
+// with the preview embedded once the fetch ends — what was written after it
+// waits behind it ([_fileOrderLinkTake], [_fileOrderLinkReady]). A group or
+// channel post does so on each of its member legs; on the shared key its
+// post holds the post line of `cleona_service_shared_key_post.dart`.
 //
 // ONE PLACE HOLDS: `sendToUser` hands every user message kind to
 // [_fileOrderHold] before anything else, so no send path can forget it.
@@ -29,7 +37,7 @@
 // RECIPIENT. A message carrying a file identifier whose file is still
 // incomplete makes the recipient collect from the holders at once (the
 // collection of W1, rounds included); if the file cannot be assembled it
-// ends `failed` with its reason and the sender is told (`MTV3_MEDIA_ABORT`,
+// ends `failed` with its reason and the sender is told (`MT_MEDIA_ABORT`,
 // `bulkCollectionFailed`). The message itself is accepted and stored, and
 // shown AFTER the file: [_fileOrderPlace] moves it behind the file, also
 // when the file arrives only later.
@@ -63,6 +71,13 @@ extension CleonaServiceFileOrder on CleonaService {
         _fileOrder[e.key] = q;
         for (final s in q) {
           if (s['frame'] != null) _fileOrderWaiting.add(s['wire'] as String);
+          // A link preview fetched by an earlier run of the process: that
+          // fetch is gone, the message goes without a preview.
+          if (s.remove('fetching') != null) {
+            _log.info('[E2E link-preview] msgId='
+                '${(s['wire'] as String).substring(0, 8)} was fetching its '
+                'preview when the process ended — it goes without one');
+          }
         }
       }
       _fileOrderLoaded = true;
@@ -112,7 +127,7 @@ extension CleonaServiceFileOrder on CleonaService {
   /// head of the line (then with the identifier that file waited behind).
   bool _fileOrderHold({
     required Uint8List recipientUserId,
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
     required Uint8List messageId,
     Uint8List? groupId,
@@ -174,8 +189,96 @@ extension CleonaServiceFileOrder on CleonaService {
     _log.info('[E2E file-order-wait] ${messageType.name} '
         'msgId=${wire.substring(0, 8)} to ${to.substring(0, 8)} waits '
         '(place ${at > 0 ? at + 1 : line.length} of ${line.length}) behind '
-        'file ${(line.first['fid'] as String?)?.substring(0, 8) ?? '-'}');
+        '${line.first['k'] == 'file' ? 'file ${(line.first['fid'] as String?)?.substring(0, 8) ?? '-'}' : 'message ${(line.first['wire'] as String).substring(0, 8)}'}');
     return true;
+  }
+
+  // ── A message with a link preview takes its place (S410 E5 A) ─────────
+
+  /// A text with a link whose preview is still being fetched holds its leg
+  /// like a file that is not yet in the network: it takes a slot at the end
+  /// of the line NOW — with the frame as it would go without a preview,
+  /// marked `fetching` — and every message written to this leg afterwards
+  /// waits behind it ([_fileOrderHold]). The slot is persisted with its
+  /// frame: a process that ends during the fetch loses the preview, never
+  /// the message (the next run drops the mark, [_fileOrderEnsureLoaded]).
+  /// The message carries no file identifier of its own; one it waits behind
+  /// is carried as for any waiting message.
+  ///
+  /// 1:1: [groupId] `null`. A group post or a channel post (S410 follow-up,
+  /// owner 29.10.2026 "A") takes one slot per member leg, in the line of
+  /// that member in the group or channel, with the fields its leg carries.
+  void _fileOrderLinkTake({
+    required Uint8List recipientUserId,
+    required Uint8List messageId,
+    required Uint8List payload,
+    proto.MessageType messageType = proto.MessageType.MT_TEXT,
+    Uint8List? groupId,
+    int? groupMembershipEpoch,
+    Uint8List? groupMembershipHash,
+    Uint8List? postId,
+  }) {
+    _fileOrderEnsureLoaded();
+    final to = bytesToHex(recipientUserId);
+    final group =
+        (groupId != null && groupId.isNotEmpty) ? bytesToHex(groupId) : null;
+    final conv = group ?? to;
+    final key = _key(conv, to);
+    final line = _fileOrder.putIfAbsent(key, () => []);
+    final wire = bytesToHex(messageId);
+    line.add({
+      'k': 'frame',
+      'conv': conv,
+      'wire': wire,
+      'after': _lastFile(line),
+      'fetching': true,
+      'frame': <String, dynamic>{
+        'to': to,
+        'type': messageType.value,
+        'payload': base64Encode(payload),
+        'id': wire,
+        'group': ?group,
+        'epoch': ?groupMembershipEpoch,
+        if (groupMembershipHash != null)
+          'hash': bytesToHex(groupMembershipHash),
+        if (postId != null && postId.isNotEmpty) 'post': bytesToHex(postId),
+      },
+    });
+    _fileOrderWaiting.add(wire);
+    _fileOrderSave(key);
+    _log.info('[E2E link-preview] msgId=${wire.substring(0, 8)} to '
+        '${to.substring(0, 8)}${group == null ? '' : ' in ${group.substring(0, 8)}'} '
+        'waits for its preview (place ${line.length} of ${line.length})');
+  }
+
+  /// `true` while the message [wire] to [recipientHex] in [conversationId]
+  /// still holds its slot.
+  bool _fileOrderLinkWaits(
+      String conversationId, String recipientHex, String wire) {
+    _fileOrderEnsureLoaded();
+    return _fileOrder[_key(conversationId, recipientHex)]
+            ?.any((s) => s['wire'] == wire) ??
+        false;
+  }
+
+  /// The preview of [wire] is fetched ([payload] is the frame with it
+  /// embedded) or the fetch gave up ([payload] `null`: the frame goes as it
+  /// was taken). The line moves on.
+  void _fileOrderLinkReady(String conversationId, String recipientHex,
+      String wire, Uint8List? payload) {
+    _fileOrderEnsureLoaded();
+    final key = _key(conversationId, recipientHex);
+    final line = _fileOrder[key];
+    final at = line?.indexWhere((s) => s['wire'] == wire) ?? -1;
+    if (line == null || at < 0) return; // the conversation ended meanwhile
+    final slot = line[at];
+    if (payload != null) {
+      (slot['frame'] as Map<String, dynamic>)['payload'] =
+          base64Encode(payload);
+    }
+    slot.remove('fetching');
+    _fileOrderSave(key);
+    unawaited(_fileOrderDrain(key));
   }
 
   // ── A file takes its place ────────────────────────────────────────────
@@ -217,7 +320,15 @@ extension CleonaServiceFileOrder on CleonaService {
 
   /// The file [msg] is completely in the network with its announcement
   /// handed over, or `failed` (D-34): the lines behind it move on.
-  void _fileOrderRelease(UiMessage msg) {
+  ///
+  /// [fileFailed] is the FILE's own outcome (`_mediaFail`), kept in each
+  /// slot (`'failed'`). The drain asks the slot, not the message's display:
+  /// since S410 finding 8 (variant A) a group file whose announcement found
+  /// no way to ONE member is shown `failed` (§16.2.3) while it lies in the
+  /// network for every other member — asked by the display, the drain
+  /// dropped its announcement to members whose line waited behind an
+  /// earlier file.
+  void _fileOrderRelease(UiMessage msg, {required bool fileFailed}) {
     if (!msg.isOutgoing) return;
     _fileOrderEnsureLoaded();
     final touched = <String>[];
@@ -226,6 +337,7 @@ extension CleonaServiceFileOrder on CleonaService {
       for (final s in e.value) {
         if (s['k'] == 'file' && s['msg'] == msg.id && s['done'] != true) {
           s['done'] = true;
+          s['failed'] = fileFailed;
           hit = true;
         }
       }
@@ -234,7 +346,7 @@ extension CleonaServiceFileOrder on CleonaService {
     for (final key in touched) {
       _fileOrderSave(key);
       _log.info('[E2E file-order-release] file msgId=${msg.id.substring(0, 8)} '
-          '${msg.status == MessageStatus.failed ? 'failed' : 'in the network'} '
+          '${fileFailed ? 'failed' : 'in the network'} '
           '— line ${key.substring(key.indexOf(':') + 1, key.indexOf(':') + 9)} '
           'moves on');
       unawaited(_fileOrderDrain(key));
@@ -290,6 +402,16 @@ extension CleonaServiceFileOrder on CleonaService {
     }
   }
 
+  /// Did the FILE of [slot] fail (D-34, §9.4)? The outcome its release kept
+  /// (`_fileOrderRelease`). A slot without it — not released yet, or written
+  /// before S410 — falls back to the display only where display and file
+  /// are one: a 1:1 file has exactly one leg. A group or channel file is
+  /// never judged by the display over its legs (§16.2.3, S410 finding 8);
+  /// its own failure always releases it with the outcome.
+  bool _fileOrderFileFailed(Map<String, dynamic> slot, UiMessage msg) =>
+      fileSlotFailed(slot['failed'],
+          oneLeg: msg.fanoutLegs.isEmpty, display: msg.status);
+
   // ── Moving a line on ──────────────────────────────────────────────────
 
   /// Hands on what is due at the head of line [key], in order, until a file
@@ -311,7 +433,7 @@ extension CleonaServiceFileOrder on CleonaService {
           if (head['k'] == 'file') {
             final msg =
                 _bulkMessage(head['conv'] as String, head['msg'] as String);
-            final gone = msg == null || msg.status == MessageStatus.failed;
+            final gone = msg == null || _fileOrderFileFailed(head, msg);
             if (gone || head['done'] == true) {
               if (frame != null && !gone) {
                 await _fileOrderSend(head, frame);
@@ -329,6 +451,9 @@ extension CleonaServiceFileOrder on CleonaService {
             }
             break;
           }
+          // A message whose link preview is still being fetched holds the
+          // line (`_fileOrderLinkTake`).
+          if (head['fetching'] == true) break;
           if (frame != null) await _fileOrderSend(head, frame);
           line.remove(head);
           _fileOrderSave(key);
@@ -377,8 +502,8 @@ extension CleonaServiceFileOrder on CleonaService {
       Map<String, dynamic> slot, Map<String, dynamic> f) async {
     final wire = f['id'] as String;
     final after = slot['after'] as String?;
-    final type = proto.MessageTypeV3.valueOf(f['type'] as int) ??
-        proto.MessageTypeV3.MTV3_TEXT;
+    final type = proto.MessageType.valueOf(f['type'] as int) ??
+        proto.MessageType.MT_TEXT;
     if (after != null) _fileOrderAfterFile[wire] = hexToBytes(after);
     Uint8List? hex(String k) =>
         f[k] == null ? null : hexToBytes(f[k] as String);
@@ -413,8 +538,8 @@ extension CleonaServiceFileOrder on CleonaService {
     if (owner == null) return;
     if (!ok &&
         owner.fanoutLegs.isEmpty &&
-        (type == proto.MessageTypeV3.MTV3_TEXT ||
-            type == proto.MessageTypeV3.MTV3_MEDIA_INLINE)) {
+        (type == proto.MessageType.MT_TEXT ||
+            type == proto.MessageType.MT_MEDIA_INLINE)) {
       // Nothing taken over: B-5 as in `sendTextMessage`, and B-6 as in
       // `sendMediaMessage` for a lane 1 file (S403, N-4) — the two kinds
       // that carry their OWN identifier (`_parkedOwner`). Without this the
@@ -424,7 +549,7 @@ extension CleonaServiceFileOrder on CleonaService {
     final legs = owner.fanoutLegs.isEmpty
         ? <String>[owner.id]
         : owner.fanoutLegs.values.toList();
-    _v41ApplyOutgoingStatus(owner, legs);
+    _applyOutgoingLegStatus(owner, legs);
     persistMessage(owner.conversationId, owner);
     onStateChanged?.call();
   }
@@ -454,9 +579,9 @@ extension CleonaServiceFileOrder on CleonaService {
         ? bytesToHex(event.groupId!)
         : bytesToHex(event.senderUserId);
     final id = bytesToHex(event.messageId);
-    if (event.type == proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE ||
-        event.type == proto.MessageTypeV3.MTV3_MEDIA_INLINE ||
-        event.type == proto.MessageTypeV3.MTV3_VOICE_MESSAGE) {
+    if (event.type == proto.MessageType.MT_MEDIA_ANNOUNCE ||
+        event.type == proto.MessageType.MT_MEDIA_INLINE ||
+        event.type == proto.MessageType.MT_VOICE_MESSAGE) {
       final f = _bulkMessage(conv, id);
       if (f != null && !f.isOutgoing) _fileOrderPlace(conv, f);
     }

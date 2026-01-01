@@ -4,17 +4,17 @@
 /// V3.0 separates identity into two crypto subjects:
 ///
 /// * **User-Sig keypair** — long-lived, seed-derived via HD-Wallet, signs the
-///   Inner ApplicationFrameV3 (end-to-end identity). Lives in
+///   Inner ApplicationFrame (end-to-end identity). Lives in
 ///   `IdentityContext` / `identity_manager.dart`.
 /// * **Device-Sig keypair** — *this module*. Locally generated, NOT
 ///   seed-derived, NOT migrated across devices. Signs the Outer
-///   NetworkPacketV3 (`deviceEd25519Sig` + optional `deviceMlDsaSig`) and the
+///   NetworkPacket (`deviceEd25519Sig` + optional `deviceMlDsaSig`) and the
 ///   2D-DHT Liveness-Record. Disposable — if the device is lost, it is removed
 ///   from the Auth-Manifest via §7.4 and a fresh keypair is generated on the
 ///   replacement device.
 ///
 /// See `Cleona_Chat_Architecture_v3_0.md` §3.5 (Device Identity Sigs) and §2
-/// (NetworkPacketV3 wire format, fields 10/11).
+/// (NetworkPacket wire format, fields 10/11).
 ///
 /// **Selectivity** (§3.5): the `signMlDsa()` half is invoked ONLY for
 /// application frames (TEXT, MEDIA, GROUP_*, CHANNEL_*, CALENDAR_*, POLL_*,
@@ -261,13 +261,13 @@ class DeviceKeyPair {
   // ===========================================================================
 
   /// Sign [data] with the Ed25519 half of this device key. Returns a 64-byte
-  /// detached signature suitable for `NetworkPacketV3.deviceEd25519Sig`.
+  /// detached signature suitable for `NetworkPacket.deviceEd25519Sig`.
   Uint8List signEd25519(Uint8List data) {
     return SodiumFFI().signEd25519(data, ed25519PrivateKey);
   }
 
   /// Sign [data] with the ML-DSA-65 half of this device key. Returns the
-  /// detached signature suitable for `NetworkPacketV3.deviceMlDsaSig`.
+  /// detached signature suitable for `NetworkPacket.deviceMlDsaSig`.
   ///
   /// **Bandwidth note** (§3.5): only call this for application frames. For
   /// infrastructure frames (DHT, hole-punch, ACKs, calls, heartbeats) leave

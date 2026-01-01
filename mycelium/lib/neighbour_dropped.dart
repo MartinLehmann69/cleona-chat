@@ -1,4 +1,5 @@
-/// The addresses this node removed after two failed uses (§11.8), and when.
+/// The addresses this node removed because a use failed — a request and its
+/// repeats stayed unanswered (§11.3a, §11.8.5) — and when.
 ///
 /// §5.5 and §11.9 say a hint that does not answer "is dropped by whoever
 /// tries it". Without this memory the next hint with the SAME, older
@@ -9,12 +10,13 @@
 /// measured on Node2 and the bootstrap, `berichte/S406-VORLAGE-ABHOLRUNDEN.md`).
 ///
 /// A removed address returns as soon as a hint confirms it AFTER its
-/// removal — no score, no probation, no waiting time (§11.8). Only hints
-/// that carry a confirmation time are checked (external records, board and
-/// cover address entries); the answer to the neighbour call (source 2) and
-/// the address in an invitation (source 3) are new evidence and always
-/// admitted (`neighbourAdd`). Memory only, bounded (§20.2); a network change
-/// clears it (§11.8: remembered addresses are re-attempted once).
+/// removal — no score, no probation, no waiting time (§11.8). The answer
+/// to the own neighbour call is such a confirmation, dated now (§11.8.4). A
+/// hint that carries no time — the address in an invitation, a foreign call
+/// — says nothing newer and does not bring it back (§11.8.6; S407-LB-P7,
+/// C-8). The one check is `neighbourAdd`. Memory only, bounded (§20.2); a
+/// network change clears it (§11.8: remembered addresses are re-attempted
+/// once).
 library;
 
 import 'dart:io';
@@ -26,7 +28,8 @@ class DroppedAddresses {
   /// `address:port` -> when it was removed, oldest first.
   final Map<String, DateTime> _at = {};
 
-  /// [a]:[port] was removed after two failed uses at [when].
+  /// [a]:[port] was removed at [when]: its request and repeats stayed
+  /// unanswered (§11.3a).
   void dropped(InternetAddress a, int port, DateTime when) {
     final k = _key(a, port);
     _at.remove(k); // re-inserted: it is the newest now

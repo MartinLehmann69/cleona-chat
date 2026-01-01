@@ -11,7 +11,7 @@
 
 part of 'cleona_service.dart';
 
-extension V3IdentityRecoveryOps on CleonaService {
+extension IdentityRecoveryOps on CleonaService {
 
   /// §6.4.3: Recover multi-identity list from DHT after seed-phrase restore.
   /// Polls DHT for the erasure-coded registry, then creates identities for

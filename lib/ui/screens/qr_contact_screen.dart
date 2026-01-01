@@ -8,6 +8,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/invitation_card_view.dart';
 import 'package:cleona/ui/components/invitation_messages.dart';
 import 'package:cleona/ui/components/invitation_redeem.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// The own invitation card as a separate screen (FAB dialog → "My
 /// QR code"). The same view as in the identity details.
@@ -22,7 +23,9 @@ class QrShowScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final locale = AppLocale.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('qr_my_code'))),
+      appBar: AppBar(
+          title: Text(locale.get('qr_my_code')),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(
         top: false,
         child: SingleChildScrollView(
@@ -63,9 +66,9 @@ enum _ScannerSituation {
 }
 
 /// Whether `mobile_scanner` brings a producer for the running platform.
-/// Looked up (S380) in
-/// `~/.pub-cache/hosted/pub.dev/mobile_scanner-6.0.11/pubspec.yaml`,
-/// `flutter: plugin: platforms:` — android, ios, macos, web. For Linux and
+/// Looked up in `~/.pub-cache/hosted/pub.dev/mobile_scanner-7.4.2/pubspec.yaml`,
+/// `flutter: plugin: platforms:` — android, ios, macos (shared darwin
+/// source on Apple Vision since 7.0), web. For Linux and
 /// Windows there is no QR decoder in the tree; there the text input stays.
 bool get _scannerPacketCarriesPlatform =>
     Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
@@ -102,7 +105,9 @@ class _QrScanScreenState extends State<QrScanScreen> {
   Widget build(BuildContext context) {
     final locale = AppLocale.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('qr_scan_title'))),
+      appBar: AppBar(
+          title: Text(locale.get('qr_scan_title')),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(
         top: false,
         child: _reading != null
@@ -134,8 +139,15 @@ class _QrScanScreenState extends State<QrScanScreen> {
   void _onDetect(BarcodeCapture capture, AppLocale locale) {
     if (_reading != null) return;
     for (final barcode in capture.barcodes) {
-      // §15.2: the card stands in binary form in the QR code.
-      final raw = barcode.rawBytes;
+      // §15.2: the card stands in binary form in the QR code. The decoded
+      // payload without QR header/padding: on Android the ML Kit bytes (the
+      // same value 6.x delivered as `rawBytes`), on iOS/macOS the payload
+      // Vision decodes (mobile_scanner 7.2+, `rawDecodedBytes`).
+      final raw = switch (barcode.rawDecodedBytes) {
+        DecodedBarcodeBytes(:final bytes) => bytes,
+        DecodedVisionBarcodeBytes(:final bytes) => bytes,
+        null => null,
+      };
       if (raw != null && raw.isNotEmpty) {
         final bytes = Uint8List.fromList(raw);
         final r = InvitationRedeem.readBytes(bytes);
@@ -168,8 +180,9 @@ class _QrScanScreenState extends State<QrScanScreen> {
         Expanded(
           child: MobileScanner(
             // NO `controller:` — only a self-created controller attaches
-            // the lifecycle observer (mobile_scanner 6.0.11, S380).
-            errorBuilder: (context, error, _) {
+            // the lifecycle observer (S380; in 7.x `useAppLifecycleState`,
+            // default true, applies to exactly that case).
+            errorBuilder: (context, error) {
               debugPrint('[QR-SCAN] camera not available: '
                   '${error.errorCode} ${error.errorDetails?.message ?? ""}');
               return _buildManualInput(context, AppLocale.read(context));
@@ -378,7 +391,9 @@ class _ManualInputScreenState extends State<_ManualInputScreen> {
   Widget build(BuildContext context) {
     final locale = AppLocale.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('qr_manual_input'))),
+      appBar: AppBar(
+          title: Text(locale.get('qr_manual_input')),
+          actions: const [AppScreenshotButton()]),
       body: SafeArea(
         top: false,
         child: SingleChildScrollView(

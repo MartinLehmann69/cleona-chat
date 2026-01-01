@@ -30,15 +30,19 @@ import 'package:mycelium/pair.dart' show kCodeLength;
 /// row of the device database (V4.2 §4.5.3 form 2), in probes the encrypted
 /// file of [FileEncryption]. No key is derived here.
 ///
-/// ── FILE LAYOUT ───────────────────────────────────────────────────────
+/// ── LAYOUT: ONE ROW PER HELD PACKET (v4_2 §4.5.3, owner 15.10.2026) ──
 /// ```
-/// version (1 B)
-/// number of records (u32 big-endian)
-/// per record:  id (8 B) | day value (16 B) | stored (u64 ms)
-///              | content length (u32) | content
+/// name:  post_box/<id as 16 hex digits>
+/// bytes: version (1 B) | id (8 B) | day value (16 B) | stored (u64 ms)
+///        | content
 /// ```
-/// No JSON: [DepositRecord.content] is foreign, sealed bytes, not
-/// text — Base64 around it would be pure overhead without benefit.
+/// A deposit writes its row, a delete receipt or an expiry removes its row;
+/// the stock is never written or read as one value. Until S407 it was ONE
+/// record `post_box` (version 2: count, then every record) rewritten as a
+/// whole at every change — 11.3 MB of others' packets on the bootstrap,
+/// +68 MB peak and 11 MB written per deposit, the start reading it twice
+/// (S407-BOOTSTRAPSPEICHER). Such a block is converted into rows once, at
+/// the next load, and then removed.
 
 /// A record on disk: exactly what a holder knows about a foreign
 /// sending, and not a byte more.
@@ -84,7 +88,7 @@ class _Reader {
 
   Uint8List bytes(int n) {
     _check(n);
-    final r = Uint8List.fromList(_b.sublist(_i, _i + n));
+    final r = _b.sublist(_i, _i + n); // a copy of its own already
     _i += n;
     return r;
   }
@@ -110,13 +114,14 @@ class _Reader {
   }
 }
 
-/// Version 2 (S391, proposal M): records lie under the 16-B day value
-/// instead of under the 32-B identifier. An OLDER version is discarded —
-/// file deleted, result empty (4.2: no migration, the old stock
-/// would lie under identifiers that no collector asks for any more). A NEWER one is
-/// a [DepositError]: it would otherwise overwrite stock that this version
-/// does not understand.
-const int _version = 2;
+/// The block format until S407: version 2, records under the 16-B day value
+/// (S391, proposal M). An OLDER block is discarded; a NEWER one is a
+/// [DepositError]. Read only to convert it into rows.
+const int _blockVersion = 2;
+
+/// The version of one row. Another one is a [DepositError]: it would
+/// otherwise be overwritten by a build that does not understand it.
+const int _rowVersion = 1;
 
 /// Lengths that are fixed in the format. [kIdLength] must match the id length in
 /// `post_box_deposit.dart`; [kValueLength] is the day value from
@@ -124,78 +129,124 @@ const int _version = 2;
 const int kIdLength = 8;
 const int kValueLength = kCodeLength;
 
-/// The storage of a holder: ONE record, [kRecordPostBox] — in the app a row
-/// of the device database (V4.2 §4.5.3 form 2, `device_records.dart`).
+/// The names of the rows begin with this.
+const String kPostBoxRowPrefix = '$kRecordPostBox/';
+
+/// The storage of a holder: one row per held packet under
+/// [kPostBoxRowPrefix] — in the app rows of the device database (v4_2
+/// §4.5.3, `device_records.dart`).
 class PostBoxDisk {
   final DeviceRecords _records;
 
   /// Reads nothing yet.
   PostBoxDisk.on(this._records);
 
-  /// [PostBoxDisk.on] the encrypted file `post_box.enc` in [directory];
+  /// [PostBoxDisk.on] encrypted files `post_box/<id>.enc` in [directory];
   /// [key] is passed through unchanged to [FileEncryption].
   static PostBoxDisk open(Directory directory, Uint8List key) =>
       PostBoxDisk.on(FileDeviceRecords(directory, key));
 
-  /// Where the record lies — for reports and probes.
-  String get path => _records.where(kRecordPostBox);
+  /// Removes the whole stock of [records] — rows and an unconverted block.
+  static void clear(DeviceRecords records) {
+    records.remove(kRecordPostBox);
+    records.removePrefix(kPostBoxRowPrefix);
+  }
 
-  /// Reads the records back, oldest first, and in doing so leaves out everything
-  /// that was stored BEFORE [limit].
+  /// Where the rows lie — for reports and probes.
+  String get path => _records.where(kPostBoxRowPrefix);
+
+  static String _name(Uint8List id) => '$kPostBoxRowPrefix${_hex(id)}';
+
+  /// Reads the records back, oldest first, and in doing so removes
+  /// everything that was stored BEFORE [limit] — the retention period
+  /// applies at LOADING, so a record does not become immortal because the
+  /// holder restarts often. A block of the earlier layout is converted into
+  /// rows first and then removed.
   ///
-  /// The retention period thus already applies at LOADING and not only at the
-  /// next touch: a record must not become immortal because
-  /// the holder restarts often.
-  ///
-  /// If no file is there, the result is empty — a holder without
-  /// history is the normal case, not an error. If one is there that
-  /// cannot be read, this method throws [DepositError] instead of
-  /// silently continuing with half the stock.
+  /// No stock is the normal case. A row that cannot be read throws
+  /// [DepositError] instead of continuing with half the stock.
   List<DepositRecord> load({required DateTime limit}) {
-    // [DeviceRecords.holds] counts what a broken write left as well.
-    if (!_records.holds(kRecordPostBox)) return <DepositRecord>[];
+    _convertBlock(limit);
+    final records = <DepositRecord>[];
+    final expired = <String>[];
+    for (final (name, bytes) in _records.readPrefix(kPostBoxRowPrefix)) {
+      if (bytes == null) {
+        throw DepositError('${_records.where(name)} exists, but cannot be '
+            'read — wrong key or damaged record');
+      }
+      final r = _rowDecode(bytes);
+      if (r.inserted.isBefore(limit)) {
+        expired.add(name);
+      } else {
+        records.add(r);
+      }
+    }
+    expired.forEach(_records.remove);
+    records.sort((a, b) => a.inserted.compareTo(b.inserted));
+    return records;
+  }
+
+  /// Writes the row of [r] — one row, whatever the stock holds.
+  void put(DepositRecord r) => _records.write(_name(r.id), _rowEncode(r));
+
+  /// Removes the row of [id].
+  void drop(Uint8List id) => _records.remove(_name(id));
+
+  void _convertBlock(DateTime limit) {
+    if (!_records.holds(kRecordPostBox)) return;
     final bytes = _records.read(kRecordPostBox);
     if (bytes == null) {
-      throw DepositError('$path exists, but cannot be read '
-          '— wrong key or damaged record');
+      throw DepositError('${_records.where(kRecordPostBox)} exists, but '
+          'cannot be read — wrong key or damaged record');
     }
-    return _decode(bytes, limit);
+    // Rows first, the block last: a crash in between converts again and
+    // writes the same rows under the same names.
+    _blockDecode(bytes, limit).forEach(put);
+    _records.remove(kRecordPostBox);
   }
 
-  /// Writes [records] as a whole ([DeviceRecords.write]): a crash in the
-  /// middle leaves the previous stock intact — there is never an
-  /// intermediate version.
-  void save(Iterable<DepositRecord> records) =>
-      _records.write(kRecordPostBox, _encode(records));
-
-  Uint8List _encode(Iterable<DepositRecord> records) {
-    final list = records.toList();
-    final b = BytesBuilder();
-    b.addByte(_version);
-    b.add(_u32(list.length));
-    for (final s in list) {
-      if (s.id.length != kIdLength) {
-        throw ArgumentError('id must be $kIdLength B, was ${s.id.length}');
-      }
-      if (s.value.length != kValueLength) {
-        throw ArgumentError(
-            'Value must be $kValueLength B, was ${s.value.length}');
-      }
-      b.add(s.id);
-      b.add(s.value);
-      b.add(_u64(s.inserted.millisecondsSinceEpoch));
-      b.add(_u32(s.content.length));
-      b.add(s.content);
+  static Uint8List _rowEncode(DepositRecord s) {
+    if (s.id.length != kIdLength) {
+      throw ArgumentError('id must be $kIdLength B, was ${s.id.length}');
     }
-    return b.toBytes();
+    if (s.value.length != kValueLength) {
+      throw ArgumentError('Value must be $kValueLength B, was ${s.value.length}');
+    }
+    const head = 1 + kIdLength + kValueLength + 8;
+    final out = Uint8List(head + s.content.length);
+    out[0] = _rowVersion;
+    out.setAll(1, s.id);
+    out.setAll(1 + kIdLength, s.value);
+    ByteData.sublistView(out).setUint64(
+        1 + kIdLength + kValueLength, s.inserted.millisecondsSinceEpoch, Endian.big);
+    out.setAll(head, s.content);
+    return out;
   }
 
-  List<DepositRecord> _decode(Uint8List bytes, DateTime limit) {
+  static DepositRecord _rowDecode(Uint8List bytes) {
     try {
       final l = _Reader(bytes);
       final version = l.byte();
-      if (version < _version) return _drop();
-      if (version != _version) {
+      if (version != _rowVersion) throw DepositError('unknown row version $version');
+      final id = l.bytes(kIdLength);
+      final value = l.bytes(kValueLength);
+      final inserted = DateTime.fromMillisecondsSinceEpoch(l.u64());
+      final content = l.bytes(bytes.length - (1 + kIdLength + kValueLength + 8));
+      l.done();
+      return (id: id, value: value, content: content, inserted: inserted);
+    } on DepositError {
+      rethrow;
+    } catch (e) {
+      throw DepositError('Row damaged: $e');
+    }
+  }
+
+  List<DepositRecord> _blockDecode(Uint8List bytes, DateTime limit) {
+    try {
+      final l = _Reader(bytes);
+      final version = l.byte();
+      if (version < _blockVersion) return const <DepositRecord>[];
+      if (version != _blockVersion) {
         throw DepositError('unknown version $version');
       }
       final count = l.u32();
@@ -205,10 +256,8 @@ class PostBoxDisk {
         final value = l.bytes(kValueLength);
         final inserted = DateTime.fromMillisecondsSinceEpoch(l.u64());
         final content = l.bytes(l.u32());
-        // The deadline applies AFTER the complete reading of the record: an
-        // expired record is passed over, not skipped — the
-        // pointer must still stand exactly behind it, otherwise the
-        // next record falls apart.
+        // The deadline applies AFTER the complete reading of the record:
+        // the pointer must still stand exactly behind it.
         if (inserted.isBefore(limit)) continue;
         records.add(
             (id: id, value: value, content: content, inserted: inserted));
@@ -221,15 +270,7 @@ class PostBoxDisk {
       throw DepositError('Content damaged: $e');
     }
   }
-
-  /// Old stock of an earlier version: gone, with what a broken write left.
-  List<DepositRecord> _drop() {
-    _records.remove(kRecordPostBox);
-    return <DepositRecord>[];
-  }
 }
 
-Uint8List _u32(int v) =>
-    (ByteData(4)..setUint32(0, v, Endian.big)).buffer.asUint8List();
-Uint8List _u64(int v) =>
-    (ByteData(8)..setUint64(0, v, Endian.big)).buffer.asUint8List();
+String _hex(Uint8List b) =>
+    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();

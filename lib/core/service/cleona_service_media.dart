@@ -2,14 +2,14 @@
 // announcement (§9.4). The lanes themselves are `cleona_service_bulk.dart`,
 // `cleona_service_stream.dart` and `cleona_service_transfer.dart`.
 //
-// S399 P2: the V3 fetch path (`MTV3_MEDIA_REQUEST` / `MEDIA_CHUNK` /
+// S399 P2: the V3 fetch path (`MT_MEDIA_REQUEST` / `MEDIA_CHUNK` /
 // `MEDIA_COMPLETE` / `MEDIA_REJECT`) and the detached V4.1 bulk lane handlers
 // are gone — §9.4 knows no fetch on request, and "a file is never sent
 // again" (§9.3, D-34).
 
 part of 'cleona_service.dart';
 
-extension V3MediaReceiveOps on CleonaService {
+extension MediaReceiveOps on CleonaService {
 
 
   String _guessMimeType(String filename) {
@@ -47,7 +47,7 @@ extension V3MediaReceiveOps on CleonaService {
   /// `cleona_service_bulk.dart`. The V3 two-stage announcement (empty
   /// payload, MEDIA_REQUEST) and the V4.1 offer (`BulkAnnounce`) are no
   /// longer read: 4.2 has no compatibility branch (D-21).
-  void _handleMediaAnnounceV3(HarvestEvent event) {
+  void _handleMediaAnnounce(HarvestEvent event) {
     try {
       _bulkAnnounceReceived(event);
     } catch (e) {

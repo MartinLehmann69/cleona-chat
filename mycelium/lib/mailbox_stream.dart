@@ -18,6 +18,7 @@ import 'dart:typed_data';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/host_stream.dart';
 import 'package:mycelium/mailbox.dart';
+import 'package:mycelium/mailbox_bulk.dart';
 import 'package:mycelium/neighbour.dart';
 import 'package:mycelium/neighbourhood_seat.dart' show reachableNeighbour;
 import 'package:mycelium/stream_frame.dart';
@@ -99,7 +100,9 @@ extension MailboxStream on Mailbox {
 
   /// Joins the stream an offer names, for the object the announcement
   /// describes. Returns the transfer identifier, or `null` if the offer is
-  /// unreadable or names no address of a family this node speaks.
+  /// unreadable or names no address of a family this node speaks. A give-up
+  /// keeps what it opened in THIS identity's collector (`stash`, on disk)
+  /// before it names the rest — no reneging (`stream_receive.dart`).
   Uint8List? streamJoin(
     Uint8List offerBytes, {
     required Uint8List transferKey,
@@ -127,6 +130,13 @@ extension MailboxStream on Mailbox {
         sha256: sha256,
         onObject: onObject,
         onFallback: onFallback,
-        progress: progress);
+        progress: progress,
+        keep: (tag, pieces) {
+          try {
+            return bulkCollector.stash(tag, pieces);
+          } on StateError {
+            return false; // the identity left: nothing is kept for it
+          }
+        });
   }
 }

@@ -1,60 +1,46 @@
-/// The sender of lane 3 (§9.4, D-30): stripes an
-/// object, seals every piece under a fresh `K_T` and places each piece
-/// ONCE with an always-on holder.
+/// The sender of lane 3 (§9.4, D-30): stripes an object, seals every piece
+/// under a fresh `K_T` and places each piece ONCE with an always-on holder.
 ///
-/// ## Who gets what
-/// With `h` holders (at most eleven, in the caller's order), piece `i` goes
-/// to share `i mod h`. With eleven, piece `n` of every stripe goes to
-/// holder `n` — the eleven of a stripe lie with eleven distinct holders,
-/// and losing four holders loses at most four pieces of any stripe. With
-/// fewer, one holder carries several pieces of a stripe and that bound no
-/// longer holds (B-30); [BulkPlaced.decodable] says whether the accepted
-/// shares still reach seven per stripe.
+/// Who gets what: with `h` holders (at most eleven, in the caller's order),
+/// piece `i` goes to share `i mod h` — with eleven, the eleven of a stripe
+/// lie with eleven distinct holders, and losing four loses at most four
+/// pieces of any stripe; with fewer that bound no longer holds (B-30), and
+/// [BulkPlaced.decodable] says whether the accepted shares reach seven.
 ///
-/// ## The sequence per holder
-/// Proof of work for its count, `0x52` open, wait up to [kOpenWait] for
-/// the `0x53`. Count 0 (a mobile node, a full or absent cache) or no answer:
-/// the share moves to the next unused candidate of the list; without one
-/// it goes to a holder that already accepted another share (B-30, a proof
-/// of its own), and only if none takes it does it stay unplaced — the
-/// result says so. Then the pieces, share
-/// by share, at `R_bulk` — grouped per holder so that each holder sees ONE
-/// quiet after its last piece and reports ONE final count.
-///
-/// ## Holder classes (§9.4, D-30)
-/// Every `0x53` states desktop or phone; the class per holder address
-/// ([classOf], memory only, [kClassesAtMost], oldest forgotten) lets the
-/// next transfer ask desktops before phones of equal rank.
-///
-/// ## Bounds (§20.2)
-/// One transfer at a time per node (§9.4); [kPlaceWaitingAtMost] wait, one
-/// more evicts the OLDEST waiting ("displaced"). Every wait ends by a
-/// deadline; nothing runs in idle.
+/// Per holder: proof of work for its count, `0x52` open, its `0x53` within
+/// [kOpenWait] (repeated as §11.3a says). Count 0 or no answer: the share
+/// moves to the next unused candidate, else to a holder that accepted
+/// another share (B-30), else it stays unplaced — the result says so. Then
+/// the pieces, share by share, at `R_bulk`, so each holder sees ONE quiet
+/// after its last piece and reports ONE final count. Every `0x53` states
+/// desktop or phone ([classOf], memory only, [kClassesAtMost]): the next
+/// transfer asks desktops first. Bounds (§20.2): one transfer at a time;
+/// [kPlaceWaitingAtMost] wait, one more evicts the OLDEST. Every wait ends
+/// by a deadline; nothing runs in idle.
 library;
 
 import 'dart:async';
+import 'dart:io' show InternetAddress;
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/bulk_piece.dart';
 import 'package:mycelium/card.dart' show CardAddress;
+import 'package:mycelium/silence.dart';
 import 'package:mycelium/media.dart'
     show kAtMostObject, kPiecesPerStripe, kStripeWidth, stripeForm, stripeNumber;
 
-/// How long a holder has to answer an open. Not the 800 ms of the post
-/// box: the holder checks a proof and may write its index first.
+/// How long a holder has to answer an open, its repeats included — the
+/// holder checks a proof and may write its index first.
 const Duration kOpenWait = Duration(seconds: 5);
-
 /// How long the sender waits for the final counts after its last piece.
 const Duration kFinalWait = Duration(seconds: 3);
-
 /// Calls waiting behind the running transfer.
 const int kPlaceWaitingAtMost = 8;
 
 /// Holder addresses whose class is remembered.
 const int kClassesAtMost = 1024;
-
 typedef BulkHolderShare = ({CardAddress address, int assigned, int confirmed});
 
 /// An interrupted run of placing (S398-W1, §9.4 "The rest goes into the
@@ -109,9 +95,10 @@ class _Job {
   final Uint8List? transferKey;
   final BulkResume? resume;
   final void Function(List<CardAddress?> assigned)? onAssigned;
+  final Set<int>? only;
   final done = Completer<BulkPlaced>();
   _Job(this.object, this.holders, this.progress, this.transferKey, this.resume,
-      this.onAssigned);
+      this.onAssigned, this.only);
 }
 
 class _Final {
@@ -133,12 +120,17 @@ class BulkPlacer {
   final Map<String, BulkClass> _classes = {};
   bool _running = false;
 
+  /// Where the open is repeated and given up (§11.3a) — the node's.
+  final Silence silence;
+
   BulkPlacer({
     required void Function(Uint8List packet, CardAddress to) send,
     BulkPace? pace,
     this.report,
+    Silence? silence,
   })  : _send = send,
-        _pace = pace ?? BulkPace();
+        _pace = pace ?? BulkPace(),
+        silence = silence ?? Silence();
 
   /// Places [object] with the holders of [holdersInOrder] (deduplicated;
   /// the first eleven that accept). [progress] counts pieces sent.
@@ -152,11 +144,13 @@ class BulkPlacer {
   /// [resume] continues an interrupted run of placing under the same
   /// [transferKey] (required with it); [onAssigned] reports the holder of
   /// every share once they are negotiated — what [resume] needs later.
+  /// [only]: just these stripes, the remainder of a fallen-back stream (§17.6, S407 M-2).
   Future<BulkPlaced> place(Uint8List object, List<CardAddress> holdersInOrder,
       {void Function(int sent, int total)? progress,
       Uint8List? transferKey,
       BulkResume? resume,
-      void Function(List<CardAddress?> assigned)? onAssigned}) {
+      void Function(List<CardAddress?> assigned)? onAssigned,
+      Set<int>? only}) {
     if (object.isEmpty || object.length > kAtMostObject) {
       throw ArgumentError('object of ${object.length} B — 1 to $kAtMostObject');
     }
@@ -166,8 +160,8 @@ class BulkPlacer {
     if (resume != null && transferKey == null) {
       throw ArgumentError('resuming needs the K_T');
     }
-    final job = _Job(
-        object, holdersInOrder, progress, transferKey, resume, onAssigned);
+    final job = _Job(object, holdersInOrder, progress, transferKey, resume,
+        onAssigned, only);
     if (_waiting.length >= kPlaceWaitingAtMost) {
       final old = _waiting.removeAt(0);
       old.done.complete(_nothing(old.object, 'displaced — more than '
@@ -246,7 +240,11 @@ class BulkPlacer {
     // Resumed: the SAME number of shares, or piece i would change holder.
     final h = r != null ? old.length : min(kHoldersAtMost, candidates.length);
     if (h == 0) return _nothing(job.object, 'no holder known');
-    final counts = [for (var j = 0; j < h; j++) n ~/ h + (j < n % h ? 1 : 0)];
+    bool wanted(int i) => job.only?.contains(i ~/ kPiecesPerStripe) ?? true;
+    final counts = List<int>.filled(h, 0);
+    for (var i = 0; i < n; i++) {
+      if (wanted(i)) counts[i % h]++;
+    }
     if (counts.first > 0xFFFF) {
       return _nothing(job.object, '${counts.first} pieces for one holder — '
           'more than an open can announce (u16)');
@@ -328,6 +326,7 @@ class BulkPlacer {
       final to = assigned[j];
       if (to == null) continue;
       for (var i = j; i < n; i += h) {
+        if (!wanted(i)) continue;
         final s = i ~/ kPiecesPerStripe, no = i % kPiecesPerStripe;
         await _pace.turn();
         _send(holdPiecePacket((tag: tag, stripe: s, no: no,
@@ -355,20 +354,22 @@ class BulkPlacer {
     }
     var decodable = true;
     for (var s = 0; s < stripeNumber(job.object.length); s++) {
+      if (!wanted(s * kPiecesPerStripe)) continue;
       var there = 0;
       for (var no = 0; no < kPiecesPerStripe; no++) {
         if (assigned[(s * kPiecesPerStripe + no) % h] != null) there++;
       }
       if (there < kStripeWidth) decodable = false;
     }
-    final unplaced = n - total;
+    final want = counts.fold(0, (a, b) => a + b); // n unless [only]
+    final unplaced = want - total;
     final opens = packets;
     packets += wire;
     report?.call('Bulk: placed $sent of $n pieces with ${shares.length} '
         'holders in ${DateTime.now().difference(start).inMilliseconds} ms '
         '(${[for (final s in shares) '${s.address} ${s.confirmed}/${s.assigned}'].join(', ')})');
     return BulkPlaced(kT, tag, job.object.length, SodiumFFI().sha256(job.object),
-        shares, n, unplaced, decodable && shares.isNotEmpty, packets,
+        shares, want, unplaced, decodable && shares.isNotEmpty, packets,
         opens * kOpenLength + wire * kHoldPieceLength,
         DateTime.now().difference(start),
         shares.isEmpty
@@ -382,9 +383,17 @@ class BulkPlacer {
     final key = '${tagHex(tag)}@$to';
     final answer = Completer<int>();
     _opens[key] = (count, answer);
-    _send(openPacket(tag, count, total, proof), to);
-    final accepted =
-        await answer.future.timeout(kOpenWait, onTimeout: () => 0);
+    final open = openPacket(tag, count, total, proof);
+    // The open expects its `0x53`: repeated by the transport within
+    // [kOpenWait] (§11.3a); the holder counts a repeated open once.
+    final at = await silence.ask(answer.future,
+        to: InternetAddress.fromRawAddress(Uint8List.fromList(to.address)),
+        port: to.port,
+        send: (_, __) => _send(open, to),
+        wait: kOpenWait ~/ kSendingsAtMost,
+        others: false,
+        what: 'media hold 0x52');
+    final accepted = at == null ? 0 : await answer.future;
     _opens.remove(key);
     return accepted >= count && accepted > 0;
   }

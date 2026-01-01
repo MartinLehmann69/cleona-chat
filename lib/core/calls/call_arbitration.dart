@@ -75,13 +75,13 @@
 // ## The carrier on the line
 //
 // CANCEL_OTHERS has its OWN message type:
-// `MTV3_CALL_CANCEL_OTHERS` (88, `proto/transport_v3.proto`) with the
+// `MT_CALL_CANCEL_OTHERS` (88, `proto/transport.proto`) with the
 // payload `CallCancelOthers { bytes call_id = 1; bytes bound_answer_key
 // = 2; }` (`proto/app_payloads.proto`). §17.2 lists CANCEL_OTHERS
 // explicitly as a signaling kind of its own next to INVITE, RING_ACK,
 // ANSWER, REJECT and HANGUP.
 //
-// Before, the arbitration piggybacked on `MTV3_CALL_REJECT` and put the
+// Before, the arbitration piggybacked on `MT_CALL_REJECT` and put the
 // binding key as `answered_elsewhere:<hex>` into `CallReject.reason`.
 // That was the deliberate interim form as long as the work package cut
 // did not include `proto/*.proto`. Why it had to go although it
@@ -94,7 +94,7 @@
 //     a free-text field — and `reason` is a field into which a peer
 //     can write whatever it wants.
 //   * **The receive path had to treat both cases the same before the
-//     branch.** `call_service.handleCallRejectV3` stops ringtone and
+//     branch.** `call_service.handleCallReject` stops ringtone and
 //     vibration and clears the Android notification BEFORE
 //     delegating — also on the winning device that is currently in the
 //     call. With its own type, the arbitration has its own
@@ -106,7 +106,7 @@
 // ## Backward compatibility: the old piggyback path is still UNDERSTOOD
 //
 // Only the own type is sent now. On RECEIPT the piggyback path
-// stays: [CancelOthers.tryDecode] is still called in `handleCallRejectV3`,
+// stays: [CancelOthers.tryDecode] is still called in `handleCallReject`,
 // so that a device with the old state — a second own
 // device that has not been updated yet — can still pronounce the arbitration
 // and we end its ringing. The path is
@@ -122,7 +122,7 @@
 // re-serialisation in `v3_frame_codec.dart:521-527` would push it to the end
 // of the buffer — the signature check fails and the frame is
 // discarded before the dispatch sees it. It is thus NOT misinterpreted as
-// `MTV3_TEXT` (enum value 0, the protobuf default), which would have happened without
+// `MT_TEXT` (enum value 0, the protobuf default), which would have happened without
 // the signature over the field order.
 //
 // ── BUILDING BLOCK 2: [TerminatedCallLedger] ──────────────────────────────────
@@ -146,7 +146,7 @@
 // **Deadline against the ancient.** The 120 s deadline from §17.2 ("an INVITE cannot ring
 // days later") is a property of the delivery layer — the cell expires
 // at the relays. A second, receiver-side latch already exists:
-// `call_service.handleCallInviteV3` discards an INVITE whose claimed
+// `call_service.handleCallInvite` discards an INVITE whose claimed
 // timestamp is older than 60 s. Both latches lie outside this
 // work package and are stricter than §17.2 requires; therefore
 // no third age limit is introduced here. What was missing here and now exists
@@ -163,7 +163,7 @@ import 'package:cleona/core/util/hex.dart';
 ///
 /// [namesUs] and [boundKeyLength] apply to both carriers. [encode] and
 /// [tryDecode] concern exclusively the old piggyback path: it is no longer
-/// sent (that is done by `MTV3_CALL_CANCEL_OTHERS`), but still understood — see
+/// sent (that is done by `MT_CALL_CANCEL_OTHERS`), but still understood — see
 /// the file header, section "Backward compatibility".
 class CancelOthers {
   /// Prefix in the `reason` field of the OLD piggyback path. Collides with no
@@ -178,7 +178,7 @@ class CancelOthers {
   /// Builds the `reason` value of the OLD piggyback path.
   ///
   /// **Is no longer sent.** The send path is
-  /// `MTV3_CALL_CANCEL_OTHERS` with `CallCancelOthers`. This method stays
+  /// `MT_CALL_CANCEL_OTHERS` with `CallCancelOthers`. This method stays
   /// because [tryDecode] would not be testable without its counterpart and because a
   /// test must be able to emulate an old sender.
   ///
@@ -243,6 +243,16 @@ class TerminatedCallLedger {
   final DateTime Function() _now;
   final Map<String, DateTime> _entries = <String, DateTime>{};
 
+  /// For a call this device ended as the CALLER: the callee's user id
+  /// (hex). §17.2: "a `RING_ACK` for a call the caller has already ended
+  /// is answered with one `HANGUP`" — the answer needs the callee, and
+  /// only that identity may provoke it.
+  final Map<String, String> _calleeOfOutgoing = <String, String>{};
+
+  /// Device markers of late RING_ACKs already answered, per call — the
+  /// same cell harvested twice is answered once.
+  final Map<String, Set<String>> _answeredLateAcks = <String, Set<String>>{};
+
   /// [clock] exists for testing the expiry limit; production
   /// leaves it out.
   TerminatedCallLedger({DateTime Function()? clock})
@@ -253,16 +263,46 @@ class TerminatedCallLedger {
   /// Mark this call as ended. Marking multiple times renews the
   /// time — rightly so: the deadline runs from the last event that
   /// confirmed the termination.
-  void record(Uint8List callId) {
+  ///
+  /// [calleeHex] is set when this device was the caller (see
+  /// [lateRingAckAnswerTo]); a later record without it keeps it.
+  void record(Uint8List callId, {String? calleeHex}) {
     if (callId.isEmpty) return;
     _prune();
-    _entries[bytesToHex(callId)] = _now();
+    final key = bytesToHex(callId);
+    _entries[key] = _now();
+    if (calleeHex != null) _calleeOfOutgoing[key] = calleeHex;
     if (_entries.length > maxEntries) {
       final oldest = _entries.entries
           .reduce((a, b) => a.value.isBefore(b.value) ? a : b)
           .key;
-      _entries.remove(oldest);
+      _forget(oldest);
     }
+  }
+
+  /// §17.2: may a RING_ACK from [senderHex] for [callId] be answered with
+  /// a HANGUP? Returns the callee to address, or null — the call is not
+  /// one this device ended as the caller, the sender is not its callee, or
+  /// this [marker] was answered already. Claims the answer: a second
+  /// call with the same marker returns null. An empty marker cannot be
+  /// told apart and is answered each time.
+  String? lateRingAckAnswerTo(
+      Uint8List callId, String senderHex, String marker) {
+    if (!isTerminated(callId)) return null;
+    final key = bytesToHex(callId);
+    final callee = _calleeOfOutgoing[key];
+    if (callee == null || callee != senderHex) return null;
+    if (marker.isNotEmpty &&
+        !_answeredLateAcks.putIfAbsent(key, () => <String>{}).add(marker)) {
+      return null;
+    }
+    return callee;
+  }
+
+  void _forget(String key) {
+    _entries.remove(key);
+    _calleeOfOutgoing.remove(key);
+    _answeredLateAcks.remove(key);
   }
 
   /// Was this call ended within the deadline?
@@ -271,16 +311,24 @@ class TerminatedCallLedger {
     final at = _entries[bytesToHex(callId)];
     if (at == null) return false;
     if (_now().difference(at) > retention) {
-      _entries.remove(bytesToHex(callId));
+      _forget(bytesToHex(callId));
       return false;
     }
     return true;
   }
 
-  void clear() => _entries.clear();
+  void clear() {
+    _entries.clear();
+    _calleeOfOutgoing.clear();
+    _answeredLateAcks.clear();
+  }
 
   void _prune() {
     final now = _now();
-    _entries.removeWhere((_, at) => now.difference(at) > retention);
+    final expired = [
+      for (final e in _entries.entries)
+        if (now.difference(e.value) > retention) e.key,
+    ];
+    expired.forEach(_forget);
   }
 }

@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cleona/core/i18n/translations.dart';
 
 /// Supported locales with their flag emoji and native name.
@@ -54,7 +53,6 @@ const supportedLocales = [
   LocaleInfo('ms', '\u{1F1F2}\u{1F1FE}', 'Bahasa Melayu'),
 ];
 
-const _prefsKey = 'cleona_locale';
 
 /// Locale manager with ChangeNotifier for live UI updates.
 class AppLocale extends ChangeNotifier {
@@ -78,16 +76,18 @@ class AppLocale extends ChangeNotifier {
     return 'en';
   }
 
-  /// Load saved locale from SharedPreferences (call once at startup).
-  Future<void> load() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getString(_prefsKey);
-      if (saved != null && supportedLocales.any((l) => l.code == saved)) {
-        _locale = saved;
-        notifyListeners();
-      }
-    } catch (_) {}
+  /// Where a chosen language is stored. The language is a device-wide choice
+  /// in the device database (`gui_device_setting.dart`, v4_2 §4.5.3); the
+  /// owner of this object (`CleonaAppState`) sets this callback and also
+  /// hands back a stored value through [adoptStored].
+  void Function(String code)? onChosen;
+
+  /// Applies a stored language without reporting it as a new choice.
+  void adoptStored(String code) {
+    if (code == _locale) return;
+    if (!supportedLocales.any((l) => l.code == code)) return;
+    _locale = code;
+    notifyListeners();
   }
 
   String get currentLocale => _locale;
@@ -101,14 +101,13 @@ class AppLocale extends ChangeNotifier {
   /// TextDirection for the current locale (used by Directionality widget).
   TextDirection get textDirection => isRtl ? TextDirection.rtl : TextDirection.ltr;
 
-  /// Switch locale and persist.
+  /// Switch locale; [onChosen] stores it.
   Future<void> setLocale(String code) async {
     if (code == _locale) return;
     if (!supportedLocales.any((l) => l.code == code)) return;
     _locale = code;
     notifyListeners();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsKey, code);
+    onChosen?.call(code);
   }
 
   /// Get translated string. Falls back: current locale → 'en' → 'de' → key.

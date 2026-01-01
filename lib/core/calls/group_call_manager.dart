@@ -3,11 +3,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cleona/core/calls/group_call_session.dart';
+import 'package:cleona/core/calls/peer_hearing.dart';
 import 'package:cleona/core/calls/collaboration/whiteboard_manager.dart';
 import 'package:cleona/core/calls/collaboration/call_chat_manager.dart';
 import 'package:cleona/core/calls/collaboration/call_file_manager.dart';
 import 'package:cleona/core/calls/collaboration/screen_share_manager.dart';
-import 'package:cleona/core/calls/lan_multicast.dart';
 import 'package:cleona/core/calls/media_relay.dart';
 import 'package:cleona/core/calls/rtt_measurement.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -18,8 +18,14 @@ import 'package:fixnum/fixnum.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/calls/call_arbitration.dart';
+import 'package:cleona/core/calls/call_consent.dart';
+import 'package:cleona/core/calls/call_manager.dart' show CallManager;
 import 'package:cleona/core/calls/call_control_frame.dart';
 import 'package:cleona/core/calls/group_media_frame.dart';
+import 'package:cleona/core/calls/group_media_admission.dart';
+import 'package:cleona/core/calls/group_call_broker.dart';
+import 'package:cleona/core/calls/group_call_crystal.dart';
+import 'package:cleona/core/calls/group_call_ringing.dart';
 import 'package:cleona/core/calls/punch_window.dart' show PunchOutcome;
 import 'package:cleona/core/calls/call_transport.dart';
 import 'package:cleona/core/link_io/d_frame.dart';
@@ -27,7 +33,7 @@ import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/harvest_event.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// How a group call multiplies its media.
 ///
@@ -98,21 +104,49 @@ class GroupCallManager {
   GroupCallSession? _currentGroupCall;
   Timer? _rttTimer;
   Timer? _healthTimer;
-  Timer? _treeRebuildDebounce;
 
   /// V3 setup-path send callback — wired by [CleonaService] to its
   /// `sendToUser` orchestrator. Used for CALL_INVITE (group), CALL_ANSWER,
   /// CALL_REJECT, CALL_GROUP_LEAVE, CALL_GROUP_KEY_ROTATE.
+  ///
+  /// [groupId] names the group of the call in every signal (§17.2, §16.2.2):
+  /// to a fellow member who is not a contact the signal goes over the group
+  /// pair, and a group pair carries only what names a group both belong to
+  /// (§15.7). Always set through [_signal].
   Future<bool> Function(
     Uint8List recipientUserId,
-    proto.MessageTypeV3 type,
-    Uint8List payload,
-  )? sendViaUser;
+    proto.MessageType type,
+    Uint8List payload, {
+    Uint8List? groupId,
+  })? sendViaUser;
+
+  /// Observes the detached send [sent]: a throw is logged as [what], never
+  /// left to the zone of `service_daemon.dart` (A-1, S351: everything outside
+  /// its survival list is `exit(99)`).
+  ///
+  /// `then(…, onError:)` and not `catchError(… return false)`: the latter
+  /// needs its handler to return the future's RUNTIME type, and a sender
+  /// whose future is a `Future<Never>` (a closure that only throws) turned
+  /// the caught error into a type error in the zone — measured with
+  /// `smoke_group_call_multi_device` §9 once the busy rejection went through
+  /// [sendViaUser] (S407-GA-P3).
+  void _detached(Future<bool>? sent, String what) {
+    sent?.then((_) {}, onError: (Object e, StackTrace st) {
+      _log.error('$what threw (detached): $e\n$st');
+    });
+  }
+
+  /// Hands the signal [payload] of [session] to [recipientHex] — naming the
+  /// group of the call ([sendViaUser]).
+  Future<bool>? _signal(GroupCallSession session, String recipientHex,
+          proto.MessageType type, Uint8List payload) =>
+      sendViaUser?.call(hexToBytes(recipientHex), type, payload,
+          groupId: hexToBytes(session.groupIdHex));
 
   /// `major * 1000 + minor` of this build, carried in the group CALL_INVITE
   /// — the same field and the same E5 gate as the 1:1 INVITE
   /// ([CallManager.callerAppMajorMinor]). The receiver checks it BEFORE it
-  /// looks at `isGroupCall` (`CallService.handleCallInviteV3`); without it
+  /// looks at `isGroupCall` (`CallService.handleCallInvite`); without it
   /// the field is the proto3 default 0 and every group invitation was
   /// rejected as "incompatible caller version 0" (measured S398-W2).
   int _callerAppMajorMinor = 0;
@@ -123,6 +157,22 @@ class GroupCallManager {
   void Function(GroupCallInfo info)? onGroupCallStarted;
   void Function(GroupCallInfo info)? onGroupCallEnded;
   void Function(String nodeIdHex, ParticipantState state)? onParticipantChanged;
+
+  /// §17.2 "Missed call" in a group call (S408, S407-GAMUTE open point 1,
+  /// owner variant B): "Whenever a call ends without having been answered —
+  /// no `RING_ACK` within 10 s, the caller hanging up before an answer, or
+  /// 60 s of ringing without an `ANSWER` — the caller sends the missed-call
+  /// message." In a group call the call is the invitation of one member:
+  /// the initiator starts the message once per member whose invitation ended
+  /// unanswered — [memberHex], the group, the `callId`. `CleonaService`
+  /// sends it as a group message to that member.
+  void Function(String memberHex, String groupIdHex, Uint8List callId)?
+      onMissedCall;
+
+  /// How a fellow participant is heard may have changed (§17.7: media
+  /// pair, broker, or one of the three notices) — the tile reads it from
+  /// [GroupCallParticipantInfo.reach].
+  void Function()? onReachChanged;
 
   /// §10.2.1 per-sender media keys. `onOwnSendKeyChanged` fires when our own
   /// secret media key is (re)generated → the encrypt side (capture isolate,
@@ -137,9 +187,10 @@ class GroupCallManager {
   /// **Until S369 the return path was missing here entirely.** [handleGroupMediaFrame]
   /// only passed the frame on to the tree children and never gave it to
   /// anyone itself; what was played was exclusively what came in via
-  /// [handleGroupCallAudioV3] — i.e. via the DELIVERY LAYER.
+  /// `handleGroupCallAudioV3` (removed in S407) — i.e. via the DELIVERY
+  /// LAYER.
   /// Exactly this path no longer exists in V4.1 (§17.1: "media does **not**
-  /// run in delivery cells", and `call_service.handleCallVideoV3` says it
+  /// run in delivery cells", and `call_service.handleCallVideo` says it
   /// verbatim). A node thus forwarded and heard nothing
   /// itself.
   ///
@@ -176,10 +227,121 @@ class GroupCallManager {
   GroupCallSession? get currentGroupCall => _currentGroupCall;
   bool get inGroupCall => _currentGroupCall?.state == GroupCallState.inCall;
 
+  /// Whether this device may hold a media pair with [peerHex] (§17.7): an
+  /// accepted contact whose switch "allow calls" is on (§17 principle,
+  /// RL-7, D-69; [callsAllowedWith]).
+  ///
+  /// Only such a pair gets Plane D material from this device — address
+  /// candidates, session cookie, ephemeral key, ML-KEM ciphertext (§17.3:
+  /// "only between contacts with call consent") — and only to such a pair
+  /// does this device run a punch window. Material from any other
+  /// participant is dropped on receipt. Whether the pair then CARRIES is
+  /// the punch window's answer: a Plane D session exists only after it
+  /// carried, and media and control frames travel only on a session.
+  ///
+  /// Until S407-GA-P3 the group path asked nothing of the kind: every
+  /// participant got the material and a window (finding B-1,
+  /// `S407-GRUPPENANRUF.md`); only the group-pair gate, built for another
+  /// purpose, kept the signals from non-contacts.
+  bool _callPairAdmissible(String peerHex) =>
+      callsAllowedWith(contacts, peerHex);
+
+  /// Whether [event] — a signal of the running [session] — names a group in
+  /// its frame other than the call's. A signal over a group pair always names
+  /// the group the gate admitted it for (§15.7, §16.2.2); one for another
+  /// group is not this call's. A signal without a group (a contact of an
+  /// older version) is judged by its `callId` alone, as before.
+  bool _namesOtherGroup(GroupCallSession session, HarvestEvent event) {
+    final g = event.groupId;
+    if (g == null || bytesToHex(g) == session.groupIdHex) return false;
+    _log.warn('${event.type.name} from '
+        '${bytesToHex(Uint8List.fromList(event.senderUserId)).substring(0, 8)} '
+        'names another group than the call — dropped (§16.2.2)');
+    return true;
+  }
+
+  /// Gives [session] its broker bookkeeping and the forwarding of the pairs
+  /// it carries (§17.7, `group_call_broker.dart`).
+  void _attachBroker(GroupCallSession session) {
+    final broker = GroupCallBroker(
+      ownHex: identity.userIdHex,
+      roster: () => session.rosterSorted,
+      isJoined: (hex) =>
+          session.participants[hex]?.state == ParticipantState.joined,
+      send: (to, record) =>
+          transport.sendControl(participantHex: to, record: record),
+      request: (to, record, answeredBy, onFailed) {
+        final error = transport.requestControl(
+          participantHex: to,
+          record: record,
+          answeredBy: answeredBy,
+          onFailed: onFailed,
+        );
+        // Not even queued (no session any more): failed at once — after
+        // the caller's own bookkeeping, not inside it.
+        if (error != null) scheduleMicrotask(onFailed);
+      },
+      capacity: () => BrokerCapacity.fromProbe(uploadProbe.observe(),
+          sendsVideo: session.videoFramesSent > 0 && !session.videoSwitchedOff),
+      ownRank: () => rankByte(uploadProbe.form, uploadProbe.power),
+      rttOf: (hex) => session.rtt?.rttTo(hex),
+      wantVideo: () => !session.videoSwitchedOff,
+      onBinding: (peer, brokerHex) => brokerHex == null
+          ? session.admission.unbindBroker(peer)
+          : session.admission.bindBroker(peer, brokerHex),
+      onChanged: () => onReachChanged?.call(),
+      log: (line) => _log.info('Broker (§17.7): $line'),
+    );
+    session.broker = broker;
+    session.pairRelay = PairRelay(targetsFor: broker.forwardTargets)
+      ..onSendUnicast = (target, frame, type) =>
+          _sendGroupLiveMediaFrame(target, type, frame);
+  }
+
+  /// [peerHex] is known to have joined: without a contact with call
+  /// consent on THIS side there is no media pair with it, decided now
+  /// (§17.7) — an edge for the broker.
+  void _joinedEdge(GroupCallSession session, String peerHex) {
+    if (peerHex == identity.userIdHex) return;
+    if (!_callPairAdmissible(peerHex)) {
+      session.broker?.setPairState(peerHex, MediaPairState.none);
+    }
+    _crystalEdge(session);
+  }
+
+  /// [peerHex] gives this device no Plane D material although this side
+  /// would hold a media pair with it: the OTHER side has no contact with
+  /// call consent, so there is no media pair either (§17.7).
+  void _refusedByPeer(GroupCallSession session, String peerHex, String what) {
+    if (!_callPairAdmissible(peerHex)) return;
+    _log.info('${peerHex.substring(0, 8)} sends no Plane D material in its '
+        '$what — no media pair with it (§17, §17.7)');
+    session.broker?.setPairState(peerHex, MediaPairState.none);
+    _crystalEdge(session);
+  }
+
+  /// [peerHex] sent Plane D material in [signal] although this device holds
+  /// no media pair with it: nothing of it is kept, no window runs.
+  void _dropPlaneDMaterial(String peerHex, String signal) {
+    _log.info('Plane D material in the $signal of '
+        '${peerHex.substring(0, 8)} dropped — no contact with calls '
+        'allowed (§17, §17.3)');
+  }
+
   // ── Initiator Flow ──────────────────────────────────────────────────
 
-  /// Start a group call. Generates call_key, sends CALL_INVITE to all members.
-  Future<GroupCallSession?> startGroupCall(String groupIdHex) async {
+  /// Start a group call. Generates call_key, sends CALL_INVITE to all members
+  /// — or, with [invitees], only to those members.
+  ///
+  /// [invitees] is the start from an event card (§18.1.7: "a click starts
+  /// a group call with everyone who accepted"). The participant LIST stays
+  /// the whole group even then: the callee builds it from the group
+  /// (`handleGroupCallInvite`), and the sender slot of every media frame
+  /// and the checksum of every tree assignment index the sorted list — a
+  /// shorter list on one side would shift every index. Members outside
+  /// [invitees] are simply not rung.
+  Future<GroupCallSession?> startGroupCall(String groupIdHex,
+      {Set<String>? invitees}) async {
     if (_currentGroupCall != null) {
       _log.warn('Already in a group call');
       return null;
@@ -222,6 +384,7 @@ class GroupCallManager {
     }
 
     _currentGroupCall = session;
+    _attachBroker(session);
     _ensureOwnSendKey(session); // §10.2.1 per-sender media key
     // §17.3/E-1 = B: the INITIATOR too needs an ephemeral pair. Until
     // S372 only the callee drew it (`acceptGroupCall`), because it solely
@@ -247,31 +410,54 @@ class GroupCallManager {
     // The candidates on the other hand are determined ONCE: they are a
     // property of this node, not of the counterpart, and their
     // determination is a system call (`NetworkInterface.list`).
-    final ownCandidates = await transport.localCandidatesPacked();
+    //
+    // Cookie and candidates go only to a member this device may hold a
+    // media pair with (§17.3, [_callPairAdmissible]); every other member
+    // rings with an INVITE that carries neither (§16.2.2).
+    //
+    // §17.2: from the moment the user starts the call each invited member
+    // is being REACHED — shown "invited", not "ringing", until its RING_ACK
+    // arrives ([handleGroupCallRingAck]); 10 s without one end its
+    // invitation ([_invitationsEnded]).
+    final rung = <String>{
+      for (final member in group.members.values)
+        if (member.nodeIdHex != identity.userIdHex &&
+            (invitees == null || invitees.contains(member.nodeIdHex)))
+          member.nodeIdHex,
+    };
+    session.ringing = GroupCallRinging(
+      onNotReached: (gone) =>
+          _invitationsEnded(session, gone, 'no RING_ACK within 10 s'),
+      onNotAnswered: (member) =>
+          _invitationsEnded(session, {member}, 'no ANSWER within 60 s'),
+    )..startReaching(rung);
+    Uint8List? ownCandidates;
+    var invited = 0;
     for (final member in group.members.values) {
-      if (member.nodeIdHex == identity.userIdHex) continue;
-      session.participants[member.nodeIdHex]?.state = ParticipantState.ringing;
+      if (!rung.contains(member.nodeIdHex)) continue;
+      invited++;
 
       final invite = proto.CallInvite()
         ..callId = callId
         ..isGroupCall = true
         ..groupId = hexToBytes(groupIdHex)
         ..callerAppMajorMinor = _callerAppMajorMinor;
-      final cookie = transport.newDCookie();
-      session.localDCookies[member.nodeIdHex] = cookie;
-      invite.callerDCookie = cookie;
-      if (ownCandidates.isNotEmpty) {
-        invite.callerCandidates = ownCandidates;
+      if (_callPairAdmissible(member.nodeIdHex)) {
+        final cookie = transport.newDCookie();
+        session.localDCookies[member.nodeIdHex] = cookie;
+        invite.callerDCookie = cookie;
+        ownCandidates ??= await transport.localCandidatesPacked();
+        if (ownCandidates.isNotEmpty) {
+          invite.callerCandidates = ownCandidates;
+        }
       }
 
-      await sendViaUser?.call(
-        hexToBytes(member.nodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_INVITE,
-        invite.writeToBuffer(),
-      );
+      await _signal(session, member.nodeIdHex,
+          proto.MessageType.MT_CALL_INVITE, invite.writeToBuffer());
     }
 
-    _log.info('Group call started: ${session.callIdHex.substring(0, 8)} in group "${group.name}" with ${group.members.length - 1} invites');
+    _log.info('Group call started: ${session.callIdHex.substring(0, 8)} in group "${group.name}" with $invited invites'
+        '${invitees == null ? "" : " (those who accepted, §18.1.7)"}');
     return session;
   }
 
@@ -286,6 +472,7 @@ class GroupCallManager {
     }
 
     session.state = GroupCallState.inCall;
+    session.ringing?.stopRinging();
 
     // Mark self as joined
     session.participants[identity.userIdHex] = GroupCallParticipant(
@@ -304,8 +491,8 @@ class GroupCallManager {
     // initiator could not distinguish a participant's second ANSWER from a
     // repetition of the first, no CANCEL_OTHERS ever went
     // out, and the participant's other devices kept ringing —
-    // in the group path without any time limit, because here there is no
-    // `_startRingingTimeout` as in the 1:1 path.
+    // in the group path then without any time limit (since S407-GAMUTE a
+    // ringing device stops by itself after 60 s, `GroupCallRinging`).
     //
     // A real key pair and not 32 random bytes: the field is called
     // `callee_eph_x25519_pk`, and what is in it should be exactly that.
@@ -326,26 +513,32 @@ class GroupCallManager {
     // BOTH sides have both cookies and both candidate lists — that is the
     // point in time from which the punch window can run on both sides at
     // once.
-    final ownCookie = transport.newDCookie();
-    session.localDCookies[session.initiatorHex] = ownCookie;
-    answer.calleeDCookie = ownCookie;
-    final ownCandidates = await transport.localCandidatesPacked();
-    if (ownCandidates.isNotEmpty) {
-      answer.calleeCandidates = ownCandidates;
+    //
+    // Only to an initiator this device may hold a media pair with (§17.3);
+    // to any other the ANSWER carries the binding marker (field 2, §17.2,
+    // no address) and nothing of Plane D, and no window runs.
+    final mediaPair = _callPairAdmissible(session.initiatorHex);
+    if (mediaPair) {
+      final ownCookie = transport.newDCookie();
+      session.localDCookies[session.initiatorHex] = ownCookie;
+      answer.calleeDCookie = ownCookie;
+      final ownCandidates = await transport.localCandidatesPacked();
+      if (ownCandidates.isNotEmpty) {
+        answer.calleeCandidates = ownCandidates;
+      }
     }
 
-    await sendViaUser?.call(
-      hexToBytes(session.initiatorHex),
-      proto.MessageTypeV3.MTV3_CALL_ANSWER,
-      answer.writeToBuffer(),
-    );
+    await _signal(session, session.initiatorHex,
+        proto.MessageType.MT_CALL_ANSWER, answer.writeToBuffer());
 
     // §17.3: the window runs FROM NOW, on both sides at once — the
     // initiator starts its own as soon as it has harvested this ANSWER.
     // Not awaited: it runs up to 30 s, and the call should already look
     // set up during that time. The same construction as in the 1:1 path
     // (`call_manager.dart`, `unawaited(_openMediaPath(call))`).
-    unawaited(_openParticipantMediaPath(session, session.initiatorHex));
+    if (mediaPair) {
+      unawaited(_openParticipantMediaPath(session, session.initiatorHex));
+    }
 
     _setupRttAndHealth(session);
     _initCollaboration(session); // §10.5 in-call collaboration
@@ -357,20 +550,19 @@ class GroupCallManager {
   }
 
   /// Reject an incoming group call.
-  Future<void> rejectGroupCall({String reason = 'busy'}) async {
+  Future<void> rejectGroupCall(
+      {String reason = CallManager.rejectReasonDeclined}) async {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.ringing) return;
 
     session.state = GroupCallState.ended;
+    session.ringing?.stopRinging();
 
     final reject = proto.CallReject()
       ..callId = session.callId
       ..reason = reason;
-    await sendViaUser?.call(
-      hexToBytes(session.initiatorHex),
-      proto.MessageTypeV3.MTV3_CALL_REJECT,
-      reject.writeToBuffer(),
-    );
+    await _signal(session, session.initiatorHex,
+        proto.MessageType.MT_CALL_REJECT, reject.writeToBuffer());
 
     _currentGroupCall = null;
     _log.info('Group call rejected: $reason');
@@ -387,12 +579,13 @@ class GroupCallManager {
     transport.forgetParticipant(nodeIdHex);
     _unregisterLiveMediaDevice(session, nodeIdHex);
     _log.info('Participant left: ${nodeIdHex.substring(0, 8)}');
+    // An edge for the brokers (§17.7): its media pairs end, the pairs it
+    // carried need another broker, and pairs with it end.
+    session.broker?.participantLeft(nodeIdHex);
 
-    // Rebuild tree (member left) — owner only.
-    if (session.state == GroupCallState.inCall && session.isOwner(identity.userIdHex)) {
-      session.tree.removeParticipant(nodeIdHex);
-      _broadcastTreeUpdate(session);
-    }
+    // An edge of the crystal (§17.7): whoever hung below it or above it
+    // finds its place again.
+    _crystalEdge(session);
 
     // Owner transfer: if the departing participant was the tree owner,
     // elect a new owner deterministically (lowest lexicographic joined id).
@@ -402,10 +595,9 @@ class GroupCallManager {
         final newOwner = joined.first;
         _log.info('Owner transfer: ${nodeIdHex.substring(0, 8)} -> '
             '${newOwner.substring(0, 8)}');
+        // Only the owner of a v4.2.3 tree (0x01) matters any more; the
+        // crystal has no owner (§17.7: "not the one that started the call").
         session.ownerHex = newOwner;
-        if (newOwner == identity.userIdHex) {
-          _rebuildTree(session);
-        }
       }
     }
 
@@ -454,14 +646,16 @@ class GroupCallManager {
     // _onSendMulticast — both end up at sendToDevice for live media).
     if (session.relay != null) {
       session.relay!.forwardFrame(Uint8List.fromList(payload),
-          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO);
+          proto.MessageType.MT_CALL_GROUP_AUDIO);
     } else {
-      // Fallback: direct send to all joined participants
+      // Fallback: direct send to the joined participants this device may
+      // hold a media pair with (§17.7) — to any other there is no Plane D
+      // session to carry it.
       for (final pId in session.joinedParticipantIds) {
-        if (pId == identity.userIdHex) continue;
+        if (pId == identity.userIdHex || !_callPairAdmissible(pId)) continue;
         _sendGroupLiveMediaFrame(
           pId,
-          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
+          proto.MessageType.MT_CALL_GROUP_AUDIO,
           payload,
         );
       }
@@ -490,13 +684,13 @@ class GroupCallManager {
     // Send to tree children via MediaRelay
     if (session.relay != null) {
       session.relay!.forwardFrame(Uint8List.fromList(payload),
-          proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO);
+          proto.MessageType.MT_CALL_GROUP_VIDEO);
     } else {
       for (final pId in session.joinedParticipantIds) {
-        if (pId == identity.userIdHex) continue;
+        if (pId == identity.userIdHex || !_callPairAdmissible(pId)) continue;
         _sendGroupLiveMediaFrame(
           pId,
-          proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO,
+          proto.MessageType.MT_CALL_GROUP_VIDEO,
           payload,
         );
       }
@@ -516,11 +710,8 @@ class GroupCallManager {
 
     for (final pId in session.joinedParticipantIds) {
       if (pId == identity.userIdHex) continue;
-      await sendViaUser?.call(
-        hexToBytes(pId),
-        proto.MessageTypeV3.MTV3_CALL_GROUP_LEAVE,
-        payload,
-      );
+      await _signal(
+          session, pId, proto.MessageType.MT_CALL_GROUP_LEAVE, payload);
     }
 
     _endCall(session);
@@ -547,11 +738,8 @@ class GroupCallManager {
     final payload = rejoin.writeToBuffer();
     for (final pId in session.joinedParticipantIds) {
       if (pId == identity.userIdHex) continue;
-      await sendViaUser?.call(
-        hexToBytes(pId),
-        proto.MessageTypeV3.MTV3_CALL_REJOIN,
-        payload,
-      );
+      await _signal(
+          session, pId, proto.MessageType.MT_CALL_REJOIN, payload);
     }
 
     // Re-announce our send key (no global rotation -- authorized set unchanged)
@@ -565,6 +753,18 @@ class GroupCallManager {
   }
 
   void _endCall(GroupCallSession session) {
+    // §17.2 "the caller hanging up before an answer": every invitation still
+    // being reached or ringing ends with the call — one HANGUP each (an
+    // ANSWER to an initiator that is gone joins nothing). The session is
+    // kept for a late RING_ACK ([handleGroupCallRingAck]).
+    final ringing = session.ringing;
+    if (session.direction == CallDirection.outgoing && ringing != null) {
+      final open = ringing.endAll();
+      _hangUp(session, open, 'the call ended before an answer');
+      _missedCallFor(session, open);
+      _lastEndedOutgoing = session;
+      _lastEndedAt = DateTime.now();
+    }
     session.state = GroupCallState.ended;
     onGroupCallEnded?.call(session.toGroupCallInfo());
     _cleanup();
@@ -575,9 +775,10 @@ class GroupCallManager {
     _rttTimer = null;
     _healthTimer?.cancel();
     _healthTimer = null;
-    _treeRebuildDebounce?.cancel();
-    _treeRebuildDebounce = null;
     _currentGroupCall?.relay?.clear();
+    _currentGroupCall?.broker?.clear();
+    _currentGroupCall?.crystal?.clear();
+    _currentGroupCall?.ringing?.stopClocks();
     // §10.5 Collaboration cleanup
     _currentGroupCall?.whiteboard?.dispose();
     _currentGroupCall?.callChat?.dispose();
@@ -589,94 +790,110 @@ class GroupCallManager {
     transport.forgetAllParticipants();
   }
 
-  // ── Tree Construction (initiator only) ──────────────────────────────
+  // ── The crystal (§17.7, from 7 participants on; S408 P6) ────────────
+  //
+  // Until S408 the tree owner (the initiator) built ONE tree over all
+  // joined participants (`OverlayTree.build`, rooted at itself) and sent
+  // each participant its place (`treeAssignment` 0x01, `treeSubtree` 0x06).
+  // §17.7 says otherwise on three counts: the crystal is built "over media
+  // pairs only", its root is "the participant highest by the ranking …,
+  // not the one that started the call", and every node "takes as its
+  // parent the media pair nearest the root that still has room under its
+  // `f_i`". The central tree hung children on participants they hold no
+  // media pair with (no session carries there, `sendMedia` → `noPath`), and
+  // the owner could not even reach a participant that is no contact of it.
+  // Now every participant builds its own place (`group_call_crystal.dart`).
+  // The LAN clusters of the central build (`sameSubnet`) go with it: their
+  // multicast was never built (`MediaRelay.onSendMulticast` stays unset).
 
-  void _rebuildTree(GroupCallSession session) {
-    if (!session.isOwner(identity.userIdHex)) return;
-
-    final participants = session.joinedParticipantIds;
-    if (participants.length < 2) return;
-
-    session.tree.build(
-      participants: participants,
-      initiatorHex: session.initiatorHex,
-      routeCost: (a, b) => transport.routeCostTo(b, fallback: 10),
-      rtt: session.rtt,
-      // ── UNTIL S368 THIS LINE WAS A FACADE — NOT ANYMORE ───
-      //
-      // The finding, measured on 05.09.2026: `isSameSubnet` expects two
-      // IP ADDRESSES and compares the /24 prefix for IPv4
-      // (`lan_multicast.dart`). What was passed in, however, were the entries
-      // from `joinedParticipantIds` — user identifiers in hex.
-      // `InternetAddress` throws on them, the throw is caught, and the
-      // function returns `false`:
-      //
-      //     isSameSubnet(hex, hex)         = false
-      //     isSameSubnet(hex, THE SAME)    = false     <- even then
-      //     isSameSubnet("192.168.10.5", "192.168.10.9") = true
-      //
-      // Consequence: `_detectLanClusters` NEVER formed a cluster,
-      // `TreeNode.isLanClusterHead` NEVER became `true`, and
-      // `MediaRelay.onSendMulticast` — the only path to
-      // `CallLanMulticast` — was NEVER called.
-      //
-      // **What was missing was not the function but its feed.**
-      // `63bef041` recorded the finding and explicitly changed NO
-      // behaviour, with the rationale: "There is no address at all for a
-      // group participant […] `GroupCallManager` calls
-      // `transport.openMediaPath` NOWHERE." Exactly that is different now —
-      // `_openParticipantMediaPath` enters the punch window's finding
-      // into `session.peerMediaAddress`, and here it is
-      // available.
-      //
-      // **A participant without an address clusters with nobody**, not even
-      // with itself: as long as the punch window has not carried,
-      // "same subnet" is not a question one answers with `false`,
-      // but one that cannot be asked. Both
-      // lead to the same result here, but for the right reason.
-      //
-      // **Not built along with it: sending via multicast.** Reasons 2 and 3
-      // from `63bef041` stand unchanged — a sender does not learn
-      // whether a local listener is there, and a multicast datagram
-      // carries no Plane D AEAD. `onSendMulticast` therefore still
-      // falls back to unicast per child; what changes is
-      // solely that cluster detection is no longer blind.
-      // For OURSELVES there is no address here: `peerMediaAddress` holds
-      // the punch window's finding PER COUNTERPART, and none runs
-      // against ourselves. That is not a gap — a cluster of two
-      // participants in the same segment also arises without us, and GUESSING an
-      // own address (say the first local interface)
-      // would be exactly the facade that this line was until today.
-      sameSubnet: (a, b) {
-        final addrA = session.peerMediaAddress[a];
-        final addrB = session.peerMediaAddress[b];
-        if (addrA == null || addrB == null) return false;
-        return isSameSubnet(addrA, addrB);
-      },
-    );
-
-    _setupRelay(session);
-    _broadcastTreeUpdate(session);
-    _log.info('Tree built: ${participants.length} nodes, depth=${session.tree.depth}');
-
-    // WHO ENTERS THIS TREE BESIDES US — answered, not left
-    // open. Without this line a field log sees a built tree and
-    // concludes from it that forwarding happens; in fact only
-    // the initiator then sends to three children, and all the others mesh.
-    final why = transport.treeMaintenanceUnavailableReason;
-    if (why != null) {
-      _log.warn('The tree stays with the initiator: $why — the remaining '
-          '${participants.length - 1} participants keep meshing, and the '
-          'enforced upper limit is therefore $maxParticipants '
-          '(${effectiveTopology.name}), not $maxParticipantsTree');
+  /// An edge of §17.7 — a join or leave, a media pair that started or
+  /// ended, the line's limit: from 7 joined participants on the call is a
+  /// crystal, and stays one (it "follows the role only where the role holds
+  /// still"); every participant decides its own place again.
+  void _crystalEdge(GroupCallSession session) {
+    if (!identical(_currentGroupCall, session) ||
+        session.state == GroupCallState.ended) {
+      return;
     }
+    final c = session.crystal;
+    if (c != null) return c.reconsider();
+    if (session.joinedParticipantIds.length <= maxParticipantsMesh) return;
+    _startCrystal(session);
   }
 
-  void _scheduleTreeRebuild(GroupCallSession session) {
-    _treeRebuildDebounce?.cancel();
-    _treeRebuildDebounce = Timer(const Duration(milliseconds: 500), () {
-      _rebuildTree(session);
-    });
+  void _startCrystal(GroupCallSession session) {
+    if (session.crystal != null) return;
+    int fanOut() => crystalFanOut(
+        BrokerCapacity.fromProbe(uploadProbe.observe(), sendsVideo: false)
+            .usableBps,
+        BrokerCapacity.voiceStreamBps);
+    final crystal = GroupCallCrystal(
+      ownHex: identity.userIdHex,
+      roster: () => session.rosterSorted,
+      mediaPairs: () => session.broker?.mediaPairs ?? const <String>{},
+      isJoined: (hex) =>
+          hex == identity.userIdHex ||
+          session.participants[hex]?.state == ParticipantState.joined,
+      fanOut: fanOut,
+      ownRank: () =>
+          crystalRank(uploadProbe.form, uploadProbe.power, fanOut()),
+      request: (to, record, answeredBy, onFailed) {
+        if (answeredBy == null) {
+          transport.sendControl(participantHex: to, record: record);
+          return;
+        }
+        final error = transport.requestControl(
+            participantHex: to,
+            record: record,
+            answeredBy: answeredBy,
+            onFailed: onFailed);
+        if (error != null) scheduleMicrotask(onFailed);
+      },
+      onChanged: () => _crystalView(session),
+      log: (line) => _log.info('Crystal (§17.7): $line'),
+    );
+    session.crystal = crystal;
+    // The crystal carries from now on; no broker forwards beside it.
+    session.broker?.suspend();
+    _log.info('Group call ${session.callIdHex.substring(0, 8)} has '
+        '${session.joinedParticipantIds.length} participants — the crystal '
+        'forms over the media pairs (§17.7)');
+    crystal.reconsider();
+  }
+
+  /// The own place in the crystal as the forwarding and the admission read
+  /// it: the parent, the children, and per child who lies behind it
+  /// (§17.5 "over its tree link towards that sender"). Everything not
+  /// behind a child comes over the parent, so the view is complete.
+  void _crystalView(GroupCallSession session) {
+    final c = session.crystal;
+    if (c == null || !identical(_currentGroupCall, session)) return;
+    final me = identity.userIdHex;
+    final parent = c.parent;
+    final kids = c.children;
+    if (parent == null && kids.isEmpty) {
+      // No tree link (yet): until one exists the participant sends to its
+      // media pairs directly, as in the mesh.
+      session.relay = null;
+      session.admission.treeViewComplete = false;
+      onReachChanged?.call();
+      return;
+    }
+    session.tree.fromNodeList([
+      {'nodeIdHex': me, 'parentHex': parent, 'childrenHex': kids.keys.toList()},
+      if (parent != null)
+        {'nodeIdHex': parent, 'parentHex': null, 'childrenHex': <String>[me]},
+      for (final k in kids.keys)
+        {'nodeIdHex': k, 'parentHex': me, 'childrenHex': <String>[]},
+    ], parent ?? me);
+    for (final MapEntry(key: k, value: below) in kids.entries) {
+      for (final m in below) {
+        if (m != me) session.tree.attachBelow(m, k);
+      }
+    }
+    session.admission.treeViewComplete = true;
+    if (session.relay == null) _setupRelay(session);
+    onReachChanged?.call();
   }
 
   void _setupRelay(GroupCallSession session) {
@@ -687,26 +904,22 @@ class GroupCallManager {
     session.relay!.onSendUnicast = (targetHex, frame, type) {
       _sendGroupLiveMediaFrame(targetHex, type, frame);
     };
-    session.relay!.onSendMulticast = (frame, type) {
-      // LAN multicast — not implemented in this MVP, use unicast fallback.
-      // Each child gets a sendToDevice via the per-call cached route.
-      final children = session.tree.childrenOf(identity.userIdHex);
-      for (final child in children) {
-        _sendGroupLiveMediaFrame(child, type, frame);
-      }
-    };
+    // No `onSendMulticast`: LAN multicast is not built (a multicast
+    // datagram carries no Plane D AEAD). Unset, the
+    // relay reaches the LAN members one by one over `onSendUnicast`.
+    // Until S407 a callback stood here that sent to the CHILDREN again
+    // instead of to the LAN members — every child got the frame twice,
+    // and no LAN member got it at all.
     session.relay!.onChildCrashed = (crashedHex) {
       final participant = session.participants[crashedHex];
       if (participant != null && participant.state == ParticipantState.joined) {
         participant.state = ParticipantState.crashed;
         onParticipantChanged?.call(crashedHex, ParticipantState.crashed);
         transport.forgetParticipant(crashedHex);
+        session.broker?.participantLeft(crashedHex);
         _log.info('Participant crashed: ${crashedHex.substring(0, 8)}');
-        if (session.isOwner(identity.userIdHex)) {
-          session.tree.handleCrash(crashedHex);
-          _broadcastTreeUpdate(session);
-          // No key rotation on crash (per architecture)
-        }
+        // An edge of the crystal (§17.7); no key rotation on crash.
+        _crystalEdge(session);
       }
     };
   }
@@ -725,72 +938,12 @@ class GroupCallManager {
   // disappears — it has no reader again.
 
 
-  /// Distributes the plan — as an assignment PER PARTICIPANT, via the
-  /// control plane (§17.1.1).
-  ///
-  /// ── WHY NO LONGER THE `CallTreeUpdate` PROTO ───────────────────
-  ///
-  /// Until S368 a `CallTreeUpdate` with the complete
-  /// node list went to every participant here, via
-  /// [_sendLiveMediaToParticipant] -> `sendSecuredToParticipant`. This
-  /// path returned `noCarrier`, so none ever arrived. It cannot either:
-  /// measured on 05.09.2026 this proto measures **270 B at 6
-  /// nodes and 1134 B at 30** — against the 85 B that a control frame
-  /// carried at the time (since 06.09.2026 it is 133 B). That would be 4 or 14
-  /// frames at 1 Hz — with 133 B 3 or 9 —, i.e. several seconds for
-  /// a plan that is outdated at the first change.
-  ///
-  /// A participant only needs two pieces of information from it anyway: who is
-  /// my parent, who are my children. As indices into the sorted
-  /// participant list that measures `6 + Kinderzahl` bytes and fits at every
-  /// group size into ONE frame (rationale and model in §17.1.1:
-  /// the star compaction there likewise addresses participants via
-  /// their position, not via their identifier).
-  Future<void> _broadcastTreeUpdate(GroupCallSession session) async {
-    if (!session.isOwner(identity.userIdHex)) return;
-    session.tree.version++;
-    for (final pId in session.joinedParticipantIds) {
-      if (pId == identity.userIdHex) continue;
-      _sendTreeAssignment(session, pId);
-    }
-  }
-
-  /// The assignment for EXACTLY ONE participant.
-  void _sendTreeAssignment(GroupCallSession session, String participantHex) {
-    final list = session.rosterSorted;
-    final parent = session.tree.parentOf(participantHex);
-    final parentIdx = parent == null ? kNoParent : list.indexOf(parent);
-    if (parentIdx < 0) {
-      // A parent that is not in the list is not a parent one can
-      // name. Sending it would mean sending an index
-      // that the receiver resolves to a STRANGER.
-      _log.warn('Tree assignment for ${participantHex.substring(0, 8)} '
-          'skipped: the parent is not in the participant list');
-      return;
-    }
-    final kinder = <int>[];
-    for (final k in session.tree.childrenOf(participantHex)) {
-      final i = list.indexOf(k);
-      if (i >= 0) kinder.add(i);
-    }
-    final record = buildTreeAssignment(
-      treeVersion: session.tree.version,
-      roster: rosterHash(list),
-      parentIndex: parentIdx,
-      childIndices: kinder,
-    );
-    final error =
-        transport.sendControl(participantHex: participantHex, record: record);
-    if (error != null) {
-      _log.debug('Tree assignment to ${participantHex.substring(0, 8)} '
-          'not accepted (${error.name})');
-      return;
-    }
-    _log.info('Tree assignment v${session.tree.version} to '
-        '${participantHex.substring(0, 8)}: parent '
-        '${parentIdx == kNoParent ? "—" : parentIdx}, children $kinder '
-        '(${record.wireLength} B in the control frame, §17.1.1)');
-  }
+  // S408 (P6): here stood `_broadcastTreeUpdate`, `_sendTreeAssignment` and
+  // `_sendTreeSubtree` — the central tree owner sending each participant its
+  // place (0x01) and its subtree (0x06). No build sends them any more; the
+  // crystal forms over `treeOffer`/`treeJoin`/`treeAccept`. A v4.2.3 owner
+  // may still send 0x01/0x06; they are taken only while this device runs no
+  // crystal ([_applyTreeAssignment]).
 
   /// Accepts a control record from a participant (§17.1.1).
   ///
@@ -800,7 +953,24 @@ class GroupCallManager {
     if (session == null) return;
     switch (record.type) {
       case ControlRecordType.treeAssignment:
-        _applyTreeAssignment(session, peerHex, record);
+        if (session.crystal == null) {
+          _applyTreeAssignment(session, peerHex, record);
+        }
+      case ControlRecordType.treeSubtree:
+        if (session.crystal == null) {
+          _applyTreeSubtree(session, peerHex, record);
+        }
+      case ControlRecordType.treeOffer:
+      case ControlRecordType.treeJoin:
+      case ControlRecordType.treeAccept:
+        // The crystal (§17.7) — only from a joined participant. A crystal
+        // record proves the call left the mesh: this device joins the
+        // crystal even if it has not yet learned of the seventh join.
+        if (session.participants[peerHex]?.state != ParticipantState.joined) {
+          return;
+        }
+        if (session.crystal == null) _startCrystal(session);
+        session.crystal?.handle(peerHex, record);
       case ControlRecordType.rttPing:
         // The answer carries the same marker back. Only thereby
         // does the probe measure the run time and not the harvest cadence
@@ -822,7 +992,35 @@ class GroupCallManager {
       case ControlRecordType.readiness:
         _log.debug('Readiness from ${peerHex.substring(0, 8)}: '
             '${record.value.isEmpty ? "—" : record.value[0]}');
+      case ControlRecordType.relayAsk:
+      case ControlRecordType.relayHave:
+      case ControlRecordType.relayBind:
+      case ControlRecordType.relayRefuse:
+      case ControlRecordType.relayBound:
+      case ControlRecordType.relayDrop:
+        // The broker of the mesh (§17.7) — only from a participant.
+        if (session.participants.containsKey(peerHex)) {
+          session.broker?.handle(peerHex, record);
+        }
+      case ControlRecordType.lossReport:
+        // The transport's (`loss_report.dart`); it does not pass it up.
+        return;
+      case ControlRecordType.lifeSign:
+        // The peer sends the life sign, so the loss rule holds toward it
+        // from now on (§17.4, D-74); a v4.2.3 peer never sends one. Only a
+        // joined participant: the record rides a session of this call.
+        if (session.participants[peerHex]?.state == ParticipantState.joined) {
+          transport.watchPairLoss(peerHex);
+        }
     }
+  }
+
+  /// The line has shown its limit (§17.1.1 loss reports, §17.7 "a broker's
+  /// limit" — an edge): the broker of the running call decides again.
+  void lineLimitShown() {
+    _currentGroupCall?.broker?.limitShown();
+    // `f_i` is known now — an edge of the crystal too.
+    _currentGroupCall?.crystal?.reconsider();
   }
 
   void _applyTreeAssignment(
@@ -876,6 +1074,11 @@ class GroupCallManager {
     ];
     session.tree.fromNodeList(node, parentHex ?? me);
     session.tree.version = z.treeVersion;
+    // §17.5: a participant without children takes every sender over its
+    // parent, so its view is complete as it stands. One WITH children
+    // must first learn who lies behind them (`treeSubtree`).
+    session.admission.treeViewComplete = kinderHex.isEmpty;
+    session.broker?.suspend();
 
     // THIS IS ENTERING THE TREE. Without this line the participant has
     // a plan and still forwards nothing.
@@ -884,6 +1087,42 @@ class GroupCallManager {
     _log.info('Tree assignment v${z.treeVersion} applied: parent '
         '${parentHex == null ? "— (Wurzel)" : parentHex.substring(0, 8)}, '
         '${kinderHex.length} children — forwarding is in place (§17.7)');
+  }
+
+  /// Learns who lies behind each of our down-links (§17.5, the record
+  /// [ControlRecordType.treeSubtree]).
+  ///
+  /// Same gates as the assignment: only from the tree owner, only for
+  /// the participant list we hold, and only for the tree version we
+  /// applied — a subtree of another tree would bind senders to the wrong
+  /// links.
+  void _applyTreeSubtree(
+      GroupCallSession session, String peerHex, ControlRecord record) {
+    if (peerHex != session.ownerHex) return;
+    final list = session.rosterSorted;
+    final s = readTreeSubtree(record, list.length);
+    if (s == null || s.roster != rosterHash(list)) {
+      _log.warn('Tree subtree record from ${peerHex.substring(0, 8)} '
+          'discarded: not well-formed or for another participant list');
+      return;
+    }
+    if (s.treeVersion != session.tree.version) return;
+    final me = identity.userIdHex;
+    final down = session.tree.downLinksOf(me);
+    for (final MapEntry(key: linkIdx, value: members) in s.subtreeOfLink.entries) {
+      if (linkIdx >= list.length) continue;
+      final link = list[linkIdx];
+      if (!down.contains(link)) continue;
+      for (final m in members) {
+        if (m < list.length && list[m] != me) {
+          session.tree.attachBelow(list[m], link);
+        }
+      }
+    }
+    session.admission.treeViewComplete = true;
+    _log.info('Tree subtree v${s.treeVersion} applied: '
+        '${s.subtreeOfLink.length} down-link(s) placed — every sender has '
+        'its link (§17.5)');
   }
 
   // ── RTT + Health ────────────────────────────────────────────────────
@@ -1103,6 +1342,14 @@ class GroupCallManager {
   Future<void> _openParticipantMediaPath(
       GroupCallSession session, String participantHex) async {
     if (participantHex == identity.userIdHex) return;
+    // §17 principle: a window sends probes to the other side's addresses
+    // and shows ours to it — only between contacts with call consent.
+    if (!_callPairAdmissible(participantHex)) {
+      _log.info('Plane D: no punch window for '
+          '${participantHex.substring(0, 8)} — no contact with calls '
+          'allowed (§17, §17.7)');
+      return;
+    }
     final local = session.localDCookies[participantHex];
     final foreign = session.peerDCookies[participantHex];
     final key = session.pairKeys[participantHex];
@@ -1139,17 +1386,58 @@ class GroupCallManager {
       // nothing in Dart.
       _log.error('Layer D: the punch window for '
           '${participantHex.substring(0, 8)} threw detached: $e\n$st');
+      _pairDecided(session, participantHex, MediaPairState.none);
       return;
     }
     if (!out.carried) {
       _log.error('Layer D does not carry for '
           '${participantHex.substring(0, 8)}: ${out.refusal} '
           '(${out.packetsSent} probes / ${out.bytesSent} B)');
+      // "contacts whose address pair does not carry" — a pair for a
+      // broker (§17.7).
+      _pairDecided(session, participantHex, MediaPairState.none);
       return;
     }
     _log.info('Layer D carries for ${participantHex.substring(0, 8)}: '
         '${out.address!.address}:${out.port} (${out.packetsSent} probes / '
         '${out.bytesSent} B, §17.3)');
+    _pairDecided(session, participantHex, MediaPairState.carrying);
+  }
+
+  /// The punch window decided the media pair with [peerHex] — an edge for
+  /// the broker, if the call it ran for is still this one.
+  void _pairDecided(
+      GroupCallSession session, String peerHex, MediaPairState s) {
+    if (!identical(_currentGroupCall, session)) return;
+    // A media pair starts: from now on it is kept alive — the life sign
+    // once now, then once per second while no voice runs on it (§17.4,
+    // D-74).
+    if (s == MediaPairState.carrying) transport.keepPairAlive(peerHex);
+    session.broker?.setPairState(peerHex, s);
+    _crystalEdge(session);
+  }
+
+  /// §17.4: "10 s without a valid frame end that media pair, not the call —
+  /// an occasion of §17.7." The transport fired the loss rule it armed on
+  /// [peerHex]'s first life sign ([CallTransport.watchPairLoss]); wired by
+  /// `CallService` to `CallTransport.onMediaPathLost` beside the 1:1 call.
+  ///
+  /// The session ends (nothing more goes to a peer that does not hear), the
+  /// participant stays in the call, and the broker of §17.7 looks for a way
+  /// for the pair — the same edge as a media pair whose window did not carry.
+  void mediaPairLost(String peerHex) {
+    final session = _currentGroupCall;
+    if (session == null ||
+        session.participants[peerHex]?.state != ParticipantState.joined) {
+      return;
+    }
+    _log.warn('Plane D: media pair with ${peerHex.substring(0, 8)} lost — '
+        '10 s without a valid frame; the pair ends, not the call (§17.4)');
+    transport.forgetParticipant(peerHex);
+    session.broker?.setPairState(peerHex, MediaPairState.none);
+    // In the crystal an ended media pair is an ended tree link (§17.7).
+    _crystalEdge(session);
+    onReachChanged?.call();
   }
 
   /// Announce our current ownSendKey to one participant (setup-class: full
@@ -1170,8 +1458,8 @@ class GroupCallManager {
     // ── A-1: THE WHOLE BODY LIES IN THE try ────────────────────────────
     //
     // Three call sites attach this method as a `void` expression
-    // (`handleGroupCallAnswerV3`, `handleCallRejoinV3`,
-    // `handleGroupCallSenderKeyV3`) — without `unawaited`, without
+    // (`handleGroupCallAnswer`, `handleCallRejoin`,
+    // `handleGroupCallSenderKey`) — without `unawaited`, without
     // `catchError`. A throw from `sendViaUser` thus ran into the
     // zone handler of `service_daemon.dart` and ended the daemon
     // (`exit(99)`, `:514`). `unawaited()` at the call sites would NOT
@@ -1179,19 +1467,25 @@ class GroupCallManager {
     // happens here, in the body, and thus for all three at once.
     try {
       _ensureOwnSendKey(session);
-      _ensurePairMaterialFor(session, participantUserHex);
 
       final ann = proto.GroupCallSenderKey()
         ..callId = session.callId
         ..senderNodeId = identity.nodeId
         ..sendKey = session.ownSendKey!
-        ..keyVersion = session.ownSendKeyVersion
-        ..dEphX25519Pk = session.ephX25519Pk!
-        ..dCookie = session.localDCookies[participantUserHex]!;
-      final ct = session.ownKemCtFor[participantUserHex];
-      if (ct != null) ann.dKemCiphertext = ct;
-      final candidates = await transport.localCandidatesPacked();
-      if (candidates.isNotEmpty) ann.dCandidates = candidates;
+        ..keyVersion = session.ownSendKeyVersion;
+      // The send key goes to EVERY participant (§17.5: "handed to every
+      // participant end to end"); the Plane D material only to one this
+      // device may hold a media pair with (§17.3, §16.2.2).
+      if (_callPairAdmissible(participantUserHex)) {
+        _ensurePairMaterialFor(session, participantUserHex);
+        ann
+          ..dEphX25519Pk = session.ephX25519Pk!
+          ..dCookie = session.localDCookies[participantUserHex]!;
+        final ct = session.ownKemCtFor[participantUserHex];
+        if (ct != null) ann.dKemCiphertext = ct;
+        final candidates = await transport.localCandidatesPacked();
+        if (candidates.isNotEmpty) ann.dCandidates = candidates;
+      }
 
       // THE ROUND, AND ONLY FROM THE INITIATOR. Without it a
       // non-initiator never learns that another non-initiator has joined
@@ -1204,11 +1498,8 @@ class GroupCallManager {
         }
       }
 
-      final ok = await sendViaUser?.call(
-        hexToBytes(participantUserHex),
-        proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY,
-        ann.writeToBuffer(),
-      );
+      final ok = await _signal(session, participantUserHex,
+          proto.MessageType.MT_CALL_GROUP_SENDER_KEY, ann.writeToBuffer());
       if (ok == true) session.announcedSendKeyTo.add(participantUserHex);
     } catch (e, st) {
       _log.error('GROUP_CALL_SENDER_KEY to '
@@ -1237,9 +1528,9 @@ class GroupCallManager {
   // ── V3 Handlers (Welle 2B — Calls Cluster C3) ──────────────────────
   //
   // Per §10 + §10.5 + §23.3: each handler accepts the decrypted
-  // `ApplicationFrameV3` (inner payload already verified by the V3 receive
+  // `ApplicationFrame` (inner payload already verified by the V3 receive
   // pipeline in `cleona_service.handleApplicationFrame`), the
-  // `senderDeviceId` lifted off the inbound `NetworkPacketV3`, and the
+  // `senderDeviceId` lifted off the inbound `NetworkPacket`, and the
   // `SenderIdentitySnapshot` carrying outer-sig status (§2.4.0).
   //
   // For setup-class frames (CALL_INVITE/ANSWER/REJECT/HANGUP/GROUP_LEAVE/
@@ -1254,11 +1545,11 @@ class GroupCallManager {
   /// V3 receive-handler for CALL_INVITE (group, is_group_call=true).
   ///
   /// Returns `true` if this INVITE created a **new ringing
-  /// group call** — see [CallManager.handleCallInviteV3] for
+  /// group call** — see [CallManager.handleCallInvite] for
   /// the rationale (A-4, the ringtone depends on it).
-  bool handleGroupCallInviteV3(HarvestEvent event) {
+  bool handleGroupCallInvite(HarvestEvent event) {
     if (_currentGroupCall != null) {
-      _sendRejectV3(event, 'busy');
+      _sendReject(event, CallManager.rejectReasonInAnotherCall);
       return false;
     }
 
@@ -1277,6 +1568,14 @@ class GroupCallManager {
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     final groupIdHex = bytesToHex(Uint8List.fromList(invite.groupId));
+    // The frame's group is the one the group-pair gate checked (§15.7:
+    // both belong to it); the INVITE must name the same — otherwise a
+    // fellow member of one group could ring a call of another.
+    if (event.groupId != null && bytesToHex(event.groupId!) != groupIdHex) {
+      _log.warn('GROUP_CALL_INVITE from ${senderHex.substring(0, 8)} names '
+          'another group than its frame — dropped (§16.2.2)');
+      return false;
+    }
 
     final group = _getGroups()[groupIdHex];
     final groupName = group?.name ?? groupIdHex.substring(0, 8);
@@ -1300,13 +1599,22 @@ class GroupCallManager {
     // over which media or control frames could run. Empty is a
     // statement ("this caller sets up no Plane D window"), not an
     // error; `acceptGroupCall` reports the case by name.
-    if (invite.callerDCookie.isNotEmpty) {
-      session.peerDCookies[senderHex] =
-          Uint8List.fromList(invite.callerDCookie);
-    }
-    if (invite.callerCandidates.isNotEmpty) {
-      session.peerCandidates[senderHex] =
-          Uint8List.fromList(invite.callerCandidates);
+    //
+    // Kept only from a caller this device may hold a media pair with
+    // (§17.3); from any other it is dropped — an older or a foreign
+    // sender may still put it in.
+    if (_callPairAdmissible(senderHex)) {
+      if (invite.callerDCookie.isNotEmpty) {
+        session.peerDCookies[senderHex] =
+            Uint8List.fromList(invite.callerDCookie);
+      }
+      if (invite.callerCandidates.isNotEmpty) {
+        session.peerCandidates[senderHex] =
+            Uint8List.fromList(invite.callerCandidates);
+      }
+    } else if (invite.callerDCookie.isNotEmpty ||
+        invite.callerCandidates.isNotEmpty) {
+      _dropPlaneDMaterial(senderHex, 'INVITE');
     }
 
     if (group != null) {
@@ -1328,7 +1636,32 @@ class GroupCallManager {
     }
 
     _currentGroupCall = session;
+    _attachBroker(session);
+    _joinedEdge(session, senderHex);
+    // The initiator gave no Plane D material although this side would
+    // hold a media pair with it: its side has no consent (§17.7).
+    if (session.peerDCookies[senderHex] == null) {
+      _refusedByPeer(session, senderHex, 'INVITE');
+    }
     _ensureOwnSendKey(session); // §10.2.1 per-sender media key
+    // §17.2: "Every device that rings sends a `RING_ACK` carrying its
+    // ephemeral X25519 binding marker" — the same marker its ANSWER carries
+    // ([acceptGroupCall] finds it drawn), drawn now as in the 1:1 path
+    // (`CallManager.handleCallInvite`). "A ringing device stops by itself
+    // after 60 s" ([_ringingOver]).
+    _ensureOwnEph(session);
+    _detached(
+        _signal(
+            session,
+            senderHex,
+            proto.MessageType.MT_CALL_RING_ACK,
+            (proto.CallRingAck()
+                  ..callId = session.callId
+                  ..deviceMarker = session.ephX25519Pk!)
+                .writeToBuffer()),
+        'CALL_RING_ACK (group)');
+    session.ringing = GroupCallRinging(onRingingOver: () => _ringingOver(session))
+      ..startRinging();
     onIncomingGroupCall?.call(session.toGroupCallInfo());
     _log.info('Incoming group call V3 from ${senderHex.substring(0, 8)} '
         '(device=${_deviceLabel(event.senderDeviceId)}) in "$groupName"');
@@ -1358,9 +1691,9 @@ class GroupCallManager {
   ///
   /// **The 1:1 trap "second ANSWER overwrites the session key"
   /// does NOT exist here** — checked: the group `callKey` comes from the
-  /// INVITE ([handleGroupCallInviteV3]), not from the ANSWER, and the
+  /// INVITE ([handleGroupCallInvite]), not from the ANSWER, and the
   /// per-sender keys (§10.2.1) come via
-  /// `MTV3_CALL_GROUP_SENDER_KEY`. A second ANSWER thus never re-derived a
+  /// `MT_CALL_GROUP_SENDER_KEY`. A second ANSWER thus never re-derived a
   /// key here. But it ran through three OTHER side effects
   /// unconditionally, and the binding lock below closes them too:
   ///
@@ -1373,7 +1706,7 @@ class GroupCallManager {
   ///      time to the same UserID (working rule 5).
   ///   3. `onParticipantChanged` fires again and `_scheduleTreeRebuild`
   ///      rebuilds the tree without cause.
-  void handleGroupCallAnswerV3(HarvestEvent event) {
+  void handleGroupCallAnswer(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1385,10 +1718,23 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, answer.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     final participant = session.participants[senderHex];
     if (participant == null) return;
+
+    // §17.2: an invitation that already ended (not reached, not answered in
+    // 60 s) joins nothing; the late ANSWER gets one HANGUP, as a late
+    // RING_ACK does, so the device that picked up does not sit in a call
+    // nobody holds.
+    final ringing = session.ringing;
+    if (ringing != null && ringing.hasEnded(senderHex)) {
+      _answerLateReply(session, senderHex,
+          bytesToHex(Uint8List.fromList(answer.calleeEphX25519Pk)));
+      return;
+    }
+    ringing?.closed(senderHex);
 
     // ── §17.2: the first ANSWER binds ────────────────────────────────
     // Comes BEFORE the capacity check: a participant who is already in
@@ -1443,16 +1789,10 @@ class GroupCallManager {
       // survival list is `exit(99)`. A full group call must not kill a
       // daemon. The only other non-awaited
       // `sendViaUser` site in `lib/core/calls/` (S351).
-      sendViaUser
-          ?.call(
-            hexToBytes(senderHex),
-            proto.MessageTypeV3.MTV3_CALL_REJECT,
-            reject.writeToBuffer(),
-          )
-          .catchError((Object e, StackTrace st) {
-        _log.error('CALL_REJECT(full) threw (detached): $e\n$st');
-        return false;
-      });
+      _detached(
+          _signal(session, senderHex, proto.MessageType.MT_CALL_REJECT,
+              reject.writeToBuffer()),
+          'CALL_REJECT(full)');
       return;
     }
 
@@ -1464,20 +1804,31 @@ class GroupCallManager {
     // §17.3/§17.4: the participant's Plane D material. It comes from
     // THIS ANSWER, i.e. from the answer of the device that bound the
     // session — that of a second device has already been
-    // intercepted above.
-    if (answer.calleeDCookie.isNotEmpty) {
-      session.peerDCookies[senderHex] =
-          Uint8List.fromList(answer.calleeDCookie);
-    }
-    if (answer.calleeCandidates.isNotEmpty) {
-      session.peerCandidates[senderHex] =
-          Uint8List.fromList(answer.calleeCandidates);
+    // intercepted above. Kept only from a participant this device may hold
+    // a media pair with (§17.3).
+    final mediaPair = _callPairAdmissible(senderHex);
+    if (mediaPair) {
+      if (answer.calleeDCookie.isNotEmpty) {
+        session.peerDCookies[senderHex] =
+            Uint8List.fromList(answer.calleeDCookie);
+      }
+      if (answer.calleeCandidates.isNotEmpty) {
+        session.peerCandidates[senderHex] =
+            Uint8List.fromList(answer.calleeCandidates);
+      }
+    } else if (answer.calleeDCookie.isNotEmpty ||
+        answer.calleeCandidates.isNotEmpty) {
+      _dropPlaneDMaterial(senderHex, 'ANSWER');
     }
 
     participant.state = ParticipantState.joined;
     participant.joinedAt = DateTime.now();
     onParticipantChanged?.call(senderHex, ParticipantState.joined);
     _registerLiveMediaDevice(session, senderHex, event.senderDeviceId);
+    _joinedEdge(session, senderHex);
+    if (mediaPair && answer.calleeDCookie.isEmpty) {
+      _refusedByPeer(session, senderHex, 'ANSWER');
+    }
 
     _log.info('Participant joined V3: ${senderHex.substring(0, 8)} '
         '(device=${_deviceLabel(event.senderDeviceId)})');
@@ -1485,21 +1836,19 @@ class GroupCallManager {
     // §17.3: see `acceptGroupCall` — both sides run their window
     // as soon as they have both halves. Not awaited, for the same
     // reason.
-    unawaited(_openParticipantMediaPath(session, senderHex));
+    if (mediaPair) unawaited(_openParticipantMediaPath(session, senderHex));
 
     final joinedCount = session.joinedParticipantIds.length;
     if (joinedCount >= 2 && session.state == GroupCallState.inviting) {
       session.state = GroupCallState.inCall;
-      _rebuildTree(session);
       _setupRttAndHealth(session);
       onGroupCallStarted?.call(session.toGroupCallInfo());
       _log.info('Group call active with $joinedCount participants');
-    } else if (session.state == GroupCallState.inCall) {
-      _scheduleTreeRebuild(session);
     }
+    _crystalEdge(session);
     // §10.2.1: hand the newcomer our send_key (no global rotation on join —
     // backward secrecy is natural, the newcomer never held prior keys). The
-    // newcomer reciprocates with its own key via handleGroupCallSenderKeyV3.
+    // newcomer reciprocates with its own key via handleGroupCallSenderKey.
     _announceSendKeyTo(session, senderHex);
 
     // §17.2: the session is bound for this participant — the OTHER
@@ -1510,8 +1859,7 @@ class GroupCallManager {
     //
     // Not only at the second ANSWER: if it were so, the ringing of the
     // siblings would only end when a SECOND device picks up — and if none
-    // picks up, not at all. In the group path there is also no
-    // time limit that would end it by itself.
+    // picks up, only at its own 60 s limit (§17.2, `GroupCallRinging`).
     if (answerKey != null) {
       unawaited(_sendGroupCancelOthers(session, senderHex, answerKey));
     }
@@ -1533,25 +1881,21 @@ class GroupCallManager {
       final cancel = proto.CallCancelOthers()
         ..callId = session.callId
         ..boundAnswerKey = boundKey;
-      await sendViaUser?.call(
-        hexToBytes(participantUserHex),
-        proto.MessageTypeV3.MTV3_CALL_CANCEL_OTHERS,
-        cancel.writeToBuffer(),
-      );
+      await _signal(session, participantUserHex,
+          proto.MessageType.MT_CALL_CANCEL_OTHERS, cancel.writeToBuffer());
       _log.info('CANCEL_OTHERS (group) to '
           '${participantUserHex.substring(0, 8)} — the ringing on their '
           'other devices ends');
     } catch (e) {
-      // Best effort like every other signal. Unlike in the 1:1 path there is
-      // NO time limit here that ends the ringing by itself — that
-      // stands as an open point in the report, not as a silent stopgap here.
+      // Best effort like every other signal. If it is lost, the sibling
+      // devices stop at their own 60 s limit (§17.2, `GroupCallRinging`).
       _log.warn('CANCEL_OTHERS (group) could not be sent: $e');
     }
   }
 
   /// V3 receive-handler for CALL_CANCEL_OTHERS (group, §17.2).
   ///
-  /// Three outcomes, as in the 1:1 path ([CallManager.handleCallCancelOthersV3]),
+  /// Three outcomes, as in the 1:1 path ([CallManager.handleCallCancelOthers]),
   /// and the middle one is the one everything hinges on:
   ///
   ///   * **No matching call** — nothing to do. A memory for
@@ -1568,7 +1912,7 @@ class GroupCallManager {
   ///     decided, and it is the only one that can decide.
   ///
   /// At the INITIATOR the cell makes no sense — it is the sender.
-  void handleGroupCallCancelOthersV3(HarvestEvent event) {
+  void handleGroupCallCancelOthers(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1580,6 +1924,7 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, cancel.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     // Without a usable binding key the winning device could not
     // recognise itself — the cell would take away its own
@@ -1618,8 +1963,166 @@ class GroupCallManager {
     _endCall(session);
   }
 
+  // ── §17.2 in the group call: RING_ACK, 10 s, 60 s (S407-GAMUTE H-1) ────
+
+  /// The last call this device ended as initiator, for a RING_ACK that
+  /// arrives after it (§17.2). One is enough: a device runs one group call
+  /// at a time, and "completed `callId`s are remembered for 24 h".
+  GroupCallSession? _lastEndedOutgoing;
+  DateTime? _lastEndedAt;
+
+  /// RING_ACK of a group call (§17.2): "When the callee's `RING_ACK`
+  /// arrives, it really is ringing on their end … the 60-s answer timeout
+  /// start[s] then". Returns whether the RING_ACK belonged to a group call
+  /// of this device — the running one or the last one it ended; otherwise
+  /// the 1:1 path takes it (`CallService.handleCallRingAck`).
+  bool handleGroupCallRingAck(HarvestEvent event) {
+    final proto.CallRingAck ack;
+    try {
+      ack = proto.CallRingAck.fromBuffer(event.payload);
+    } catch (e) {
+      return false;
+    }
+    final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
+    final marker = bytesToHex(Uint8List.fromList(ack.deviceMarker));
+    final session = _currentGroupCall;
+    if (session != null && _callIdMatches(session.callId, ack.callId)) {
+      if (_namesOtherGroup(session, event)) return true;
+      // At a callee it is a sibling device's RING_ACK — nothing to learn.
+      if (session.direction != CallDirection.outgoing) return true;
+      final participant = session.participants[senderHex];
+      final ringing = session.ringing;
+      if (participant == null || ringing == null) return true;
+      if (ringing.ringAck(senderHex)) {
+        participant.state = ParticipantState.ringing;
+        onParticipantChanged?.call(senderHex, ParticipantState.ringing);
+        _log.info('RING_ACK from ${senderHex.substring(0, 8)} — it really '
+            'rings there; ${GroupCallRinging.answerLimit.inSeconds} s for '
+            'its ANSWER (§17.2)');
+      } else if (ringing.hasEnded(senderHex)) {
+        _answerLateReply(session, senderHex, marker);
+      }
+      return true;
+    }
+    final ended = _lastEndedOutgoing;
+    final at = _lastEndedAt;
+    if (ended == null || at == null) return false;
+    if (DateTime.now().difference(at) > const Duration(hours: 24)) {
+      _lastEndedOutgoing = null;
+      _lastEndedAt = null;
+      return false;
+    }
+    if (!_callIdMatches(ended.callId, ack.callId)) return false;
+    _answerLateReply(ended, senderHex, marker);
+    return true;
+  }
+
+  /// §17.2: "a `RING_ACK` for a call the caller has already ended is
+  /// answered with one `HANGUP`" — here per member whose invitation ended
+  /// without an answer, once per device marker.
+  void _answerLateReply(
+      GroupCallSession session, String memberHex, String marker) {
+    if (!(session.ringing?.claimLateReply(memberHex, marker) ?? false)) {
+      return;
+    }
+    _log.info('Late reply from ${memberHex.substring(0, 8)} for the ended '
+        'invitation of ${session.callIdHex.substring(0, 8)} — one HANGUP');
+    _hangUp(session, {memberHex}, 'late reply');
+  }
+
+  /// One HANGUP to each of [members] (§17.2) — a call signal, sent once.
+  void _hangUp(GroupCallSession session, Set<String> members, String why) {
+    final payload = (proto.CallHangup()..callId = session.callId)
+        .writeToBuffer();
+    for (final m in members) {
+      _detached(_signal(session, m, proto.MessageType.MT_CALL_HANGUP,
+          payload), 'CALL_HANGUP (group, $why)');
+    }
+  }
+
+  /// Invitations of [members] ended without an answer — not reached in 10 s
+  /// or not answered in 60 s (§17.2). Each is shown gone and gets one
+  /// HANGUP; the call ends if no invitation is open and nobody joined.
+  void _invitationsEnded(
+      GroupCallSession session, Set<String> members, String why) {
+    if (!identical(_currentGroupCall, session)) return;
+    final ended = <String>{};
+    for (final m in members) {
+      final p = session.participants[m];
+      if (p == null || p.state == ParticipantState.joined ||
+          p.state == ParticipantState.left) {
+        continue;
+      }
+      p.state = ParticipantState.left;
+      onParticipantChanged?.call(m, ParticipantState.left);
+      ended.add(m);
+      _log.info('Invitation of ${m.substring(0, 8)} ended: $why (§17.2)');
+    }
+    _hangUp(session, ended, why);
+    _missedCallFor(session, ended);
+    _endIfNobodyCame(session);
+  }
+
+  /// §17.2 "Missed call": each of [members] gets the missed-call message —
+  /// started on the initiator only, once per member and call
+  /// ([GroupCallRinging.claimMissed]), after its HANGUP, so that the
+  /// member's ringing has its end before the entry arrives (as the 1:1 path,
+  /// `CallManager.hangup`). A member that answered or declined never reaches
+  /// here: its invitation was closed.
+  void _missedCallFor(GroupCallSession session, Set<String> members) {
+    final ringing = session.ringing;
+    if (session.direction != CallDirection.outgoing || ringing == null) {
+      return;
+    }
+    for (final m in members) {
+      if (!ringing.claimMissed(m)) continue;
+      _log.info('Missed-call message to ${m.substring(0, 8)} for '
+          '${session.callIdHex.substring(0, 8)} (§17.2)');
+      try {
+        onMissedCall?.call(
+            m, session.groupIdHex, Uint8List.fromList(session.callId));
+      } catch (e) {
+        _log.warn('Missed-call message could not be started: $e');
+      }
+    }
+  }
+
+  /// §17.2 "not reachable … ends the call": a group call nobody joined ends
+  /// once no invitation is being reached or rings any more.
+  void _endIfNobodyCame(GroupCallSession session) {
+    if (!identical(_currentGroupCall, session) ||
+        session.direction != CallDirection.outgoing ||
+        session.state != GroupCallState.inviting ||
+        (session.ringing?.anyOpen ?? false)) {
+      return;
+    }
+    _log.info('Group call ${session.callIdHex.substring(0, 8)}: no '
+        'invitation open, nobody joined — the call ends (§17.2)');
+    _endCall(session);
+  }
+
+  /// §17.2: "A ringing device stops by itself after 60 s" — it tells the
+  /// initiator once, as the 1:1 callee does (`rejectCall('timeout')`).
+  void _ringingOver(GroupCallSession session) {
+    if (!identical(_currentGroupCall, session) ||
+        session.state != GroupCallState.ringing) {
+      return;
+    }
+    _log.info('Group call ${session.callIdHex.substring(0, 8)} rang '
+        '${GroupCallRinging.answerLimit.inSeconds} s without an answer — '
+        'ringing ends (§17.2)');
+    final reject = proto.CallReject()
+      ..callId = session.callId
+      ..reason = CallManager.rejectReasonTimeout;
+    _detached(
+        _signal(session, session.initiatorHex,
+            proto.MessageType.MT_CALL_REJECT, reject.writeToBuffer()),
+        'CALL_REJECT(timeout)');
+    _endCall(session);
+  }
+
   /// V3 receive-handler for CALL_REJECT (group).
-  void handleGroupCallRejectV3(HarvestEvent event) {
+  void handleGroupCallReject(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1631,19 +2134,35 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, reject.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     final participant = session.participants[senderHex];
     if (participant == null) return;
 
+    // §17.2 "60 s of ringing without an ANSWER": the member's device stopped
+    // by itself (`_ringingOver`, REJECT "timeout") — unanswered, not
+    // declined. Its REJECT usually arrives before the initiator's own 60 s
+    // run out (it started ringing first), so it is read here. D-79: a device
+    // answering that it is in another call is missed as well; a bare "busy"
+    // (4.2.3-beta sends it for "reject" too) stays an ordinary rejection.
+    final rangOut = (reject.reason == CallManager.rejectReasonTimeout ||
+            reject.reason == CallManager.rejectReasonInAnotherCall) &&
+        (session.ringing?.isOpen(senderHex) ?? false);
+
     participant.state = ParticipantState.left;
     onParticipantChanged?.call(senderHex, ParticipantState.left);
     _log.info('Participant rejected V3: ${senderHex.substring(0, 8)} '
         '(${reject.reason})');
+    // Its invitation is closed; with no invitation open and nobody joined
+    // the call is over (§17.2).
+    session.ringing?.closed(senderHex);
+    if (rangOut) _missedCallFor(session, {senderHex});
+    _endIfNobodyCame(session);
   }
 
   /// V3 receive-handler for CALL_HANGUP (group).
-  void handleGroupCallHangupV3(HarvestEvent event) {
+  void handleGroupCallHangup(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1655,13 +2174,26 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, hangup.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
+    if (session.state == GroupCallState.ringing) {
+      // §17.2: the caller's one HANGUP ends a ringing device — the caller
+      // gave up, or ended this member's invitation (10 s / 60 s). Only the
+      // initiator rang it; nobody else ends its ringing.
+      if (senderHex == session.initiatorHex) {
+        _log.info('Group call ${session.callIdHex.substring(0, 8)}: the '
+            'initiator hung up before an answer — ringing ends (§17.2)');
+        session.ringing?.stopRinging();
+        _endCall(session);
+      }
+      return;
+    }
     _participantLeft(session, senderHex);
   }
 
   /// V3 receive-handler for GROUP_CALL_LEAVE.
-  void handleGroupCallLeaveV3(HarvestEvent event) {
+  void handleGroupCallLeave(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1673,13 +2205,14 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, leave.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     _participantLeft(session, senderHex);
   }
 
   /// V3 receive-handler for CALL_REJOIN.
-  void handleCallRejoinV3(HarvestEvent event) {
+  void handleCallRejoin(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
 
@@ -1691,6 +2224,7 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, rejoin.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     final participant = session.participants[senderHex];
@@ -1703,9 +2237,7 @@ class GroupCallManager {
     _log.info('Participant rejoined V3: ${senderHex.substring(0, 8)} '
         '(device=${_deviceLabel(event.senderDeviceId)}, no global rotation)');
 
-    if (session.isOwner(identity.userIdHex)) {
-      _scheduleTreeRebuild(session);
-    }
+    _crystalEdge(session);
     // §10.2.1: re-announce our send_key to the rejoiner (they re-announce
     // theirs). No global rotation — the authorized set did not change.
     session.announcedSendKeyTo.remove(senderHex);
@@ -1717,7 +2249,7 @@ class GroupCallManager {
   /// Live-class frame per §10.4.5 (high-frequency on dynamic membership) —
   /// no zstd / no ML-DSA on the wire; receive-side parses + applies the
   /// new tree directly. Only accepts updates from the current tree owner.
-  void handleCallTreeUpdateV3(HarvestEvent event) {
+  void handleCallTreeUpdate(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1745,6 +2277,9 @@ class GroupCallManager {
       initiatorHex,
     );
     session.tree.version = update.version;
+    // The whole node list: a complete view (§17.5 edge binding).
+    session.admission.treeViewComplete = true;
+    session.broker?.suspend();
 
     _setupRelay(session);
 
@@ -1756,7 +2291,7 @@ class GroupCallManager {
   ///
   /// Live-class per §10.4.5; reply pong is dispatched on the per-call
   /// route cache via [_sendLiveMediaToParticipant] (no extra ML-DSA).
-  void handleCallRttPingV3(HarvestEvent event) {
+  void handleCallRttPing(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.rtt == null) return;
 
@@ -1778,13 +2313,13 @@ class GroupCallManager {
 
     _sendLiveMediaToParticipant(
       senderHex,
-      proto.MessageTypeV3.MTV3_CALL_RTT_PONG,
+      proto.MessageType.MT_CALL_RTT_PONG,
       pong.writeToBuffer(),
     );
   }
 
   /// V3 receive-handler for CALL_RTT_PONG.
-  void handleCallRttPongV3(HarvestEvent event) {
+  void handleCallRttPong(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.rtt == null) return;
 
@@ -1808,7 +2343,7 @@ class GroupCallManager {
   // (`cleona_service_receive.dart`), the forwarding
   // (`call_service.handleCallGroupKeyRotateV3`) and the protocol message
   // `GroupCallKeyRotate` together with type number 81 have fallen. Per-sender keys
-  // come via GROUP_CALL_SENDER_KEY (`handleGroupCallSenderKeyV3`).
+  // come via GROUP_CALL_SENDER_KEY (`handleGroupCallSenderKey`).
 
   /// V3 receive-handler for GROUP_CALL_SENDER_KEY (§10.2.1). Registers an
   /// authenticated peer's secret media key.
@@ -1818,7 +2353,7 @@ class GroupCallManager {
   /// require the announced `sender_node_id` to equal that authenticated id —
   /// so a participant can only register a key under its OWN identity and
   /// cannot frame another by announcing a key for the victim's id.
-  void handleGroupCallSenderKeyV3(HarvestEvent event) {
+  void handleGroupCallSenderKey(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null) return;
 
@@ -1830,6 +2365,7 @@ class GroupCallManager {
       return;
     }
     if (!_callIdMatches(session.callId, ann.callId)) return;
+    if (_namesOtherGroup(session, event)) return;
 
     final authedHex = bytesToHex(Uint8List.fromList(event.senderUserId));
     final announcedHex = bytesToHex(Uint8List.fromList(ann.senderNodeId));
@@ -1867,6 +2403,7 @@ class GroupCallManager {
       onParticipantChanged?.call(authedHex, ParticipantState.joined);
       _log.info('Participant ${authedHex.substring(0, 8)} has joined '
           '(from its own key handshake, §10.2.1)');
+      _joinedEdge(session, authedHex);
     }
 
     // ── THE INITIATOR'S ROUND ──────────────────────────────────────
@@ -1888,6 +2425,7 @@ class GroupCallManager {
         p.joinedAt ??= DateTime.now();
         onParticipantChanged?.call(hex, ParticipantState.joined);
         newKnown.add(hex);
+        _joinedEdge(session, hex);
       }
       if (newKnown.isNotEmpty) {
         _log.info('Round from the initiator: ${newKnown.length} more '
@@ -1901,35 +2439,49 @@ class GroupCallManager {
     // Our half first, and INDEPENDENTLY of whether we have already
     // addressed them: the derivation needs both, and which one is there
     // first is decided by the race on the line.
-    _ensurePairMaterialFor(session, authedHex);
-    if (ann.dEphX25519Pk.isNotEmpty) {
-      session.peerEphPk[authedHex] = Uint8List.fromList(ann.dEphX25519Pk);
-    }
-    if (ann.dCookie.isNotEmpty) {
-      session.peerDCookies[authedHex] = Uint8List.fromList(ann.dCookie);
-    }
-    if (ann.dCandidates.isNotEmpty) {
-      session.peerCandidates[authedHex] = Uint8List.fromList(ann.dCandidates);
-    }
-    if (ann.dKemCiphertext.isNotEmpty &&
-        !session.peerKemSecretFor.containsKey(authedHex)) {
-      try {
-        session.peerKemSecretFor[authedHex] = OqsFFI().mlKemDecapsulate(
-          Uint8List.fromList(ann.dKemCiphertext),
-          identity.mlKemSecretKey,
-        );
-      } catch (e) {
-        // Named, not silent: the pair key then comes into being without
-        // our receive share — and thus deviates from the result of the
-        // other side. The punch window then runs into nothing, and
-        // exactly this line says why.
-        _log.warn('Plane D: ML-KEM decapsulation from '
-            '${authedHex.substring(0, 8)} failed: $e');
+    //
+    // Only with a participant this device may hold a media pair with
+    // (§17.3, §17.7); from any other the material is dropped and no pair
+    // key forms — the send key below is kept all the same (§17.5).
+    final mediaPair = _callPairAdmissible(authedHex);
+    if (mediaPair) {
+      _ensurePairMaterialFor(session, authedHex);
+      if (ann.dEphX25519Pk.isNotEmpty) {
+        session.peerEphPk[authedHex] = Uint8List.fromList(ann.dEphX25519Pk);
       }
-    }
-    final pair = _derivePairKey(session, authedHex);
-    if (pair != null) {
-      session.pairKeys[authedHex] = pair;
+      if (ann.dCookie.isNotEmpty) {
+        session.peerDCookies[authedHex] = Uint8List.fromList(ann.dCookie);
+      }
+      if (ann.dCandidates.isNotEmpty) {
+        session.peerCandidates[authedHex] =
+            Uint8List.fromList(ann.dCandidates);
+      }
+      if (ann.dKemCiphertext.isNotEmpty &&
+          !session.peerKemSecretFor.containsKey(authedHex)) {
+        try {
+          session.peerKemSecretFor[authedHex] = OqsFFI().mlKemDecapsulate(
+            Uint8List.fromList(ann.dKemCiphertext),
+            identity.mlKemSecretKey,
+          );
+        } catch (e) {
+          // Named, not silent: the pair key then comes into being without
+          // our receive share — and thus deviates from the result of the
+          // other side. The punch window then runs into nothing, and
+          // exactly this line says why.
+          _log.warn('Plane D: ML-KEM decapsulation from '
+              '${authedHex.substring(0, 8)} failed: $e');
+        }
+      }
+      final pair = _derivePairKey(session, authedHex);
+      if (pair != null) {
+        session.pairKeys[authedHex] = pair;
+      }
+      if (ann.dCookie.isEmpty) _refusedByPeer(session, authedHex, 'sender key');
+    } else if (ann.dEphX25519Pk.isNotEmpty ||
+        ann.dCookie.isNotEmpty ||
+        ann.dCandidates.isNotEmpty ||
+        ann.dKemCiphertext.isNotEmpty) {
+      _dropPlaneDMaterial(authedHex, 'GROUP_SENDER_KEY');
     }
 
     final existing = session.peerSendKeys[authedHex];
@@ -1960,7 +2512,8 @@ class GroupCallManager {
     // both sides at once. ONCE per participant: it runs up to 30 s,
     // and a second attempt per arriving cell would be exactly the
     // traffic that working rule 5 rules out.
-    if (session.pairKeys.containsKey(authedHex) &&
+    if (mediaPair &&
+        session.pairKeys.containsKey(authedHex) &&
         session.peerDCookies.containsKey(authedHex) &&
         session.mediaPathStarted.add(authedHex)) {
       unawaited(_openParticipantMediaPath(session, authedHex));
@@ -1977,8 +2530,9 @@ class GroupCallManager {
   ///
   /// ── WHY THIS PATH IS NEEDED ───────────────────────────────────
   ///
-  /// [handleGroupCallAudioV3] and [handleGroupCallVideoV3] take a
-  /// `HarvestEvent` — i.e. a frame that the DELIVERY LAYER harvested.
+  /// `handleGroupCallAudioV3` and `handleGroupCallVideoV3` (both removed
+  /// in S407) took a `HarvestEvent` — i.e. a frame that the DELIVERY
+  /// LAYER harvested.
   /// A Plane D frame never arrives there; it comes via
   /// `CallTransport.onMediaFrame`. Measured on 05.09.2026, this
   /// return path ran exclusively into the 1:1 call: `call_service.dart` checks
@@ -2018,8 +2572,50 @@ class GroupCallManager {
     if (!session.participants.containsKey(peerHex)) return;
 
     final type = frame.kind == DFrameKind.video
-        ? proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO
-        : proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO;
+        ? proto.MessageType.MT_CALL_GROUP_VIDEO
+        : proto.MessageType.MT_CALL_GROUP_AUDIO;
+
+    // ── WHO SENT IT — resolved from the header, not from the D cookie:
+    // the cookie names the last hop. The rationale in full length is in
+    // `group_media_frame.dart`.
+    final parsed = unpackGroupMedia(Uint8List.fromList(frame.payload));
+    if (parsed == null || !parsed.hasSender) return;
+    final roster = session.rosterSorted;
+    if (parsed.senderIndex >= roster.length) {
+      // The participant sets have diverged (a join that
+      // we have not seen yet). Discard, do not guess — a
+      // guessed place would attribute the frame to a FOREIGN speaker.
+      _log.debug('Group media: sender slot ${parsed.senderIndex} lies '
+          'outside the list (${roster.length}) — dropped');
+      return;
+    }
+    final senderHex = roster[parsed.senderIndex];
+
+    // ── OVER WHICH EDGE (§17.5, B-5 in S407-GRUPPENANRUF) ─────────────
+    //
+    // Every participant holds every sender's `send_key`, so the slot in
+    // the header can name anyone. Until S407 it was believed: any
+    // participant could inject frames as any other, and the receiver
+    // played them and passed them on. Now a sender's frames are taken
+    // only over the media pair with it, from its bound broker, or over
+    // the tree link towards it. What is refused is neither played nor
+    // forwarded — and the own frame, should it ever come back, is
+    // refused as well (hearing oneself).
+    final verdict = session.admission.judge(
+      ownHex: identity.userIdHex,
+      linkHex: peerHex,
+      senderHex: senderHex,
+      tree: session.relay != null ? session.tree : null,
+    );
+    if (verdict == EdgeVerdict.refused) {
+      if (session.admission.refused++ % 250 == 0) {
+        _log.debug('Group media: a frame for ${senderHex.substring(0, 8)} '
+            'over ${peerHex.substring(0, 8)} refused — not its media pair, broker or '
+            'tree link (§17.5); ${session.admission.refused} so far');
+      }
+      return;
+    }
+
     if (frame.kind == DFrameKind.video) {
       session.videoFramesReceived++;
     } else {
@@ -2030,108 +2626,73 @@ class GroupCallManager {
     // arrived tree assignment — nothing happens here, and exactly by this
     // the guard measures whether the tree is ENTERED and not merely
     // built.
-    session.relay?.forwardFrame(Uint8List.fromList(frame.payload), type);
+    //
+    // Over every tree link except the one the frame came by (§17.7, B-2
+    // in S407-GRUPPENANRUF). A frame that did not come over a tree link
+    // at all — a participant still meshing before its own assignment has
+    // arrived — is played but not passed on: everyone else gets it from
+    // that participant directly, and passing it into the tree as well
+    // would deliver it twice (IEEE 802.1D: a frame received on a port
+    // that is not forwarding is not forwarded).
+    final relay = session.relay;
+    if (relay != null &&
+        session.tree.linksOf(identity.userIdHex).contains(peerHex)) {
+      relay.forwardFrame(Uint8List.fromList(frame.payload), type,
+          from: peerHex);
+    } else if (relay == null && verdict == EdgeVerdict.mediaPair) {
+      // In the mesh: a frame a member of a pair we carry as its broker
+      // sent us itself goes on to the pair's other member (§17.7, one hop,
+      // both directions) — and only such a frame.
+      session.pairRelay?.forwardFrame(
+          Uint8List.fromList(frame.payload), type,
+          from: peerHex, senderHex: senderHex);
+    }
 
     // AND THIS IS HEARING IT ONESELF. Forwarding and playing are two
     // duties, not one; until S369 only the first stood here.
-    _deliverGroupMediaBody(session, frame);
+    onGroupMediaBody?.call(senderHex, frame.kind, parsed.body);
   }
 
-  /// Resolves the sender from the header and passes the body up.
-  ///
-  /// The index comes from `rosterSorted` and not from the D cookie: the
-  /// cookie names the last hop. The rationale in full length is
-  /// in `group_media_frame.dart`.
-  void _deliverGroupMediaBody(GroupCallSession session, DFrame frame) {
-    final sink = onGroupMediaBody;
-    if (sink == null) return;
-
-    final parsed = unpackGroupMedia(Uint8List.fromList(frame.payload));
-    if (parsed == null || !parsed.hasSender) return;
-
-    final roster = session.rosterSorted;
-    if (parsed.senderIndex >= roster.length) {
-      // The participant sets have diverged (a join that
-      // we have not seen yet). Discard, do not guess — a
-      // guessed place would attribute the frame to a FOREIGN speaker.
-      _log.debug('Group media: sender slot ${parsed.senderIndex} lies '
-          'outside the list (${roster.length}) — dropped');
-      return;
-    }
-
-    final senderHex = roster[parsed.senderIndex];
-    // The own frame comes back via the tree if we ourselves
-    // forward. Mixing it would mean hearing oneself.
-    if (senderHex == identity.userIdHex) return;
-
-    sink(senderHex, frame.kind, parsed.body);
-  }
-
-  void handleGroupCallAudioV3(HarvestEvent event) {
-    final session = _currentGroupCall;
-    if (session == null || session.state != GroupCallState.inCall) return;
-
-    session.totalFramesReceived++;
-
-    if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(event.payload),
-          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO);
-    }
-  }
-
-  /// V3 receive-handler for CALL_GROUP_VIDEO (relay frame to children). Same live-frame semantics as
-  /// [handleGroupCallAudioV3].
-  void handleGroupCallVideoV3(HarvestEvent event) {
-    final session = _currentGroupCall;
-    if (session == null || session.state != GroupCallState.inCall) return;
-
-    session.videoFramesReceived++;
-
-    if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(event.payload),
-          proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO);
-    }
-  }
+  // S407: here stood `handleGroupCallAudioV3` and `handleGroupCallVideoV3`
+  // — the delivery-layer receive handlers for group media. They had no
+  // caller (`call_service.handleCallGroupAudio/VideoV3` discard such a
+  // frame, §17.1: "media does **not** run in delivery cells"), and they
+  // passed every frame on over the tree without knowing the link it came
+  // by — exactly what §17.7 ("every tree link except the one it came by")
+  // and §17.5 (the edge binding) rule out. A path that can only break
+  // both rules is removed, not adapted.
 
   /// V3 outer-reply busy auto-reject. The peer device-id is delivered
-  /// directly on the inbound `NetworkPacketV3`, so no routing
+  /// directly on the inbound `NetworkPacket`, so no routing
   /// re-resolution is needed.
-  void _sendRejectV3(HarvestEvent event, String reason) {
+  void _sendReject(HarvestEvent event, String reason) {
     try {
       final invite = proto.CallInvite.fromBuffer(event.payload);
       final senderUserId = Uint8List.fromList(event.senderUserId);
-      final senderHex = bytesToHex(senderUserId);
-      final contact = contacts[senderHex];
-      if (contact == null ||
-          contact.x25519Pk == null ||
-          contact.mlKemPk == null) {
-        _log.debug('busy-reject V3: missing KEM pubkeys for '
-            '${senderHex.substring(0, 8)} — drop');
-        return;
-      }
 
       final reject = proto.CallReject()
         ..callId = invite.callId
         ..reason = reason;
-      // §17.2: a rejection is an ordinary 1:1 cell under the
-      // pair tag, to the USER. The device-addressed branch that stood next to it here until
-      // the CUT was dead on the V4.1 path (§14.2:
-      // `HarvestEvent.senderDeviceId` is always `null`) and fell with
-      // `sendSignalReplyToDevice`.
+      // §17.2: a rejection is a call signal to the USER, naming the group
+      // of the call it refuses — to a caller that is no contact it goes
+      // over the group pair (§16.2.2). Until S407-GA-P3 it went over
+      // `transport.sendSignal` and only to a contact with KEM keys in the
+      // address book (a V3 remnant: the delivery layer seals to the
+      // contact's or the pair's own keys); a fellow member who is no
+      // contact rang into a busy line and heard nothing back.
       //
-      // A-1 (S352): `transport.sendSignal` passes straight through to `sendViaUser`,
-      // which can throw; the surrounding `try` is synchronous and never catches
-      // the throw of an `async` function.
-      transport
-          .sendSignal(
-            recipientUserId: senderUserId,
-            type: proto.MessageTypeV3.MTV3_CALL_REJECT,
-            payload: reject.writeToBuffer(),
-          )
-          .catchError((Object e, StackTrace st) {
-        _log.error('Group busy rejection threw (detached): $e\n$st');
-        return false;
-      });
+      // A-1 (S352): `sendViaUser` can throw; the surrounding `try` is
+      // synchronous and never catches the throw of an `async` function.
+      _detached(
+          sendViaUser?.call(
+            senderUserId,
+            proto.MessageType.MT_CALL_REJECT,
+            reject.writeToBuffer(),
+            groupId: invite.groupId.isEmpty
+                ? null
+                : Uint8List.fromList(invite.groupId),
+          ),
+          'Group busy rejection');
     } catch (e) {
       _log.debug('busy-reject V3 build failed: $e');
     }
@@ -2259,10 +2820,10 @@ class GroupCallManager {
   /// anyway (§17.5, K31-3)", has been dropped — §17.7 closed K31-3 on 05.09.2026.
   void _sendGroupLiveMediaFrame(
     String participantHex,
-    proto.MessageTypeV3 type,
+    proto.MessageType type,
     Uint8List payload,
   ) {
-    final kind = type == proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO
+    final kind = type == proto.MessageType.MT_CALL_GROUP_VIDEO
         ? DFrameKind.video
         : DFrameKind.voice;
     final failure = transport.sendMedia(
@@ -2291,7 +2852,7 @@ class GroupCallManager {
   /// adapter since AP-2b, bound to the operation instead of the call site.
   void _sendLiveMediaToParticipant(
     String participantHex,
-    proto.MessageTypeV3 type,
+    proto.MessageType type,
     Uint8List payload,
   ) {
     final contact = contacts[participantHex];
@@ -2383,6 +2944,15 @@ class GroupCallManager {
   /// **This number is not sharp today** — see [effectiveTopology].
   static const int maxParticipantsTree = 25;
 
+  /// Limit for VIDEO in a group call, separate from the voice limits above.
+  ///
+  /// §17.7: "Video is offered up to a participant count set by measurement
+  /// (Appendix C); until that count is set, video is offered up to the mesh
+  /// ceiling of 6." The measurement does not exist yet, so this is the mesh
+  /// ceiling — in either topology. When the measurement sets a number, it
+  /// goes here and nowhere else.
+  static const int maxParticipantsVideo = maxParticipantsMesh;
+
   /// Which topology REALLY carries the media of a group call today.
   ///
   /// **What is asked is the statement, not a proxy.** "The file
@@ -2395,7 +2965,7 @@ class GroupCallManager {
   ///
   /// "`_broadcastTreeUpdate` sends `CALL_TREE_UPDATE` via
   /// [_sendLiveMediaToParticipant] -> `sendSecuredToParticipant`, and
-  /// `CallTransportV41` returns `noCarrier` there without exception (§17.1
+  /// `PlaneDCallTransport` returns `noCarrier` there without exception (§17.1
   /// knows three frame kinds, tree maintenance is none of them). […] As long as that
   /// is so, `maxParticipantsTree` would be a promise that the program
   /// does not keep."
@@ -2441,6 +3011,17 @@ class GroupCallManager {
     final participant = session.participants[nodeIdHex];
     if (participant == null) return;
     participant.audioLevel = level;
+  }
+
+  /// Copies the mixer's hearing of [nodeIdHex] (`peer_hearing.dart`) into
+  /// the participant, for `get_group_call_state`.
+  void updateParticipantHearing(String nodeIdHex, PeerHearing hearing) {
+    final participant = _currentGroupCall?.participants[nodeIdHex];
+    if (participant == null) return;
+    participant
+      ..framesHeard = hearing.framesHeard
+      ..framesDuplicate = hearing.framesDuplicate
+      ..toneHz = hearing.toneHz;
   }
 
   /// Update a participant's mute state (inferred from sustained silence).
@@ -2517,7 +3098,7 @@ class GroupCallManager {
   /// Send collaboration data to all joined participants via live-media path.
   void _sendCollaborationToAll(
     GroupCallSession session,
-    proto.MessageTypeV3 type,
+    proto.MessageType type,
     Uint8List payload,
   ) {
     for (final pId in session.joinedParticipantIds) {
@@ -2526,8 +3107,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_WHITEBOARD_STROKE.
-  void handleWhiteboardStrokeV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_WHITEBOARD_STROKE.
+  void handleWhiteboardStroke(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.whiteboard == null) return;
@@ -2541,8 +3122,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_WHITEBOARD_PAGE.
-  void handleWhiteboardPageV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_WHITEBOARD_PAGE.
+  void handleWhiteboardPage(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.whiteboard == null) return;
@@ -2556,8 +3137,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_CALL_CHAT.
-  void handleCallChatV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_CALL_CHAT.
+  void handleCallChat(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.callChat == null) return;
@@ -2571,8 +3152,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_FILE_EXCHANGE.
-  void handleFileExchangeV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_FILE_EXCHANGE.
+  void handleFileExchange(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.fileManager == null) return;
@@ -2586,8 +3167,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_CLIPBOARD_EXCHANGE.
-  void handleClipboardExchangeV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_CLIPBOARD_EXCHANGE.
+  void handleClipboardExchange(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.fileManager == null) return;
@@ -2601,8 +3182,8 @@ class GroupCallManager {
     }
   }
 
-  /// V3 receive-handler for MTV3_SCREEN_SHARE_FRAME.
-  void handleScreenShareV3(HarvestEvent event) {
+  /// V3 receive-handler for MT_SCREEN_SHARE_FRAME.
+  void handleScreenShare(HarvestEvent event) {
     final session = _currentGroupCall;
     if (session == null || session.state != GroupCallState.inCall) return;
     if (session.screenShare == null) return;

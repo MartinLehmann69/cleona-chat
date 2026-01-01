@@ -24,8 +24,9 @@ import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/neighbourhood_seat.dart' show reachableNeighbour;
 import 'package:mycelium/node.dart';
+import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/node_collect_edge.dart';
-import 'package:mycelium/node_helpers.dart' show interfaces;
+import 'package:mycelium/node_helpers.dart' show interfaces, ownTarget;
 import 'package:mycelium/host_stream.dart' show streamDispatch;
 
 class HostMedia {
@@ -66,17 +67,13 @@ class HostMedia {
     // left there of an identity goes (S401).
     final disk = BulkDisk.open(directory, key, report: report)
       ..identityStockDrop();
-    // A packet to one of the node's OWN addresses never reaches the wire:
-    // a recipient that is itself one of the holders (a group member, a
-    // desktop contact) asks its own cache, and a shell to oneself does not
-    // come about. It goes to the dispatch in the next microtask instead —
-    // the same path, the address it was sent to as the sender.
-    // The port first: the list is built only for a packet that may be one.
-    bool own(CardAddress to) =>
-        (to.port == node.port || to.port == node.publicAddress?.port) &&
-        bulkOwnAddresses(node).any((a) => a.equal(to));
+    // A packet to one of the node's OWN addresses never reaches the wire
+    // ([ownTarget]): a recipient that is itself one of the holders (a group
+    // member, a desktop contact) asks its own cache. It goes to the
+    // dispatch in the next microtask instead — the same path, the address
+    // it was sent to as the sender.
     void send(Uint8List p, CardAddress to) {
-      if (!own(to)) return node.rawSend(p, to);
+      if (!ownTarget(node, to)) return unawaited(node.rawSend(p, to));
       scheduleMicrotask(() => _dispatch(p, to));
     }
 
@@ -94,7 +91,8 @@ class HostMedia {
         disk: disk,
         pace: pace,
         report: report);
-    placer = BulkPlacer(send: send, pace: pace, report: report);
+    placer = BulkPlacer(
+        send: send, pace: pace, report: report, silence: node.silence);
     _send = send;
     node.mediaReception = receive;
     node.addCollectEdge((_, __) {
@@ -117,7 +115,8 @@ class HostMedia {
         othersOnDisk: () => _collectors.entries
             .where((e) => e.key != owner)
             .fold(0, (n, e) => n + e.value.openedOnDisk),
-        report: _report);
+        report: _report,
+        silence: node.silence);
   }
 
   /// The identity [owner] left the host (deregistered, or its service was

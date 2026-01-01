@@ -1,14 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_keys_store.dart';
-import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/key_migration.dart';
 import 'package:cleona/core/crypto/legacy_key_purge.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
@@ -350,6 +348,11 @@ class IdentityContext {
   /// Self-declaration: user claims to be 18+ (from IdentityManager).
   bool isAdult;
 
+  /// Opt-in "evaluate channel reports" (from IdentityManager). Like
+  /// [isAdult] a setting of the identity on every own device (§15.10,
+  /// §14.7 Type 8, D-72); this is the running service's copy.
+  bool reviewEnabled;
+
   /// §13 (S382): runtime mirror of `Identity.restoredFromPhrase`
   /// (identity_manager.dart) — the complete reasoning stands there.
   ///
@@ -367,6 +370,7 @@ class IdentityContext {
     this.masterSeed,
     DateTime? createdAt,
     this.isAdult = false,
+    this.reviewEnabled = true,
     this.restoredFromPhrase = false,
   })  : _baseDir = baseDir ?? _resolveBaseDir(),
         createdAt = createdAt ?? DateTime.now(),
@@ -513,132 +517,41 @@ class IdentityContext {
     await IdentityManager(baseDir: baseDir).reconcileSeedPhraseGate();
   }
 
-  /// The key under which the files of THIS identity lie — in three stages,
-  /// and none of them creates a plaintext key.
-  ///
-  /// ── WHY THERE ARE THREE (S368) ────────────────────────────────────────
-  ///
-  /// Until S368 the call sites simply had `key: _fileEncKey`. If that is
-  /// `null` — an identity without HD wallet, i.e. without master seed —,
-  /// `FileEncryption` fell back to `_loadOrCreateLegacyKey` and put
-  /// 32 random bytes as `$baseDir/db.key` NEXT TO the ciphertext. Exactly
-  /// that is the plaintext key this work eliminates.
-  ///
-  ///   1. **Seed-derived** (`deriveFileEncKey(masterSeed, hdIndex)`) —
-  ///      the normal case and the only one that occurs in the field.
-  ///   2. **An EXISTING legacy key** — read-only, so that a developer
-  ///      profile from the time before S368 opens. `LegacyKeyPurge`
-  ///      cleans it away at start as soon as nothing hangs on it any more.
-  ///   3. **The keyring.** If there is neither seed nor legacy key,
-  ///      ONE key per profile directory is held in the keyring
-  ///      (`identity_file_key`). It is generated there, not on the disk
-  ///      — the same answer as for the master seed itself: what cannot be
-  ///      derived belongs in the keyring and not in a file next to it.
-  ///
-  /// It throws only if the keyring cannot be had either. Then there is no
-  /// permissible storage place, and silence would be the wrong answer.
+  /// The key under which the files of THIS identity lie:
+  /// `deriveFileEncKey(masterSeed, hdIndex)` and nothing else. No key is
+  /// ever written next to the ciphertext (S368), and since S407 (owner
+  /// decision 08.10.2026, S403 V16 = B) there is no stage for an identity
+  /// without a seed either — without one this throws.
   Uint8List? _resolvedFileEncKey;
 
   Future<Uint8List> _dissolveFileEncKey() async {
     final derived = _fileEncKey;
-    if (derived != null) return _resolvedFileEncKey = derived;
-    final already = _resolvedFileEncKey;
-    if (already != null) return already;
-
-    final old = FileEncryption.legacyKeyBytes(_baseDir);
-    if (old != null) {
-      _log.warn('Identity without HD wallet: the files are still under '
-          'the old key of this profile. `LegacyKeyPurge` replaces it '
-          'as soon as nothing depends on it any more.');
-      return _resolvedFileEncKey = old;
+    if (derived == null) {
+      throw StateError(_noSeedMessage);
     }
-    return _resolvedFileEncKey =
-        await _dissolveBundleKey(_identityFileKeyName);
+    return _resolvedFileEncKey = derived;
   }
 
-  /// Fetches a 32-B key from the keyring and creates it THERE if it is
-  /// missing. Throws if the keyring does not accept it — there is no
-  /// falling back to a plaintext file (S368).
-  Future<Uint8List> _dissolveBundleKey(String name) async {
-    if (!KeyringService.isInitialized) {
-      await KeyringService.init(_baseDir);
-    }
-    final ring = KeyringService.instance;
-    final outBundle = ring.load(name);
-    if (outBundle != null && outBundle.length == 32) return outBundle;
-    final fresh = SodiumFFI().randomBytes(32);
-    if (!ring.store(name, fresh)) {
-      throw StateError(
-          'No master seed in $_baseDir, and the keyring does not accept '
-          '"$name". Formerly a fresh plaintext `db.key` was created '
-          'here; that has been forbidden since S368.');
-    }
-    _log.info('Without master seed: "$name" now lies in the keyring — '
-        'not on the disk.');
-    return fresh;
-  }
-
-  /// The name in the keyring for the case without master seed.
-  /// It is DEVICE-WIDE: an identity without seed has no HD index on
-  /// which a key could hang.
-  ///
-  /// Until S403 a second name stood here, `device_shared_file_key`, for
-  /// the device keys of an identity without seed. They are no longer
-  /// stored in that case — see [_deviceKeysOf].
-  static const String _identityFileKeyName = 'identity_file_key';
-
-  /// The device keys of a profile directory WITHOUT a master seed, for the
-  /// lifetime of this process — see [_deviceKeysOf].
-  static final Map<String, DeviceKeyBundle> _seedlessDeviceKeys = {};
-
-  /// The device keys of this device (§4.4.2).
-  ///
-  /// ── WITH A MASTER SEED — the only case that occurs in operation ──────
-  ///
-  /// From the device database (`DeviceKeysStore.loadOrCreate`), created at
-  /// the first start and the same ever after. Fail-loud (§4.5.2): a device
-  /// database that lies there and does not open THROWS.
-  ///
-  /// ── WITHOUT A MASTER SEED ────────────────────────────────────────────
-  ///
-  /// The device database opens under `deriveSharedFileEncKey(master_seed)`
-  /// and under nothing else (§4.5.3, §21.4.1) — without a seed there is no
-  /// device database, and so no place where device keys could be stored.
-  /// Until S403 they were sealed into `device_keys.bin.enc` under a random
-  /// key kept in the keyring; a device database under such a key would be
-  /// one the rest of the start (`IdentityManager`) could not open.
-  ///
-  /// No start path of the product arrives here: every one of them reads
-  /// the seed with `IdentityManager.loadMasterSeed()` right after it read
-  /// the list of identities, which itself needs the seed
+  /// Every start path reads the master seed before it builds an identity
   /// (`service_daemon.dart`, `main.dart`, `ios_background_fetch.dart`,
-  /// `scripts/init_profile.dart`). Who arrives here are the guards that
-  /// measure an identity WITHOUT a seed. For them the keys are generated
-  /// once per profile directory and process and kept in memory — two
-  /// identities of one directory still share ONE device.
-  ///
-  /// And where a device database DOES lie in the directory, a missing seed
-  /// is not this case but a keyring that did not answer: then it THROWS.
-  /// Fresh keys there would be the silent regeneration §4.5.2 rules out.
+  /// `scripts/init_profile.dart`); an identity without one does not exist
+  /// (§4.5.2, §21.4.1). Owner decision 08.10.2026 (S403 V16 = B): the
+  /// former special path for guards without a seed is gone.
+  String get _noSeedMessage =>
+      'Identity without master seed or HD index in $profileDir — there is '
+      'no such identity (§4.5.2, §21.4.1); every start path reads the seed '
+      'first.';
+
+  /// The device keys of this device (§4.4.2), from the device database
+  /// (`DeviceKeysStore.loadOrCreate`) under `deriveSharedFileEncKey(seed)`,
+  /// created at the first start and the same ever after. Fail-loud
+  /// (§4.5.2): a device database that does not open THROWS, and without a
+  /// master seed there is no device database — and no identity (S407).
   DeviceKeyBundle _deviceKeysOf() {
     final seed = masterSeed;
-    if (seed != null) {
-      return DeviceKeysStore.loadOrCreate(
-          baseDir: _baseDir, key: HdWallet.deriveSharedFileEncKey(seed));
-    }
-    if (DeviceStore.present(_baseDir)) {
-      throw StateError(
-          'No master seed for an identity in $_baseDir, but a device '
-          'database lies there — the device keys in it cannot be read, and '
-          'they are NOT generated anew (that would change the device node '
-          'id).');
-    }
-    return _seedlessDeviceKeys.putIfAbsent(
-        Directory(_baseDir).absolute.path,
-        () => DeviceKeyBundle(
-              sig: DeviceKeyPair.generate(),
-              kem: DeviceKemKeyPair.generate(),
-            ));
+    if (seed == null) throw StateError(_noSeedMessage);
+    return DeviceKeysStore.loadOrCreate(
+        baseDir: _baseDir, key: HdWallet.deriveSharedFileEncKey(seed));
   }
 
   /// The resolved key for the SYNCHRONOUS write paths.
@@ -661,11 +574,12 @@ class IdentityContext {
       profileDir: identity.profileDir,
       baseDir: baseDir,
       displayName: overrideDisplayName ?? identity.displayName,
-      networkChannel: NetworkSecret.channel.name,
+      networkChannel: activeNetworkChannel.name,
       hdIndex: identity.hdIndex,
       masterSeed: masterSeed,
       createdAt: identity.createdAt,
       isAdult: identity.isAdult,
+      reviewEnabled: identity.reviewEnabled,
       restoredFromPhrase: identity.restoredFromPhrase,
     );
     await ctx.initKeys();
@@ -715,13 +629,9 @@ class IdentityContext {
   MessageStore? _store;
 
   /// The storage of this identity, or `null` if no seed-derived key
-  /// exists.
-  ///
-  /// `null` is NOT an operating case: an identity without HD wallet already
-  /// fails in the field at `_loadContacts`, because `CleonaService.store`
-  /// (rightly) refuses to open with a substitute key (§21.4.1).
-  /// It is the case of the guards that must measure an identity WITHOUT a
-  /// seed — there [initKeys] stays on the file path, visibly named.
+  /// exists — which after [initKeys] cannot be: [initKeys] throws without
+  /// a seed (S407). `null` remains only for a context whose keys were never
+  /// initialised.
   MessageStore? get storeOrNull {
     final k = _fileEncKey;
     if (k == null) return null;
@@ -808,24 +718,12 @@ class IdentityContext {
   /// identity changes (§3.1 stable anchor / SR-2) — so there too it throws
   /// instead of guessing.
   Future<void> initKeys() async {
-    // S368: WITHOUT a seed-derived key no plaintext `db.key` comes into
-    // existence any more — the key then comes from the KEYRING.
-    // Resolution in [_dissolveFileEncKey].
+    // The key comes from the seed alone ([_dissolveFileEncKey]); without a
+    // seed this throws before anything is read or written (S407).
     final fileEnc =
         FileEncryption(baseDir: _baseDir, key: await _dissolveFileEncKey());
-    final deposit = storeOrNull;
-    if (deposit == null) {
-      // No seed-derived key -> no storage. See [storeOrNull]: that is the
-      // guard case, not an operating case.
-      _log.warn('Identity without HD wallet: the key material stays in '
-          'keys.json.enc under the legacy `db.key`. In the field this '  // V3-TOUCH-OK: legacy key fallback, normative in v4_1 §4.5.3 (db.key is one of the six files that never move into the database)
-          'case does not exist — there even the store of the conversations fails '
-          '(§21.4.1).');
-    }
-
-    final Map<String, dynamic>? json = deposit == null
-        ? fileEnc.readJsonFile('$profileDir/keys.json')
-        : _readKeysOutDeposit(deposit);
+    final deposit = storeOrNull!;
+    final Map<String, dynamic>? json = _readKeysOutDeposit(deposit);
 
     if (json != null) {
       _keysApply(json);
@@ -836,20 +734,9 @@ class IdentityContext {
         keysCreatedAt = DateTime.now();
         _saveKeys(fileEnc);
       }
-      // SR-2: the rotation chain. From its own area if there is a
-      // storage; otherwise (guard without seed) from the field of the file.
+      // SR-2: the rotation chain, from its own area of the storage.
       rotationChain.clear();
-      if (deposit != null) {
-        _readRotationChainOutDeposit(deposit);
-      } else {
-        final chainJson = json['rotation_chain'] as List<dynamic>?;
-        if (chainJson != null) {
-          for (final l in chainJson) {
-            rotationChain
-                .add(StoredRotationLink.fromJson(l as Map<String, dynamic>));
-          }
-        }
-      }
+      _readRotationChainOutDeposit(deposit);
       _log.info('Keys loaded'
           '${rotationChain.isNotEmpty ? ' (rotation chain: ${rotationChain.length} link(s))' : ''}');
     } else {
@@ -1069,16 +956,7 @@ class IdentityContext {
     if (keysCreatedAt != null) data['keys_created_at'] = keysCreatedAt!.millisecondsSinceEpoch;
 
     final deposit = storeOrNull;
-    if (deposit == null) {
-      // Guard without seed — see [storeOrNull]. There the chain keeps its
-      // field in the same map, because there is no second carrier.
-      if (rotationChain.isNotEmpty) {
-        data['rotation_chain'] =
-            rotationChain.map((l) => l.toJson()).toList();
-      }
-      fileEnc.writeJsonFile('$profileDir/keys.json', data);
-      return;
-    }
+    if (deposit == null) throw StateError(_noSeedMessage);
 
     deposit.putEntry(areaKeys, keyKeys, data);
     // ORDER: first the key set, then the chain. If it breaks off in

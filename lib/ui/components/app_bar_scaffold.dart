@@ -18,6 +18,7 @@ import 'dart:io' show Platform;
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/luminance.dart';
 import 'package:cleona/ui/theme/skin_surface.dart';
@@ -39,6 +40,10 @@ class AppBarScaffold extends StatelessWidget {
   /// through behind cards/message-bubbles (browser-preview intent).
   final bool opaqueBody;
 
+  /// §23.10: the application's own screenshot button is part of every
+  /// header row; in a conversation whose forwarding is off it refuses.
+  final bool screenshotForwardingAllowed;
+
   const AppBarScaffold({
     super.key,
     required this.title,
@@ -48,6 +53,7 @@ class AppBarScaffold extends StatelessWidget {
     required this.body,
     this.floatingActionButton,
     this.opaqueBody = false,
+    this.screenshotForwardingAllowed = true,
   });
 
   @override
@@ -67,14 +73,20 @@ class AppBarScaffold extends StatelessWidget {
                 subtitle: subtitle,
                 leading: leading,
                 actions: actions,
+                screenshotForwardingAllowed: screenshotForwardingAllowed,
               ),
               const _GlobalUpdateBanner(),
               const _GlobalCoAuthWarningBanner(),
               Expanded(
                 child: SafeArea(
                   top: false,
+                  // A Material, not a ColoredBox: ListTiles paint their ink on
+                  // the nearest Material; under an opaque ColoredBox the
+                  // splashes were hidden and every debug build asserted
+                  // "ListTile background color or ink splashes may be
+                  // invisible" (S410, event editor).
                   child: opaqueBody
-                      ? ColoredBox(color: theme.colorScheme.surface, child: body)
+                      ? Material(color: theme.colorScheme.surface, child: body)
                       : body,
                 ),
               ),
@@ -98,12 +110,14 @@ class _HeaderRow extends StatelessWidget {
   final String? subtitle;
   final Widget? leading;
   final List<Widget>? actions;
+  final bool screenshotForwardingAllowed;
 
   const _HeaderRow({
     required this.title,
     this.subtitle,
     this.leading,
     this.actions,
+    this.screenshotForwardingAllowed = true,
   });
 
   Color _resolveForeground(CharacterProfile character) {
@@ -200,8 +214,16 @@ class _HeaderRow extends StatelessWidget {
               ],
             ),
           ),
-          if (actions != null)
-            IconTheme(data: IconThemeData(color: fg), child: Row(children: actions!)),
+          IconTheme(
+            data: IconThemeData(color: fg),
+            // The screenshot button stands first, so the other actions keep
+            // their places counted from the right edge on every platform.
+            child: Row(children: [
+              AppScreenshotButton(
+                  forwardingAllowed: screenshotForwardingAllowed),
+              ...?actions,
+            ]),
+          ),
         ],
       ),
     );

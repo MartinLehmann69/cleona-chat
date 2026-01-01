@@ -6,7 +6,6 @@ import '../crypto/sodium_ffi.dart';
 import '../log/clogger.dart';
 import '../util/hex.dart' show bytesToHex;
 import '../service/cleona_service.dart';
-import '../service/service_interface.dart' show ReadinessGate;
 import 'system_channels.dart';
 
 class ContactIssueReporter {
@@ -66,7 +65,7 @@ class ContactIssueReporter {
       natType: 'unknown',
       // `peerCount`, by contrast, gets a REAL V4.1 number: the session
       // partners of the tagline (`cleona_service.dart`,
-      // `_v41SessionPartner`). It answers the same question as
+      // `_sessionPartnerCount`). It answers the same question as
       // `activePeerCount` did before — "with how many nodes is this
       // device talking right now" — and, unlike that one, has a writer.
       peerCount: _service.peerCount,
@@ -76,41 +75,6 @@ class ContactIssueReporter {
       logTail: logLines,
       uptimeSeconds: uptime,
     );
-  }
-
-  String? findExistingReport(String fingerprint) {
-    final channelId = SystemChannels.bugLogChannelIdHex;
-    final conv = _service.conversations[channelId];
-    _service.ensureLoaded(channelId);
-    if (conv == null) return null;
-
-    for (final msg in conv.messages) {
-      final parsed = _parsePostJson(msg.text);
-      if (parsed == null) continue;
-      if (parsed['type'] == 'contact_issue' &&
-          parsed['fingerprint'] == fingerprint) {
-        return msg.id;
-      }
-    }
-    return null;
-  }
-
-  Future<bool> publishReport(ContactIssueReport report) async {
-    final postText = report.toPostText();
-    if (postText.length > SystemChannels.maxManualPostBytes) {
-      _log.warn('Contact issue report exceeds size limit');
-      return false;
-    }
-
-    final result = await _service.sendChannelPost(
-      SystemChannels.bugLogChannelIdHex,
-      postText,
-    );
-    if (result != null) {
-      _log.info('Contact issue report published (fp: ${report.fingerprint.substring(0, 16)})');
-      return true;
-    }
-    return false;
   }
 
   Future<String?> exportToFile(ContactIssueReport report, String savePath) async {
@@ -124,16 +88,6 @@ class ContactIssueReporter {
       return null;
     }
   }
-
-  /// §22.7.2 — posting into the system channels is possible from `ready`.
-  ///
-  /// Until AP-5, `_service.peerCount > 0` stood here, and the same
-  /// condition stood a second time in `contact_issue_dialog.dart:23`.
-  /// §22.7.2 forbids both: the acquaintance count as predicate ("gates hang
-  /// off the readiness state `ready`, never off a raw acquaintance count")
-  /// and the second, independent copy of the same gate. Both places now
-  /// ask the same getter — [ICleonaService.isReady].
-  bool get canPostToBugLog => _service.isReady;
 
   int _estimateSeedAge(ContactInfo contact) {
     if (contact.acceptedAt != null) {
@@ -162,14 +116,5 @@ class ContactIssueReporter {
       }
     } catch (_) {}
     return '$os-$arch';
-  }
-
-  static Map<String, dynamic>? _parsePostJson(String? text) {
-    if (text == null || text.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) return decoded;
-    } catch (_) {}
-    return null;
   }
 }

@@ -1,15 +1,9 @@
 /// The shell — the pairwise wrapping around EVERY packet on the data port.
 ///
-/// ── WHAT FOR ─────────────────────────────────────────────────────────────────
-///
-/// V4.2 §4.2: link confidentiality is „an additional shell underneath"
-/// sealing; §5.5 rule 3: every cover packet is sealed pairwise, filled or
-/// empty (S388 D2 measured neither: a naked zero buffer, kind byte open).
-///
-/// The shell lies between [Wire] and `split.dart` and makes both
-/// indistinguishable: **1200 B, always, without a single plaintext byte.**
-/// Cover is a shell with cover payload (§5.5); a part packet is a
-/// shell with 1 to 1170 B inside. From outside they are the same.
+/// WHAT FOR: V4.2 §4.2 (link confidentiality "an additional shell underneath"
+/// sealing); §5.5 rule 3 (every cover packet sealed pairwise, filled or
+/// empty). Between [Wire] and `split.dart`: **1200 B, always, without a
+/// single plaintext byte** — cover and a part of 1 to 1170 B look the same.
 ///
 /// ```
 /// data packet, 1200 B:
@@ -19,21 +13,16 @@
 /// Filling inside the seal may be zero; in the open handshake it may not
 /// (`shell_start.dart`).
 ///
-/// ── WHAT THIS COSTS, named ──────────────────────────────────────────────
-///
-/// * **One handshake per neighbour**, 2400 B out, 1200 B back, one round
-///   trip before the first packet; waiting packets lie here meanwhile.
-/// * **30 B per packet** (12 nonce + 16 authenticator + 2 length): a part
-///   is at most 1170 B (`split.dart`), 1200 B on the wire.
-/// * **Renewal only after a pause** (§11.6). A link lives in memory; it is
-///   renewed only by real traffic after silence AND an own real sending
-///   pause ([renewDue]), never by cover — and before a request that expects an
-///   answer to a counterpart silent for more than 2 s ([renewIfSilent]).
-/// * **No protection against replay** here; the layers above discard
-///   duplicates (receipt, part number, §9.2).
+/// WHAT THIS COSTS: one handshake per neighbour (2400 B out, 1200 B back,
+/// one round trip; waiting packets lie here meanwhile); 30 B per packet;
+/// renewal only after a pause (§11.6: real traffic after silence AND an own
+/// real sending pause, [renewDue]; before a request to a counterpart silent
+/// for more than 2 s, [renewIfSilent]) — never by cover. **No protection
+/// against replay** here; the layers above discard duplicates (§9.2).
 ///
 /// **Not WHO the neighbour is:** the handshake is anonymous
-/// (`shell_start.dart`); the envelope one level higher decides that.
+/// (`shell_start.dart`); the envelope one level higher decides that. A
+/// neighbour that moves is found under its old link (`shell_roam.dart`).
 library;
 
 import 'dart:async';
@@ -44,6 +33,7 @@ import 'package:cleona/core/link/link_kdf.dart';
 import 'package:mycelium/wire.dart';
 import 'package:mycelium/shell_start.dart';
 import 'package:mycelium/shell_link.dart';
+import 'package:mycelium/shell_roam.dart';
 import 'package:mycelium/trace.dart' show traceOn;
 
 class Shell implements PacketRoute {
@@ -66,10 +56,10 @@ class Shell implements PacketRoute {
   final Map<String, Timer> _deadlines = {};
   final Map<String, int> _attempt = {};
 
-  /// Running handshakes started WITHOUT repetition (cover, fresh start).
-  /// Until S397 they had no deadline at all: one lost packet left the entry
-  /// forever, and [_start] returned early for every later real send — those
-  /// packets waited silently, with no deadline and no report (S397-2).
+  /// Running fresh starts ([_freshStart]): the only handshakes started
+  /// WITHOUT repetition, and the ones [kFreshStartConcurrent] counts (C-12).
+  /// A real send wish meeting one makes it its own and it leaves ([_start]).
+  /// One lost packet once left an entry forever (S397-2): one deadline each.
   final Set<String> _oneShot = {};
 
   void Function(Uint8List packet, InternetAddress from, int fromPort)? _further;
@@ -81,7 +71,22 @@ class Shell implements PacketRoute {
   int dropped = 0;
   int get unclearKept => _unclear.length; // addresses with a kept packet ([kUnclearAtMost])
   HopEnd? onHopEnd; // §20.2: how a handshake with waiting packets ended (`split.dart` attach)
-  Silent? onSilent; // §11.8: ANY handshake without an answer is a failed use (S405, `shell_link.dart`)
+  Silent? onSilent; // §11.3a: a handshake and its repeats without an answer — the address failed (`shell_link.dart`)
+  Silent? onHeard; // §11.8.6: a packet opened under this address's own link
+  Moved? onMoved; // §11.8.6: opened under ANOTHER address's link (`shell_roam.dart`)
+  /// A move (`shell_roam.dart`): [to] borrows [old]'s link; `false` if none.
+  bool roamValidate(InternetAddress to, int toPort, InternetAddress old, int oldPort) {
+    final l = _links[shellWho(old, oldPort)], w = shellWho(to, toPort);
+    if (l == null || _links.containsKey(w)) return false;
+    _links[w] = l;
+    return true;
+  }
+
+  /// The path request failed: [to] loses the borrowed link again.
+  void roamEnd(InternetAddress to, int toPort, InternetAddress old, int oldPort) {
+    final w = shellWho(to, toPort);
+    if (identical(_links[w], _links[shellWho(old, oldPort)])) _links.remove(w);
+  }
 
   Shell(this._bottom,
       {void Function(String)? report,
@@ -104,8 +109,7 @@ class Shell implements PacketRoute {
     final w = shellWho(target, targetPort);
     final l = _links[w];
     if (l == null || _now().difference(l.heard) <= kCompanionAfter) return;
-    _waiting.putIfAbsent(w, () => []).addAll(l.resend); // as on expiry (F28-0)
-    _links.remove(w);
+    _links.remove(w); // nothing re-sent under the new key (§11.3a, S407)
     _answered.remove(w);
     _report('Shell: $w silent for > 2 s — new handshake for a request');
   }
@@ -119,7 +123,7 @@ class Shell implements PacketRoute {
 
   /// The path of the cover stream (§5.1: own buffer, no path to delivery).
   ///
-  /// Via [send] cover (1170 B since W4) occupied the resend buffer and
+  /// Via [send] cover (1170 B since W4) occupied the (since S407 removed) resend buffer and
   /// displaced real packets in the handshake queue (S391, E3). So it is
   /// never kept and never waits: without a key it triggers the handshake
   /// and is itself lost; with a key, however old, it never renews (F29-A).
@@ -148,9 +152,6 @@ class Shell implements PacketRoute {
         // waits, and a repeated cover packet would be a pattern on the
         // wire. Empty payload likewise (probes, edge cases).
         if (!cover && payload.isNotEmpty) {
-          if (l.resend.length < kResendAtMost) {
-            l.resend.add(Uint8List.fromList(payload));
-          }
           companion(l, now, () => _to || _links[w] != l || // F28-1
               _bottom.send(pack(Uint8List(0), l.sendKey), target, targetPort));
         }
@@ -158,17 +159,19 @@ class Shell implements PacketRoute {
             pack(payload, l.sendKey), target, targetPort);
       }
       // Expired: see [kLinkSilence]. First gone, then new — otherwise the
-      // branch below takes the old key again. What went out under it
-      // without a sign of life waits for the new key (F28-0, S398).
-      _waiting.putIfAbsent(w, () => []).addAll(l.resend);
+      // branch below takes the old key again. What went out under the old
+      // key is NOT sent again (S407, §11.3a): the one repeat path is the
+      // transport's silence rule, for the packets that expect an answer.
       _links.remove(w);
       _answered.remove(w);
       _report('Shell: key to $w has been unconfirmed for ${silence.inSeconds} s '
           '— new handshake');
     }
     if (cover) {
-      // One attempt, no deadline: nothing waits for a cover packet.
-      _start(w, target, targetPort, withRetry: false);
+      // Nothing waits for a cover packet, but flight 1 expects an answer
+      // like every packet that does: repeated, then the address has failed
+      // (§11.3a). Until S407 a one-shot whose silence counted as one use.
+      _start(w, target, targetPort);
       return false;
     }
     // Held without eviction for the handshake ([HopEnd]).
@@ -198,14 +201,9 @@ class Shell implements PacketRoute {
 
   // ── Sending ─────────────────────────────────────────────────────────────
 
-  /// [withRetry] `false` means: ONE attempt, no deadline.
-  ///
-  /// This is how the recipient starts ([_freshStart]). A repetition would there
-  /// be 4 packets for 2 — an amplification of 2, and exactly that is what the
-  /// procedure is not supposed to have. Besides, nothing waits for it: if no
-  /// answer comes, the counterpart keeps sending, and after [kFreshStartLock]
-  /// it may be tried once more.
-  ///
+  /// [withRetry] `false` means: ONE attempt — how the recipient starts
+  /// ([_freshStart]); a repetition would amplify (4 packets for 2), and if no
+  /// answer comes the counterpart keeps sending ([kFreshStartLock]).
   /// A one-shot start still gets ONE deadline, after which it is simply
   /// forgotten (no repetition — the ratio stays 1). A real send wish that
   /// meets a running one-shot start turns it into an ordinary one with
@@ -231,12 +229,11 @@ class Shell implements PacketRoute {
     }
     _oneShot.add(w);
     _deadlines[w]?.cancel();
-    _deadlines[w] = Timer(kAnswerDeadline * kAttempts, () {
+    _deadlines[w] = Timer(kAnswerDeadline, () {
       _deadlines.remove(w);
       if (!_oneShot.remove(w)) return; // answered or upgraded
-      _running.remove(w);
-      _attempt.remove(w);
-      onSilent?.call(target, targetPort);
+      _forget(w);
+      // Not repeated (§11.6), so nothing is declared failed (§11.3a).
     });
   }
 
@@ -247,21 +244,29 @@ class Shell implements PacketRoute {
       final b = _running[w];
       if (b == null) return; // done or given up
       final n = (_attempt[w] ?? 1) + 1;
-      if (n > kAttempts) {
-        _running.remove(w);
-        _attempt.remove(w);
-        final q = _waiting.remove(w);
-        dropped += q?.length ?? 0;
-        _report('Shell: $w does not answer — ${q?.length ?? 0} packet(s) '
-            'dropped; other steps of the ladder keep running');
-        if (q != null) onHopEnd?.call(target, targetPort, true);
-        onSilent?.call(target, targetPort);
-        return;
-      }
+      if (n > kAttempts) return _fail(w, target, targetPort, 'does not answer');
       _attempt[w] = n;
       flight1(_bottom, b, target, targetPort);
       _deadline(w, target, targetPort);
     });
+  }
+
+  void _forget(String w) {
+    _running.remove(w);
+    _oneShot.remove(w);
+    _attempt.remove(w);
+    _deadlines.remove(w)?.cancel();
+  }
+
+  /// [w]'s start ended without a link: the address has failed (§11.3a).
+  void _fail(String w, InternetAddress target, int targetPort, String why) {
+    _forget(w);
+    final q = _waiting.remove(w);
+    dropped += q?.length ?? 0;
+    _report('Shell: $w $why — ${q?.length ?? 0} packet(s) '
+        'dropped; other steps of the ladder keep running');
+    if (q != null) onHopEnd?.call(target, targetPort, true);
+    onSilent?.call(target, targetPort);
   }
 
   // ── Receiving ───────────────────────────────────────────────────────────
@@ -278,9 +283,8 @@ class Shell implements PacketRoute {
       if (content != null) {
         l.heard = _now();
         l.last = l.heard;
-        // Sign of life: the counterpart still has the key.
-        l.resend.clear();
         l.companionSpent = false; // a new silence starts ([kCompanionAfter])
+        onHeard?.call(from, fromPort); // authenticated: only under this address's key
         // Empty = cover. It does not go upwards; §5.1 „no code path
         // connects it to the send path".
         if (content.isNotEmpty) _further?.call(content, from, fromPort);
@@ -291,13 +295,19 @@ class Shell implements PacketRoute {
     if (b != null) {
       final k = complete(b, p);
       if (k != null) {
-        _running.remove(w);
-        _oneShot.remove(w);
-        _attempt.remove(w);
-        _deadlines.remove(w)?.cancel();
+        _forget(w);
         _setUp(w, k, caller: true, target: from, targetPort: fromPort);
         return;
       }
+    }
+    // A moved counterpart's packet opens under its old link (§11.8.6): read
+    // as any packet; only the answer to the path request adopts the address.
+    final moved = l == null && onMoved != null ? roamOpen(_links, p, w) : null;
+    final old = moved == null ? null : whoAddress(moved);
+    if (old != null) {
+      onMoved!(old.$1, old.$2, from, fromPort); // may lend the link (§11.8.6)
+      if (_links.containsKey(w)) return _onPacket(p, from, fromPort);
+      return;
     }
     _assemble(w, p, from, fromPort);
   }
@@ -328,7 +338,7 @@ class Shell implements PacketRoute {
 
   void _freshStart(String w, InternetAddress from, int fromPort) {
     if (_running.containsKey(w) || _links.containsKey(w)) return;
-    if (_running.length >= kFreshStartConcurrent) return;
+    if (_oneShot.length >= kFreshStartConcurrent) return; // own: not (C-12)
     final now = _now();
     _freshStartLast
         .removeWhere((_, t) => now.difference(t) > kFreshStartLock);
@@ -340,6 +350,8 @@ class Shell implements PacketRoute {
   void _answer(String w, Uint8List partA, Uint8List partB,
       InternetAddress from, int fromPort) {
     final uniformA = Uint8List.sublistView(partA, 0, kUniform);
+    final mine = startOf(_running, uniformA), to = mine == null ? null : whoAddress(mine); // own flight 1 back
+    if (to != null) return _fail(mine!, to.$1, to.$2, 'is this node itself (own handshake back from $w)');
 
     // Tie: both started at the same time. The decision is made by the
     // smaller Elligator share, and in the same way on BOTH sides — otherwise
@@ -358,10 +370,7 @@ class Shell implements PacketRoute {
 
     final a = answerShellHandshake(partA, partB);
     if (a == null) return;
-    _running.remove(w);
-    _oneShot.remove(w);
-    _attempt.remove(w);
-    _deadlines.remove(w)?.cancel();
+    _forget(w);
     _answered[w] = (a.uniformCaller, a.packet);
     _bottom.send(a.packet, from, fromPort);
     _setUp(w, a.key, caller: false, target: from, targetPort: fromPort);
@@ -376,18 +385,12 @@ class Shell implements PacketRoute {
     // nonce space (`link_kdf.dart`).
     final init = LinkKdf.deriveCellKeyInit(linkKey);
     final resp = LinkKdf.deriveCellKeyResp(linkKey);
-    // What went out under the PREVIOUS key the counterpart
-    // could not read — otherwise it would not have needed a new one.
-    final toResend = _links[w]?.resend;
     _links[w] = Link(caller ? init : resp, caller ? resp : init,
         _now());
     handshakesDone++;
     if (traceOn) _report('TRACE shell link to $w set up as ${caller ? "caller" : "callee"}');
     capLinks(_links, _answered.remove);
     final q = _waiting.remove(w);
-    for (final n in toResend ?? const <Uint8List>[]) {
-      send(n, target, targetPort);
-    }
     if (q == null) return;
     for (final n in q) {
       send(n, target, targetPort);

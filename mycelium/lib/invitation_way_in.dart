@@ -33,6 +33,22 @@
 /// seam). [wayInEdge] is that one edge. The one timer is local: the 30 s of
 /// §12.4.
 ///
+/// ── ASKING THE SEAT ONCE (owner decision 09.10.2026, A) ─────────────────
+///
+/// An address counts as answering only after it answered a request of THIS
+/// node (W8, S391); a packet that merely arrives does not confirm it. At home
+/// the seat may be reached only over its private address — the one that
+/// worked last (§6.2) — while its global IPv6 address, reachable from the open
+/// network, is used only when the seat calls this node, and so is never
+/// confirmed (`berichte/S407-IPV6-STUMM.md`). Before giving up, the wait
+/// therefore asks ONCE over each address of the seat that is reachable from
+/// the open network but not confirmed in this run, with the address question
+/// `0x40` the stale-entry try of §11.8 uses (`host_network.dart` `staleTry`):
+/// its answer confirms the address (`outsideRoute.onAnswerReceived`), which is
+/// the edge [wayInEdge] above. At most [kWayInSeatAsksAtMost] requests per
+/// wait — one per user action, no clock, no repetition. Silence is no use
+/// failed (§11.8): the address stays as it was.
+///
 /// When the way in appears, the card is rebuilt from the SAME invitation —
 /// same code, expiry, keys — with the current addresses and neighbour, and
 /// that is what is shown (`berichte/S405-ERSTKONTAKT-GESAMTANALYSE.md` E-2:
@@ -50,9 +66,11 @@ import 'package:mycelium/host_media.dart' show bulkFamilyOpen;
 import 'package:mycelium/invitation.dart' as inv;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/neighbourhood_card.dart';
+import 'package:mycelium/neighbour_keys.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart' show cardFor, hexFrom;
 import 'package:mycelium/node_invitation.dart';
+import 'package:mycelium/node_outside.dart' show NodeOutside;
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
 import 'package:mycelium/own_entries.dart' show cardOwnAddresses;
 import 'package:mycelium/pair.dart' show firstContactCode;
@@ -61,16 +79,26 @@ import 'package:mycelium/pair.dart' show firstContactCode;
 /// indicator — at most 30 s."
 const Duration kWayInWaitAtMost = Duration(seconds: 30);
 
+/// At most this many requests a wait sends to its seat (one per address family
+/// a card can name — IPv4 and IPv6; owner decision 09.10.2026: at most
+/// 2 × 1200 B per attempt).
+const int kWayInSeatAsksAtMost = 2;
+
 /// The way in invitation data carry (§12.4).
 enum WayIn { ownAddress, invitationNeighbour }
 
 /// The invitation neighbour as invitation data may name it NOW (§15.2): of
 /// the card's seat the address that answered in this run, reachable from the
 /// open network, never a contact's device (`neighbourhood_card.dart`).
-CardAddress? invitationNeighbourNow(Node k) =>
-    cardSeatForStrangers(k.neighbourhood)?.cardAddress((a) =>
-        k.readiness.responding.contains(a.key) &&
-        k.neighbourhood.openNetwork(a.address));
+CardAddress? invitationNeighbourNow(Node k) {
+  final seat = cardSeatForStrangers(k.neighbourhood);
+  final a = seat?.cardAddress((a) =>
+      k.readiness.responding.contains(a.key) &&
+      k.neighbourhood.openNetwork(a.address));
+  // S407 a': with the record key the seat named, so a reader whose address
+  // has gone silent looks the current one up (§11.9).
+  return seat == null || a == null ? a : k.keyedOf(seat, a);
+}
 
 /// The way in [card] of [p] carries — `null` if none (see the head).
 WayIn? invitationWayIn(Mailbox p, Card card) {
@@ -92,6 +120,29 @@ WayIn? invitationWayIn(Mailbox p, Card card) {
     return WayIn.invitationNeighbour;
   }
   return null;
+}
+
+/// Asks the card's seat ONCE over each of its addresses that is reachable from
+/// the open network and not confirmed in this run (see the head) — at most
+/// [kWayInSeatAsksAtMost]. Returns how many requests went out.
+int wayInSeatAsk(Node k) {
+  final seat = cardSeatForStrangers(k.neighbourhood);
+  if (seat == null) return 0;
+  final responding = k.readiness.responding;
+  var asked = 0;
+  for (final a in seat.addresses) {
+    if (asked == kWayInSeatAsksAtMost) break;
+    if (!k.neighbourhood.openNetwork(a.address)) continue;
+    if (responding.contains(a.key)) continue;
+    if (!k.speaks(a.address)) continue;
+    asked++;
+    unawaited(k.outsideRoute.whatIsMyAddress(a.address, a.port));
+  }
+  if (asked > 0) {
+    k.report('Invitation: asked the seat once over $asked unconfirmed '
+        'open-network address(es)');
+  }
+  return asked;
 }
 
 /// The local edge "a way in may have appeared" for [k] (see the head).
@@ -131,7 +182,8 @@ extension MailboxWayIn on Mailbox {
   /// The card of [e] as it would be issued NOW — same invitation, current
   /// own addresses and neighbour (§15.2). Changes nothing.
   Card _cardNow(inv.Invitation e) => cardFor(identity, e, cardOwnAddresses(node),
-      neighbour: invitationNeighbourNow(node), relay: node.knownRelay);
+      neighbour: invitationNeighbourNow(node), relay: node.knownRelay,
+      publisherKey: node.publisherKey); // as `invitationIssue`: §15.2, §11.9
 
   /// Waits until the invitation data of [e] carry a way in (§12.4) and
   /// returns the card rebuilt with it — at once if they already do; after
@@ -177,6 +229,9 @@ extension MailboxWayIn on Mailbox {
       finish(card, e.revoke ? null : invitationWayIn(this, card));
     });
     look();
+    // Not shown yet: ask the seat once over its unconfirmed open-network
+    // addresses (owner decision 09.10.2026, A; see the head).
+    if (!done.isCompleted && !e.revoke) wayInSeatAsk(node);
     return done.future;
   }
 }

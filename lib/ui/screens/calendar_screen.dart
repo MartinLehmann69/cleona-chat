@@ -13,6 +13,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
+import 'package:cleona/ui/components/save_text_file.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/screens/calendar_sync_screen.dart';
 import 'package:cleona/ui/screens/event_editor_screen.dart';
@@ -213,7 +214,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       case CalendarView.day:
       case CalendarView.week:
       case CalendarView.month:
-        return '${_monthName(_selectedDate.month, locale)} ${_selectedDate.year}';
+        return calendarMonthTitle(_selectedDate, locale);
       case CalendarView.year:
         return '${_selectedDate.year}';
       case CalendarView.tasks:
@@ -425,25 +426,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
-  String _formatDayTitle(DateTime d, AppLocale locale) {
-    const weekdays = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
-    return '${weekdays[d.weekday - 1]}, ${d.day}. ${_monthName(d.month, locale)} ${d.year}';
-  }
+  String _formatDayTitle(DateTime d, AppLocale locale) =>
+      calendarDayTitle(d, locale);
 
-  String _formatWeekTitle(DateTime d, AppLocale locale) {
-    final weekStart = d.subtract(Duration(days: d.weekday - 1));
-    final weekEnd = weekStart.add(const Duration(days: 6));
-    return '${weekStart.day}. – ${weekEnd.day}. ${_monthName(weekEnd.month, locale)} ${weekEnd.year}';
-  }
+  String _formatWeekTitle(DateTime d, AppLocale locale) =>
+      calendarWeekTitle(d, locale);
 
   String _formatMonthTitle(DateTime d, AppLocale locale) =>
-      '${_monthName(d.month, locale)} ${d.year}';
-
-  String _monthName(int month, AppLocale locale) {
-    const names = ['', 'Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun',
-                   'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
-    return names[month];
-  }
+      calendarMonthTitle(d, locale);
 
   // ── iCal Import ─────────────────────────────────────────────────────
 
@@ -512,30 +502,20 @@ class _CalendarScreenState extends State<CalendarScreen> {
       return;
     }
 
-    final icsContent = ICalEngine.exportToIcs(events, calendarName: 'Cleona Calendar');
-
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: locale.get('calendar_export_dialog_title'),
-      fileName: 'cleona_calendar_${DateTime.now().toString().substring(0, 10)}.ics',
-      type: FileType.custom,
-      allowedExtensions: ['ics'],
-    );
-
-    if (savePath == null) return;
-
-    try {
-      File(savePath).writeAsStringSync(icsContent);
-      if (context.mounted) {
+    final saved = await exportCalendarIcs(
+        events, locale.get('calendar_export_dialog_title'));
+    if (!context.mounted) return;
+    switch (saved.outcome) {
+      case SaveTextOutcome.cancelled:
+        return;
+      case SaveTextOutcome.saved:
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(locale.tr('calendar_export_done', {'count': '${events.length}'}))),
         );
-      }
-    } catch (e) {
-      if (context.mounted) {
+      case SaveTextOutcome.failed:
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(locale.tr('calendar_export_failed', {'error': '$e'}))),
+          SnackBar(content: Text(locale.tr('calendar_export_failed', {'error': '${saved.error}'}))),
         );
-      }
     }
   }
 
@@ -563,7 +543,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
           pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text('Cleona Calendar', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+            pw.Text(locale.get('calendar_pdf_title'), style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
             pw.Text(_formatViewTitle(locale), style: const pw.TextStyle(fontSize: 14)),
           ]),
           pw.SizedBox(height: 4),
@@ -571,14 +551,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
         ],
       ),
       footer: (ctx) => pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-        pw.Text('Exported ${DateTime.now().toString().substring(0, 16)}', style: const pw.TextStyle(fontSize: 8)),
-        pw.Text('Page ${ctx.pageNumber}/${ctx.pagesCount}', style: const pw.TextStyle(fontSize: 8)),
+        pw.Text(locale.tr('calendar_pdf_exported', {'date': DateTime.now().toString().substring(0, 16)}), style: const pw.TextStyle(fontSize: 8)),
+        pw.Text(locale.tr('calendar_pdf_page', {'page': '${ctx.pageNumber}', 'pages': '${ctx.pagesCount}'}), style: const pw.TextStyle(fontSize: 8)),
       ]),
       build: (ctx) => switch (_currentView) {
-        CalendarView.day => _buildPdfDay(occurrences),
-        CalendarView.week => _buildPdfWeek(occurrences),
-        CalendarView.month => _buildPdfMonth(occurrences),
-        CalendarView.year => _buildPdfYear(occurrences),
+        CalendarView.day => _buildPdfDay(occurrences, locale),
+        CalendarView.week => _buildPdfWeek(occurrences, locale),
+        CalendarView.month => _buildPdfMonth(occurrences, locale),
+        CalendarView.year => _buildPdfYear(occurrences, locale),
         CalendarView.tasks => const <pw.Widget>[], // guarded above
       },
     ));
@@ -587,22 +567,17 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   String _formatViewTitle(AppLocale locale) {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
     final d = _selectedDate;
     return switch (_currentView) {
-      CalendarView.day => '${d.day}. ${months[d.month - 1]} ${d.year}',
-      CalendarView.week => () {
-        final ws = d.subtract(Duration(days: d.weekday - 1));
-        final we = ws.add(const Duration(days: 6));
-        return '${ws.day}.${ws.month}. – ${we.day}.${we.month}.${we.year}';
-      }(),
-      CalendarView.month => '${months[d.month - 1]} ${d.year}',
+      CalendarView.day => calendarDayTitle(d, locale),
+      CalendarView.week => calendarWeekTitle(d, locale),
+      CalendarView.month => calendarMonthTitle(d, locale),
       CalendarView.year => '${d.year}',
       CalendarView.tasks => locale.get('calendar_tasks'),
     };
   }
 
-  List<pw.Widget> _buildPdfDay(List<CalendarOccurrence> occurrences) {
+  List<pw.Widget> _buildPdfDay(List<CalendarOccurrence> occurrences, AppLocale locale) {
     final dayStart = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
     final dayEnd = dayStart.add(const Duration(days: 1));
     final dayOccs = occurrences.where((o) {
@@ -613,7 +588,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final allDay = dayOccs.where((o) => o.event.allDay).toList();
     if (allDay.isNotEmpty) {
       widgets.add(pw.Container(padding: const pw.EdgeInsets.all(4), color: PdfColors.grey200,
-        child: pw.Text('All-Day', style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold))));
+        child: pw.Text(locale.get('calendar_all_day'), style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold))));
       for (final occ in allDay) {
         widgets.add(pw.Padding(padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 8),
           child: pw.Text(occ.event.title, style: const pw.TextStyle(fontSize: 10))));
@@ -646,14 +621,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return widgets;
   }
 
-  List<pw.Widget> _buildPdfWeek(List<CalendarOccurrence> occurrences) {
+  List<pw.Widget> _buildPdfWeek(List<CalendarOccurrence> occurrences, AppLocale locale) {
     final weekStart = _selectedDate.subtract(Duration(days: _selectedDate.weekday - 1));
-    const dayNames = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    final dayNames = calendarWeekdaysShort(locale);
     final rows = <pw.TableRow>[];
     rows.add(pw.TableRow(children: dayNames.asMap().entries.map((e) {
       final day = weekStart.add(Duration(days: e.key));
       return pw.Container(padding: const pw.EdgeInsets.all(4), color: PdfColors.grey200,
-        child: pw.Text('${e.value} ${day.day}.${day.month}.', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)));
+        child: pw.Text('${e.value} ${calendarDateShort(day, locale)}', style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)));
     }).toList()));
     final dayColumns = <List<CalendarOccurrence>>[];
     for (var i = 0; i < 7; i++) {
@@ -681,12 +656,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
       columnWidths: {for (var i = 0; i < 7; i++) i: const pw.FlexColumnWidth()}, children: rows)];
   }
 
-  List<pw.Widget> _buildPdfMonth(List<CalendarOccurrence> occurrences) {
+  List<pw.Widget> _buildPdfMonth(List<CalendarOccurrence> occurrences, AppLocale locale) {
     final year = _selectedDate.year, month = _selectedDate.month;
     final firstDay = DateTime(year, month, 1);
     final dim = DateTime(year, month + 1, 0).day;
     final off = (firstDay.weekday - 1) % 7;
-    const dn = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    final dn = calendarWeekdaysShort(locale);
     final rows = <pw.TableRow>[pw.TableRow(children: dn.map((d) => pw.Container(padding: const pw.EdgeInsets.all(4),
       color: PdfColors.grey200, child: pw.Center(child: pw.Text(d, style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold))))).toList())];
     for (var w = 0; w < 6; w++) {
@@ -712,26 +687,26 @@ class _CalendarScreenState extends State<CalendarScreen> {
       columnWidths: {for (var i = 0; i < 7; i++) i: const pw.FlexColumnWidth()}, children: rows)];
   }
 
-  List<pw.Widget> _buildPdfYear(List<CalendarOccurrence> occurrences) {
+  List<pw.Widget> _buildPdfYear(List<CalendarOccurrence> occurrences, AppLocale locale) {
     final year = _selectedDate.year;
-    const mn = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+    final mn = [for (var m = 1; m <= 12; m++) locale.get('month_$m')];
     final rows = <pw.TableRow>[];
     for (var r = 0; r < 4; r++) {
       rows.add(pw.TableRow(children: List.generate(3, (c) {
         final m = r * 3 + c + 1;
-        return pw.Container(padding: const pw.EdgeInsets.all(6), child: _buildPdfMiniMonth(year, m, mn[m - 1], occurrences));
+        return pw.Container(padding: const pw.EdgeInsets.all(6), child: _buildPdfMiniMonth(year, m, mn[m - 1], occurrences, calendarWeekdaysShort(locale)));
       })));
     }
     return [pw.Table(columnWidths: {for (var i = 0; i < 3; i++) i: const pw.FlexColumnWidth()}, children: rows)];
   }
 
-  pw.Widget _buildPdfMiniMonth(int year, int month, String name, List<CalendarOccurrence> occs) {
+  pw.Widget _buildPdfMiniMonth(int year, int month, String name, List<CalendarOccurrence> occs, List<String> weekdays) {
     final fd = DateTime(year, month, 1), dim = DateTime(year, month + 1, 0).day, off = (fd.weekday - 1) % 7;
     final dwe = <int>{}; for (final o in occs) { final d = DateTime.fromMillisecondsSinceEpoch(o.occurrenceStart); if (d.year == year && d.month == month) dwe.add(d.day); }
     return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
       pw.Text(name, style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
       pw.SizedBox(height: 2),
-      pw.Row(children: ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map((d) =>
+      pw.Row(children: weekdays.map((d) =>
         pw.SizedBox(width: 18, child: pw.Center(child: pw.Text(d, style: pw.TextStyle(fontSize: 6, color: PdfColors.grey500))))).toList()),
       ...List.generate(6, (w) => pw.Row(children: List.generate(7, (c) {
         final di = w * 7 + c - off + 1;
@@ -969,7 +944,7 @@ class _WeekView extends StatelessWidget {
   Widget build(BuildContext context) {
     final monday = date.subtract(Duration(days: date.weekday - 1));
     final now = DateTime.now();
-    const weekdays = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    final weekdays = calendarWeekdaysShort(AppLocale.of(context));
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1100,7 +1075,7 @@ class _MonthView extends StatelessWidget {
     final firstOfMonth = DateTime(date.year, date.month, 1);
     final startWeekday = firstOfMonth.weekday; // 1=Mon
     final now = DateTime.now();
-    const weekdays = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    final weekdays = calendarWeekdaysShort(AppLocale.of(context));
 
     return Column(
       children: [
@@ -1233,8 +1208,10 @@ class _YearView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const monthNames = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun',
-                        'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+    final locale = AppLocale.of(context);
+    final monthNames = [
+      for (var m = 1; m <= 12; m++) calendarMonthShort(locale, m),
+    ];
     final now = DateTime.now();
 
     return GridView.builder(
@@ -1464,15 +1441,90 @@ class _TasksView extends StatelessWidget {
   }
 
   String _formatDue(DateTime due, AppLocale locale) {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
     final today = DateTime.now();
     final diff = DateTime(due.year, due.month, due.day)
         .difference(DateTime(today.year, today.month, today.day))
         .inDays;
-    final base = '${due.day}. ${months[due.month - 1]} ${due.year}';
+    final base = calendarDateMedium(due, locale);
     if (diff == 0) return '${locale.get('calendar_tasks_today')} · $base';
     if (diff == 1) return '${locale.get('calendar_tasks_tomorrow')} · $base';
     if (diff < 0) return '${locale.get('calendar_tasks_overdue')} · $base';
     return base;
   }
 }
+
+// ── Dates of the calendar screen in the app's language (S410) ──────────
+// Here stood fixed German abbreviations ("Mo".."So", "Jan".."Dez") in every
+// language. Weekdays: `weekday_short_N`; months: `month_short_N` /
+// `month_N`; order and separators: one pattern per language in
+// `translations.dart`. German renders as before.
+
+/// Monday-first short weekday names.
+List<String> calendarWeekdaysShort(AppLocale locale) =>
+    [for (var d = 1; d <= 7; d++) locale.get('weekday_short_$d')];
+
+/// Abbreviated name of [month] (1–12).
+String calendarMonthShort(AppLocale locale, int month) =>
+    locale.get('month_short_$month');
+
+/// "Fr, 30. Okt 2026" — the title of the day view.
+@visibleForTesting
+String calendarDayTitle(DateTime d, AppLocale locale) =>
+    locale.tr('calendar_day_title', {
+      'weekday': locale.get('weekday_short_${d.weekday}'),
+      'day': '${d.day}',
+      'month': calendarMonthShort(locale, d.month),
+      'm': '${d.month}',
+      'year': '${d.year}',
+    });
+
+/// "26. – 1. Nov 2026" — the Monday-to-Sunday week of [d]; month and year
+/// of its Sunday.
+@visibleForTesting
+String calendarWeekTitle(DateTime d, AppLocale locale) {
+  final start = d.subtract(Duration(days: d.weekday - 1));
+  final end = start.add(const Duration(days: 6));
+  return locale.tr('calendar_week_title', {
+    'from': '${start.day}',
+    'to': '${end.day}',
+    'month': calendarMonthShort(locale, end.month),
+    'm': '${end.month}',
+    'year': '${end.year}',
+  });
+}
+
+/// "Okt 2026" — the month view and the AppBar title.
+@visibleForTesting
+String calendarMonthTitle(DateTime d, AppLocale locale) =>
+    locale.tr('calendar_month_title', {
+      'month': calendarMonthShort(locale, d.month),
+      'm': '${d.month}',
+      'year': '${d.year}',
+    });
+
+/// "30. Okt 2026" — a date without weekday (due date of a task).
+@visibleForTesting
+String calendarDateMedium(DateTime d, AppLocale locale) =>
+    locale.tr('calendar_date_medium', {
+      'day': '${d.day}',
+      'month': calendarMonthShort(locale, d.month),
+      'm': '${d.month}',
+      'year': '${d.year}',
+    });
+
+/// "30.10." — day and month without the year (PDF week header).
+String calendarDateShort(DateTime d, AppLocale locale) =>
+    locale.tr('calendar_date_short', {'day': '${d.day}', 'm': '${d.month}'});
+
+/// Saves [events] as an `.ics` file the user picks (calendar export).
+@visibleForTesting
+Future<SaveTextResult> exportCalendarIcs(
+        List<CalendarEvent> events, String dialogTitle) =>
+    saveTextFile(
+      text: ICalEngine.exportToIcs(events, calendarName: 'Cleona Calendar'),
+      dialogTitle: dialogTitle,
+      fileName:
+          'cleona_calendar_${DateTime.now().toString().substring(0, 10)}.ics',
+      type: FileType.custom,
+      allowedExtensions: ['ics'],
+    );

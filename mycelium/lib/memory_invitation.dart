@@ -86,6 +86,9 @@ class Reader {
 
   int get _rest => _b.length - _i;
 
+  /// Nothing left — for a trailing section older files lack (S407).
+  bool get atEnd => _rest == 0;
+
   void _check(int n) {
     if (_rest < n) {
       throw MemoryError('File too short: $n B needed, $_rest B present');

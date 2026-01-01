@@ -22,7 +22,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart' show SodiumFFI;
 import 'package:mycelium/readiness.dart';
 import 'package:mycelium/memory.dart' show Memory;
-import 'package:mycelium/group_read.dart';
+import 'package:mycelium/host_channel.dart';
 import 'package:mycelium/identity.dart';
 import 'package:mycelium/card.dart' show CardAddress;
 import 'package:mycelium/node.dart';
@@ -32,12 +32,13 @@ import 'package:mycelium/node_call.dart';
 import 'package:mycelium/node_helpers.dart' show shortFrom, interfacesRead;
 import 'package:mycelium/media.dart';
 import 'package:mycelium/host_media.dart';
+import 'package:mycelium/durable_node.dart' show DurableNode;
 import 'package:mycelium/bulk_piece.dart' show BulkClass;
 import 'package:mycelium/message.dart' show Inbound;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_inbound.dart';
 import 'package:mycelium/mailbox_outbound.dart';
-import 'package:mycelium/mailbox_pair.dart';
+import 'package:mycelium/mailbox_edge.dart';
 import 'package:mycelium/mailbox_start.dart';
 import 'package:mycelium/envelope.dart';
 import 'package:mycelium/host_outside.dart';
@@ -122,6 +123,9 @@ class Host {
     int bulkCacheBytes = 0,
     BulkClass bulkClass = BulkClass.desktop,
     bool Function()? bulkServeAllowed,
+    /// §12.7 "router mapping", read when the router is first asked (§7.3);
+    /// `null`: no router is asked (probes). `host_router.dart`, A-4.
+    bool Function()? routerMapping,
   }) async {
     final roundsStart = DateTime.now(); // before the first call (source 4)
     await interfacesRead();
@@ -178,6 +182,7 @@ class Host {
     final w = Host._(started, wg, report, List.unmodifiable(relay))
       ..onReadiness = onReadiness;
     w._wireUp();
+    w.channel.records = own; // §16.2.5: what it keeps survives a restart
     w.bulk = HostMedia(started, directory, key,
         bulkCacheBytes: bulkCacheBytes, cls: bulkClass,
         open: (f) => bulkFamilyOpen(w.network, f),
@@ -188,7 +193,12 @@ class Host {
         neighbourRemember: w.neighbourRemember, report: report);
     w.network = HostNetwork(started, w._outside, wg, w._newNeighbour,
         (l) => w.outsideRun = l, report);
+    w.network.invitationAddresses = () => [ // §11.8.3 source 3
+          for (final p in w._mailboxes.values)
+            for (final k in p.contacts) ...[...k.cardsAddresses, ...k.neighbours],
+        ];
     w.contactSeatsWireUp(); // §5.2 contact seats; §8.1 what the contacts learn
+    unawaited((w.network.router..allowed = routerMapping).edge()); // edge start
     w._admit(started.main, g1, first);
     ref = w;
     early.forEach(w._inbound);
@@ -207,6 +217,7 @@ class Host {
     // Source 4 when the call series is through (§11.8) — it waits for no holder.
     w.outsideRun = w._outside.afterSources(w.node.callSeriesDone);
     w.network.staleTry(); // §11.8: source 1, once per edge
+    w.network.invitationTry(); // §11.8.2 start: source 3 as well
     return w;
   }
 
@@ -230,6 +241,7 @@ class Host {
   /// LAST mailbox stays (`StateError`) — a node needs an
   /// identity.
   void deregister(Mailbox p) {
+    p.memorySave(); // D-66: what is held in memory only (lastSuccess) first
     node.deregister(p.identity);
     bulk.release(p.ownIdentifier); // lane 3: its collections end here
     if (_mailboxes.remove(p.ownIdentifier) != null) codesDeregistered();
@@ -240,11 +252,13 @@ class Host {
     _stateChecker?.cancel();
     _outside.stop(); // §11.9: only the clock; the own entry stays
     network.stop(); // §8.1: the keep-alive clock
-    // Also on stopping, not only at the edge: during the run
-    // the neighbourhood may have changed without a NEW neighbour
-    // being added (a refreshed address, a displaced one).
-    network.save();
+    network.save(); // also here: the neighbourhood changes without a NEW neighbour
+    for (final p in _mailboxes.values) {
+      p.memorySave(); // D-66: lastSuccess is held in memory until here
+    }
     bulk.stop(); // pieces in intake to disk
+    DurableNode.of(node)?.stop(); // system channels (§16.0): no request waits
+    await network.router.layDown(); // after the saves: may wait on the router (F-1)
     await node.stop(); // begun transmissions leave whole first (R-1)
   }
 
@@ -298,16 +312,17 @@ class Host {
   ///
   /// All evidence expires IMMEDIATELY (state `searching`), the interfaces
   /// are read anew, then ONE call series and ONE query of the remembered
-  /// neighbours, after the call series source 4 (§11.8). None of it repeats,
-  /// and the future does not wait for a holder (§8.2).
+  /// neighbours, after the call series source 4 (§11.8). What rests goes
+  /// again (§9.3, `mailbox_edge.dart`). None of it repeats, and the future
+  /// does not wait for a holder (§8.2).
   Future<void> networkChanged() async {
     node.readiness.reset();
     for (final p in List.of(_mailboxes.values)) {
-      p.dayKeyDistribute(); // §8.2, edge network change
+      p.atEdge(); // §9.3, §8.2 edge network change (S403 finding 2)
     }
     _outside.roundStarts();
     await node.networkEnvironmentNewRead();
-    network.networkChanged(); // §8.1 measurement anew, §11.8 stale entries
+    network.networkChanged(); // §8.1 measurement anew, §11.8.2 every remembered address
     final row = node.call();
     unawaited(node.collect());
     outsideRun = _outside.afterSources(row);
@@ -330,7 +345,7 @@ class Host {
     // would otherwise cost exactly the source that makes the next start fast.
     network.save();
     for (final p in List.of(_mailboxes.values)) {
-      p.giveUpAgain();
+      p.atEdge(); // §9.3, §8.2 edge new neighbour (W-2)
     }
     unawaited(node.collectFrom(fresh)); // §8.2: the new neighbour alone
     // Triggered AFTER the own questions: whoever asks here (the manifest
@@ -375,23 +390,7 @@ class Host {
     // a route to the sender. What is asked is the mailbox of the SENDING
     // identity — never a different one (`identity.dart`).
     node.routesTo = (to, from) => mailboxFor(from)?.routesToAddress(to);
-    // A group packet does not name its group in plain text — the identifier
-    // is inside the seal. It is OFFERED to every group of every mailbox until
-    // one accepts it.
-    node.groupsReception = (packet) {
-      var number = 0;
-      for (final p in _mailboxes.values) {
-        for (final g in p.groups.values) {
-          number++;
-          try {
-            if (g.receive(packet) != null) return;
-          } on Object catch (_) {
-            // not for this group — ask the next one
-          }
-        }
-      }
-      report?.call('Group packet for none of the $number groups');
-    };
+    channelWireUp(); // §16.2.5 keeper, deposit, collection, nudge (host_channel.dart)
     media = MediaSender(
       out: (lane, packet) => report?.call(
           'Media: ${packet.length} B on lane ${lane.name} — without target'),

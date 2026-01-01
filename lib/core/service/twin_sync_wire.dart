@@ -7,7 +7,7 @@
 // the question "is this type unknown?" would have had to be answered in a third one with a
 // typed-in field number. Both are private
 // places of a 13 000-line class and thus not checkable from outside —
-// the same reasoning with which `shortPairLabel` was pulled out of `v41_routing.dart`:
+// the same reasoning with which `shortPairLabel` was pulled out of `delivery_routing.dart`:
 // "a private method of `CleonaService` would
 // not be checkable — and this line was wrong because nobody checked
 // it."
@@ -16,6 +16,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:fixnum/fixnum.dart';
+import 'package:mycelium/mailbox_own_signal.dart' show ownWhereRead;
 
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 
@@ -29,6 +30,12 @@ const int kTwinSyncTypeFieldNumber = 4;
 /// the mirrored frame, so the twin checks and keeps it in the same
 /// `received_ids` table (§20.2) as the device that received it first.
 /// `null` (every other type) writes the field not at all.
+///
+/// [where]: the sending device's fixed neighbours and segment addresses in
+/// the delivery layer's wire form (`ownWhereWire`) — §14.7 "Every own-line
+/// deposit carries, sealed, the depositing device's fixed neighbours and its
+/// segment addresses" (D-46). Every sender on the own line passes them; an
+/// empty list is not written.
 Uint8List buildTwinSyncEnvelope({
   required Uint8List syncId,
   required Uint8List deviceId,
@@ -36,6 +43,7 @@ Uint8List buildTwinSyncEnvelope({
   required proto.TwinSyncType syncType,
   required Uint8List payload,
   Uint8List? deliveryId,
+  ({Uint8List neighbours, Uint8List segment})? where,
 }) {
   final envelope = proto.TwinSyncEnvelope()
     ..syncId = syncId
@@ -46,8 +54,15 @@ Uint8List buildTwinSyncEnvelope({
   if (deliveryId != null) {
     envelope.deliveryId = deliveryId;
   }
+  if (where != null) {
+    if (_listed(where.neighbours)) envelope.neighbours = where.neighbours;
+    if (_listed(where.segment)) envelope.segmentAddresses = where.segment;
+  }
   return Uint8List.fromList(envelope.writeToBuffer());
 }
+
+/// A wire list that names at least one address.
+bool _listed(Uint8List wire) => ownWhereRead(wire).isNotEmpty;
 
 /// Did the envelope carry a type that THIS version does not know?
 ///

@@ -5,7 +5,7 @@
 // (mycelium `bulk_place.dart`, D-30). Only then goes the announcement —
 // `K_T`, length, SHA-256, the holders, a micro preview
 // (`bulk_announce.dart`) — to every recipient as an ordinary sealed message
-// (`MTV3_MEDIA_ANNOUNCE`, §4.3), one leg per member in a group (§16.2). The
+// (`MT_MEDIA_ANNOUNCE`, §4.3), one leg per member in a group (§16.2). The
 // message is `resting` while the pieces are placed and takes its state from
 // the announcement like text (§9.1). Nothing accepted: `failed` (§22.5.1
 // "no volunteer and no holder accepted anything").
@@ -42,9 +42,9 @@
 //
 // Lane 2 (a volunteer, §17.6, S398 P3b) lives in `cleona_service_stream.dart`
 // and shares the recipient's half with this file: its announcement is the
-// same `MTV3_MEDIA_ANNOUNCE` with the flag "stream possible" and no holder
+// same `MT_MEDIA_ANNOUNCE` with the flag "stream possible" and no holder
 // yet; a stream that falls back sends the holders afterwards under the SAME
-// `K_T` (`MTV3_MEDIA_HOLDERS`), so the tag, the entry and the held receipt
+// `K_T` (`MT_MEDIA_HOLDERS`), so the tag, the entry and the held receipt
 // stay those of the announcement.
 
 part of 'cleona_service.dart';
@@ -114,7 +114,7 @@ extension CleonaServiceBulk on CleonaService {
 
   // ── Receiving ─────────────────────────────────────────────────────────
 
-  /// `MTV3_MEDIA_ANNOUNCE`: the announcement of lane 3. The two-stage path
+  /// `MT_MEDIA_ANNOUNCE`: the announcement of lane 3. The two-stage path
   /// of V3 and the V4.1 offer (`BulkAnnounce`, marker 0xB1) are gone — 4.2
   /// has no compatibility branch (D-21): a payload that is not a lane 3
   /// announcement makes no bubble.
@@ -190,6 +190,8 @@ extension CleonaServiceBulk on CleonaService {
       'mime': metadata.mimeType,
       'at': DateTime.now().millisecondsSinceEpoch,
       'receipt': ?_bulkReceiptsHeld.remove(msgId),
+      if (streamRemainderForTesting != null)
+        kStreamGaveUpKey: streamRemainderForTesting!.toList()..sort(),
     });
     // Without the file name: it is the text of the notification posted
     // below, and that "is not written to a log" (§22.8).
@@ -239,8 +241,7 @@ extension CleonaServiceBulk on CleonaService {
     e['started'] = true;
     _bulkIncomingPut(tag, e);
     _transferProgress(conversationId, msgId, TransferPhase.collecting, 0);
-    final seed = _streamSeeds.remove(tag);
-    p.bulkCollect(
+    final t = p.bulkCollect(
       transferKey: a.transferKey,
       length: a.length,
       sha256: a.sha256,
@@ -249,16 +250,17 @@ extension CleonaServiceBulk on CleonaService {
       onFailure: (t, why) => bulkCollectionFailed(t, why),
       progress: (t, complete, stripes) => _transferProgress(conversationId,
           msgId, TransferPhase.collecting, complete * 100 ~/ stripes),
-      // Lane 2 fell back: what the stream already opened (§17.6).
-      seed: seed,
+      // Lane 2 fell back: what the stream already opened lies on this
+      // identity's disk (kept at the give-up, S407-N4) and is taken there.
       // `TTL_media` runs from the announcement, also across a restart — the
       // collector keeps no time of its own (S401).
       started: DateTime.fromMillisecondsSinceEpoch(
           (e['at'] as int?) ?? DateTime.now().millisecondsSinceEpoch),
     );
+    final kept = p.bulkCollector.status(t);
     _log.info('[E2E media-mass-collect] msgId=${msgId.substring(0, 8)} '
         'holders=${a.holders.length} length=${a.length} '
-        'seed=${seed?.values.fold<int>(0, (n, m) => n + m.length) ?? 0} piece(s)');
+        'kept=${kept?.complete ?? 0} of ${kept?.stripes ?? 0} stripe(s)');
     return true;
   }
 
@@ -319,7 +321,6 @@ extension CleonaServiceBulk on CleonaService {
     _transferProgressEnd(msgId);
     _bulkReceiptsSend(e);
     _bulkIncomingRemove(key);
-    _streamSeeds.remove(key);
     onStateChanged?.call();
     _log.info('[E2E media-mass-recv-done] msgId=${msgId.substring(0, 8)} '
         'bytes=${data.length} path=$savePath');
@@ -331,13 +332,13 @@ extension CleonaServiceBulk on CleonaService {
   /// (`Messages.receiptLater`); `false` for everything else.
   bool _bulkReceiptLater(mycelium.Inbound e) {
     if (e.kind != null) return false;
-    final proto.ApplicationFrameV3 f;
+    final proto.ApplicationFrame f;
     try {
-      f = proto.ApplicationFrameV3.fromBuffer(e.content);
+      f = proto.ApplicationFrame.fromBuffer(e.content);
     } catch (_) {
       return false;
     }
-    if (f.messageType != proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE) return false;
+    if (f.messageType != proto.MessageType.MT_MEDIA_ANNOUNCE) return false;
     final msgId = bytesToHex(Uint8List.fromList(f.messageId));
     final conversationId = f.groupId.isNotEmpty
         ? bytesToHex(Uint8List.fromList(f.groupId))
@@ -389,7 +390,7 @@ extension CleonaServiceBulk on CleonaService {
           '(receipt ${receipt != null}, mailbox ${p != null}, contact '
           '${contact != null}, group pair ${pair != null})');
     }
-    _sendDeliveryReceiptV3(
+    _sendDeliveryReceipt(
       recipientUserId: hexToBytes(from),
       messageId: hexToBytes(msgId),
       groupId: group == null ? const <int>[] : hexToBytes(group),
@@ -400,18 +401,24 @@ extension CleonaServiceBulk on CleonaService {
   /// every holder had nothing, `TTL_media` passed, it was displaced, or the
   /// rounds of `bulk_collect.dart` brought no new stripe. The file is
   /// `failed` with its reason here, and the sender is told
-  /// (`MTV3_MEDIA_ABORT`), so both ends show the same reason (§9.4
+  /// (`MT_MEDIA_ABORT`), so both ends show the same reason (§9.4
   /// "Reasons"). `false` if this identity does not know [tag].
   bool bulkCollectionFailed(Uint8List tag, String why) {
     final key = tagHex(tag);
     final e = _bulkIncoming[key];
     if (e == null || _disposed) return false;
+    // D-34's one exception: an image asks its sender once for the stripes
+    // whose kept pieces were lost (`cleona_service_image_again.dart`).
+    if (_imageAskAgain(key, e, why)) return true;
     final conversationId = e['conv'] as String;
     final msgId = e['msg'] as String;
     final (reason, complete, stripes) = _collectionFailureReason(why);
     _log.warn('[E2E media-mass-recv-failed] msgId=${msgId.substring(0, 8)} — $why');
     _bulkIncomingRemove(key);
-    _streamSeeds.remove(key);
+    // The collector leaves what it opened on disk when a collection fails
+    // (S407-N4: the D-34 request above goes on with it); here the transfer
+    // ends for good, and its blocks go with the entry.
+    myceliumMailbox?.bulkCollector.abandon(tag);
     final msg = _bulkMessage(conversationId, msgId);
     if (msg != null) {
       _mediaFail(msg, reason, why,
@@ -555,7 +562,7 @@ extension CleonaServiceBulk on CleonaService {
   /// S399 O-2: the bound of §20.2 displaced the entry of [tag] — the oldest.
   /// `K_T` and the holders lived only in [e], so the file can never be
   /// collected: it is `failed` with its reason now, not left `announced`
-  /// until the next start, and the sender is told (`MTV3_MEDIA_ABORT`), so
+  /// until the next start, and the sender is told (`MT_MEDIA_ABORT`), so
   /// both ends show the same reason (§9.3, §9.4 "Reasons"). Nothing is sent
   /// again. The reason is `holdersGone` ("holders gone or expired"): of the
   /// seven of §9.4 it is the one the entry's end comes closest to — it
@@ -569,7 +576,6 @@ extension CleonaServiceBulk on CleonaService {
     // Entry first: the collector's failure callback below finds nothing and
     // does not fail the file a second time.
     _bulkIncomingRemove(tag);
-    _streamSeeds.remove(tag);
     myceliumMailbox?.bulkCollector.abandon(hexToBytes(tag));
     final msg = conversationId == null || msgId == null
         ? null

@@ -3,11 +3,9 @@ import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/calls/plane_d_host.dart';
 import 'package:cleona/core/service/mycelium_seam.dart';
 import 'package:cleona/core/update/data_port_http.dart';
-import 'package:cleona/core/util/local_addresses.dart'
-    show dialableLocalAddresses, isRealNetworkChange;
 import 'package:cleona/core/util/network_metered.dart' as network_metered;
-import 'package:mycelium/node_post_box.dart' show NodePostBox;
 import 'package:mycelium/host.dart';
+import 'package:mycelium/host_codes.dart' show HostCodes;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -18,13 +16,17 @@ import 'package:cleona/ui/screens/home_screen.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_dialog.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_instructions_screen.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_router_select_screen.dart';
+import 'package:cleona/core/platform/daemon_stdio.dart';
 import 'package:cleona/core/platform/router_db.dart';
+import 'package:cleona/core/platform/linux_native_libraries.dart';
+import 'package:cleona/ui/screens/native_library_missing_screen.dart';
 import 'package:cleona/ui/screens/setup_screen.dart';
 import 'package:cleona/ui/screens/settings_screen.dart';
 import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/core/service/gui_device_setting.dart';
 import 'package:cleona/core/calls/call_integration_channel.dart';
 import 'package:cleona/core/calls/session_behaviour_channel.dart';
 import 'package:cleona/core/service/cleona_service.dart';
@@ -43,8 +45,11 @@ import 'package:cleona/core/config/network_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/tray/tray_status.dart'
+    show trayLocaleCode, trayTranslate;
 import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
+import 'package:cleona/ui/screens/system_channel_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
@@ -55,8 +60,11 @@ import 'package:cleona/core/calls/video_engine.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
+import 'package:cleona/core/platform/android_badge.dart';
+import 'package:cleona/core/platform/android_notification_texts.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/app_screenshot.dart';
+import 'package:cleona/core/platform/capture_exclusion.dart';
 import 'package:cleona/core/platform/process_hardening.dart';
 import 'package:cleona/core/platform/windows_session.dart';
 import 'package:cleona/core/platform/disk_space.dart';
@@ -70,6 +78,7 @@ import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/update/gui_update_start.dart';
 import 'package:cleona/core/update/update_offer.dart';
 import 'package:cleona/core/sync/cover_stream.dart' show CoverSaver;
 import 'package:cleona/core/platform/apk_installer.dart';
@@ -77,8 +86,8 @@ import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/ui/screens/first_start_wipe_notice_screen.dart';
 import 'package:cleona/ui/screens/keyring_file_warning_screen.dart';
 import 'package:cleona/core/platform/first_start_wipe.dart';
-import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:cleona/ui/components/archive_retrieval_state.dart';
+import 'package:cleona/ui/components/archive_preview_cache.dart';
 import 'package:cleona/ui/components/call_notice.dart';
 import 'package:cleona/ui/components/escape_pops_route.dart';
 import 'package:cleona/ui/components/connection_sheet.dart';
@@ -110,6 +119,8 @@ const List<(String, String)> kThirdPartyLicenseEntries = [
   ('Monocypher', 'assets/licenses/monocypher.txt'),
   ('libogg', 'assets/licenses/libogg.txt'),
   ('libvorbis', 'assets/licenses/libvorbis.txt'),
+  ('webrtc-audio-processing', 'assets/licenses/webrtc_audio_processing.txt'),
+  ('Abseil', 'assets/licenses/abseil.txt'),
 ];
 
 /// Loads every bundled third-party license text and hands it to
@@ -130,11 +141,73 @@ Future<void> _registerThirdPartyLicenses() async {
 }
 
 
+/// The crypto start of the UI process: the FFI libraries and the keyring.
+///
+/// One function for every UI entry point — `main()` and the integration
+/// tests (`integration_test/app_test_ci.dart`). S407-7: the CI test had its
+/// own copy that loaded the FFI libraries but never started the keyring;
+/// since S368/S403 the master seed has no storage location without it, the
+/// setup failed with "No keyring available" and the macOS workflow stayed red
+/// from 25.09.2026 on.
+Future<void> initUiCrypto() async {
+  debugPrint('[main] Initializing SodiumFFI...');
+  SodiumFFI();
+  debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
+  OqsFFI().init();
+  debugPrint('[main] OqsFFI OK.');
+  // §3.7: start up the keyring. On Linux/Windows the
+  // START sequence (`initCrypto`: first-start wipe path, envelope change,
+  // cleaner) belongs to the daemon — the UI there ONLY starts up the
+  // keyring, see the `else` branch below.
+  //
+  // S368: here stood "the GUI connects via IPC and never accesses keys
+  // directly". That was wrong and carried the finding: `setup_screen.dart`
+  // CREATES the master seed in this process and reads it again.
+  // Without a keyring it had no admissible storage location there and
+  // landed under the raw `db.key` — the chain that S368 closes.
+  if (Platform.isAndroid || Platform.isIOS) {
+    debugPrint('[main] Initializing KeyringService (mobile)...');
+    await MobileKeyringService.init(AppPaths.dataDir);
+    await IdentityContext.initCrypto(AppPaths.dataDir);
+    debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
+  } else if (Platform.isMacOS) {
+    debugPrint('[main] Initializing KeyringService (macOS)...');
+    await IdentityContext.initCrypto(AppPaths.dataDir);
+    debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
+  } else {
+    // ── THE UI DOES NEED THE KEYRING AFTER ALL (S368) ──────
+    //
+    // Here stood only "Skipping KeyringService init (daemon owns
+    // keyring)". The omission was a saving measure (W3: double
+    // DPAPI probe, file locks) — but the UI CREATES the seed on
+    // Linux and Windows (`setup_screen.dart:143`,
+    // `generateSeedPhrase`) and READS it afterwards itself (`:1880`,
+    // `:2097`, `:2888` via `mgr.loadMasterSeed()`). Without a
+    // keyring the only way for that was
+    // `master_seed.json.enc` under the raw `db.key` — the
+    // plaintext key from which the whole chain down to the
+    // message store falls.
+    //
+    // It is EXPRESSLY only the keyring, not `initCrypto`:
+    // the first-start wipe path, the envelope change and the cleaner
+    // stay with the daemon. Two wipers on one profile would be a
+    // race with data loss as the price.
+    debugPrint('[main] Initializing KeyringService (desktop GUI — '
+        'the seed is created and read here, S368)...');
+    await KeyringService.init(AppPaths.dataDir);
+    debugPrint('[main] KeyringService OK '
+        '(hw=${KeyringService.instance.isHardwareProtected}).');
+  }
+}
+
 void main() async {
   // §4.5.3: every console line of this process goes through the log
   // redaction — first statement, before anything can call `debugPrint`.
   RedactedDebugPrint.install();
   WidgetsFlutterBinding.ensureInitialized();
+  // §23.10: the native side excluded the window from capture before the
+  // first frame; only the test run's switch lifts it (capture_exclusion.dart).
+  await CaptureExclusion.applyTestSwitch();
 
   // S403: the bundled third-party license texts go into Flutter's license
   // registry BEFORE runApp, so the license page (settings → licenses) shows
@@ -200,6 +273,32 @@ void main() async {
     _writeGuiLock();
   }
 
+  // §26.5.4: "automatic recovery if the app crashes within 30 s of an
+  // update" — the app includes the window (owner 19.10.2026, S407-RUECKNAHME
+  // R-2). After the single-instance check: a second start must not judge the
+  // running window. Linux and Windows only (daemon + window from one bundle).
+  if (Platform.isLinux || Platform.isWindows) {
+    final command = [Platform.resolvedExecutable];
+    if (Platform.isLinux) {
+      try {
+        final parts = String.fromCharCodes(
+                File('/proc/self/cmdline').readAsBytesSync())
+            .split('\x00')
+            .where((s) => s.isNotEmpty)
+            .toList();
+        command.addAll(parts.skip(1));
+      } catch (_) {}
+    }
+    if (await GuiUpdateStart.atStart(command: command, log: _guiUpdateLine)) {
+      exit(0);
+    }
+    // An orderly window exit within its 30 s is no crash. The window's own
+    // deliberate exits call `markGuiStopped`; a window closed by the user
+    // ends the process without running Dart code on Windows — the runner
+    // leaves a note for the next start (windows/runner/main.cpp). Linux
+    // hides the window on close (linux/runner/my_application.cc).
+  }
+
   // The start edge of the surface: what an earlier run left behind of its
   // own plaintext in transit (a voice recording, a pasted clipboard item, a
   // camera picture — after a crash, or from a build that never deleted them)
@@ -232,59 +331,27 @@ void main() async {
     ));
   }
 
+  // S410, I-6: Linux takes libsodium and libzstd from the system and liboqs
+  // from the bundle. A missing one is named, with the package to install,
+  // in the user's language — instead of the technical startup error below
+  // ("SodiumException: libsodium.so not found" plus a stack, in English).
+  if (Platform.isLinux) {
+    final missing = missingLinuxNativeLibraries();
+    if (missing.isNotEmpty) {
+      for (final m in missing) {
+        debugPrint('[main] FATAL: ${m.describe()}');
+      }
+      runApp(NativeLibraryMissingApp(missing: missing));
+      return;
+    }
+  }
+
   // iOS startup diagnostics: catch FFI init failures that would otherwise
   // silently prevent runApp() from being reached (→ white screen).
   String? startupError;
   try {
     debugPrint('[main] Platform: ${Platform.operatingSystem}, home: ${AppPaths.home}, dataDir: ${AppPaths.dataDir}');
-    debugPrint('[main] Initializing SodiumFFI...');
-    SodiumFFI();
-    debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
-    OqsFFI().init();
-    debugPrint('[main] OqsFFI OK.');
-    // §3.7: start up the keyring. On Linux/Windows the
-    // START sequence (`initCrypto`: first-start wipe path, envelope change,
-    // cleaner) belongs to the daemon — the UI there ONLY starts up the
-    // keyring, see the `else` branch below.
-    //
-    // S368: here stood "the GUI connects via IPC and never accesses keys
-    // directly". That was wrong and carried the finding: `setup_screen.dart`
-    // CREATES the master seed in this process and reads it again.
-    // Without a keyring it had no admissible storage location there and
-    // landed under the raw `db.key` — the chain that S368 closes.
-    if (Platform.isAndroid || Platform.isIOS) {
-      debugPrint('[main] Initializing KeyringService (mobile)...');
-      await MobileKeyringService.init(AppPaths.dataDir);
-      await IdentityContext.initCrypto(AppPaths.dataDir);
-      debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
-    } else if (Platform.isMacOS) {
-      debugPrint('[main] Initializing KeyringService (macOS)...');
-      await IdentityContext.initCrypto(AppPaths.dataDir);
-      debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
-    } else {
-      // ── THE UI DOES NEED THE KEYRING AFTER ALL (S368) ──────
-      //
-      // Here stood only "Skipping KeyringService init (daemon owns
-      // keyring)". The omission was a saving measure (W3: double
-      // DPAPI probe, file locks) — but the UI CREATES the seed on
-      // Linux and Windows (`setup_screen.dart:143`,
-      // `generateSeedPhrase`) and READS it afterwards itself (`:1880`,
-      // `:2097`, `:2888` via `mgr.loadMasterSeed()`). Without a
-      // keyring the only way for that was
-      // `master_seed.json.enc` under the raw `db.key` — the
-      // plaintext key from which the whole chain down to the
-      // message store falls.
-      //
-      // It is EXPRESSLY only the keyring, not `initCrypto`:
-      // the first-start wipe path, the envelope change and the cleaner
-      // stay with the daemon. Two wipers on one profile would be a
-      // race with data loss as the price.
-      debugPrint('[main] Initializing KeyringService (desktop GUI — '
-          'the seed is created and read here, S368)...');
-      await KeyringService.init(AppPaths.dataDir);
-      debugPrint('[main] KeyringService OK '
-          '(hw=${KeyringService.instance.isHardwareProtected}).');
-    }
+    await initUiCrypto();
   } catch (e, stack) {
     startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
         'home=${AppPaths.home}\ndataDir=${AppPaths.dataDir}\n\n$e\n$stack';
@@ -422,6 +489,18 @@ void _logCrash(String source, Object error, StackTrace? stack) {
   }
 }
 
+/// One line into `gui-update.log` (as `_guiUpdateLog` of the app state), for
+/// the window's update start before any state exists.
+void _guiUpdateLine(String msg) {
+  final line = '${DateTime.now().toIso8601String()} [gui-update] '
+      '${LogRedaction.apply(msg)}';
+  debugPrint(line);
+  try {
+    File('${AppPaths.dataDir}/gui-update.log')
+        .writeAsStringSync('$line\n', mode: FileMode.append);
+  } catch (_) {}
+}
+
 /// Checks if another GUI instance is running. If so, write a trigger.
 bool _signalExistingInstance() {
   final home = AppPaths.home;
@@ -515,7 +594,9 @@ class _CleonaAppState extends State<CleonaApp> {
   @override
   void initState() {
     super.initState();
-    _appLocale.load();
+    // The chosen language comes from the device database once a service is
+    // there (`CleonaAppState._guiAdopt`); until then the system language.
+    legacyGuiPrefsSweep();
   }
 
   @override
@@ -871,9 +952,88 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// `switch_language` from the E2E path. One listener covers both.
   void appLocaleAdopt(AppLocale locale) {
     _appLocale?.removeListener(_uiLanguageReport);
+    _appLocale?.removeListener(_androidNotificationTextsSend);
     _appLocale = locale;
     locale.addListener(_uiLanguageReport);
+    locale.addListener(_androidNotificationTextsSend);
+    locale.onChosen = (code) => _guiChoose(kGuiFieldLocale, code);
     _uiLanguageReport();
+    _androidNotificationTextsSend();
+  }
+
+  /// Android: the words of the system notifications in the app language
+  /// (S410-F, working rule 7) — on adoption and on every language change,
+  /// by both ways of changing it (the same listener as
+  /// [_uiLanguageReport]). The platform stores them; what stands on screen
+  /// is redrawn at once: the channel names, the unread summary and the
+  /// service notice.
+  void _androidNotificationTextsSend() {
+    if (!Platform.isAndroid) return;
+    final locale = _appLocale;
+    if (locale == null) return;
+    const channel = MethodChannel('chat.cleona/notification');
+    channel.invokeMethod(
+        'setNotificationTexts', androidNotificationTexts(locale.get));
+    _updateAndroidBadge();
+    _lastNotificationText = '';
+    _updateAndroidNotification();
+  }
+
+  // ── GUI device-wide choices in the device database (S407, §4.5.3) ─────
+
+  /// Choices made while no service could store them (first setup: no master
+  /// seed, so no device database). Written by [_guiAdopt] once one can.
+  final Map<String, Object?> _guiPending = {};
+
+  /// The service whose stored choices were last applied — they are read
+  /// once per service, not at every state change.
+  ICleonaService? _guiAdoptedFrom;
+
+  /// A write of [_guiPending] is under way — one at a time.
+  bool _guiFlushing = false;
+
+  void _guiChoose(String field, Object? value) {
+    final svc = _service;
+    if (svc == null) {
+      _guiPending[field] = value;
+      return;
+    }
+    svc.setGuiDeviceSetting(field, value).then((stored) {
+      if (!stored) _guiPending[field] = value;
+    });
+  }
+
+  /// Writes pending choices and applies the stored ones of the current
+  /// service. Called on every state change; cheap after the first time.
+  void _guiAdopt() {
+    final svc = _service;
+    if (svc == null) return;
+    if (_guiPending.isNotEmpty && !_guiFlushing) {
+      _guiFlushing = true;
+      final batch = Map<String, Object?>.from(_guiPending);
+      Future.wait(batch.entries.map((e) =>
+          svc.setGuiDeviceSetting(e.key, e.value).then((stored) {
+            if (stored && identical(_guiPending[e.key], e.value)) {
+              _guiPending.remove(e.key);
+            }
+          }))).whenComplete(() => _guiFlushing = false);
+    }
+    if (identical(_guiAdoptedFrom, svc)) return;
+    _guiAdoptedFrom = svc;
+    final stored = svc.guiDeviceSettings;
+    final theme = stored[kGuiFieldTheme];
+    if (!_guiPending.containsKey(kGuiFieldTheme) &&
+        theme is int &&
+        theme >= 0 &&
+        theme < ThemeMode.values.length &&
+        ThemeMode.values[theme] != _themeMode) {
+      _themeMode = ThemeMode.values[theme];
+      notifyListeners();
+    }
+    final locale = stored[kGuiFieldLocale];
+    if (!_guiPending.containsKey(kGuiFieldLocale) && locale is String) {
+      _appLocale?.adoptStored(locale);
+    }
   }
 
   /// Only sets a field on the IPC client. By itself it costs NO
@@ -884,17 +1044,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult> _connectivityResults = [];
-  Timer? _networkChangeDebounce;
-  bool _networkChangeRunning = false;
-
-  /// The last seen inventory of dialable addresses (S380).
-  ///
-  /// The counterpart to `_lastPollIps` in the daemon. Without it every
-  /// EVENT counted as a CHANGE here — as there until S380 in the `ip monitor` branch —
-  /// and every change drops all sessions. On
-  /// Android events without an address change are the rule (captive
-  /// portal, switching between two bands of the same network).
-  List<String> _lastDialableAddresses = const <String>[];
+  // The settling, the last address list (S380) and the guard against two
+  // edges at once lie in the delivery layer since S407-LB-P14
+  // (`NetworkWatch`, `mycelium/lib/network_watch.dart`).
   String _lastNotificationText = '';
 
   /// Buffered incoming 1:1/group call when the Navigator is not yet attached.
@@ -942,10 +1094,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   int? get syncPartnersInbound => _service?.syncPartnersInbound;
   int get independentSyncPartners => _service?.independentSyncPartners ?? 0;
 
-  /// §9.2 — the measured responsibility set. The consent dialog
-  /// from §9.3 computes its time span from it.
-  int get reachableResponsibleRelays =>
-      _service?.reachableResponsibleRelays ?? 0;
 
   // ── UI peer counter (S252) ─────────────────────────────────────────
   // Confirmed + relay-reachable peers. Must be used by ALL UI surfaces
@@ -1014,12 +1162,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// `V41Host` per identity.
   Host? _host;
 
-  /// The same key as `_wirt`'s (`wirtSchluessel`, set at
-  /// start) — kept for the port mapping (task D): its
-  /// network-change edge lies in a different method body than the local
-  /// `masterSeed` at start.
-  Uint8List? _masterSeedForHost;
-
   /// The HTTP delivery at the host port (§26.6.5, S386 part A).
   DataPortHttp? _delivery;
   final Map<String, CleonaService> _inProcessServices = {};
@@ -1038,6 +1180,53 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// This process has been connected to the daemon before (desktop). A
   /// later connection is a reconnect, not an opening of the application.
   bool _daemonConnectedBefore = false;
+
+  /// S407-E7: this GUI process was started by a version restart
+  /// ([_spawnGuiRestartHelper] with `versionRestart`) — a second restart
+  /// would loop (`ipcVersionAction`).
+  static final bool _guiVersionRestarted =
+      Platform.environment['CLEONA_GUI_VERSION_RESTART'] == '1';
+
+  /// S407-E7: the daemon was replaced once for a version difference in this
+  /// process — a second replacement would loop.
+  bool _daemonReplacedForVersion = false;
+
+  /// S407-E7 (v4_2 §22.1): daemon and GUI are one program in two processes
+  /// and must run one version. [client] reached a daemon of
+  /// `client.daemonAppVersion`. Returns `true` when this connection is not
+  /// used — the GUI restarts itself, or the daemon was replaced and
+  /// [initialize] ran again.
+  Future<bool> _versionRestore(IpcClient client) async {
+    final action = ipcVersionAction(
+        gui: CleonaService.kCurrentAppVersion,
+        daemon: client.daemonAppVersion,
+        guiRestarted: _guiVersionRestarted);
+    if (action == IpcVersionAction.none) return false;
+    _guiUpdateLog('version: GUI ${CleonaService.kCurrentAppVersion}, daemon '
+        '"${client.daemonAppVersion}" -> ${action.name}');
+    if (action == IpcVersionAction.restartGui) {
+      client.onDaemonDied = null;
+      client.onIpcStalled = null;
+      await client.stop();
+      _spawnGuiRestartHelper(versionRestart: true);
+      return true;
+    }
+    if (_daemonReplacedForVersion) {
+      // The daemon started from this GUI's own bundle still runs another
+      // version: the installation itself is mixed. Replacing again would
+      // loop; the connection is used as it is and the case is logged.
+      _guiUpdateLog('version: daemon from the own bundle runs another '
+          'version — installation is mixed, no further replacement');
+      return false;
+    }
+    _daemonReplacedForVersion = true;
+    client.onDaemonDied = null;
+    client.onIpcStalled = null;
+    await client.stop();
+    _killExistingDaemon();
+    await initialize();
+    return true;
+  }
 
 
   ICleonaService? get service => _service;
@@ -1095,47 +1284,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _crashDialogShowing = false;
         return;
       }
+      // §16.7: the popup is the preview; a known fingerprint is shown in
+      // it with "+1" / "send my report as a variant" — the user decides.
       showCrashReportDialog(
         context: ctx,
-        reporter: reporter,
+        api: service.systemChannelApi,
         report: report,
-      ).then((result) async {
-        _crashDialogShowing = false;
-        switch (result.action) {
-          case CrashDialogResult.publish:
-            await reporter.publishReport(report);
-          case CrashDialogResult.dismissKnown:
-            await reporter.publishDuplicate(report);
-          case CrashDialogResult.navigateToReport:
-            await reporter.publishDuplicate(report);
-            if (result.existingPostId != null && navigatorKey.currentContext != null) {
-              // Navigate to the Bug Log channel
-              _navigateToChannel(
-                  navigatorKey.currentContext!, result.existingPostId!);
-            }
-          case CrashDialogResult.discard:
-          case CrashDialogResult.rateLimitAck:
-            break;
-        }
-      });
+      ).whenComplete(() => _crashDialogShowing = false);
     });
-  }
-
-  void _navigateToChannel(BuildContext context, String postId) {
-    final channelIdHex = sys_ch.SystemChannels.bugLogChannelIdHex;
-    final service = _activeCleonaService;
-    if (service != null && service.conversations.containsKey(channelIdHex)) {
-      final conv = service.conversations[channelIdHex]!;
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => ChatScreen(
-            conversationId: channelIdHex,
-            displayName: conv.displayName,
-            isChannel: true,
-          ),
-        ),
-      );
-    }
   }
 
   @override
@@ -1248,6 +1404,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // in `CleonaService.setAppResumed`, only one level higher.
     final beforeFront = _appResumed;
     _appResumed = isResumed;
+    // S407-IOS-BILD: iOS may have released the media reader's listening
+    // socket while the app was suspended (Apple TN2277). One check on the
+    // same edge, over the loopback only — no network, no clock.
+    if (isResumed && !beforeFront) {
+      unawaited(MediaVault.instance.ensureRunning());
+    }
     final host = _host;
     if (isResumed && !beforeFront && host != null) {
       // S387: the mycelium counterpart of the V4.1 catch-up harvest — ONE
@@ -1255,7 +1417,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // (`NodePostBox.collect`).
       // The manifest slot at the same edge (M1+), behind the collection's
       // questions at each holder — it does not wait for a holder (§8.2).
-      unawaited(host.node.collect());
+      // S407-OLAPPW W-2: the edge also sends the day-key notices still due
+      // (§8.2, §9.3) — `HostCodes.applicationOpened`.
+      unawaited(host.applicationOpened());
       unawaited(_updateManifestAsk(moment: 'app opened'));
     }
 
@@ -1300,25 +1464,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       //      `V41Node.nachholErnte(grund: 'Vordergrund')` — that fetches what
       //      stayed lying on the responsible relays during the absence.
       //   2. The network change itself, via `_startConnectivityMonitor`
-      //      further below: `service.onNetworkChanged` →
-      //      `CleonaService.v41OnNetworkChanged` (set in
-      //      `v41_attach.dart`) → clear port mapping, re-read addresses,
-      //      `setzeAnsageadressen`, `V41Node.onNetworkChanged`
-      //      (sessions fall, observed addresses forgotten) and
-      //      `announceOwnEntry(vorrangig: true)`. The entry record
-      //      is thus very much issued anew, and with priority.
+      //      further below: since S407-LB-P12 the one entry
+      //      `networkChangeEdge` (`mycelium_seam.dart`) — `Host.networkChanged`
+      //      (§11.8.2: evidence expires, interfaces re-read, calls anew),
+      //      the router mapping (§7.3), every identity's application part.
       //
-      // WHAT IS REALLY MISSING, and only that (measured 08.09.2026): the
-      // MULTICAST MEMBERSHIP of the LAN call. `startLanEntry`
-      // (`lan_entry_wiring.dart`, `joinMulticast` in the loop over
-      // `NetworkInterface.list`) joins the group ONCE at start,
-      // per interface present at that time; there is no second
-      // call, neither from `v41OnNetworkChanged` nor elsewhere. After an
-      // interface change the node no longer hears a foreign call in the new segment
-      // — it still CALLS there (`lanEntry?.announceNow()`
-      // stands in the seam), but it does not hear. The data socket itself
-      // is bound to the wildcard (`udp_sockets.dart`,
-      // `family.wildcard`) and survives the change.
+      // (Until S408-P23 a remaining gap of the V4.1 LAN call stood here —
+      // its multicast membership was joined once at start only. The LAN
+      // call, `lan_entry_wiring.dart`, fell with `lib/core/tagline/`.)
     }
   }
 
@@ -1718,7 +1871,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // ── BACK IN OPERATION (2026-09-01, gap G-7) ───────────────────
       //
       // From the cut on 31.08. up to here this branch was a visible
-      // failure: it lacked `source.binaryFragmentStore`, the access to the
+      // failure: it lacked `source.updateBinaryStore`, the access to the
       // path of the finished assembled APK. The getter has been recreated in
       // `cleona_service_update.dart` — field and class
       // had survived the cut anyway, only the access was missing.
@@ -1730,7 +1883,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // each of its four stages individually, so that a second cut does not
       // silently take it along again.
       final mgr = source.binaryUpdateManager;
-      final store = source.binaryFragmentStore;
+      final store = source.updateBinaryStore;
       if (mgr == null || store == null) return false;
       _updateNeedsInstallPermission = false;
       // The state stays `ready` — the update IS ready. Earlier
@@ -1782,29 +1935,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   void setThemeMode(ThemeMode mode) {
     _themeMode = mode;
     notifyListeners();
-    // Persist theme choice
-    SharedPreferences.getInstance().then((prefs) {
-      prefs.setInt('cleona_theme_mode', mode.index);
-    });
-  }
-
-  /// Restore persisted theme mode (call early, before first build).
-  Future<void> _restoreThemeMode() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final idx = prefs.getInt('cleona_theme_mode');
-      if (idx != null && idx >= 0 && idx < ThemeMode.values.length) {
-        _themeMode = ThemeMode.values[idx];
-        notifyListeners();
-      }
-    } catch (_) {}
+    _guiChoose(kGuiFieldTheme, mode.index);
   }
 
   /// Boot: check profile SYNCHRONOUSLY, then connect async.
   void _boot() {
     _instance = this;
     WidgetsBinding.instance.addObserver(this);
-    _restoreThemeMode();
     if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
       _showTriggerTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
         _checkShowTrigger();
@@ -1892,9 +2029,17 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  void _spawnGuiRestartHelper() {
+  /// Restarts this GUI from disk and ends the process. [versionRestart]
+  /// (S407-E7): the restart is for a version difference with the daemon —
+  /// the new process carries `CLEONA_GUI_VERSION_RESTART=1`, and on Windows
+  /// and macOS it is started here (after an update `update-apply.bat` starts
+  /// both on Windows, so the plain update path needs no helper there).
+  void _spawnGuiRestartHelper({bool versionRestart = false}) {
     () async {
       try {
+        final env = versionRestart
+            ? const {'CLEONA_GUI_VERSION_RESTART': '1'}
+            : const <String, String>{};
         if (Platform.isLinux) {
           final cmdlineBytes = File('/proc/self/cmdline').readAsBytesSync();
           final cmdParts = String.fromCharCodes(cmdlineBytes)
@@ -1903,14 +2048,17 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
               .toList();
           final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
           await Process.start('/bin/bash', ['-c', 'sleep 3 && exec $quotedCmd'],
-              mode: ProcessStartMode.detached);
+              environment: env, mode: ProcessStartMode.detached);
+        } else if (versionRestart && (Platform.isWindows || Platform.isMacOS)) {
+          await Process.start(Platform.resolvedExecutable, const [],
+              environment: env, mode: ProcessStartMode.detached);
         }
-        // Windows: no separate restart helper needed — update-apply.bat
-        // starts both daemon and GUI after extraction.
       } catch (e) {
         _guiUpdateLog('Failed to spawn restart helper: $e');
       }
       _guiUpdateLog('exit(0)');
+      // A deliberate restart is no crash of the window (§26.5.4, R-2).
+      BinaryUpdateManager.markGuiStopped(null);
       exit(0);
     }();
   }
@@ -1925,7 +2073,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// Where the daemon's stdout/stderr go (Linux, S395). Cut to its last half
+  /// Where the daemon's stderr goes (Linux S395, Windows S397; stdout is
+  /// discarded, it only repeats the log — S395-2). Cut to its last half
   /// before each start once it passes 1 MB, so it cannot grow without bound.
   String _prepareDaemonStdioLog() {
     final path = '$_baseDir/logs/daemon-stdio.log';
@@ -1942,7 +2091,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     return path;
   }
 
-  /// The last [lines] lines of the daemon's stdout/stderr (Linux), or a line
+  /// The last [lines] lines of the daemon's stderr, or a line
   /// saying why there are none.
   String _daemonStdioTail({int lines = 40}) {
     try {
@@ -1965,6 +2114,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       exitCode = await _daemonExit?.timeout(const Duration(seconds: 2));
     } catch (_) {}
     _logDaemonCrash(exitCode: exitCode);
+    // The window ends on purpose here; its own crash it is not (§26.5.4,
+    // R-2). The daemon's crash is judged at the daemon's next start.
+    BinaryUpdateManager.markGuiStopped(null);
     exit(0);
   }
 
@@ -2104,16 +2256,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // thrown away here (`drain`, `exitCode.then((_) {})`). stderr is where
       // the Dart VM writes its crash report on a segmentation fault — the
       // S394-4 tray crash left nothing but "Daemon crash detected, PID". The
-      // shell behind `setsid` now redirects the daemon's own descriptors into
-      // a file: a pipe to this GUI would break with the GUI, the file does
-      // not. `exec` replaces the shell, so the process tree is unchanged and
-      // `exitCode` is the daemon's own. No core dumps: an image of the
-      // daemon's memory would carry its keys (§4).
+      // shell behind `setsid` now redirects the daemon's stderr into a file
+      // (stdout only repeats the log, S395-2) — see [linuxDaemonLaunchArgs].
+      // No core dumps: an image of the daemon's memory would carry its keys
+      // (§4).
       final stdioLog = _prepareDaemonStdioLog();
-      final proc = await Process.start('setsid', [
-        'sh', '-c', r'log=$1; shift; exec "$@" >>"$log" 2>&1',
-        'sh', stdioLog, daemonBinary, ...args,
-      ]);
+      final proc = await Process.start(
+          'setsid', linuxDaemonLaunchArgs(stdioLog, daemonBinary, args));
       // Reaps the child (no zombie) and keeps its status for the crash report.
       _daemonExit = proc.exitCode;
     } else if (Platform.isWindows) {
@@ -2123,6 +2272,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // daemon-stdio.log. A launcher file instead of an inline `cmd /c`
       // line: Dart quotes arguments with backslash escapes, which cmd.exe
       // does not understand. stdout goes to NUL — it only repeats the log.
+      // No console window (S407): `cmd.exe` starts detached, without a
+      // console, and the daemon is built as a GUI-subsystem program
+      // (windows/scripts/set-gui-subsystem.ps1), so Windows gives it none
+      // either; the redirection above still reaches it.
       final stdioLog = _prepareDaemonStdioLog().replaceAll('/', r'\');
       final launcher = File('$_baseDir/daemon-start.cmd'); // not a log
       final line = [daemonBinary, ...args].map((a) => '"$a"').join(' ');
@@ -2328,6 +2481,29 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Connectivity monitoring (event-driven, no polling) ────────────
 
+  /// INTO THE LOG FILE, NOT ONLY TO LOGCAT (S407-N7): the trigger of a
+  /// network change stood only in `debugPrint`, i.e. in the rotating logcat
+  /// ring — in the log file a change showed only as new addresses in the
+  /// mycelium lines. Same file as the host's lines (first identity); the
+  /// daemon writes its own trigger lines (`service_daemon.dart`). Without an
+  /// in-process service (desktop GUI over IPC, or before start) the node is
+  /// not here — then the console as before.
+  void _connectivityLog(String msg, {bool debug = false, bool warn = false}) {
+    if (_inProcessServices.isEmpty) {
+      debugPrint(msg);
+      return;
+    }
+    final log = CLogger.get('connectivity',
+        profileDir: _inProcessServices.values.first.profileDir);
+    if (warn) {
+      log.warn(msg);
+    } else if (debug) {
+      log.debug(msg);
+    } else {
+      log.info(msg);
+    }
+  }
+
   void _startConnectivityMonitor() {
     _connectivitySub?.cancel();
     // Fetch initial connectivity state
@@ -2337,7 +2513,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_networkKindRead(results));
     });
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
-      debugPrint('[connectivity] Change: $results');
+      _connectivityLog('[connectivity] Change: $results');
       _connectivityResults = results;
       notifyListeners();
       unawaited(_networkKindRead(results));
@@ -2363,88 +2539,34 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // once and has no path to rebind it after an interface change.
       // Reported gap". That was wrong since S360; the
       // chain stands written out in the resume branch further up
-      // (`didChangeAppLifecycleState`). The node part runs, it just
-      // no longer hangs on a call of its own from here, but IN the
-      // service: `service.onNetworkChanged` calls it itself.
+      // (`didChangeAppLifecycleState`). The node part runs — since
+      // S407-LB-P12 through the one entry `networkChangeEdge` below.
 
-      // P4: debounce rapid connectivity events (Hotel-WLAN, captive portals).
-      // Without this, each event fires onNetworkChanged() immediately —
-      // concurrent runs corrupt peer/route state.
-      _networkChangeDebounce?.cancel();
-      _networkChangeDebounce = Timer(const Duration(seconds: 2), () async {
-        if (_networkChangeRunning) return;
-        // ── AN EVENT IS NOT YET A CHANGE (S380) ────────────────
-        //
-        // The same probe as in the daemon, from the same source
-        // (`istEchterNetzwechsel`). It never stood here: the debouncing
-        // bundled events, but never checked whether an
-        // address change follows them. The damage was measured on the
-        // Linux daemon (there via `ip monitor`); THAT it has the same
-        // gap here is proven in the code, the event rate of
-        // `connectivity_plus` on a real device is not.
-        final addresses = await dialableLocalAddresses();
-        if (!isRealNetworkChange(
-            before: _lastDialableAddresses, after: addresses)) {
-          debugPrint('[connectivity] event without address change — '
-              'discarded (${addresses.join(',')})');
-          return;
+      // ── THE EVENT ONLY (S407-LB-P14, finding A-1) ───────────────────
+      //
+      // Until S407 this listener kept its own settling delay (P4: hotel
+      // Wi-Fi, captive portals), its own last address list — EMPTY at the
+      // start, so the first event after the start (connectivity_plus
+      // reports the current state when listened to) ran the whole edge for
+      // nothing — its own comparison (S380) and its own guard against two
+      // edges at once (`_networkChangeRunning`). All four lie in the
+      // delivery layer now (`networkEvent` → `NetworkWatch`,
+      // `mycelium/lib/network_watch.dart`): it settles the burst, compares
+      // with the addresses it read at the host's start, writes the change
+      // line into the host's log file, and lets no two edges run at once.
+      // In the IPC case there is no host in this process — the daemon
+      // detects the change itself.
+      final host = _host;
+      if (host == null) return;
+      unawaited(networkEvent(host,
+              reason: 'connectivity',
+              report: (m) => _connectivityLog('[main] $m'))
+          .then((ran) {
+        if (!ran) {
+          _connectivityLog('[connectivity] event without address change — '
+              'discarded', debug: true);
         }
-        debugPrint('[connectivity] address change: '
-            '${_lastDialableAddresses.join(',')} → ${addresses.join(',')}');
-        _lastDialableAddresses = addresses;
-        _networkChangeRunning = true;
-        try {
-          // ONE CALL, BOTH PARTS. `service.onNetworkChanged` does
-          // the service part (local addresses, rendezvous, backoff,
-          // resends) AND calls the seam `v41OnNetworkChanged`, i.e.
-          // the node part. `triggerNodeReset` does NOT control that — the
-          // parameter stems from the V3 era and separated callers that
-          // had already triggered the node themselves; this double path
-          // no longer exists (see `CleonaService.onNetworkChanged`).
-          if (_inProcessServices.isNotEmpty) {
-            // ── THE NODE PART ONCE (S376 P5 finding 5; S387 mycelium) ─
-            //
-            // `Host.networkChanged` (§11.8, §22.7.1) — once per event
-            // for the whole process; the services below only with
-            // `triggerNodeReset: false`.
-            final host = _host;
-            if (host != null) {
-              try {
-                await host.networkChanged();
-              } catch (e) {
-                debugPrint('[main] mycelium network change (node part): $e');
-              }
-              // The manifest slot AFTER the end of the network change (S388, M1+).
-              unawaited(_updateManifestAsk(moment: 'network change'));
-              // The port mapping at the same edge (§7.3, task D) —
-              // NOT awaited, for the same reason as at start
-              // (RFC 6886 backoff).
-              unawaited(() async {
-                try {
-                  await portMappingToEdge(
-                    host,
-                    baseDir: _baseDir,
-                    key: hostKey(_baseDir, _masterSeedForHost),
-                    report: (m) => debugPrint('[main] $m'),
-                  );
-                } catch (e) {
-                  debugPrint('[main] port mapping (network change): $e');
-                }
-              }());
-            }
-            for (final service in _inProcessServices.values) {
-              service.onNetworkChanged(triggerNodeReset: false);
-            }
-          } else {
-            // SINGLE SERVICE, hence with the node part: here there is no
-            // loop that could multiply it. In the IPC case
-            // the seam is `null` anyway — the node stands in the daemon.
-            await _service?.onNetworkChanged();
-          }
-        } finally {
-          _networkChangeRunning = false;
-        }
-      });
+      }));
     });
   }
 
@@ -2485,6 +2607,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       await MediaVault.instance.start(profileDir: _baseDir);
     } catch (e) {
+      // Into the log file as well (S407-IOS-BILD): on a phone the console is
+      // not readable afterwards.
+      CLogger.get('mediavault', profileDir: _baseDir).error(
+          'media store: $e — attachments stay invisible in this session '
+          '(but they lie intact and encrypted).');
       debugPrint('[main] media store: $e — attachments stay invisible in this '
           'session (but they lie intact and encrypted).');
     }
@@ -2514,6 +2641,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final connected =
           await ipcClient.connect(reconnect: _daemonConnectedBefore);
 
+      if (connected && await _versionRestore(ipcClient)) return;
+
       if (connected) {
         _daemonConnectedBefore = true;
         _ipcClient = ipcClient;
@@ -2525,7 +2654,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // receiver yet.
         _uiLanguageReport();
 
-        ipcClient.onStateChanged = () => notifyListeners();
+        ipcClient.onStateChanged = () {
+          _guiAdopt();
+          notifyListeners();
+        };
         ipcClient.onNewMessage = (convId, msg) => notifyListeners();
         ipcClient.onContactRequestReceived = (nodeId, name) => notifyListeners();
         ipcClient.onContactAccepted = (nodeId) => notifyListeners();
@@ -2587,6 +2719,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           _updateProgress = progress;
           notifyListeners();
         };
+        // S407-E7: the fast reconnect reached a daemon of another version —
+        // after an update the daemon restarted from the new bundle while
+        // this process runs the old code. Restore one version first.
+        ipcClient.onVersionMismatch = (_) => unawaited(_versionRestore(ipcClient));
         ipcClient.onDaemonDied = () {
           _guiUpdateLog('onDaemonDied: updateState=${_updateState.name}, applyPending=$_updateApplyPending');
           if (_updateApplyPending || _updateState == BinaryUpdateState.ready) {
@@ -2844,9 +2980,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
     // Create identity contexts (shared sequence — S106 fix)
     final masterSeed = mgr.loadMasterSeed();
-    // Kept for the network-change edge of the port mapping (task D),
-    // which lies in a different method body.
-    _masterSeedForHost = masterSeed;
     final firstId = identities.first;
 
     final primaryCtx = await IdentityContext.createFromIdentity(
@@ -2918,10 +3051,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Here stood ~165 lines: `host.wireReceive(...)` with the
     // ApplicationFrame dispatcher (KEM try loop over all hosted
     // identities, `serviceRecency` heuristic) and the infrastructure
-    // switch with 22 `MessageTypeV3` selectors.
+    // switch with 22 `MessageType` selectors.
     //
     // It is a selector list over a wire that no longer exists:
-    // `InfrastructureFrameV3`/`NetworkPacketV3` arose in
+    // `InfrastructureFrameV3`/`NetworkPacket` arose in
     // `CleonaNode`, and the handlers on the service side fell with the ten
     // `cleona_service_v3_*.dart`.
     //
@@ -2978,8 +3111,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (_sessionReducedMode) service.reducedMode = true;
       _wireServiceCallbacks(service);
       await service.startService();
-      _inProcessServices[ctx.userIdHex] = service;
-      debugPrint('[main] Service started: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
+      _inProcessServiceAdd(ctx.userIdHex, service);
+      debugPrint('[main] Service started:${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
 
     // ── THE ONE HOST, ONE MAILBOX PER IDENTITY (S387) ─────────────
@@ -2999,15 +3132,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _meteredDetermine(await Connectivity().checkConnectivity());
     for (var attempt = 0;; attempt++) {
       try {
+        final deviceKey = hostKey(_baseDir, masterSeed);
         _host = await hostStart(
           services: _inProcessServices.values.toList(),
           baseDir: _baseDir,
-          key: hostKey(_baseDir, masterSeed),
+          key: deviceKey,
           port: devicesPort,
-          // Lane 3 (§21.3.3, D-30, D-32): desktop 1 GB, phone 100 MB.
-          bulkCacheBytes: bulkCacheBytesForPlatform(),
+          // Lane 3 (§21.3.3, D-30, D-32): the user's tier, else desktop
+          // 1 GB, phone 100 MB.
+          bulkCacheBytes: bulkCacheBytesConfigured(_baseDir, deviceKey),
           bulkClass: bulkClassForPlatform(),
           bulkServeAllowed: bulkServeAllowedNow,
+          askRouter: true, // §7.3: the host asks the router at its edges
           report: hostLog.info,
           traceReport: hostLog.trace, // beta diagnosis: log file only (S406)
         );
@@ -3030,21 +3166,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // The moment "start" (S388): ONE service per process carries the update.
     attachUpdateToService(_host!, _inProcessServices.values.first,
         moment: (m) => _updateManifestAsk(moment: m), report: hostLog.info);
-    // The port mapping (task D, §7.3): asked at this edge, NOT
-    // awaited — the RFC 6886 backoff takes in the worst case
-    // eight and a half minutes, and the node start must not wait for it.
-    unawaited(() async {
-      try {
-        await portMappingToEdge(
-          _host!,
-          baseDir: _baseDir,
-          key: hostKey(_baseDir, _masterSeedForHost),
-          report: hostLog.info,
-        );
-      } catch (e) {
-        debugPrint('[main] port mapping: $e');
-      }
-    }());
+    // The port mapping (task D, §7.3) is the host's own since S408 P15
+    // (A-4): asked at its edge start inside `hostStart`, not awaited.
     // The release in the healthy case: the port is assigned, a wake-up
     // may run again. The `finally` wrapper in [_initInProcess] releases
     // the same hold once more on every exit — releasing twice
@@ -3073,6 +3196,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _service = _inProcessServices[activeHex] ?? _inProcessServices.values.first;
 
     _isInitialized = true;
+    // Every identity is in: now the badge sum is complete (the calls during
+    // the start were held back, see `_updateAndroidBadge`).
+    _updateAndroidBadge();
     _startConnectivityMonitor();
     // `_queryPublicIp()` (§27, ipify) lay in `main_v3_address.dart` and
     // is deleted with the V3 address model — the file header itself said
@@ -3131,6 +3257,27 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Every 60s: an INFO-level beat marker so filtered log viewers
         // still see the app is alive.
         debugPrint('[heartbeat] $msg');
+      }
+      // ── A RETURN FROM SLEEP IS A NETWORK CHANGE (S407-LB-P13, A-2) ───
+      //
+      // v4_2 §11.8.2: "network change — … a return from sleep …". The node
+      // runs here on Android, iOS and macOS without a daemon. While the
+      // device sleeps or the OS freezes the process (iOS in the
+      // background, Android in Doze) no tick runs and the wall clock goes
+      // on, so this tick sees the whole absence. Away longer than the
+      // keep-alive interval, the edge runs. No new clock: this heartbeat
+      // ran before. A return to the foreground without such an absence
+      // (Android, foreground service kept the process running) is no sleep
+      // and runs no edge; its own work (collection, §8.2) stays in
+      // `didChangeAppLifecycleState`. Since S407-LB-P14 the delivery layer
+      // decides and logs it (`networkHeartbeat` → `NetworkWatch.heartbeat`)
+      // and lets it never run beside another edge.
+      final host = _host;
+      if (host != null) {
+        networkHeartbeat(host,
+            gap: Duration(milliseconds: dtMs),
+            period: const Duration(seconds: 5),
+            report: (m) => _connectivityLog('[main] $m'));
       }
     });
   }
@@ -3312,18 +3459,61 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Sum of unreadCount across every in-process identity service. Drives the
-  /// system Launcher-Badge (#U3 — single counter for a multi-identity daemon).
+  /// The app icon badge and the message notifications on Android, derived
+  /// from the unread counts of EVERY in-process identity (#U3 — one icon,
+  /// one number; S410 E1 — a badge only while something is unread, see
+  /// `android_badge.dart`).
+  ///
+  /// The result is a function of [_inProcessServices]. It is therefore
+  /// recomputed on both kinds of change: a member's count changes (its
+  /// `onBadgeCountChanged`, wired in [_wireServiceCallbacks]) and the
+  /// membership changes ([_inProcessServiceAdd], [_inProcessServiceRemove])
+  /// — the counterpart of `TrayStatus.registerIdentity`/`unregisterIdentity`
+  /// in the daemon. Until S410-F the membership change was missing: a
+  /// deleted identity's unread items stayed in the badge, and its
+  /// notifications stayed on screen.
+  ///
+  /// Not before the start has put every identity in ([_isInitialized]):
+  /// a sum over part of the identities would cancel the notifications of
+  /// the ones not yet started. The start computes it once at its end.
   void _updateAndroidBadge() {
     if (!Platform.isAndroid) return;
-    var total = 0;
-    for (final svc in _inProcessServices.values) {
-      for (final conv in svc.conversations.values) {
-        total += conv.unreadCount;
-      }
-    }
+    if (!_isInitialized) return;
+    final badge = AndroidBadge.of(
+        _inProcessServices.values.map((svc) => svc.conversations));
     const channel = MethodChannel('chat.cleona/notification');
-    channel.invokeMethod('updateBadge', {'count': total});
+    channel.invokeMethod('updateBadge', badge.toArguments());
+  }
+
+  /// An identity's service joins the process. The one place where
+  /// [_inProcessServices] gains a member (apart from the map literal).
+  void _inProcessServiceAdd(String nodeIdHex, CleonaService service) {
+    _inProcessServices[nodeIdHex] = service;
+    _updateAndroidBadge();
+  }
+
+  /// An identity's service leaves the process (deleted here or from another
+  /// own device). The one place where [_inProcessServices] loses a member
+  /// while the app runs; `dispose` clears it as a whole and leaves the
+  /// notifications standing on purpose.
+  ///
+  /// The steps both deletion paths share, in their order: out of the map
+  /// (and the badge recomputed over the remaining ones), stop, and
+  /// UNREGISTER THE MAILBOX OF THIS IDENTITY (S387) — without that the host
+  /// would keep delivering to a stopped service. The last mailbox stays at
+  /// the node until `_hostStop` stops the whole host.
+  Future<CleonaService?> _inProcessServiceRemove(String nodeIdHex) async {
+    final service = _inProcessServices.remove(nodeIdHex);
+    _updateAndroidBadge();
+    if (service != null) {
+      await service.stop();
+    }
+    _inProcessContexts.remove(nodeIdHex);
+    final host = _host;
+    if (host != null && service != null) {
+      serviceDeregister(host, service, report: debugPrint);
+    }
+    return service;
   }
 
   /// S398-W4 — the two surface holders that had no feeder.
@@ -3347,6 +3537,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (!identical(service, _service)) return;
       ArchiveRetrievalState.instance.reportProgress(messageId, sent, total);
     };
+    // The tier-2 preview (§21.6, S407-VORSCHAU), asked when a tile draws.
+    // Reads `_service` at call time, like the sender above.
+    ArchivePreviewCache.instance.loader = (messageId) async {
+      final s = _service;
+      if (s == null) return null;
+      return s.getArchivePreview(messageId);
+    };
     service.onArchiveRetrieveDone = (messageId, ok) {
       ArchiveRetrievalState.instance.finish(messageId);
       if (identical(service, _service)) notifyListeners();
@@ -3360,7 +3557,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Wires standard callbacks on a CleonaService (avoids duplication).
   void _wireServiceCallbacks(CleonaService service) {
-    service.onStateChanged = () => notifyListeners();
+    // The words of an invitation notification (S407 G-2) in the language
+    // chosen in the app; before it is known, the system's.
+    service.notificationWords = (key) =>
+        _appLocale?.get(key) ?? trayTranslate(key, trayLocaleCode());
+    service.onStateChanged = () {
+      _guiAdopt();
+      notifyListeners();
+    };
     service.onNewMessage = (convId, msg) => notifyListeners();
     service.onContactRequestReceived = (nodeId, name) => notifyListeners();
     service.onContactAccepted = (nodeId) => notifyListeners();
@@ -3518,7 +3722,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // The system Launcher-Badge is a single number per app, so the last-
       // writer-wins per-identity callback (#U3) showed only the firing
       // identity's count and lost the others.
-      service.onBadgeCountChanged = (_) => _updateAndroidBadge();
+      //
+      // Only while the service is a member: `startService` reports its
+      // loaded count BEFORE the service is put into the map (that is done
+      // by [_inProcessServiceAdd], which recomputes), and a removed,
+      // stopped service must not bring its count back.
+      service.onBadgeCountChanged = (_) {
+        if (_inProcessServices.containsValue(service)) {
+          _updateAndroidBadge();
+        }
+      };
 
       // Sound playback via platform channel
       service.notificationSound.onPlaySoundAndroid = (filename) async {
@@ -3631,17 +3844,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<bool> deleteIdentityAndroid(String nodeIdHex) async {
     if (_inProcessServices.length <= 1) return false;
 
-    final service = _inProcessServices.remove(nodeIdHex);
-    if (service != null) {
-      await service.stop();
-    }
-    _inProcessContexts.remove(nodeIdHex);
-    // UNREGISTER THE MAILBOX OF THIS IDENTITY (S387). Without this line
-    // the host would keep delivering to a stopped service.
-    final host = _host;
-    if (host != null && service != null) {
-      serviceDeregister(host, service, report: debugPrint);
-    }
+    // Out of the map, badge, stop, mailbox (S387, S410-F).
+    final service = await _inProcessServiceRemove(nodeIdHex);
 
     // Switch _service if we just deleted the active one
     if (_service == service && _inProcessServices.isNotEmpty) {
@@ -3749,7 +3953,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           // connection: the connection collects immediately.
           serviceRegister(host, service);
           planeDRegister(host, service);
-          _inProcessServices[ctx.userIdHex] = service;
+          _inProcessServiceAdd(ctx.userIdHex, service);
         }
         debugPrint('[main] Registry recovery: ${created.length} identities restored in-process');
         notifyListeners();
@@ -3953,12 +4157,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           navState.push(MaterialPageRoute(
             builder: (_) => ChangeNotifierProvider.value(
               value: this,
-              child: ChatScreen(
-                conversationId: convId,
-                displayName: resolved.displayName,
-                isGroup: resolved.isGroup,
-                isChannel: resolved.isChannel,
-              ),
+              child: systemChannelPage(
+                      _service!, convId, resolved.displayName) ??
+                  ChatScreen(
+                    conversationId: convId,
+                    displayName: resolved.displayName,
+                    isGroup: resolved.isGroup,
+                    isChannel: resolved.isChannel,
+                  ),
             ),
           ));
         }());
@@ -4131,8 +4337,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         break;
 
       case 'reset_donation_banner':
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove('donation_banner_dismissed_until');
+        await _service?.setGuiDeviceSetting(kGuiFieldDonationBannerUntil, null);
         notifyListeners();
         break;
 
@@ -4387,7 +4592,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // As above: without a mailbox the new identity would be mute (S387).
         serviceRegister(host, service);
         planeDRegister(host, service);
-        _inProcessServices[ctx.userIdHex] = service;
+        _inProcessServiceAdd(ctx.userIdHex, service);
 
         // Save updated nodeIdHex
         final identities = mgr.loadIdentities();
@@ -4427,14 +4632,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   void _hostStop() {
     _delivery?.close();
     _delivery = null;
-    // The port mapping (task D): MANDATORY before stopping — its
-    // own renewal timer otherwise keeps the Dart VM alive. Like
-    // `_auslieferung?.close()` next to it not awaited: `_wirtStoppen`
-    // is synchronous (callers include `State.dispose()`, which allows no
-    // asynchronous override).
+    // The port mapping is laid down by `Host.stop` itself (S408 P15). Not
+    // awaited: this stop is synchronous (callers include `State.dispose()`).
     final hostBeforeTheStop = _host;
     if (hostBeforeTheStop != null) {
-      unawaited(portMappingLayDown(hostBeforeTheStop));
       // Plane D off (S398-W2) — synchronous part first, like the mapping.
       unawaited(
           planeDDetach(hostBeforeTheStop, _inProcessServices.values.toList()));
@@ -4463,18 +4664,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // its gate `_inProcessServices.length <= 1` (owner
       // decision (b) of 09.09.2026) and without a broadcast to the contacts
       // (the deletion came from outside, working rule #5).
-      final service = _inProcessServices.remove(nodeIdHex);
+      // Leaves the process BEFORE `_isInitialized` may fall below (last
+      // identity): the badge is recomputed over the remaining ones — over
+      // none, if it was the last, which cancels every message notification.
+      // Out of the map, badge, stop, mailbox (S387). The last mailbox stays
+      // at the node until `_hostStop` below stops the whole host.
+      final service = await _inProcessServiceRemove(nodeIdHex);
       final warActive = identical(_service, service);
-      if (service != null) {
-        await service.stop();
-      }
-      _inProcessContexts.remove(nodeIdHex);
-      // Unregister the mailbox (S387). The last one stays at the node until
-      // `_wirtStoppen` below stops the whole host.
-      final host = _host;
-      if (host != null && service != null) {
-        serviceDeregister(host, service, report: debugPrint);
-      }
 
       final remaining = remoteDeletionRemoveEntry(
         nodeIdHex: nodeIdHex,
@@ -4518,10 +4714,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _appLocale?.removeListener(_uiLanguageReport);
+    _appLocale?.removeListener(_androidNotificationTextsSend);
     _showTriggerTimer?.cancel();
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
-    _networkChangeDebounce?.cancel();
     _connectivitySub?.cancel();
     final home = AppPaths.home;
     try { File('$home/.cleona/gui.lock').deleteSync(); } catch (_) {}
@@ -4553,3 +4749,22 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 // persistent entry supply (`95b2b104`) the same purpose without V3 gives
 // the same information — moved to `lib/core/tagline/v41_attach.dart`
 // (`vorratUnicastTargets`), source now `v41.entries.dialCandidates()`.
+
+/// Removes the GUI choices that until S407 lay in the platform's
+/// `SharedPreferences` file — appearance, language, donation banner. They
+/// live in the device database now (`gui_device_setting.dart`, v4_2 §4.5.3);
+/// 4.2 takes nothing over from old profiles (CLAUDE.md "4.2 ist von V3
+/// vollstaendig getrennt"), so the old values are dropped, not moved. This is
+/// the only remaining use of `SharedPreferences` (gate
+/// `scripts/check-no-file-config.sh`).
+void legacyGuiPrefsSweep() {
+  SharedPreferences.getInstance().then((prefs) async {
+    for (final key in const [
+      'cleona_theme_mode',
+      'cleona_locale',
+      'donation_banner_dismissed_until',
+    ]) {
+      if (prefs.containsKey(key)) await prefs.remove(key);
+    }
+  }).catchError((Object _) {});
+}

@@ -158,6 +158,21 @@ class UpdatePartial {
   bool get isComplete => _resolved == sourceBlocks;
   String get objectPath => '$dir/object';
 
+  /// How far the object has come, 0.0 … 1.0 — 1.0 only when complete
+  /// (S407-N5: the visitor page showed 0 until the check).
+  ///
+  /// Counted are the blocks that carry information: the source blocks
+  /// resolved plus the blocks waiting to resolve one. [resolved] alone is no
+  /// measure: after 1.0 k received blocks only 7.6 % are resolved and the
+  /// object completes at 1.05 k (header); resolved + waiting stands near
+  /// 1.0 k there. A waiting block that resolves moves from one count to the
+  /// other, so the sum does not jump.
+  double get progress {
+    if (isComplete) return 1.0;
+    final f = (_resolved + _waiting) / sourceBlocks;
+    return f < 0.99 ? f : 0.99;
+  }
+
   /// One line for reports and the diagnosis.
   String describe() => '$_resolved/$sourceBlocks resolved, $_waiting waiting, '
       '$_records block(s) stored';

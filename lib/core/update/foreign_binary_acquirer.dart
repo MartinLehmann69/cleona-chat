@@ -1,38 +1,36 @@
 /// On-demand acquisition of a binary for a platform this node does not run
-/// (Architecture §19.6.4).
+/// (v4_2 §26.6.3 "Demand-driven foreign-platform fetch").
 ///
 /// Why this exists: an invite link points at the INVITER's node, not at a
-/// bootstrap. A node self-seeds only its own platform, so a cross-platform
+/// bootstrap. A node keeps only its own platform, so a cross-platform
 /// invite (Android inviter, Linux visitor) hits a 404 on
 /// `GET /cleona/binary/linux` and dead-ends — the visitor is pushed to the
-/// external `f=` fallback, i.e. exactly the gatekeeper §19.6 exists to avoid.
+/// external `f=` fallback, i.e. exactly the gatekeeper §26.6 exists to avoid.
 /// This component lets the serving node fetch the missing platform's binary
 /// from the network, verify it against the maintainer-signed manifest, and
 /// serve it.
 ///
-/// Deliberately kept OUT of [BinaryUpdateManager]:
-///   * That manager carries a single shared mutable state (`_state`,
-///     `_targetPlatform`, `_targetVersion`, `_progress`, `_cancelled`). Two
-///     concurrent acquisitions for different platforms would corrupt each
-///     other's status, and `cancel()` would kill both.
-///   * On a successful `verify()` it fires `onUpdateReady` and copies the
-///     result into `update/verified/`, which feeds THIS node's installer. A
-///     foreign binary must never reach that path — an Android APK is a ZIP,
-///     and the desktop installer's is-zip branch would happily unpack it over
-///     the application directory.
+/// Where it comes from (V9 A1, owner decision 08.10.2026): the same
+/// in-network collection as the node's own update — the object named by the
+/// manifest's hash for that platform, asked of the node's holders
+/// ([UpdateCarrier.foreignFetch]). Until then it looked the platform up on
+/// Nostr relays (`BinaryRendezvousManager`, a 4-hour republish) and fetched
+/// it over HTTP; §26.6.4 says the binary distribution uses no external
+/// rendezvous channel, and that path is gone.
+///
+/// Deliberately kept OUT of [BinaryUpdateManager] and the update target:
+///   * The carrier fetches it with a partial state of its own; it never
+///     becomes the update target, never deletes the target's state.
+///   * A foreign binary must never reach `update/verified/` — an Android APK
+///     is a ZIP, and the desktop installer's is-zip branch would happily
+///     unpack it over the application directory. It goes to the fragment
+///     store under its platform, marked `.ondemand`.
 ///
 /// Always active: there is no off switch. The acquisition is bounded instead
 /// of gated — one at a time node-wide, one foreign binary stored, 24 h TTL,
 /// excluded from the bootstrap storage-budget exemption — and everything it
 /// fetches is verified against the maintainer-signed manifest before it is
 /// stored or served.
-///
-/// Full binaries only: sources advertising `hasFullBinary` are used, Reed-
-/// Solomon reassembly is not attempted. A node holding a foreign platform's
-/// complete binary is precisely what we are looking for (bootstrap-class
-/// nodes hold all platforms, §19.6.1 principle 5), and skipping reassembly
-/// avoids both the shared-state problem above and the padding-trim size
-/// dependency.
 library;
 
 import 'dart:async';
@@ -40,14 +38,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/core/rendezvous/binary_rendezvous_manager.dart';
-import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
-    show EndpointAddress;
-import 'package:cleona/core/update/binary_fetch_client.dart';
-import 'package:cleona/core/update/binary_fragment_store.dart';
+import 'package:cleona/core/update/update_binary_store.dart';
+import 'package:cleona/core/update/update_carrier.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 
 /// Platforms a visitor may request. The path segment reaches the fragment
@@ -69,11 +65,15 @@ const Duration kForeignBinaryTtl = Duration(hours: 24);
 /// After a failed acquisition, the same platform is not retried for this long.
 const Duration kForeignAcquireCooldown = Duration(minutes: 10);
 
+/// The share of the progress bar that collecting fills; checking the hash
+/// and the signature takes the rest (the visitor page, §26.6.5).
+const double kForeignCollectShare = 0.9;
+
 /// Marker file written next to a foreign binary so the GC can tell it apart
 /// from this node's own seeded platform.
 const String _onDemandMarker = '.ondemand';
 
-enum ForeignAcquireState { idle, resolving, downloading, verifying, ready, failed }
+enum ForeignAcquireState { idle, downloading, verifying, ready, failed }
 
 class ForeignAcquireStatus {
   final ForeignAcquireState state;
@@ -90,9 +90,11 @@ class ForeignAcquireStatus {
 }
 
 class ForeignBinaryAcquirer {
-  final BinaryFragmentStore _store;
-  final BinaryFetchClient _fetch;
-  final BinaryRendezvousManager? Function() _rendezvous;
+  final UpdateBinaryStore _store;
+
+  /// The update carrier of the delivery layer — set after the host starts,
+  /// hence a function; `null` until then.
+  final UpdateCarrier? Function() _carrier;
   final CLogger _log;
 
   final Map<String, ForeignAcquireStatus> _status = {};
@@ -100,24 +102,49 @@ class ForeignBinaryAcquirer {
   Future<bool>? _inFlight;
   String? _inFlightPlatform;
 
+  /// The object being collected for [_inFlightPlatform] — its progress is
+  /// read off the carrier's partial state when the status is asked.
+  Uint8List? _inFlightObject;
+
   /// Injected clock so tests can drive TTL and cooldown without sleeping.
   final DateTime Function() _now;
 
+  /// The key the binary signatures are checked against — the maintainer's;
+  /// injectable so a smoke can sign a test object with its own pair.
+  final Uint8List _maintainerKey;
+
   ForeignBinaryAcquirer({
     required this._store,
-    required BinaryFetchClient fetchClient,
-    required this._rendezvous,
+    required this._carrier,
     required String profileDir,
     CLogger? logger,
     DateTime Function()? now,
-  })  : _fetch = fetchClient,
-        _log = logger ?? CLogger.get('foreign-bin', profileDir: profileDir),
-        _now = now ?? DateTime.now;
+    Uint8List? maintainerKey,
+  })  : _log = logger ?? CLogger.get('foreign-bin', profileDir: profileDir),
+        _now = now ?? DateTime.now,
+        _maintainerKey = maintainerKey ??
+            hexToBytes(UpdateChecker.maintainerPublicKeyHex);
 
   // --- Status --------------------------------------------------------------
 
-  ForeignAcquireStatus statusFor(String platform) =>
-      _status[platform] ?? const ForeignAcquireStatus(ForeignAcquireState.idle);
+  /// While collecting, the progress is read off the carrier's partial state
+  /// of the object (S407-N5): until then it stood at 0 until the check set
+  /// [kForeignCollectShare]. Read on asking — the visitor page asks; no
+  /// clock and no packet of its own.
+  ForeignAcquireStatus statusFor(String platform) {
+    final s = _status[platform] ??
+        const ForeignAcquireStatus(ForeignAcquireState.idle);
+    final object = _inFlightObject;
+    if (s.state != ForeignAcquireState.downloading ||
+        platform != _inFlightPlatform ||
+        object == null) {
+      return s;
+    }
+    final fraction = _carrier()?.foreignProgress(object);
+    if (fraction == null) return s;
+    return ForeignAcquireStatus(ForeignAcquireState.downloading,
+        progress: kForeignCollectShare * fraction.clamp(0.0, 1.0));
+  }
 
   void _set(String platform, ForeignAcquireState s,
       {double progress = 0.0, String? error}) {
@@ -179,66 +206,76 @@ class ForeignBinaryAcquirer {
       return _fail(platform, 'Malformed signature in manifest for $platform.');
     }
 
-    _set(platform, ForeignAcquireState.resolving);
-    final brm = _rendezvous();
-    if (brm == null) {
-      return _fail(platform, 'Binary discovery is not available on this node.');
-    }
-
-    List<ResolvedBinaryEndpoint> endpoints;
+    final Uint8List object;
     try {
-      endpoints = await brm.resolve(platform);
+      object = hexToBytes(expectedHash);
     } catch (e) {
-      return _fail(platform, 'Could not look up sources: $e');
+      return _fail(platform, 'Malformed hash in manifest for $platform.');
     }
-
-    final sources = <EndpointAddress>[];
-    for (final ep in endpoints) {
-      if (!ep.hasFullBinary) continue;
-      if (ep.version != version) continue;
-      sources.addAll(ep.addresses);
+    if (object.length != 32 || expectedSize <= 0) {
+      return _fail(platform, 'Malformed hash/size in manifest for $platform.');
     }
-    if (sources.isEmpty) {
-      return _fail(platform,
-          'No node currently offers a complete $platform binary for v$version.');
+    final carrier = _carrier();
+    if (carrier == null) {
+      return _fail(platform, 'The network is not ready on this node yet.');
     }
 
     _set(platform, ForeignAcquireState.downloading);
-    for (final addr in sources) {
-      Uint8List? bytes;
-      try {
-        bytes = await _fetch.fetch(addr, platform, -1, expectedSize: expectedSize);
-      } catch (e) {
-        _log.debug('fetch from ${addr.ip}:${addr.port} failed: $e');
-        continue;
-      }
-      if (bytes == null || bytes.length != expectedSize) continue;
-
-      _set(platform, ForeignAcquireState.verifying, progress: 0.9);
-      final hash = SodiumFFI().sha256(bytes);
-      if (bytesToHex(hash).toLowerCase() != expectedHash.toLowerCase()) {
-        _log.warn('Hash mismatch for $platform from ${addr.ip} — discarded');
-        continue;
-      }
-      final pk = hexToBytes(UpdateChecker.maintainerPublicKeyHex);
-      if (!SodiumFFI().verifyEd25519(hash, signature, pk)) {
-        _log.warn('Maintainer signature invalid for $platform — discarded');
-        continue;
-      }
-
-      try {
-        await _evictOtherForeign(platform);
-        await _store.storeComplete(platform, version, bytes);
-        _markOnDemand(platform, version);
-      } catch (e) {
-        return _fail(platform, 'Could not store the downloaded binary: $e');
-      }
-      _set(platform, ForeignAcquireState.ready, progress: 1.0);
-      _log.info('Acquired $platform v$version on demand '
-          '(${bytes.length} bytes) from ${addr.ip}:${addr.port}');
-      return true;
+    _inFlightObject = object;
+    String? path;
+    try {
+      path = await carrier.foreignFetch(
+          contentHash: object, length: expectedSize);
+    } catch (e) {
+      return _fail(platform, 'Collecting $platform failed: $e');
+    } finally {
+      _inFlightObject = null;
     }
-    return _fail(platform, 'No source delivered a verifiable $platform binary.');
+    if (path == null) {
+      return _fail(platform,
+          'No neighbour delivered the $platform binary for v$version.');
+    }
+
+    // The carrier checked the SHA-256 of the object; the manifest's hash is
+    // checked here once more, independently, before the signature — the
+    // store must hold only what the maintainer signed.
+    _set(platform, ForeignAcquireState.verifying,
+        progress: kForeignCollectShare);
+    final Uint8List hash;
+    try {
+      hash = await sha256OfFile(path);
+    } catch (e) {
+      carrier.foreignTaken(object);
+      return _fail(platform, 'Could not read the collected binary: $e');
+    }
+    if (bytesToHex(hash).toLowerCase() != expectedHash.toLowerCase() ||
+        !SodiumFFI().verifyEd25519(hash, signature, _maintainerKey)) {
+      carrier.foreignTaken(object);
+      _log.warn('Collected $platform binary does not match the signed '
+          'manifest — discarded');
+      return _fail(platform, 'The collected $platform binary is not verifiable.');
+    }
+
+    try {
+      await _evictOtherForeign(platform);
+      final complete = _store.completePath(platform, version);
+      File(complete).parent.createSync(recursive: true);
+      try {
+        File(path).renameSync(complete);
+      } on FileSystemException {
+        // Another file system: copy, then the state below removes the source.
+        File(path).copySync(complete);
+      }
+      _markOnDemand(platform, version);
+    } catch (e) {
+      carrier.foreignTaken(object);
+      return _fail(platform, 'Could not store the collected binary: $e');
+    }
+    carrier.foreignTaken(object);
+    _set(platform, ForeignAcquireState.ready, progress: 1.0);
+    _log.info('Acquired $platform v$version on demand ($expectedSize bytes) '
+        'from the network');
+    return true;
   }
 
   bool _fail(String platform, String message) {

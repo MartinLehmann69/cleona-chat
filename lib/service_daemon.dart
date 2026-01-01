@@ -1,18 +1,19 @@
 import 'package:cleona/core/calls/plane_d_host.dart';
+import 'package:cleona/core/calls/voice_lab_tone.dart';
 import 'package:cleona/core/service/mycelium_seam.dart';
 import 'package:cleona/core/storage/device_store.dart';
+import 'package:cleona/core/storage/device_state_legacy.dart';
 import 'package:cleona/core/update/data_port_http.dart';
 import 'package:cleona/core/util/host_interfaces.dart';
 import 'package:cleona/core/platform/process_hardening.dart';
 import 'package:mycelium/host.dart';
-import 'package:mycelium/node_post_box.dart' show NodePostBox;
+import 'package:mycelium/host_codes.dart' show HostCodes;
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/config/network_channel.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -25,17 +26,17 @@ import 'package:cleona/core/ipc/ipc_server.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/log/redacted_console.dart';
-import 'package:cleona/core/util/local_addresses.dart'
-    show dialableLocalAddresses, isRealNetworkChange;
 import 'package:cleona/core/tray/native_tray.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
 import 'package:cleona/core/calendar/reminder_text.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/calendar/sync/caldav_server_setting.dart';
 import 'package:cleona/core/platform/desktop_notifier.dart';
+import 'package:cleona/core/platform/windows_firewall.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
@@ -135,6 +136,9 @@ void main(List<String> args) {
 
     zoneLogBaseDir = config.baseDir;
     final log = CLogger.get('daemon', profileDir: config.baseDir);
+    // Where a lab daemon finds its lab tone switch (`voice_lab_tone.dart`);
+    // only this process kind sets it, so no other process has a lab tone.
+    VoiceLabTone.deviceDir = config.baseDir;
 
     log.info('Starting Cleona daemon...');
     log.info('Base dir: ${config.baseDir}');
@@ -145,6 +149,10 @@ void main(List<String> args) {
     // flush-timer doesn't swallow the log. Critical for diagnosing gui-00
     // 0.06-style failures where the daemon log appears empty post-mortem.
     await CLogger.flushAll();
+
+    // S410, I-6: every library the daemon opens by name is there — or it
+    // says which one is missing and ends, before anything else runs.
+    await _exitIfNativeLibrariesMissing(log);
 
     // ── Single-Instance Guard ────────────────────────────────────────
     Directory(config.baseDir).createSync(recursive: true);
@@ -226,7 +234,7 @@ void main(List<String> args) {
     // ~/.cleona/Cleona2 both started, inbound + GUI/IPC state diverged).
     // Bypass only via --ignore-single-instance in BETA builds (lab/jury-swarm).
     if (config.ignoreSingleInstance &&
-        NetworkSecret.channel == NetworkChannel.beta) {
+        activeNetworkChannel == NetworkChannel.beta) {
       log.info('--ignore-single-instance (beta): machine-global guard skipped.');
     } else {
       // Path MUST be deterministic across launch contexts (start.sh, systemd,
@@ -271,6 +279,47 @@ void main(List<String> args) {
       }
       // _machineGlobalLockRaf is top-level → never GC'd → lock held for the
       // entire process lifetime.
+    }
+
+    // §26.5: "automatic recovery if the app crashes within 30 s of an
+    // update" — as early as possible, before the code that crashed runs
+    // again. Until S407 the marker was only logged and `rollback` had no
+    // caller (S392-11). The marker lies where `applyDesktopUpdate` writes
+    // it (`AppPaths.dataDir`, `null` here), not under `config.baseDir`.
+    // On Windows the running .exe cannot be overwritten in place: as for the
+    // update itself, a helper script restores the bundle after this process
+    // ended and starts daemon and window again.
+    final updateStart = BinaryUpdateManager.startAfterUpdate(null);
+    if (updateStart == UpdateStart.crashed) {
+      final pending = BinaryUpdateManager.checkUpdatePending(null);
+      log.warn('[update] the previous start of v${pending?['version']} ended '
+          'within 30 s without an orderly shutdown — rolling back (§26.5)');
+      if (Platform.isWindows) {
+        final bat = BinaryUpdateManager.writeWindowsRollback(
+            Platform.resolvedExecutable, null);
+        if (bat != null) {
+          final winPath = bat.replaceAll('/', '\\');
+          log.warn('[update] spawning update-rollback.bat: $winPath — exiting');
+          await Process.start('cmd.exe', ['/c', 'start', '/MIN', '', winPath],
+              mode: ProcessStartMode.detached);
+          await CLogger.flushAll();
+          exit(0);
+        }
+        log.error('[update] no marker for the rollback — the update stays');
+      } else if (!Platform.isLinux) {
+        log.warn('[update] rollback on ${Platform.operatingSystem} is not '
+            'built — the update stays');
+      } else if (BinaryUpdateManager.rollback(Platform.resolvedExecutable, null)) {
+        log.warn('[update] rolled back to the previous bundle — restarting');
+        await _restartSelfLinux(log);
+        await CLogger.flushAll();
+        exit(0);
+      } else {
+        log.error('[update] rollback failed — the update stays');
+      }
+    } else if (updateStart == UpdateStart.first) {
+      log.info('[update] first start after the update of '
+          'v${BinaryUpdateManager.checkUpdatePending(null)?['version']}');
     }
 
     // Write PID file early so Guard 0 can detect us before we finish init.
@@ -441,7 +490,7 @@ void main(List<String> args) {
     OqsFFI().init();
 
     // ── Tray icon (FIRST, before anything else) ──────────────────────
-    final isBeta = NetworkSecret.channel == NetworkChannel.beta;
+    final isBeta = activeNetworkChannel == NetworkChannel.beta;
     final trayTooltip = isBeta ? 'Cleona Beta' : 'Cleona Chat';
     final tray = NativeTray();
     final iconPath = config.iconPath ?? _findIconPath(beta: isBeta);
@@ -453,7 +502,7 @@ void main(List<String> args) {
           if (level == 'warn') { log.warn(msg); } else { log.info(msg); }
         },
       );
-      log.info('Tray icon: ${ok ? "OK" : "FAILED"} (icon: $iconPath, channel: ${NetworkSecret.channel.name})');
+      log.info('Tray icon: ${ok ? "OK" : "FAILED"} (icon: $iconPath, channel: ${activeNetworkChannel.name})');
     } else {
       log.warn('No tray icon found, running without tray');
     }
@@ -466,12 +515,21 @@ void main(List<String> args) {
     // Windows only supports SIGINT (Ctrl+C), not SIGTERM/SIGHUP.
     // Log every signal — distinguishing "killed by signal" from "died spontaneously"
     // is the first forensic split when investigating a daemon crash (C-3).
+    //
+    // `CLogger.writeThrough()` FIRST (S407-KLEIN3): it writes what is still
+    // buffered and puts every following line on disk before the call
+    // returns. A signalled daemon often does not live to the flush at the
+    // end of `shutdownAll` (session logout: SIGTERM + SIGHUP, the X server
+    // goes at the same moment) — measured on node1 09.10.2026, the shutdown
+    // lines existed only in the console copy, which S395-2 no longer keeps.
     ProcessSignal.sigint.watch().listen((_) {
+      CLogger.writeThrough();
       log.warn('SIGINT received — initiating shutdown');
       lifecycle.shutdownAll();
     });
     if (!Platform.isWindows) {
       ProcessSignal.sigterm.watch().listen((_) {
+        CLogger.writeThrough();
         log.warn('SIGTERM received — initiating shutdown');
         lifecycle.shutdownAll();
       });
@@ -556,10 +614,10 @@ class _MultiServiceDaemon {
   /// stop it, otherwise a timer keeps the Dart VM alive.
   Host? _host;
 
-  /// The same key as `_host`'s (`hostKey`, set on
-  /// start) — held for the port mapping (task D): its edge
-  /// network change lies in `_startNetworkMonitor`, a separate method
-  /// without the start method's local `masterSeedForHost`.
+  /// The seed of `_host`'s key (`hostKey`, set on start) — held for the
+  /// methods without the start method's local `masterSeedForHost`. The port
+  /// mapping at the network change no longer needs it: the one entry
+  /// (`networkChangeEdge`) knows the host's key itself.
   Uint8List? _masterSeedForHost;
 
   /// The HTTP delivery at the host port (§26.6.5, S386 part A).
@@ -582,7 +640,7 @@ class _MultiServiceDaemon {
   late final DesktopNotifier? _desktopNotifier = Platform.isLinux
       ? DesktopNotifier(
           warn: log.warn,
-          appName: NetworkSecret.channel == NetworkChannel.beta
+          appName: activeNetworkChannel == NetworkChannel.beta
               ? 'Cleona Beta'
               : 'Cleona Chat')
       : null;
@@ -599,6 +657,9 @@ class _MultiServiceDaemon {
   /// notification under the same identifier (a conversation, a reminder)
   /// replaces the earlier one.
   void _bindDesktopNotifications(CleonaService service) {
+    // The words of an invitation notification (S407 G-2) in the language
+    // the GUI reported — the same as a reminder's.
+    service.notificationWords = (key) => trayTranslate(key, _notificationLocale);
     final notifier = _desktopNotifier;
     if (notifier == null) return;
     service.onPostDesktopNotification = (title, body, notificationId) =>
@@ -616,7 +677,6 @@ class _MultiServiceDaemon {
   CalDAVServer? _caldavServer;
   Timer? _statusTimer;
   Timer? _networkPollTimer; // Windows-only: 30s poll fallback for network changes
-  List<String> _lastPollIps = []; // Windows-only: IP snapshot for delta-check
   Process? _networkMonitor;
   Timer? _triggerTimer;
   Timer? _heartbeatTimer;
@@ -765,13 +825,13 @@ class _MultiServiceDaemon {
     //
     // 216 lines stood here: `host.wireReceive(...)` with the
     // ApplicationFrame dispatcher (KEM try loop over all hosted
-    // identities) and the infrastructure switch with 24 `MessageTypeV3`
+    // identities) and the infrastructure switch with 24 `MessageType`
     // selectors (CONTACT_REQUEST, FRAGMENT_*, PEER_*, SYSCHAN_*,
     // DEVICE_KEM_*, POLL_ANON_*, GUARDIAN_*), plus
     // `host.wireEvents(onPeersChanged:)`.
     //
     // IT IS A PURE SELECTOR LIST OVER A WIRE THAT NO LONGER
-    // EXISTS. `InfrastructureFrameV3`/`NetworkPacketV3` originated in
+    // EXISTS. `InfrastructureFrameV3`/`NetworkPacket` originated in
     // `CleonaNode`; without the node nobody calls the hooks, and no
     // frame of this kind reaches this process. The handlers on the
     // service side fell with the ten `cleona_service_v3_*.dart`.
@@ -785,9 +845,12 @@ class _MultiServiceDaemon {
     // UI learned about address changes via `service.onStateChanged`.
     // V4.1 today has no producer for it.
 
-    // Windows: ensure firewall allows inbound UDP for the daemon process.
+    // Windows: check the inbound firewall rule for the daemon (no rights
+    // needed; setting it is the elevated step of setup and GUI). Not
+    // awaited: PowerShell takes a moment, and nothing of the start waits
+    // for the answer.
     if (Platform.isWindows) {
-      await _ensureWindowsFirewallRule();
+      unawaited(_checkWindowsFirewallRule(primaryCtx.deviceStoreForWrite()));
     }
 
     // ── THE V4.1 NODE IS NOW THE START PATH (CUT, 31.08.) ─────────
@@ -1002,15 +1065,18 @@ class _MultiServiceDaemon {
     // cover filling (`naechsterTarnfuellungsBlock`/`nimmTarnfuellungsBlock`)
     // here. Neither has a carrier at the mycelium host; since S388 the update
     // goes via `attachUpdateToService` (manifest slot + fetch path, §26.5.4/§26.6.1).
+    final deviceKey = hostKey(config.baseDir, masterSeedForHost);
     final host = await hostStart(
       services: _services.values.toList(),
       baseDir: config.baseDir,
-      key: hostKey(config.baseDir, masterSeedForHost),
+      key: deviceKey,
       port: nodePort,
-      // Lane 3 (§21.3.3, D-30, D-32): desktop 1 GB, phone 100 MB.
-      bulkCacheBytes: bulkCacheBytesForPlatform(),
+      // Lane 3 (§21.3.3, D-30, D-32): the user's tier, else desktop 1 GB,
+      // phone 100 MB.
+      bulkCacheBytes: bulkCacheBytesConfigured(config.baseDir, deviceKey),
       bulkClass: bulkClassForPlatform(),
       bulkServeAllowed: bulkServeAllowedNow,
+      askRouter: true, // §7.3: the host asks the router at its edges
       report: log.info,
       traceReport: log.trace, // beta diagnosis: log file only (S406)
     );
@@ -1025,21 +1091,8 @@ class _MultiServiceDaemon {
     log.info('mycelium host started on port ${host.port}, '
         '${host.mailboxes.length} mailbox(es)');
 
-    // The port mapping (task D, §7.3): asked at this edge, NOT
-    // awaited — the RFC 6886 backoff takes eight and a half minutes in the
-    // worst case, and the node start must not wait for it.
-    unawaited(() async {
-      try {
-        await portMappingToEdge(
-          host,
-          baseDir: config.baseDir,
-          key: hostKey(config.baseDir, masterSeedForHost),
-          report: log.info,
-        );
-      } catch (e) {
-        log.warn('Port mapping: $e');
-      }
-    }());
+    // The port mapping (task D, §7.3) is the host's own since S408 P15
+    // (A-4): asked at its edge start inside `hostStart`, not awaited.
 
     // The port marker for Guard 3 of the NEXT start — here, because the
     // port is demonstrably bound from here on (`hostStart` has
@@ -1087,6 +1140,15 @@ class _MultiServiceDaemon {
     ipcServer.onCalDAVServerSetEnabled = setCalDAVServerEnabled;
     ipcServer.onCalDAVServerRegenerateToken = regenerateCalDAVServerToken;
     ipcServer.onCalDAVServerSetPort = setCalDAVServerPort;
+    if (Platform.isWindows) {
+      ipcServer.onWindowsFirewall = ({required bool recheck}) async {
+        final running = _windowsFirewallCheck;
+        final state = recheck
+            ? await _checkWindowsFirewallRule(primaryCtx.deviceStoreForWrite())
+            : (running != null ? await running : _windowsFirewall);
+        return {'state': state.name, 'exe': Platform.resolvedExecutable};
+      };
+    }
     // The click on [Install] — the ONLY way to installation.
     // Formerly this place asked the manager of the PRIMARY service; since
     // S387 whoever reports first collects, and exactly that one installs.
@@ -1124,7 +1186,8 @@ class _MultiServiceDaemon {
     // S406-UPD2 finding B-6).
     ipcServer.onUserInterfaceOpened = () {
       final w = _host;
-      if (w != null) unawaited(w.node.collect());
+      // S407-OLAPPW W-2: post box AND the day-key notices still due (§8.2).
+      if (w != null) unawaited(w.applicationOpened());
       unawaited(_updateManifestAsk(moment: 'app opened'));
     };
     await ipcServer.start();
@@ -1145,14 +1208,13 @@ class _MultiServiceDaemon {
     // the daemon without any external server. Opt-in; disabled by default.
     await _startLocalCalDAVServer();
 
-    // §19.6: check for crashed update at startup, mark healthy after 30s.
-    final pending = BinaryUpdateManager.checkUpdatePending(config.baseDir);
-    if (pending != null) {
-      final pendingVer = pending['version'] as String?;
-      log.info('[update] Previous update marker found: v$pendingVer');
-    }
+    // §26.5.4: 30 s after the start the daemon counts as healthy. Marker and
+    // backup go only when no window started or the window is healthy too —
+    // "the app" includes the window (owner 19.10.2026, S407-RUECKNAHME R-2;
+    // the window's part: `GuiUpdateStart`). The crash check itself runs at
+    // the very start (above).
     Timer(const Duration(seconds: 30), () {
-      BinaryUpdateManager.markUpdateHealthy(config.baseDir);
+      BinaryUpdateManager.markDaemonHealthy(null);
     });
 
     // (§19.6 auto-download + auto-install callbacks are wired in the
@@ -1208,6 +1270,27 @@ class _MultiServiceDaemon {
         log.info('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
       } else {
         log.debug('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
+      }
+      // ── A RETURN FROM SLEEP IS A NETWORK CHANGE (S407-LB-P13, A-2) ───
+      //
+      // v4_2 §11.8.2: "network change — another interface, a new or lost
+      // own address, a return from sleep, or the user's 'reconnect'".
+      // Until S407 the gap was only the DRIFT line above. While the machine
+      // sleeps no tick runs and the wall clock goes on, so this tick sees
+      // the whole absence — on Linux, Windows and macOS alike. Away longer
+      // than the keep-alive interval, the edge runs. No new clock: this
+      // heartbeat ran before.
+      //
+      // Since S407-LB-P14 the delivery layer decides (`networkHeartbeat` →
+      // `NetworkWatch.heartbeat`) and logs the return; the edge it runs
+      // re-reads the own addresses, so the poll or `ip monitor` does not run
+      // the same change a second time, and it never runs beside another.
+      final w = _host;
+      if (w != null) {
+        networkHeartbeat(w,
+            gap: Duration(milliseconds: dtMs),
+            period: const Duration(seconds: 5),
+            report: log.info);
       }
       // GONE WITH V3 (CUT, 31.08.): `_nodeHost.checkReceiveHealth()`
       // and the firewall blockage warning. Both read state from
@@ -1286,7 +1369,7 @@ class _MultiServiceDaemon {
   // `_serviceRecency`, `_orderedServicesByRecency()` and
   // `_markServiceActive()` — together the KEM try-loop heuristic apparatus
   // from §2.4 step [9]: try the most recently supplied identity
-  // first, so that an incoming `ApplicationFrameV3` is normally
+  // first, so that an incoming `ApplicationFrame` is normally
   // assigned with ONE decap probe.
   //
   // V4.1 does not need it, and for a structural reason: the
@@ -1554,7 +1637,7 @@ class _MultiServiceDaemon {
   // callee: `CleonaService.storeRegistryInDht`. That lay in
   // `cleona_service_v3_delivery.dart:525` and stored the multi-identity
   // registry reed-solomon-encoded in the Kademlia DHT
-  // (`node.routingTable.findClosestPeers` + `MTV3_FRAGMENT_STORE` at ten
+  // (`node.routingTable.findClosestPeers` + `MT_FRAGMENT_STORE` at ten
   // replicators). Both are deleted.
   //
   // WHAT IS MISSING, AND SINCE WHEN ALSO THE CONSTRUCTION: until 08.09.2026
@@ -1653,10 +1736,7 @@ class _MultiServiceDaemon {
     // Dart VM alive, and the daemon would not exit after `stopAll()`.
     await _delivery?.close();
     _delivery = null;
-    // The port mapping laid down FIRST (task D): its own
-    // renewal timer otherwise keeps the Dart VM alive, independently of the
-    // wire that `stop()` closes right after.
-    if (_host != null) await portMappingLayDown(_host!);
+    // The port mapping is laid down by `Host.stop` itself, first (S408 P15).
     // Plane D off before the wire closes (S398-W2).
     if (_host != null) await planeDDetach(_host!, _services.values);
     if (_host != null) await hostStop(_host!); // lane 2 clocks, then the host
@@ -1696,6 +1776,9 @@ class _MultiServiceDaemon {
     // lock = two daemons with valid exclusive locks on different inodes).
     // The stale PID in the file is detected by the GUI via kill -0.
     tray.dispose();
+    // An orderly shutdown within 30 s of an update is no crash (§26.5,
+    // S392-11): the next start counts as the first again.
+    BinaryUpdateManager.markUpdateStopped(null);
     // THE LAST FLUSH, and it was MISSING until 01.09.2026. Seven other
     // exit points of this file (`:113 :139 :172 :184 :222 :236 :403`)
     // call it, of all things the orderly shutdown did not — `exit`
@@ -1705,58 +1788,54 @@ class _MultiServiceDaemon {
     exit(0);
   }
 
-  /// Windows: ensure inbound firewall rules (UDP + TCP) for the daemon exe.
-  /// Program-based rules — port-independent, set once per installation.
-  /// Non-admin: netsh fails gracefully (rules should be set by installer).
-  /// The parameter `port` went away (CUT, 31.08.) — it was already
-  /// unused before: the rule is PROGRAM-BOUND (`program=$exe`,
-  /// no `localport=`), so it allows every port of this process. Without
-  /// this note the port change from `nodePort` to
-  /// `nodePort + 1` would have looked like an error on the next reading. It is
-  /// none, and demonstrably so: `port` does not occur in the body.
-  Future<void> _ensureWindowsFirewallRule() async {
-    final marker = File('${config.baseDir}/firewall_rule_added');
-    if (marker.existsSync()) return;
+  /// Windows: the state of the inbound firewall rule for this daemon
+  /// (v4_2 §22.x "Windows Desktop": "At every start the application checks
+  /// the rule"). Read by the GUI over IPC (`windows_firewall_state`), which
+  /// shows "Allow in firewall" when it is not [WindowsFirewallState.allowed].
+  WindowsFirewallState _windowsFirewall = WindowsFirewallState.unknown;
 
-    final exe = Platform.resolvedExecutable;
-    log.info('Windows: checking/adding firewall rules for $exe');
+  /// The running check, so that a second request waits for it instead of
+  /// starting PowerShell twice.
+  Future<WindowsFirewallState>? _windowsFirewallCheck;
 
-    // Check if rules already exist (e.g. set by installer)
-    try {
-      final check = await Process.run('netsh', [
-        'advfirewall', 'firewall', 'show', 'rule',
-        'name=Cleona Messenger UDP',
-      ]);
-      if (check.exitCode == 0 && check.stdout.toString().contains('Cleona')) {
-        log.info('Windows: firewall rules already present (set by installer)');
-        marker.writeAsStringSync('installer');
-        return;
-      }
-    } catch (_) {}
-
-    var allOk = true;
-    for (final proto in ['UDP', 'TCP']) {
+  /// Windows: checks the inbound firewall rule for this executable — at
+  /// every start and again on request of the GUI after "Allow in firewall".
+  ///
+  /// Until S407 the daemon tried `netsh advfirewall firewall add rule`
+  /// itself. Without administrator rights — the daemon never has them —
+  /// that always failed ("needs admin rights — should be set by installer"),
+  /// and the setup set no rule either; Windows then asked at the first
+  /// listen, and "Cancel" left two blocking "Query User" rules (measured on
+  /// the lab VM with the published v4.2.3 setup, 14.10.2026). Setting the
+  /// rule is now the elevated step of the setup and of the GUI
+  /// (`windows/cleona-firewall.cmd`); the daemon only reads, which needs no
+  /// rights.
+  ///
+  /// The result is a row of the device database [device]
+  /// (`DeviceStore.keyWindowsFirewallRule`, §4.5.3; until S407 the file
+  /// `firewall_rule_added`, which is dropped).
+  Future<WindowsFirewallState> _checkWindowsFirewallRule(DeviceStore? device) {
+    return _windowsFirewallCheck ??= () async {
       try {
-        final result = await Process.run('netsh', [
-          'advfirewall', 'firewall', 'add', 'rule',
-          'name=Cleona Messenger $proto',
-          'dir=in', 'action=allow', 'protocol=$proto',
-          'program=$exe',
-          'enable=yes',
-        ]);
-        if (result.exitCode == 0) {
-          log.info('Windows: firewall rule $proto added');
-        } else {
-          allOk = false;
-          log.warn('Windows: firewall rule $proto needs admin rights — '
-              'should be set by installer (netsh exit ${result.exitCode})');
+        legacyDeviceStateDrop(config.baseDir, kLegacyFirewallMarkerFile);
+        final exe = Platform.resolvedExecutable;
+        final state = await WindowsFirewall.check(exe);
+        _windowsFirewall = state;
+        log.info('Windows: inbound firewall rule for $exe: ${state.name}');
+        try {
+          device?.putEntry(DeviceStore.areaDevice,
+              DeviceStore.keyWindowsFirewallRule, {
+            'state': state.name,
+            'at': DateTime.now().millisecondsSinceEpoch,
+          });
+        } catch (e) {
+          log.warn('Windows: firewall rule state not stored: $e');
         }
-      } catch (e) {
-        allOk = false;
-        log.warn('Windows: firewall rule $proto: $e');
+        return state;
+      } finally {
+        _windowsFirewallCheck = null;
       }
-    }
-    if (allOk) marker.writeAsStringSync('daemon');
+    }();
   }
 
   /// Event-driven network change detection.
@@ -2001,38 +2080,21 @@ class _MultiServiceDaemon {
       // Poll for network changes every 30s (no ip monitor equivalent).
       // The node-reset runs once for the whole daemon; per-service we only
       // trigger the service-side cleanup (mailbox poll, identity-publisher).
-      _networkPollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      _networkPollTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         if (!_running) return;
-        final currentIps = await dialableLocalAddresses();
-        final ipsKey = currentIps.join(',');
-        final lastKey = _lastPollIps.join(',');
-        // SINCE S380 THE PROBE STANDS ONCE, in `isRealNetworkChange` —
-        // the `ip monitor` branch below needs the same, and two copies
-        // would be two places where "change" diverges. That
-        // was exactly the state before S380: a comparison here, none there.
-        if (!isRealNetworkChange(before: _lastPollIps, after: currentIps)) {
-          return;
-        }
-        _lastPollIps = currentIps;
-        log.info('Network change detected (poll) — IPs: $lastKey → $ipsKey');
-        // ── WHAT THESE THREE LINES TRIGGER ──────────────────────────
+        // ── THE EVENT ONLY (S407-LB-P14, finding A-1) ─────────────────
         //
-        // `service.onNetworkChanged` is not a mere cleanup call. It calls
-        // the seam `v41OnNetworkChanged` (`cleona_service.dart`, "final
-        // knotenNaht = v41OnNetworkChanged"), and that does three things in
-        // this order: it determines the dialable addresses anew,
-        // resets the announcement with them (`setAnnounceAddresses` in
-        // `v41_attach.dart` — exactly for that S360 pulled the function out of
-        // the body of `startV41Node`), and only afterwards lets
-        // `V41Node.onNetworkChanged` drop the sessions. The
-        // rendezvous loop sees a different address fingerprint on its next
-        // pass, `AblageMarke.verlangtAblage`
-        // fires, and the own entry record is stored anew with reason
-        // `Adresswechsel`.
+        // This tick is an EVENT of the platform, no decision. Whether the
+        // own addresses changed decides the delivery layer
+        // (`networkEvent` → `NetworkWatch`, `mycelium/lib/network_watch.dart`):
+        // it read them at the host's start, so the first tick is no change
+        // — until S407 the list here started empty and the tick 30 s after
+        // every start ran the whole edge for nothing. The comparison that
+        // stood here since S380 (`isRealNetworkChange`, the same for
+        // `ip monitor` below) and the change line moved there too.
         //
-        // DETECTION: here by 30-s poll via `dialableLocalAddresses`
-        // (neither Windows nor macOS have `ip monitor`); in-process and
-        // under Linux event-driven, see below.
+        // DETECTION: here by 30-s poll (neither Windows nor macOS have
+        // `ip monitor`); in-process and under Linux event-driven, see below.
         //
         // ── UNTIL S373 THE PRIOR STATE STOOD HERE ───────────────────────
         //
@@ -2057,48 +2119,19 @@ class _MultiServiceDaemon {
         // carries the announcement forward (package `s373-beobachtete-adresse`,
         // `8e3ea26c`). Without it exactly this one case would stay open — and
         // only this one.
-        // ── THE NODE PART ONCE (S376, P5 finding 5) ───────────────
         //
-        // There is ONE node in this process: one socket, one
-        // session set, one entry record, one LAN call. The
-        // loop below, by contrast, runs per identity — until S376
-        // the node part thus also ran N times, because `triggerNodeReset`
-        // was ignored. With three identities that was three
-        // session teardowns, three priority announcements and three
-        // LAN calls for ONE event; the second and third pass
-        // tore down sessions that the partner selection had just rebuilt
-        // after the first.
-        // ── THE NODE PART ONCE (S376 P5 finding 5; S387 mycelium) ─────
+        // ── THE ONE ENTRY (S407-LB-P12, finding A-3) ──────────────────
         //
-        // `Host.networkChanged` (§11.8, §22.7.1): all evidence expires
-        // immediately, interfaces anew, ONE call series, ONE query of the
-        // remembered neighbours — once per event for the whole process,
-        // the services below only with `triggerNodeReset: false`.
+        // The edge "network change" of §11.8.2 runs through
+        // `networkChangeEdge` (`mycelium_seam.dart`): the host part ONCE
+        // per event for the whole process (S376 P5 finding 5), every
+        // identity as subscriber for its application part, the port
+        // mapping at the same edge (§7.3) and the manifest moment after
+        // the host part (S388). Until S407 these four steps stood here
+        // and below by hand, and "reconnect" lacked two of them.
         final w = _host;
         if (w != null) {
-          // The manifest slot AFTER the end of the network change (S388, M1+):
-          // before that the old neighbourhood still applies.
-          unawaited(w.networkChanged().catchError((Object e) {
-            log.warn('mycelium network change failed: $e');
-          }).then((_) => _updateManifestAsk(moment: 'network change')));
-          // The port mapping at the same edge (§7.3) — NOT awaited,
-          // for the same reason as at start (RFC 6886 backoff).
-          unawaited(() async {
-            try {
-              await portMappingToEdge(
-                w,
-                baseDir: config.baseDir,
-                key:
-                    hostKey(config.baseDir, _masterSeedForHost),
-                report: log.info,
-              );
-            } catch (e) {
-              log.warn('Port mapping (network change): $e');
-            }
-          }());
-        }
-        for (final service in _services.values) {
-          service.onNetworkChanged(triggerNodeReset: false);
+          unawaited(networkEvent(w, reason: 'poll', report: log.info));
         }
       });
       return;
@@ -2109,76 +2142,39 @@ class _MultiServiceDaemon {
       await Process.run('pkill', ['-f', 'ip monitor address']);
       final proc = await Process.start('ip', ['monitor', 'address']);
       _networkMonitor = proc;
-      // Debounce: network changes often come in bursts (multiple interfaces).
-      Timer? debounce;
       proc.stdout.transform(const SystemEncoding().decoder).listen((line) {
         if (!_running) return;
-        debounce?.cancel();
-        debounce = Timer(const Duration(seconds: 2), () async {
-          // ── AN EVENT IS NOT YET A CHANGE (S380) ──────────────
-          //
-          // Until S380 only the log line stood here: EVERY netlink event
-          // counted as a network change and dropped all sessions. A
-          // router advertisement refreshes the lifetimes of an existing
-          // address and is such an event — measured on the bootstrap
-          // six in 40 minutes, each with three dropped
-          // sessions, while the address set stayed unchanged.
-          // Reasoning and measurement log at `isRealNetworkChange`.
-          //
-          // And the message now names the addresses. Six messages
-          // without a single "what then" kept exactly this finding invisible
-          // for two sessions.
-          final currentIps = await dialableLocalAddresses();
-          final lastKey = _lastPollIps.join(',');
-          final ipsKey = currentIps.join(',');
-          if (!isRealNetworkChange(
-              before: _lastPollIps, after: currentIps)) {
+        // ── AN EVENT IS NOT YET A CHANGE (S380, S407-LB-P14) ──────────
+        //
+        // Until S380 EVERY netlink event counted as a network change and
+        // dropped all sessions. A router advertisement refreshes the
+        // lifetimes of an existing address and is such an event — measured
+        // on the bootstrap six in 40 minutes while the address set stayed
+        // unchanged. Since S407-LB-P14 the delivery layer settles the burst
+        // (2 s, as here before), compares the own addresses with those it
+        // last acted on — read at the host's start, so the first event is
+        // no change — names them in its change line and runs the edge
+        // (`networkEvent` → `NetworkWatch`).
+        //
+        // ── THE PRIOR STATE STILL STOOD HERE (S376) ────────────────
+        //
+        // Verbatim: "As in the Windows branch above: the node part of the
+        // network change went away with V3 and is not replaced in V4.1."
+        // S373 corrected the Windows branch and left THIS sentence
+        // standing — so it referred to a correction and at the same
+        // time claimed its opposite. Re-measured on 08.09.2026: the full
+        // node part runs ONCE per edge (P5 finding 5) — since S407-LB-P12
+        // through the ONE entry, since S407-LB-P14 decided in the delivery
+        // layer, as in the poll branch above.
+        final w = _host;
+        if (w == null) return;
+        unawaited(networkEvent(w, reason: 'ip monitor', report: log.info)
+            .then((ran) {
+          if (!ran) {
             log.debug('Address event without address change — discarded '
-                '(ip monitor, IPs: $ipsKey)');
-            return;
+                '(ip monitor)');
           }
-          _lastPollIps = currentIps;
-          log.info(
-              'Network change detected (ip monitor) — IPs: $lastKey → $ipsKey');
-          // ── THE PRIOR STATE STILL STOOD HERE (S376) ────────────────
-          //
-          // Verbatim: "As in the Windows branch above: the node part of the
-          // network change went away with V3 and is not replaced in V4.1."
-          // S373 corrected the Windows branch and left THIS sentence
-          // standing — so it referred to a correction and at the same
-          // time claimed its opposite. Re-measured on 08.09.2026: the same
-          // applies here as above: the full node part runs — since
-          // S376 via `v41NodeNetworkChange`, ONCE per event, and
-          // the service loop below only carries the service part
-          // (P5 finding 5).
-          // The node part ONCE per event — as in the poll branch above
-          // (`Host.networkChanged`, S387).
-          final w = _host;
-          if (w != null) {
-            unawaited(w.networkChanged().catchError((Object e) {
-              log.warn('mycelium network change failed: $e');
-            }).then((_) => _updateManifestAsk(moment: 'network change')));
-            // The port mapping at the same edge (§7.3) — NOT
-            // awaited, for the same reason as at start
-            // (RFC 6886 backoff).
-            unawaited(() async {
-              try {
-                await portMappingToEdge(
-                  w,
-                  baseDir: config.baseDir,
-                  key:
-                      hostKey(config.baseDir, _masterSeedForHost),
-                  report: log.info,
-                );
-              } catch (e) {
-                log.warn('Port mapping (network change): $e');
-              }
-            }());
-          }
-          for (final service in _services.values) {
-            service.onNetworkChanged(triggerNodeReset: false);
-          }
-        });
+        }));
       });
       proc.exitCode.then((code) {
         log.debug('ip monitor exited with $code');
@@ -2377,6 +2373,36 @@ String? _findIconPath({bool beta = false}) {
   return null;
 }
 
+/// Linux: starts this daemon again, detached, 2 s after this process ends —
+/// with the same arguments, from the canonical place in the bundle as it is
+/// NOW (after an update or a rollback replaced it).
+Future<void> _restartSelfLinux(CLogger log) async {
+  final cmdlineBytes = File('/proc/self/cmdline').readAsBytesSync();
+  final cmdParts = String.fromCharCodes(cmdlineBytes)
+      .split('\x00')
+      .where((s) => s.isNotEmpty)
+      .toList();
+  // Swap argv[0] for the canonical place in the bundle (S367). If the
+  // daemon lay in the root before and in `bin/` now (or back), the own
+  // command line points to a file that no longer exists — the restart would
+  // run into nothing, and quietly, because `Process.start` is detached. The
+  // arguments stay unchanged; only the path is updated, and that also only
+  // if a file really lies there.
+  if (cmdParts.isNotEmpty) {
+    final fresh = AppPaths.daemonPathIn(
+        AppPaths.bundleDirOf(Platform.resolvedExecutable));
+    if (File(fresh).existsSync()) {
+      log.info('Restart via $fresh (was: ${cmdParts.first})');
+      cmdParts[0] = fresh;
+    }
+  }
+  final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
+  await Process.start('/bin/bash', [
+    '-c',
+    'sleep 2 && exec $quotedCmd',
+  ], mode: ProcessStartMode.detached);
+}
+
 Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void> Function() shutdownAll) async {
   try {
     final path = await mgr.getVerifiedBinaryPath(
@@ -2390,32 +2416,7 @@ Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void>
       log.info('Update applied: v${mgr.targetVersion} — spawning restart helper');
       await CLogger.flushAll();
       if (Platform.isLinux) {
-        final cmdlineBytes = File('/proc/self/cmdline').readAsBytesSync();
-        final cmdParts = String.fromCharCodes(cmdlineBytes)
-            .split('\x00')
-            .where((s) => s.isNotEmpty)
-            .toList();
-        // Swap argv[0] for the canonical place in the NEW bundle
-        // (S367). The update has just replaced the whole bundle; if
-        // the daemon previously lay in the root and now lies in `bin/`,
-        // the own command line points to a file that no longer
-        // exists — the restart would run into nothing, and quietly, because
-        // `Process.start` is detached. The arguments stay
-        // unchanged; only the path is updated, and that also only
-        // if a file really lies there.
-        if (cmdParts.isNotEmpty) {
-          final fresh = AppPaths.daemonPathIn(
-              AppPaths.bundleDirOf(Platform.resolvedExecutable));
-          if (File(fresh).existsSync()) {
-            log.info('Restart via $fresh (was: ${cmdParts.first})');
-            cmdParts[0] = fresh;
-          }
-        }
-        final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
-        await Process.start('/bin/bash', [
-          '-c',
-          'sleep 2 && exec $quotedCmd',
-        ], mode: ProcessStartMode.detached);
+        await _restartSelfLinux(log);
       } else if (Platform.isWindows) {
         final batPath = mgr.windowsUpdateBatPath;
         if (batPath != null) {
@@ -2563,7 +2564,38 @@ _DaemonConfig _parseArgs(List<String> args) {
   );
 }
 
+/// Exit code of a daemon that misses a library it opens by name (S410, I-6):
+/// `EX_UNAVAILABLE` from BSD `sysexits.h` ("a service is unavailable … a
+/// support program or file does not exist"). Distinct from 1 (refused start),
+/// 64 (`EX_USAGE`, wrong arguments) and 99 (unhandled error).
+const int kExitNativeLibraryMissing = 69;
+
+/// Linux: opens the three libraries of `linux_native_libraries.dart` and, if
+/// one is missing, names it with the package that provides it — on the
+/// console, in the daemon log — and ends with [kExitNativeLibraryMissing].
+///
+/// Until S410 the first crypto call threw `SodiumException('libsodium.so
+/// not found')` (or `StateError('liboqs.so not found')`) into the zone
+/// handler, which logged "UNHANDLED ASYNC ERROR" with a stack and ended with
+/// exit 99 — no package name, and a missing libzstd only surfaced at the
+/// first compression, deep in operation.
+Future<void> _exitIfNativeLibrariesMissing(CLogger? log) async {
+  if (!Platform.isLinux) return;
+  final missing = missingLinuxNativeLibraries();
+  if (missing.isEmpty) return;
+  for (final m in missing) {
+    final line = 'ERROR: ${m.describe()}';
+    try { RedactedConsole.err(line); } catch (_) {}
+    log?.error(line);
+  }
+  log?.error('A library is missing — the daemon cannot start '
+      '(exit $kExitNativeLibraryMissing).');
+  await CLogger.flushAll();
+  exit(kExitNativeLibraryMissing);
+}
+
 Future<void> _exportContactSeed(_DaemonConfig config) async {
+  await _exitIfNativeLibrariesMissing(null);
   SodiumFFI();
   OqsFFI().init();
 
@@ -2634,7 +2666,7 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
     displayName: config.name ?? activeId.displayName,
     ownAddresses: ownAddrs,
     seedPeers: const [],
-    channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+    channelTag: activeNetworkChannel == NetworkChannel.beta ? 'b' : 'l',
     deviceIdHex: identity.deviceNodeIdHex,
     userEd25519Pk: identity.ed25519PublicKey,
     // S368: the FOUNDING key must go along, otherwise the exported

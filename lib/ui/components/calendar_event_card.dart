@@ -4,6 +4,7 @@ import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/calendar/recurrence_engine.dart';
+import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 
 /// Density control for [CalendarEventCard].
@@ -87,6 +88,61 @@ class CalendarEventCard extends StatelessWidget {
   }
 
   // ---------------------------------------------------------------------------
+  // Call button decision (§18.1.7)
+  // ---------------------------------------------------------------------------
+
+  /// What the "Call" button of [event] does.
+  ///
+  /// §18.1.7: a group event offers a group-call start only up to the
+  /// full-mesh ceiling of §17.7 ([GroupCallManager.maxParticipantsMesh]);
+  /// above it, no start. A 1:1 event starts a 1:1 call without condition.
+  ///
+  /// The group size counted is the one [GroupCallManager.startGroupCall]
+  /// invites: every member who accepted plus the caller; with nobody who
+  /// accepted there is nobody to call and no button. An event without a
+  /// group whose only other party is one contact is a 1:1 event; the other
+  /// party is the attendee for the creator and the creator for an attendee.
+  /// An event without a group and with several other parties has no call
+  /// path (a group call needs a group) and therefore no button.
+  static EventCallAction resolveCallAction(
+    CalendarEvent event, {
+    required String? selfId,
+    required Map<String, GroupInfo> groups,
+  }) {
+    final groupId = event.groupId;
+    if (groupId != null) {
+      final group = groups[groupId];
+      if (group == null) return const EventCallAction(EventCallKind.none);
+      // §18.1.7: "a click starts a group call with everyone who accepted".
+      // Until S407 this counted and rang the whole group. The organizer
+      // counts as accepted unless it declined — as in iCalendar, where
+      // the ORGANIZER is a participant without answering its own
+      // invitation (RFC 5545 §3.8.4.3, §3.2.12 PARTSTAT).
+      final invitees = <String>{
+        for (final id in group.members.keys)
+          if (id != selfId &&
+              (event.rsvpResponses[id] == RsvpStatus.accepted ||
+                  (id == event.createdBy &&
+                      event.rsvpResponses[id] != RsvpStatus.declined)))
+            id,
+      };
+      if (invitees.isEmpty) return const EventCallAction(EventCallKind.none);
+      final participants = {...invitees, ?selfId};
+      if (participants.length > GroupCallManager.maxParticipantsMesh) {
+        return EventCallAction(EventCallKind.groupTooLarge,
+            target: groupId, invitees: invitees);
+      }
+      return EventCallAction(EventCallKind.group,
+          target: groupId, invitees: invitees);
+    }
+    final others = {...event.attendeeNodeIds, event.createdBy}
+      ..remove(selfId)
+      ..removeWhere((id) => id.isEmpty);
+    if (others.length != 1) return const EventCallAction(EventCallKind.none);
+    return EventCallAction(EventCallKind.oneToOne, target: others.single);
+  }
+
+  // ---------------------------------------------------------------------------
   // Build
   // ---------------------------------------------------------------------------
 
@@ -103,6 +159,11 @@ class CalendarEventCard extends StatelessWidget {
     final end = DateTime.fromMillisecondsSinceEpoch(event.endTime);
     final now = DateTime.now();
     final isUpcoming = start.isAfter(now) && start.difference(now).inMinutes <= 15;
+    final callAction = resolveCallAction(
+      event,
+      selfId: service?.nodeIdHex,
+      groups: service?.groups ?? const {},
+    );
 
     // Card body (column of header + details + actions)
     final cardBody = Column(
@@ -144,8 +205,8 @@ class CalendarEventCard extends StatelessWidget {
             children: [
               Text(
                 event.allDay
-                    ? _formatDate(start)
-                    : '${_formatDate(start)}, ${_formatTime(start)} – ${_formatTime(end)}',
+                    ? formatDate(start, locale)
+                    : '${formatDate(start, locale)}, ${_formatTime(start)} – ${_formatTime(end)}',
                 style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.7)),
               ),
               if (event.recurrenceRule != null)
@@ -203,20 +264,39 @@ class CalendarEventCard extends StatelessWidget {
                   color: Colors.red,
                   onTap: () => service?.sendCalendarRsvp(event.eventId, RsvpStatus.declined),
                 ),
-                // Call (only at event time, if hasCall)
-                if (event.hasCall && isUpcoming)
+                // Call (only at event time, if hasCall) — §18.1.7
+                if (event.hasCall && isUpcoming &&
+                    callAction.kind != EventCallKind.none)
                   _ActionButton(
                     icon: Icons.call,
-                    label: 'Call',
+                    label: locale.get('calendar_start_call'),
                     color: Colors.blue,
-                    onTap: () {
-                      // Start group call via existing call infrastructure
-                      if (event.groupId != null) {
-                        service?.startGroupCall(event.groupId!);
-                      }
+                    onTap: switch (callAction.kind) {
+                      EventCallKind.oneToOne => () =>
+                          service?.startCall(callAction.target!),
+                      EventCallKind.group => () => service?.startGroupCall(
+                          callAction.target!,
+                          invitees: callAction.invitees),
+                      // Above the full-mesh ceiling: no start (§18.1.7).
+                      EventCallKind.groupTooLarge => null,
+                      EventCallKind.none => null,
                     },
                   ),
               ],
+            ),
+          ),
+        if (!event.cancelled &&
+            event.hasCall &&
+            isUpcoming &&
+            callAction.kind == EventCallKind.groupTooLarge)
+          Padding(
+            padding: EdgeInsets.fromLTRB(12, 0, 12, vPad),
+            child: Text(
+              locale.get('calendar_call_too_many').replaceAll(
+                  '{max}', '${GroupCallManager.maxParticipantsMesh}'),
+              style: TextStyle(
+                  fontSize: 11,
+                  color: colorScheme.onSurface.withValues(alpha: 0.6)),
             ),
           ),
       ],
@@ -268,22 +348,56 @@ class CalendarEventCard extends StatelessWidget {
     ];
   }
 
-  String _formatDate(DateTime dt) {
-    const weekdays = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
-    const months = ['', 'Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun',
-                    'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
-    return '${weekdays[dt.weekday - 1]}, ${dt.day}. ${months[dt.month]} ${dt.year}';
-  }
+  /// The date in the reader's language (S410: stood as German weekday and
+  /// month abbreviations in every language).
+  static String formatDate(DateTime dt, AppLocale locale) =>
+      locale.tr('calendar_card_date', {
+        'weekday': locale.get('weekday_short_${dt.weekday}'),
+        'day': '${dt.day}',
+        'month': locale.get('month_${dt.month}'),
+        'm': '${dt.month}',
+        'year': '${dt.year}',
+      });
 
   String _formatTime(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+}
+
+/// What the "Call" button of an event card does (§18.1.7).
+enum EventCallKind {
+  /// No button: no call path for this event.
+  none,
+
+  /// 1:1 event: starts a 1:1 call with [EventCallAction.target].
+  oneToOne,
+
+  /// Group event within the full-mesh ceiling: starts a group call.
+  group,
+
+  /// Group event above the full-mesh ceiling: button disabled, hint shown.
+  groupTooLarge,
+}
+
+/// Result of [CalendarEventCard.resolveCallAction].
+class EventCallAction {
+  final EventCallKind kind;
+
+  /// Peer user id (1:1) or group id (group); `null` for [EventCallKind.none].
+  final String? target;
+
+  /// For [EventCallKind.group]: the members to ring — "everyone who
+  /// accepted" (§18.1.7), without the own identity.
+  final Set<String>? invitees;
+
+  const EventCallAction(this.kind, {this.target, this.invitees});
 }
 
 class _ActionButton extends StatelessWidget {
   final IconData icon;
   final String label;
   final Color color;
-  final VoidCallback onTap;
+  /// `null` draws the button disabled.
+  final VoidCallback? onTap;
 
   const _ActionButton({
     required this.icon,

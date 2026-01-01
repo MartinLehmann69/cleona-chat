@@ -692,7 +692,7 @@ class _FileKeyringFallback extends KeyringService {
   ///
   /// `\0` is not printable, so it does not collide with
   /// [_looksLikeLegacyPlaintext].
-  static const List<int> _v3Magic = [0x43, 0x4b, 0x33, 0x00];
+  static const List<int> _v3Magic = [0x43, 0x4b, 0x33, 0x00];  // version-name-ok: format version of a stored container
 
   String get _saltPath => '$_baseDir/$_saltFileName';
 
@@ -718,7 +718,7 @@ class _FileKeyringFallback extends KeyringService {
   /// Are there containers in the profile that open ONLY with a salt?
   ///
   /// That is the condition under which a new salt would be data loss.
-  bool _hasV3Blobs() {
+  bool _hasV3Blobs() {  // version-name-ok: format version of a stored container
     final dir = Directory(_baseDir);
     if (!dir.existsSync()) return false;
     for (final e in dir.listSync(followLinks: false).whereType<File>()) {
@@ -787,7 +787,7 @@ class _FileKeyringFallback extends KeyringService {
     if (existing != null) return existing;
 
     final saltFileExists = File(_saltPath).existsSync();
-    final hasV3 = _hasV3Blobs();
+    final hasV3 = _hasV3Blobs();  // version-name-ok: format version of a stored container
     final hasProfileData = Directory('$_baseDir/identities').existsSync();
 
     if (hasV3 || (saltFileExists && hasProfileData)) {
@@ -916,12 +916,12 @@ class _FileKeyringFallback extends KeyringService {
     return _encKey!;
   }
 
-  Uint8List? _v2Key;
+  Uint8List? _v2Key;  // version-name-ok: format version of a stored container
   Uint8List? _v1Key;
 
   /// v2 (until S363): host name + fixed string. **Only for READING any
   /// more** — every hit is rewritten to v3.
-  Uint8List _deriveKeyV2() {
+  Uint8List _deriveKeyV2() {  // version-name-ok: format version of a stored container
     if (_v2Key != null) return _v2Key!;
     // S106 fix: key derivation no longer depends on baseDir. A path
     // change (profileDir vs baseDir, deploy to different location) used
@@ -1349,7 +1349,7 @@ class _FileKeyringFallback extends KeyringService {
   /// If that fails (no salt creatable, probe failed), the OLD file stays
   /// and the reader still gets its plaintext — a failing migration must
   /// not cost the only copy.
-  void _migrateToV3(String name, Uint8List plaintext, String from) {
+  void _migrateToV3(String name, Uint8List plaintext, String from) {  // version-name-ok: format version of a stored container
     try {
       final key = _deriveKeyForWrite();
       if (_writeVerified(name, plaintext, key)) {

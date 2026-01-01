@@ -47,6 +47,15 @@ abstract interface class DeviceRecords {
 
   /// Where [name] lies — for reports.
   String where(String name);
+
+  /// Every record whose name begins with [prefix], as (name, bytes), one
+  /// after the other — a store of many small rows (the post box, one row per
+  /// held packet, v4_2 §4.5.3) is never read as a whole. An unreadable
+  /// record comes with `null` bytes.
+  Iterable<(String, Uint8List?)> readPrefix(String prefix);
+
+  /// Removes every record whose name begins with [prefix].
+  void removePrefix(String prefix);
 }
 
 /// The records as encrypted files in [directory] (`<name>.enc`), under
@@ -75,8 +84,10 @@ class FileDeviceRecords implements DeviceRecords {
 
   /// Encrypted and atomic: `.enc.tmp`, then renamed.
   @override
-  void write(String name, Uint8List bytes) =>
-      _enc.writeBinaryFile(_path(name), bytes);
+  void write(String name, Uint8List bytes) {
+    File(_path(name)).parent.createSync(recursive: true);
+    _enc.writeBinaryFile(_path(name), bytes);
+  }
 
   /// Through [FileEncryption.deleteFile], so that an `.enc.old` of an
   /// aborted write does not bring the record back on the next read.
@@ -85,4 +96,42 @@ class FileDeviceRecords implements DeviceRecords {
 
   @override
   String where(String name) => '${_path(name)}.enc';
+
+  /// [prefix] up to its last `/` is a directory under [directory]; the
+  /// rest is the start of the file names in it.
+  (Directory, String) _split(String prefix) {
+    final cut = prefix.lastIndexOf('/');
+    return (
+      Directory('${directory.path}/${prefix.substring(0, cut + 1)}'),
+      prefix.substring(cut + 1),
+    );
+  }
+
+  /// The names under [prefix], also those only a broken write left.
+  List<String> _names(String prefix) {
+    final (dir, start) = _split(prefix);
+    if (!dir.existsSync()) return const [];
+    final head = prefix.substring(0, prefix.length - start.length);
+    final names = <String>{};
+    for (final f in dir.listSync().whereType<File>()) {
+      final base = f.uri.pathSegments.last;
+      final m = RegExp(r'^(.*)\.enc(\.tmp|\.old)?$').firstMatch(base);
+      if (m != null && m.group(1)!.startsWith(start)) names.add('$head${m.group(1)}');
+    }
+    return names.toList()..sort();
+  }
+
+  @override
+  Iterable<(String, Uint8List?)> readPrefix(String prefix) sync* {
+    for (final name in _names(prefix)) {
+      yield (name, read(name));
+    }
+  }
+
+  @override
+  void removePrefix(String prefix) {
+    for (final name in _names(prefix)) {
+      remove(name);
+    }
+  }
 }

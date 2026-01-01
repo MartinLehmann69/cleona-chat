@@ -49,7 +49,7 @@
 ///    `SHA-256("kem" || userId || deviceId)`), the entry MUST contain
 ///    [DeviceKemKeyPair.x25519PublicKey] (32 B) and
 ///    [DeviceKemKeyPair.mlKemPublicKey] (1184 B). See
-///    `proto/transport_v3.proto::DeviceKemRecordV3` fields 3 + 4.
+///    `proto/transport.proto::DeviceKemRecord` fields 3 + 4.
 ///
 /// 4. **ContactSeed URI** (Subagent B, §8.1.1): `dxk` (X25519) and `dmk`
 ///    (ML-KEM-768) parameters carry the same two pubkeys for
@@ -103,7 +103,7 @@ class DeviceKemKeyPair {
   /// X25519 secret key — 32 bytes (libsodium scalar format).
   final Uint8List x25519PrivateKey;
 
-  /// X25519 public key — 32 bytes. Carried in `DeviceKemRecordV3.device_x25519_pk`
+  /// X25519 public key — 32 bytes. Carried in `DeviceKemRecord.device_x25519_pk`
   /// and `ContactSeed.dxk`.
   final Uint8List x25519PublicKey;
 
@@ -111,7 +111,7 @@ class DeviceKemKeyPair {
   final Uint8List mlKemPrivateKey;
 
   /// ML-KEM-768 public key — 1184 bytes (see [OqsFFI.mlKemPublicKeyLength]).
-  /// Carried in `DeviceKemRecordV3.device_ml_kem_pk` and `ContactSeed.dmk`.
+  /// Carried in `DeviceKemRecord.device_ml_kem_pk` and `ContactSeed.dmk`.
   final Uint8List mlKemPublicKey;
 
   DeviceKemKeyPair._({

@@ -2,24 +2,25 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:mycelium/wire_target.dart';
 import 'package:mycelium/neighbours_listener.dart';
 import 'package:mycelium/neighbours_channel.dart';
 import 'package:mycelium/neighbours_packet.dart';
+import 'package:mycelium/neighbours_send.dart';
+import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
+import 'package:mycelium/silence.dart' show kSendingsAtMost;
 
 /// What the search can do and how it says so stands in `neighbours_channel.dart` —
 /// passed on from here so that a caller imports only one name.
 export 'package:mycelium/neighbours_channel.dart';
 
-/// How often a call goes out.
-///
-/// Three, because two nodes never start at the same moment: whoever calls first
+/// How often a call goes out. Two nodes never start at the same moment: whoever calls first
 /// finds nobody as long as the other's listener (port 41341) is not yet
 /// open. A single call that falls into this gap or gets lost as a UDP packet
 /// means PERMANENTLY no neighbour — afterwards there is silence, and there is
-/// nothing that catches up on it. Three calls cover the start offset of two
-/// processes and survive two lost packets.
-const int kCalls = 3;
+/// nothing that catches up on it. The call and its three repeats (§7.2
+/// "repeat: as §11.3a", `silence.dart`; until S407 three calls) cover the
+/// start offset of two processes and survive three lost packets.
+const int kCalls = kSendingsAtMost;
 
 /// Interval between two calls of a series.
 ///
@@ -102,8 +103,8 @@ class Neighbours {
   final RawDatagramSocket _call;
 
   /// The listeners that get ONLY segment-wide packets (group, broadcast) —
-  /// the evidence for F-7. See `neighbours_listener.dart`. Can be empty; then
-  /// no search call is answered, and that was said on opening.
+  /// the evidence for F-7. See `neighbours_listener.dart`. Can be empty
+  /// (Windows); then [_listen] answers it (§7.2 fallback), said on opening.
   final List<RawDatagramSocket> _segment;
   final String _ownIdentifier;
 
@@ -160,6 +161,7 @@ class Neighbours {
     BroadcastRelease release = realBroadcastRelease,
     ListenerBinding listener = realListenerBinding,
     SegmentBinding segment = realSegmentBinding,
+    ListenerBinding caller = realCallerBinding,
     Sign? sign,
     OnFind? onFind,
     void Function(String identifier, InternetAddress address, int port)? onAnswer,
@@ -178,6 +180,7 @@ class Neighbours {
         join: join,
         release: release,
         segment: segment,
+        caller: caller,
         report: report);
 
     final n = Neighbours._(g.listen, g.call, g.segment, myIdentifier, dataPort,
@@ -260,28 +263,14 @@ class Neighbours {
   ///
   /// The `catch` catches ONLY what goes wrong before the actual throw.
   /// Measured (S389): not a single operating system error comes synchronously out of
-  /// `send`; they all come as error events and land in [_error].
+  /// `send`; they all come as error events and land in [_error]. A datagram
+  /// the socket refuses is held (`neighbours_send.dart`, Windows S407).
   void _send(Uint8List packet, InternetAddress target, String what) {
     try {
-      _call.send(packet, target, _port);
+      sendOrHold(_call, packet, target, _port);
     } catch (e) {
       _report?.call('Neighbour search: call via $what did not go out ($e).');
     }
-  }
-
-  /// An answer to the one from whom the packet came. Its sender is
-  /// unchecked foreign material: a packet with sender port 0 or a
-  /// broadcast address as sender would CLOSE this socket on answering
-  /// — permanently, in both directions (measured, S389,
-  /// `wire_target.dart`). Then this node would never be found again.
-  void _answer(RawDatagramSocket via, Uint8List packet, Datagram d) {
-    final reason = impossibleTarget(d.address, d.port, packet.length);
-    if (reason != null) {
-      _report?.call('Neighbour search: no answer to ${d.address.address}:'
-          '${d.port} — $reason');
-      return;
-    }
-    via.send(packet, d.address, d.port);
   }
 
   /// Measured (S389): after such an event this socket is dead — it
@@ -294,7 +283,7 @@ class Neighbours {
   bool get audible => _listen != null;
 
   void _onCall(RawSocketEvent e) {
-    if (e != RawSocketEvent.read) return;
+    if (e != RawSocketEvent.read) return heldOut(_listen, e);
     final listen = _listen;
     if (listen == null) return;
     final d = listen.receive();
@@ -304,7 +293,13 @@ class Neighbours {
     // segment sends here via unicast — the amplifier. What came via group
     // or broadcast lies identically at [_segment] and is
     // answered there. Reasoning and measurement: `neighbours_listener.dart`.
-    if (d.data.isNotEmpty && d.data[0] == _suchCode) return;
+    // §7.2 fallback (S407): where [_segment] could not be bound (Windows,
+    // 10049) it is answered HERE — never to an address the open network
+    // reaches (§11.6 "local segment only"; no amplifier).
+    if (d.data.isNotEmpty && d.data[0] == _suchCode) {
+      if (_segment.isEmpty && !fromOutsideReachable(d.address)) _searchAnswer(d);
+      return;
+    }
     final read = callPacketRead(d.data, _callCode);
     if (read == null) return; // broken or foreign kind -> gone
     if (read.$1 == _ownIdentifier) return; // own call, no echo
@@ -313,7 +308,7 @@ class Neighbours {
     // for the other side to find us; it must not depend on what
     // our own caller does with the find (the callback goes to
     // `node_call.dart` and from there on into neighbourhood and cover stream).
-    _answer(listen, _packet(_answerCode), d);
+    answerTo(listen, _packet(_answerCode), d, _report);
 
     // And now the find. `read.$2` is the data port from the CALL packet,
     // not `d.port`: `d.port` is the sender's call socket, which accepts
@@ -335,6 +330,12 @@ class Neighbours {
     final d = s.receive();
     if (d == null) return;
     if (d.data.isEmpty || d.data[0] != _suchCode) return; // Ruf: [_beiRuf]
+    _searchAnswer(d);
+  }
+
+  /// Answers ONE search call — from [_onSegmentCall], or from [_onCall] in
+  /// the §7.2 fallback.
+  void _searchAnswer(Datagram d) {
     final listen = _listen;
     if (listen == null) return;
     final f = callPacketWithFieldRead(d.data, _suchCode, kSuchRandomLength);
@@ -343,12 +344,12 @@ class Neighbours {
         : _sign?.call(
             f.identifier, findData(f.field, f.identifier, _ownDataPort));
     if (f == null || z == null) return;
-    _answer(listen,
-        callPacketWithField(_findCode, _ownDataPort, z, f.identifier), d);
+    answerTo(listen,
+        callPacketWithField(_findCode, _ownDataPort, z, f.identifier), d, _report);
   }
 
   void _onAnswer(RawSocketEvent e) {
-    if (e != RawSocketEvent.read) return;
+    if (e != RawSocketEvent.read) return heldOut(_call, e);
     final d = _call.receive();
     if (d == null) return;
     if (d.data.isNotEmpty && d.data[0] == _findCode) {

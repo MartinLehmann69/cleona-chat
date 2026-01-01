@@ -148,7 +148,7 @@ class UpdateManifest {
   /// from `bootstrap_web_app.dart`.
   ///
   /// Making it hybrid is not buildable today: the consumer of the
-  /// browser page is browser JavaScript (`bootstrap_web_app.dart:997-1005`,
+  /// browser page is browser JavaScript (`bootstrap_web_app.dart:875-883`,
   /// `ed25519Verify` in pure JS), and there is no ML-DSA-65 there. A
   /// second field that part of the consumers cannot check would be
   /// exactly the transitional form that CLAUDE.md forbids. The finding is
@@ -156,10 +156,11 @@ class UpdateManifest {
   /// not silently decided here.
   final Map<String, String>? binarySignatures;
 
-  /// NEW (§19.6.2): per-platform exact byte size of the unpadded release
-  /// binary, required to truncate the Reed-Solomon reconstruction back to
-  /// the original binary (erasure-coded fragments are padded to a multiple
-  /// of K). Null on legacy manifests.
+  /// Per-platform exact byte size of the release binary (v4_2 §26.6.8). The
+  /// invitation link carries it as `z=` (§26.6.3): the browser assemblers of
+  /// earlier 4.2 versions trimmed Reed-Solomon block padding with it; the
+  /// current assembler downloads the complete binary and does not read it.
+  /// Null on manifests without the field.
   final Map<String, int>? binarySizes;
 
   /// S387, D1 (§26.6.2): per platform and source version the SHA-256 (hex) of the
@@ -504,6 +505,12 @@ class UpdateChecker {
   UpdateChecker({CLogger? log})
       : _log = log ?? CLogger.get('UpdateChecker', profileDir: AppPaths.dataDir);
 
+  /// Version and sequence number of the manifests already reported at INFO
+  /// in this process ([verifyManifest]); oldest first, bounded — one channel
+  /// carries one manifest at a time.
+  static final Set<String> _verifiedAnnounced = <String>{};
+  static const int _kAnnouncedAtMost = 8;
+
   /// Parse and verify an update manifest from its JSON.
   ///
   /// Returns the manifest if signature is valid, null otherwise.
@@ -533,7 +540,21 @@ class UpdateChecker {
         return null;
       }
 
-      _log.info('Update manifest verified: v${manifest.version}');
+      // INFO once per version and sequence number in this process, every
+      // further check of the same manifest at DEBUG (S407-N6): each moment
+      // and each caller checks again, and the field log of 08.10.2026 held
+      // 220 identical INFO lines in bursts of 12–18 a second.
+      final said = '${manifest.version}#${manifest.minMonotoneSeq}';
+      if (_verifiedAnnounced.add(said)) {
+        _log.info('Update manifest verified: v${manifest.version} '
+            '(sequence ${manifest.minMonotoneSeq})');
+        while (_verifiedAnnounced.length > _kAnnouncedAtMost) {
+          _verifiedAnnounced.remove(_verifiedAnnounced.first);
+        }
+      } else {
+        _log.debug('Update manifest verified: v${manifest.version} '
+            '(sequence ${manifest.minMonotoneSeq}, again)');
+      }
       return manifest;
     } catch (e) {
       _log.warn('Failed to parse update manifest: $e');

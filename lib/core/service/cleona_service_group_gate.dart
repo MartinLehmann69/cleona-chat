@@ -70,29 +70,34 @@ const String kGroupPostsWaitingArea = 'group_posts_waiting';
 /// (it is the invitation), the read mark (it names an own post, and a device
 /// that does not hold the group has none) and the acknowledgement of the
 /// pair.
-const Set<proto.MessageTypeV3> kGroupWaitingKinds = {
-  proto.MessageTypeV3.MTV3_TEXT,
-  proto.MessageTypeV3.MTV3_REPLY,
-  proto.MessageTypeV3.MTV3_MEDIA_INLINE,
-  proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
-  proto.MessageTypeV3.MTV3_MEDIA_HOLDERS,
-  proto.MessageTypeV3.MTV3_MEDIA_ABORT,
-  proto.MessageTypeV3.MTV3_VOICE_MESSAGE,
-  proto.MessageTypeV3.MTV3_REACTION,
-  proto.MessageTypeV3.MTV3_EDIT,
-  proto.MessageTypeV3.MTV3_DELETE,
-  proto.MessageTypeV3.MTV3_POLL_CREATE,
-  proto.MessageTypeV3.MTV3_POLL_VOTE,
-  proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
-  proto.MessageTypeV3.MTV3_POLL_UPDATE,
-  proto.MessageTypeV3.MTV3_POLL_SNAPSHOT,
-  proto.MessageTypeV3.MTV3_POLL_REVOKE,
-  proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
-  proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
-  proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
-  proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
-  proto.MessageTypeV3.MTV3_GROUP_LEAVE,
-  proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE,
+const Set<proto.MessageType> kGroupWaitingKinds = {
+  proto.MessageType.MT_TEXT,
+  proto.MessageType.MT_REPLY,
+  proto.MessageType.MT_MEDIA_INLINE,
+  proto.MessageType.MT_MEDIA_ANNOUNCE,
+  proto.MessageType.MT_MEDIA_HOLDERS,
+  proto.MessageType.MT_MEDIA_ABORT,
+  proto.MessageType.MT_VOICE_MESSAGE,
+  proto.MessageType.MT_REACTION,
+  proto.MessageType.MT_EDIT,
+  proto.MessageType.MT_DELETE,
+  proto.MessageType.MT_POLL_CREATE,
+  proto.MessageType.MT_POLL_VOTE,
+  proto.MessageType.MT_POLL_VOTE_ANONYMOUS,
+  proto.MessageType.MT_POLL_UPDATE,
+  proto.MessageType.MT_POLL_SNAPSHOT,
+  proto.MessageType.MT_POLL_REVOKE,
+  proto.MessageType.MT_CALENDAR_INVITE,
+  proto.MessageType.MT_CALENDAR_UPDATE,
+  proto.MessageType.MT_CALENDAR_DELETE,
+  proto.MessageType.MT_CALENDAR_RSVP,
+  proto.MessageType.MT_GROUP_LEAVE,
+  proto.MessageType.MT_CHAT_CONFIG_UPDATE,
+  // §16.2.2 (owner 13.10.2026, K-1 = A): "A post for a group or channel the
+  // device does not hold yet is buffered" — the channel's post waits for the
+  // channel's invitation like a group post for the group's (S407: until then
+  // it was dropped as "for unknown channel").
+  proto.MessageType.MT_CHANNEL_POST,
 };
 
 /// What the gate decided about a frame.
@@ -189,11 +194,11 @@ extension GroupGateOps on CleonaService {
       // §16.2.2: "a new invitation lifts the mark" — also for a channel
       // the device left ("The same mark is kept for a channel the device
       // left"), so the channel's invitation and creation pass as well.
-      if (event.type == proto.MessageTypeV3.MTV3_GROUP_INVITE ||
-          event.type == proto.MessageTypeV3.MTV3_GROUP_CREATE ||
-          event.type == proto.MessageTypeV3.MTV3_CHANNEL_INVITE ||
-          event.type == proto.MessageTypeV3.MTV3_CHANNEL_CREATE ||
-          event.type == proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT) {
+      if (event.type == proto.MessageType.MT_GROUP_INVITE ||
+          event.type == proto.MessageType.MT_GROUP_CREATE ||
+          event.type == proto.MessageType.MT_CHANNEL_INVITE ||
+          event.type == proto.MessageType.MT_CHANNEL_CREATE ||
+          event.type == proto.MessageType.MT_DELIVERY_RECEIPT) {
         return GroupGateVerdict.pass;
       }
       _log.info('${event.type.name} from $sender for the group '
@@ -262,6 +267,7 @@ extension GroupGateOps on CleonaService {
   void _groupRemovedFrom(String gid, int epoch) {
     myceliumMailbox?.groupPairLeave(hexToBytes(gid));
     _groups.remove(gid);
+    _skForget(gid); // §16.2.5: no keys of the next generation
     _saveGroups();
     _groupMarkLeft(gid, epoch, removed: true);
     _saveConversations();
@@ -324,7 +330,7 @@ extension GroupGateOps on CleonaService {
     // The delivery layer's acknowledgement of a file announcement is held
     // back until its object decodes (§9.4, D-29); the identifier it is sent
     // under waits with the announcement.
-    final receipt = event.type == proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE
+    final receipt = event.type == proto.MessageType.MT_MEDIA_ANNOUNCE
         ? _bulkReceiptsHeld.remove(id)
         : null;
     try {
@@ -404,7 +410,7 @@ extension GroupGateOps on CleonaService {
   /// read.
   HarvestEvent? _groupWaitingEvent(_WaitingKey w, Map<String, dynamic> row) {
     try {
-      final kind = proto.MessageTypeV3.valueOf(w.kind);
+      final kind = proto.MessageType.valueOf(w.kind);
       if (kind == null) return null;
       final epoch = row['epoch'];
       final hash = row['hash'];

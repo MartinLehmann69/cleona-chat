@@ -29,6 +29,12 @@ linter:
 
 analyzer:
   exclude:
+    # Run artifacts of the E2E runner (git-ignored). run-e2e.sh keeps each
+    # run's protocols under run-logs/ (S410 finding 4; before that under
+    # test-results/logs/), and the smoke results are named after their suite
+    # (`fail-test__smoke__<suite>.dart`) — logs, not Dart code.
+    - test/e2e/test-results/**
+    - test/e2e/run-logs/**
     # Retired V4.0 field simulation: imports modules that no longer exist,
     # deliberately not ported (see scripts/sim/attic/README.md).
     - scripts/sim/attic/**
@@ -37,4 +43,4 @@ analyzer:
     # the formulas of the proposals, output via `print`. Added in S378 —
     # they were on no branch of the V4 line, although the redesign rests on
     # them.
-    - scripts/v4-redesign/**
+    - scripts/delivery-redesign-sims/**

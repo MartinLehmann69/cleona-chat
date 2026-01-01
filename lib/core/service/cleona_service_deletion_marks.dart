@@ -166,7 +166,16 @@ extension DeletionMarkOps on CleonaService {
     final wire = [for (final id in owing) ..._deletionMarks[id]!.owed!];
     if (!_myceliumForget(wire)) return;
     for (final id in owing) {
-      _deletionMarks[id] = _deletionMarks[id]!.owing(null);
+      // The mark of a conversation that left before the mailbox was
+      // attached (`_conversationLeavesProfile`) stood only to carry what was
+      // owed; settled, it leaves (owner decision E15 F-3 B, 08.10.2026).
+      // A conversation identifier has 32 bytes, a message identifier 16 —
+      // the mark of a deleted message stays (§21.5.2 level 1, Z-1).
+      if (id.length == 64) {
+        _deletionMarks.remove(id);
+      } else {
+        _deletionMarks[id] = _deletionMarks[id]!.owing(null);
+      }
       _persistDeletionMark(id);
     }
   }
@@ -236,18 +245,13 @@ extension DeletionMarkOps on CleonaService {
 /// The state area that holds the edits waiting for their message.
 const String kPendingEditsArea = 'pending_edits';
 
-/// How long a buffered edit is held: the same term as a deletion mark
-/// ([kDeletionMarkRetention]) — it covers the longest a copy of the
-/// message can still be under way (§9.3, §8.2). §20.2: every buffer has
-/// a declared limit and a declared behaviour; the limit is this term, the
-/// behaviour is the sweep.
-const Duration kPendingEditRetention = Duration(days: 31);
-
-/// At most this many buffered edits for messages this device has never
-/// seen. Such a mark costs its sender one message and this device one
-/// row; the cap is that of the unseen deletion marks
-/// ([kUnseenDeletionMarksAtMost]). The oldest drops.
-const int kUnseenEditMarksAtMost = 4096;
+// §20.2, owner decision E17 A (08.10.2026): the buffer has no count limit
+// and no clock — the same as the posts buffered for a group not held yet
+// (§21.5.3). A buffered edit leaves when its message is held (checked there
+// and applied or dropped; from then on the message's own deletion rules,
+// its auto-delete timer included, apply) or with its conversation
+// (`_conversationLeavesProfile`). Such a mark costs its sender one message
+// and this device one row, as a real message of that sender does.
 
 class PendingEditMark {
   /// When the edit arrived here — the retention runs on it.
@@ -276,9 +280,6 @@ class PendingEditMark {
     required this.byHex,
   });
 
-  bool expired(DateTime now) =>
-      now.millisecondsSinceEpoch - atMs >= kPendingEditRetention.inMilliseconds;
-
   Map<String, dynamic> toJson() => {
         'at': atMs,
         'conv': conversationId,
@@ -297,20 +298,14 @@ class PendingEditMark {
 }
 
 extension PendingEditOps on CleonaService {
-  /// Loads the buffered edits on first access and drops what has run out.
-  /// One path for the started service and for everything else.
+  /// Loads the buffered edits on first access, every one of them, whatever
+  /// its age. One path for the started service and for everything else.
   void _ensurePendingEditsLoaded() {
     if (_pendingEditsLoaded) return;
     try {
-      final now = DateTime.now();
       for (final e in store.loadArea(kPendingEditsArea).entries) {
         try {
-          final mark = PendingEditMark.fromJson(e.value);
-          if (mark.expired(now)) {
-            store.removeEntry(kPendingEditsArea, e.key);
-          } else {
-            _pendingEdits[e.key] = mark;
-          }
+          _pendingEdits[e.key] = PendingEditMark.fromJson(e.value);
         } catch (err) {
           _log.warn('Pending edit ${e.key} unreadable, skipped: $err');
         }
@@ -336,7 +331,6 @@ extension PendingEditOps on CleonaService {
     if (messageId.isEmpty) return;
     _ensurePendingEditsLoaded();
     final at = now ?? DateTime.now();
-    _sweepPendingEdits(at);
     final standing = _pendingEdits[messageId];
     // A later edit replaces an earlier one; a replayed older one does not
     // set the text back (the receiver evaluates the timestamps in the
@@ -349,13 +343,6 @@ extension PendingEditOps on CleonaService {
         editAtMs: editAtMs,
         byHex: byHex);
     _persistPendingEdit(messageId);
-    // §20.2: a declared bound on the edits for messages never seen —
-    // the oldest drops, never the newest arrival is blocked.
-    final unseen = _pendingEdits.keys.toList();
-    for (var i = 0; i < unseen.length - kUnseenEditMarksAtMost; i++) {
-      _pendingEdits.remove(unseen[i]);
-      _persistPendingEdit(unseen[i]);
-    }
   }
 
   /// Applies the buffered edit of [msg], which has just been inserted
@@ -413,12 +400,14 @@ extension PendingEditOps on CleonaService {
         '$conversationId');
   }
 
-  /// Drops the buffered edits whose retention has run out (§20.2).
-  void _sweepPendingEdits(DateTime now) {
+  /// Drops the buffered edits that wait for a message of
+  /// [conversationId] — the conversation has left the profile, and nothing
+  /// will hold their message any more.
+  void _pendingEditsOfConversationDrop(String conversationId) {
     _ensurePendingEditsLoaded();
     final out = [
       for (final e in _pendingEdits.entries)
-        if (e.value.expired(now)) e.key,
+        if (e.value.conversationId == conversationId) e.key,
     ];
     for (final id in out) {
       _pendingEdits.remove(id);
@@ -442,9 +431,4 @@ extension PendingEditOps on CleonaService {
     }
   }
 
-  /// The sweep of [_sweepPendingEdits] at a moment the guard chooses
-  /// (`test/smoke/smoke_group_post_findings_run.dart`).
-  @visibleForTesting
-  void debugSweepPendingEdits({required DateTime now}) =>
-      _sweepPendingEdits(now);
 }

@@ -13,7 +13,7 @@ library;
 
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/ip_address_class.dart';
-import 'package:cleona/core/rendezvous/rendezvous_provider.dart';
+import 'package:cleona/core/util/endpoint_address.dart';
 import 'package:cleona/core/update/invite_link.dart';
 
 /// Higher-level service for creating invite links (§19.6.4).
@@ -71,7 +71,7 @@ class InviteLinkService {
   /// Pick the best public address from a list.
   /// Prefers: public IPv4 > global IPv6 > private (returns null if no public).
   static EndpointAddress? bestPublicAddress(List<EndpointAddress> addresses) {
-    EndpointAddress? bestV4;
+    EndpointAddress? bestV4;  // version-name-ok: IP address family
     EndpointAddress? bestV6;
 
     for (final addr in addresses) {

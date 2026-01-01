@@ -15,12 +15,12 @@
 
 part of 'cleona_service.dart';
 
-extension V3ReceivePathOps on CleonaService {
+extension ReceivePathOps on CleonaService {
 
   // ── THE V3 RECEIVE ENTRY HAS FALLEN (CUT, 31.08.2026) ──────────
   //
   // Here stood `handleIncomingApplicationPacket(...)` and its fast path
-  // `_tryLiveMediaFastPath(...)`. Both accepted a `proto.NetworkPacketV3`
+  // `_tryLiveMediaFastPath(...)`. Both accepted a `proto.NetworkPacket`
   // — the RAW V3 frame from the wire — and did three things: inner KEM
   // decapsulation against the user KEM keys of this identity, user
   // signature check against the contact registration, and handover to
@@ -32,31 +32,19 @@ extension V3ReceivePathOps on CleonaService {
   // `CleonaNode.onApplicationFramePayload` — the callback of the deleted
   // node. Re-measured on 31.08.2026: there is no further caller in `lib/`.
   //
-  // THE V4.1 RECEIVE SIDE IS A DIFFERENT ONE AND IT STANDS: `V41Host.accept`
-  // -> `MessageSealer.open` -> `Aggregate.unpack` ->
-  // [acceptV41Frame] (further down in this file) -> the V4.1 cells come
-  // as `HarvestEvent` into [handleApplicationFrame]. The DISPATCHER below
-  // is thus unchanged in operation; only this one entry is gone.
+  // THE 4.2 RECEIVE SIDE IS A DIFFERENT ONE AND IT STANDS: the mailbox of
+  // `package:mycelium` opens the envelope, proves the sender and hands the
+  // frame through `cleona_service_mycelium.dart` as a `HarvestEvent` into
+  // [handleApplicationFrame]. The DISPATCHER below is thus unchanged in
+  // operation; only this one entry is gone. (The V4.1 receive side,
+  // `acceptV41Frame`, fell with `lib/core/tagline/`, S408-P23.)
   //
-  // TWO THINGS ARE LOST IN THE PROCESS, named instead of concealed:
+  // TWO THINGS WERE LOST WITH THE V3 ENTRY, named instead of concealed:
   //
   //   * `identity.previousX25519Sk`/`previousMlKemSk` — the fallback to
   //     the PREVIOUS KEM keys after a rotation. It lived only in this body.
-  //
-  //     ADDED ON 02.09.2026 (S362), AND TWO THINGS HERE WERE WRONG.
-  //     First the deadline: it no longer stands at 7 days, but at 32
-  //     (`IdentityContext.previousKeyRetention`, the bracket from §4.5.4
-  //     for the 31-day class). Second the sentence
-  //     "`MessageSealer.open` decapsulates against the pair key": that is
-  //     not true. `MessageOpener.open` decapsulates against
-  //     `ownMlKemSecret()`, i.e. very much against the user KEM keys; the
-  //     pair key `K_AB` carries the MARK, not the seal. The fallback was
-  //     therefore very much needed — since S362 it is built in
-  //     `tagline/message_seal.dart`
-  //     (`previousX25519Secret`/`previousMlKemSecret`, wired in
-  //     `tagline/v41_attach.dart`). As long as it was missing, a
-  //     management cell was openable for 3.5 instead of 31 days on
-  //     average, and the loss was silent.
+  //     In 4.2 the post box opens with the current and the previous KEM
+  //     generation (`mycelium/lib/post_box.dart`, `kemOpeners`, §4.5.4).
   //
   //   * THE LIVE MEDIA FAST PATH (§10.3 / appendix B.2). Call frames carry
   //     a PLAINTEXT inner without per-recipient KEM, because the payload
@@ -67,8 +55,8 @@ extension V3ReceivePathOps on CleonaService {
   //     has had no implementation since the CUT" — the same error that had
   //     already been corrected in `cleona_service.dart` (`sendToUser`), but
   //     remained standing here as a duplicate. Measured false: there is an
-  //     implementation, `calls/call_transport_v41.dart:83`
-  //     `class CallTransportV41 implements CallTransport`, constructed in
+  //     implementation, `calls/plane_d_call_transport.dart:83`
+  //     `class PlaneDCallTransport implements CallTransport`, constructed in
   //     `service/call_service.dart:192`. And this fast path here is not its
   //     caller anyway: live call frames never run through the receive
   //     dispatcher of this file, but arrive directly at the `DSocket`
@@ -109,7 +97,7 @@ extension V3ReceivePathOps on CleonaService {
   }) async {
     // A TYPE THIS BUILD DOES NOT KNOW IS DISCARDED — before dedup, receipt
     // and dispatch (S398, finding R-1). protobuf leaves an unknown enum value
-    // in `unknownFields`, and `event.type` then reads `MTV3_TEXT`: a frame of
+    // in `unknownFields`, and `event.type` then reads `MT_TEXT`: a frame of
     // a reserved type (30/31 restore, 35-37 guardian) or of a future one
     // would be shown as a text message made of its payload and acknowledged
     // as text. Measured before this line: all three appeared in the chat
@@ -121,7 +109,6 @@ extension V3ReceivePathOps on CleonaService {
           '— discarded (reserved or newer than this build)');
       return GroupGateVerdict.pass;
     }
-
 
     // Receive-side dedup — the identity's memory of received DELIVERY
     // identifiers (§20.2, S403 decision 1): one slim table in the store
@@ -189,11 +176,11 @@ extension V3ReceivePathOps on CleonaService {
           return GroupGateVerdict.pass;
         }
         if (!mirrored &&
-            isAckWorthyV3(event.type) &&
+            isAckWorthy(event.type) &&
             event.senderUserId.isNotEmpty) {
           final senderUserId = Uint8List.fromList(event.senderUserId);
           if (!constantTimeEquals(senderUserId, identity.userId)) {
-            _sendDeliveryReceiptV3(
+            _sendDeliveryReceipt(
               recipientUserId: senderUserId,
               messageId: Uint8List.fromList(event.messageId),
               senderDeviceId: event.senderDeviceId,
@@ -228,17 +215,10 @@ extension V3ReceivePathOps on CleonaService {
       }
     }
 
-    // §5.1 F3′ (fourth outbox edge): this frame is fully verified, so the
-    // sender is provably back online. If we hold parked outbox entries FOR
-    // this user, flush them user-scoped now — the recipient reappearing is
-    // the one case the sender-side edges (network-change, first-peer,
-    // endpoint-confirmed) cannot see.
-    _maybeFlushOutboxForSender(senderUserHex);
-    // §5.1 F3' — the same edge for the First-CR, but called SEPARATELY:
-    // _maybeFlushOutboxForSender exits early if no outbox entries are
-    // parked for this sender (:7595) — and for a First-CR there are none by
-    // construction. A hook inside the function would therefore be
-    // unreachable in exactly the relevant case.
+    // §5.1 F3' — a fully verified frame proves the sender is back online.
+    // (The V4.1 outbox drain on this edge, `_maybeFlushOutboxForSender`,
+    // fell with `lib/core/tagline/`, S408-P23: in 4.2 the mailbox resends
+    // at its own edges, §8.2.)
     shortenCrBackoffOnEdge('verified-inbound', onlyUserHex: senderUserHex);
 
     // A5: any verified ApplicationFrame proves contact liveness
@@ -257,8 +237,12 @@ extension V3ReceivePathOps on CleonaService {
     // group it does not hold yet waits for the invitation
     // (`cleona_service_group_gate.dart`). Neither reaches a handler now.
     final gate = _groupGate(event);
-    if (gate == GroupGateVerdict.pass) {
-      _applicationEventDispatch(event, wasDirect: wasDirect);
+    // §16.2.2: in a group in announcement mode a member's post is discarded
+    // (`cleona_service_group_announcement.dart`); the receipt stays as for
+    // any frame the delivery layer has acknowledged.
+    if (gate == GroupGateVerdict.pass && !_groupAnnouncementRefuses(event)) {
+      _applicationEventDispatch(event,
+          wasDirect: wasDirect, mirrored: mirrored);
 
       // §9.4 "Nothing overtakes a file" (S398-W5): a file arrived, or a
       // message that waited behind one — order and collection
@@ -273,7 +257,7 @@ extension V3ReceivePathOps on CleonaService {
 
     // Auto-DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light): for ack-worthy
     // ApplicationFrame types, emit a receipt back to the sender's UserID
-    // with the inner messageId. The sender's `_handleDeliveryReceiptV3`
+    // with the inner messageId. The sender's `_handleDeliveryReceipt`
     // upgrades the matching outgoing UiMessage from `sent` to `delivered`.
     // Skipped when:
     //   - messageId empty (sender hasn't been migrated to set inner.messageId),
@@ -287,12 +271,12 @@ extension V3ReceivePathOps on CleonaService {
     // anything), and this receipt says the same thing; withholding it here
     // would make the two disagree.
     if (!mirrored &&
-        isAckWorthyV3(event.type) &&
+        isAckWorthy(event.type) &&
         event.messageId.isNotEmpty &&
         event.senderUserId.isNotEmpty) {
       final senderUserId = Uint8List.fromList(event.senderUserId);
       if (!constantTimeEquals(senderUserId, identity.userId)) {
-        _sendDeliveryReceiptV3(
+        _sendDeliveryReceipt(
           recipientUserId: senderUserId,
           messageId: Uint8List.fromList(event.messageId),
           senderDeviceId: event.senderDeviceId,
@@ -307,221 +291,261 @@ extension V3ReceivePathOps on CleonaService {
   /// frame that arrives ([handleApplicationFrame]) and for one that waited
   /// for the invitation into its group (`_groupWaitingApply`, §16.2.2).
   void _applicationEventDispatch(HarvestEvent event,
-      {required bool wasDirect}) {
+      {required bool wasDirect, bool mirrored = false}) {
     switch (event.type) {
       // Messaging — Cluster C2
-      case proto.MessageTypeV3.MTV3_TEXT:
-        _handleTextV3(event);
+      case proto.MessageType.MT_TEXT:
+        _handleText(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_INLINE:
-        _handleMediaInlineV3(event);
+      case proto.MessageType.MT_MEDIA_INLINE:
+        _handleMediaInline(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
-        _handleMediaAnnounceV3(event);
+      case proto.MessageType.MT_MEDIA_ANNOUNCE:
+        _handleMediaAnnounce(event);
         break;
       // Lane 2 (§17.6, S398 P3b) — `cleona_service_stream.dart`.
-      case proto.MessageTypeV3.MTV3_MEDIA_STREAM_REQUEST:
+      case proto.MessageType.MT_MEDIA_STREAM_REQUEST:
         _streamRequestReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_STREAM_OFFER:
+      case proto.MessageType.MT_MEDIA_STREAM_OFFER:
         _streamOfferReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_MEDIA_HOLDERS:
+      case proto.MessageType.MT_MEDIA_HOLDERS:
         _streamHoldersReceived(event);
         break;
       // §9.4 "Reasons", D-34 (S398-W1) — `cleona_service_transfer.dart`.
-      case proto.MessageTypeV3.MTV3_MEDIA_ABORT:
+      case proto.MessageType.MT_MEDIA_ABORT:
         _mediaAbortReceived(event);
         break;
-      // MTV3_MEDIA_REQUEST / _CHUNK / _COMPLETE / _REJECT have no handler
-      // (S399 P2-7): §9.4 knows no fetch on request, and a file is never
-      // sent again (§9.3, D-34). They fall to `default` and are logged.
-      case proto.MessageTypeV3.MTV3_REACTION:
-        _handleReactionV3(event);
+      // D-34's one exception (S407 A2): an image whose recipient lost the
+      // pieces it kept asks once for the missing stripes —
+      // `cleona_service_image_again.dart`. Any other file is refused there.
+      case proto.MessageType.MT_MEDIA_REQUEST:
+        _imageAgainReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_REPLY:
-        _handleReplyV3(event);
+      // MT_MEDIA_CHUNK / _COMPLETE / _REJECT have no handler (S399 P2-7):
+      // §9.4 knows no fetch on request, and a file is never sent again
+      // (§9.3, D-34). They fall to `default` and are logged.
+      case proto.MessageType.MT_REACTION:
+        _handleReaction(event, mirrored: mirrored);
         break;
-      case proto.MessageTypeV3.MTV3_EDIT:
-        _handleEditV3(event);
+      // §16.2.4 — `cleona_service_channel_reactions.dart`.
+      case proto.MessageType.MT_CHANNEL_REACTION_TOTALS:
+        _channelReactionTotalsReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_DELETE:
-        _handleDeleteV3(event);
+      case proto.MessageType.MT_CHANNEL_REACTION_HANDOVER:
+        _channelReactionHandoverReceived(event, mirrored);
         break;
-      case proto.MessageTypeV3.MTV3_VOICE_MESSAGE:
-        _handleVoiceMessageV3(event);
+      case proto.MessageType.MT_REPLY:
+        _handleReply(event);
+        break;
+      case proto.MessageType.MT_EDIT:
+        _handleEdit(event);
+        break;
+      case proto.MessageType.MT_DELETE:
+        _handleDelete(event);
+        break;
+      case proto.MessageType.MT_VOICE_MESSAGE:
+        _handleVoiceMessage(event);
         break;
 
       // Layer-Replies (ephemeral, ACK) — Cluster C1
-      case proto.MessageTypeV3.MTV3_TYPING_INDICATOR:
-        _handleTypingIndicatorV3(event);
+      case proto.MessageType.MT_TYPING_INDICATOR:
+        _handleTypingIndicator(event);
         break;
-      case proto.MessageTypeV3.MTV3_READ_RECEIPT:
-        _handleReadReceiptV3(event);
+      case proto.MessageType.MT_READ_RECEIPT:
+        _handleReadReceipt(event);
         break;
-      case proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT:
-        _handleDeliveryReceiptV3(event, wasDirect: wasDirect);
+      case proto.MessageType.MT_DELIVERY_RECEIPT:
+        _handleDeliveryReceipt(event, wasDirect: wasDirect);
         break;
 
       // §9.5 (D-48): catching up after more than 7 days — request, answer
       // packet or progress report of a party (`cleona_service_catch_up.dart`).
-      case proto.MessageTypeV3.MTV3_CATCH_UP:
+      case proto.MessageType.MT_CATCH_UP:
         _catchUpReceived(event);
         break;
 
       // Identity / Profile — Cluster C4. Types 30/31 (V3 restore) are
       // reserved; a frame carrying them is discarded above as an unknown
       // type (S398, finding R-1).
-      case proto.MessageTypeV3.MTV3_IDENTITY_DELETED:
-        _handleIdentityDeletedV3(event);
+      case proto.MessageType.MT_IDENTITY_DELETED:
+        _handleIdentityDeleted(event);
         break;
-      case proto.MessageTypeV3.MTV3_PROFILE_UPDATE:
-        _handleProfileUpdateV3(event);
+      case proto.MessageType.MT_PROFILE_UPDATE:
+        _handleProfileUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
-        _handleKeyRotationBroadcastV3(event);
+      case proto.MessageType.MT_KEY_ROTATION_BROADCAST:
+        _handleKeyRotationBroadcastEvent(event);
         break;
-      case proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK:
-        _handleKeyRotationAckV3(event);
+      case proto.MessageType.MT_KEY_ROTATION_ACK:
+        _handleKeyRotationAck(event);
         break;
-      case proto.MessageTypeV3.MTV3_ROTATION_REJECTION_ALERT:
-        _handleRotationRejectionAlertV3(event);
+      case proto.MessageType.MT_ROTATION_REJECTION_ALERT:
+        _handleRotationRejectionAlert(event);
         break;
       // §14.5 path 2 — the carrier without which `verifyRotationCoAuth` has
       // no denominator (`cleona_service_deviceset.dart`).
-      case proto.MessageTypeV3.MTV3_DEVICE_SET_ANNOUNCE:
-        _handleDeviceSetAnnounceV3(event);
+      case proto.MessageType.MT_DEVICE_SET_ANNOUNCE:
+        _handleDeviceSetAnnounce(event);
         break;
 
-      // Contact request — cluster C4. MTV3_CONTACT_REQUEST no longer has a
+      // Contact request — cluster C4. MT_CONTACT_REQUEST no longer has a
       // handler (S388-BAU-KONTAKT): the request is package (2) of first
       // contact in mycelium (§15.5), and such a frame falls into `default`
       // (§15.7 — no third path for strangers).
-      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE:
-        _handleContactRequestResponseV3(event);
+      case proto.MessageType.MT_CONTACT_REQUEST_RESPONSE:
+        _handleContactRequestResponse(event);
         break;
 
       // Groups — Cluster C4
-      case proto.MessageTypeV3.MTV3_GROUP_CREATE:
-        _handleGroupCreateV3(event);
+      case proto.MessageType.MT_GROUP_CREATE:
+        _handleGroupCreate(event);
         break;
-      case proto.MessageTypeV3.MTV3_GROUP_INVITE:
-        _handleGroupInviteV3(event);
+      case proto.MessageType.MT_GROUP_INVITE:
+        _handleGroupInvite(event);
         break;
-      case proto.MessageTypeV3.MTV3_GROUP_LEAVE:
-        _handleGroupLeaveV3(event);
+      case proto.MessageType.MT_GROUP_LEAVE:
+        _handleGroupLeave(event);
         break;
-      case proto.MessageTypeV3.MTV3_GROUP_KEY_UPDATE:
-        _handleGroupKeyUpdateV3(event);
+      case proto.MessageType.MT_GROUP_KEY_UPDATE:
+        _handleGroupKeyUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST:
+      case proto.MessageType.MT_GROUP_MEMBERSHIP_RESYNC_REQUEST:
         _handleGroupMembershipResyncRequest(event);
         break;
-      case proto.MessageTypeV3.MTV3_GROUP_JOIN: // B-3, §16.2.2
-        _handleGroupJoinV3(event);
+      case proto.MessageType.MT_GROUP_JOIN: // B-3, §16.2.2
+        _handleGroupJoin(event);
         break;
 
       // Channels — Cluster C4
-      case proto.MessageTypeV3.MTV3_CHANNEL_CREATE:
-        _handleChannelCreateV3(event);
+      case proto.MessageType.MT_CHANNEL_CREATE:
+        _handleChannelCreate(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_POST:
-        _handleChannelPostV3(event);
+      case proto.MessageType.MT_CHANNEL_POST:
+        _handleChannelPost(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_INVITE:
-        _handleChannelInviteV3(event);
+      case proto.MessageType.MT_CHANNEL_INVITE:
+        _handleChannelInvite(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_LEAVE:
-        _handleChannelLeaveV3(event);
+      case proto.MessageType.MT_CHANNEL_LEAVE:
+        _handleChannelLeave(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE:
-        _handleChannelRoleUpdateV3(event);
+      case proto.MessageType.MT_CHANNEL_ROLE_UPDATE:
+        _handleChannelRoleUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_BAD_BADGE_REPORT:
-        _moderation.handleChannelBadBadgeReportV3(event);
+      // §16.2.2 — `cleona_service_channel_list.dart`.
+      case proto.MessageType.MT_CHANNEL_MEMBERS_CHANGE:
+        // A 4.2.3 device does not know the kind (stand-in of a probe).
+        if (!channelReceiveAs423) _channelMembersChangeReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE:
-        _moderation.handleChannelJuryVoteV3(event);
+      // §16.2.2 — `cleona_service_group_list.dart`.
+      case proto.MessageType.MT_GROUP_MEMBERS_CHANGE:
+        // A 4.2.3 device does not know the kind (stand-in of a probe).
+        if (!channelReceiveAs423) _groupMembersChangeReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION:
-        _moderation.handleChannelModDecisionV3(event);
+      // §16.2.5 — `cleona_service_shared_key*.dart`. A 4.2.3 device does not
+      // know the kinds (stand-ins of a probe: `channelReceiveAs423`,
+      // `sharedKeyOff`).
+      case proto.MessageType.MT_CAPABILITY_NOTICE:
+        if (!channelReceiveAs423) _capabilityNoticeReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_SUBSCRIBE_PROBE:
-        _moderation.handleChannelSubscribeProbeV3(event);
+      case proto.MessageType.MT_SHARED_KEY:
+        if (!channelReceiveAs423) _skDeliveryReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST:
-        _moderation.handleChannelJoinRequestV3(event);
+      case proto.MessageType.MT_SHARED_KEY_AUTHOR:
+        if (!channelReceiveAs423) _skAuthorReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_REPORT:
-        _moderation.handleChannelReportV3(event);
+      case proto.MessageType.MT_CHANNEL_BAD_BADGE_REPORT:
+        _moderation.handleChannelBadBadgeReport(event);
+        break;
+      case proto.MessageType.MT_CHANNEL_JURY_VOTE:
+        _moderation.handleChannelJuryVote(event);
+        break;
+      case proto.MessageType.MT_CHANNEL_MOD_DECISION:
+        _moderation.handleChannelModDecision(event);
+        break;
+      case proto.MessageType.MT_CHANNEL_SUBSCRIBE_PROBE:
+        _moderation.handleChannelSubscribeProbe(event);
+        break;
+      case proto.MessageType.MT_CHANNEL_JOIN_REQUEST:
+        _moderation.handleChannelJoinRequestEvent(event);
+        break;
+      case proto.MessageType.MT_CHANNEL_REPORT:
+        _moderation.handleChannelReport(event);
         break;
 
       // Calls — Cluster C3 (delegated to CallService)
-      case proto.MessageTypeV3.MTV3_CALL_INVITE:
-        _calls.handleCallInviteV3(event);
+      case proto.MessageType.MT_CALL_INVITE:
+        _calls.handleCallInvite(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_ANSWER:
-        _calls.handleCallAnswerV3(event);
+      case proto.MessageType.MT_CALL_ANSWER:
+        _calls.handleCallAnswer(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_REJECT:
-        _calls.handleCallRejectV3(event);
+      case proto.MessageType.MT_CALL_REJECT:
+        _calls.handleCallReject(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_RING_ACK:
+      case proto.MessageType.MT_CALL_RING_ACK:
         // §17.2: only with this may the caller hear a ringback tone.
-        _calls.handleCallRingAckV3(event);
+        _calls.handleCallRingAck(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_CANCEL_OTHERS:
+      case proto.MessageType.MT_CALL_CANCEL_OTHERS:
         // §17.2 multi-device arbitration. Own type instead of a rider on
-        // MTV3_CALL_REJECT — justification in `calls/call_arbitration.dart`.
-        _calls.handleCallCancelOthersV3(event);
+        // MT_CALL_REJECT — justification in `calls/call_arbitration.dart`.
+        _calls.handleCallCancelOthers(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_HANGUP:
-        _calls.handleCallHangupV3(event);
+      case proto.MessageType.MT_CALL_HANGUP:
+        _calls.handleCallHangup(event);
         break;
-      case proto.MessageTypeV3.MTV3_ICE_CANDIDATE:
-        _calls.handleIceCandidateV3(event);
+      case proto.MessageType.MT_CALL_MISSED:
+        // §17.2: an ordinary message, not a call signal
+        // (`cleona_service_missed_call.dart`).
+        _missedCallReceived(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_REJOIN:
-        _calls.handleCallRejoinV3(event);
+      case proto.MessageType.MT_ICE_CANDIDATE:
+        _calls.handleIceCandidate(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_AUDIO:
-        _calls.handleCallAudioV3(event);
+      case proto.MessageType.MT_CALL_REJOIN:
+        _calls.handleCallRejoin(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_VIDEO:
-        _calls.handleCallVideoV3(event);
+      case proto.MessageType.MT_CALL_AUDIO:
+        _calls.handleCallAudio(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
+      case proto.MessageType.MT_CALL_VIDEO:
+        _calls.handleCallVideo(event);
+        break;
+      case proto.MessageType.MT_CALL_KEYFRAME_REQUEST:
         _calls.onKeyframeRequested?.call();
         break;
       // §17.5 — handled here, not in CallService: the state is a report
       // about the peer that the UI reads (`peerCallMediaState`); CallService
       // decides only when OUR state changes (`onOwnVideoStateChanged`, S399).
-      case proto.MessageTypeV3.MTV3_CALL_MEDIA_STATE:
-        handleCallMediaStateV3(event);
+      case proto.MessageType.MT_CALL_MEDIA_STATE:
+        handleCallMediaState(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO:
-        _calls.handleCallGroupAudioV3(event);
+      case proto.MessageType.MT_CALL_GROUP_AUDIO:
+        _calls.handleCallGroupAudio(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO:
-        _calls.handleCallGroupVideoV3(event);
+      case proto.MessageType.MT_CALL_GROUP_VIDEO:
+        _calls.handleCallGroupVideo(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_LEAVE:
-        _calls.handleCallGroupLeaveV3(event);
+      case proto.MessageType.MT_CALL_GROUP_LEAVE:
+        _calls.handleCallGroupLeave(event);
         break;
-      // S368: MTV3_CALL_GROUP_KEY_ROTATE (81) has been removed — the handler
+      // S368: MT_CALL_GROUP_KEY_ROTATE (81) has been removed — the handler
       // was a wire-compat no-op. The number is reserved in the proto; a
       // frame with it now falls into the `default` branch and is discarded.
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY:
-        _calls.groupCallManager.handleGroupCallSenderKeyV3(event);
+      case proto.MessageType.MT_CALL_GROUP_SENDER_KEY:
+        _calls.groupCallManager.handleGroupCallSenderKey(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_RTT_PING:
-        _calls.handleCallRttPingV3(event);
+      case proto.MessageType.MT_CALL_RTT_PING:
+        _calls.handleCallRttPing(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_RTT_PONG:
-        _calls.handleCallRttPongV3(event);
+      case proto.MessageType.MT_CALL_RTT_PONG:
+        _calls.handleCallRttPong(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_TREE_UPDATE:
-        _calls.handleCallTreeUpdateV3(event);
+      case proto.MessageType.MT_CALL_TREE_UPDATE:
+        _calls.handleCallTreeUpdate(event);
         break;
 
       // Wave 2B.3: PEER_LIST_*, DHT_*, ROUTE_UPDATE, REACHABILITY_*, HOLE_PUNCH_*
@@ -536,11 +560,11 @@ extension V3ReceivePathOps on CleonaService {
       // through this ApplicationFrame switch either.
 
       // Chat-Config — Cluster C4
-      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE:
-        _handleChatConfigUpdateV3(event);
+      case proto.MessageType.MT_CHAT_CONFIG_UPDATE:
+        _handleChatConfigUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_RESPONSE:
-        _handleChatConfigResponseV3(event);
+      case proto.MessageType.MT_CHAT_CONFIG_RESPONSE:
+        _handleChatConfigResponse(event);
         break;
 
       // (ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_* — see comment
@@ -553,78 +577,78 @@ extension V3ReceivePathOps on CleonaService {
       // knowledge; such a frame falls into `default`.
 
       // Multi-Device — Cluster C4
-      case proto.MessageTypeV3.MTV3_TWIN_SYNC:
-        _handleTwinSyncV3(event);
+      case proto.MessageType.MT_TWIN_SYNC:
+        _handleTwinSync(event);
         break;
       // B-4b: the V3 pairing frames (DEVICE_PAIR_REQUEST/_APPROVE) have no
       // handler any more — a further device is enrolled over the words
       // (§14.6.1, `cleona_service_enrolment.dart`); such a frame falls into
       // `default` and is dropped.
-      case proto.MessageTypeV3.MTV3_DEVICE_REVOCATION:
-        _handleDeviceRevocationV3(event);
+      case proto.MessageType.MT_DEVICE_REVOCATION:
+        _handleDeviceRevocation(event);
         break;
 
       // Calendar — Cluster C4
-      case proto.MessageTypeV3.MTV3_CALENDAR_INVITE:
-        _calendarProto.handleCalendarInviteV3(event);
+      case proto.MessageType.MT_CALENDAR_INVITE:
+        _calendarProto.handleCalendarInvite(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_RSVP:
-        _calendarProto.handleCalendarRsvpV3(event);
+      case proto.MessageType.MT_CALENDAR_RSVP:
+        _calendarProto.handleCalendarRsvp(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_UPDATE:
-        _calendarProto.handleCalendarUpdateV3(event);
+      case proto.MessageType.MT_CALENDAR_UPDATE:
+        _calendarProto.handleCalendarUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_DELETE:
-        _calendarProto.handleCalendarDeleteV3(event);
+      case proto.MessageType.MT_CALENDAR_DELETE:
+        _calendarProto.handleCalendarDelete(event);
         break;
-      case proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST:
-        _calendarProto.handleFreeBusyRequestV3(event);
+      case proto.MessageType.MT_FREE_BUSY_REQUEST:
+        _calendarProto.handleFreeBusyRequest(event);
         break;
-      case proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE:
-        _calendarProto.handleFreeBusyResponseV3(event);
+      case proto.MessageType.MT_FREE_BUSY_RESPONSE:
+        _calendarProto.handleFreeBusyResponse(event);
         break;
 
       // Polls — Cluster C4
-      case proto.MessageTypeV3.MTV3_POLL_CREATE:
-        _polls.handlePollCreateV3(event);
+      case proto.MessageType.MT_POLL_CREATE:
+        _polls.handlePollCreate(event);
         break;
-      case proto.MessageTypeV3.MTV3_POLL_VOTE:
-        _polls.handlePollVoteV3(event);
+      case proto.MessageType.MT_POLL_VOTE:
+        _polls.handlePollVote(event);
         break;
-      case proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS:
-        _polls.handlePollVoteAnonymousV3(event);
+      case proto.MessageType.MT_POLL_VOTE_ANONYMOUS:
+        _polls.handlePollVoteAnonymous(event);
         break;
-      case proto.MessageTypeV3.MTV3_POLL_UPDATE:
-        _polls.handlePollUpdateV3(event);
+      case proto.MessageType.MT_POLL_UPDATE:
+        _polls.handlePollUpdate(event);
         break;
-      case proto.MessageTypeV3.MTV3_POLL_SNAPSHOT:
-        _polls.handlePollSnapshotV3(event);
+      case proto.MessageType.MT_POLL_SNAPSHOT:
+        _polls.handlePollSnapshot(event);
         break;
-      case proto.MessageTypeV3.MTV3_POLL_REVOKE:
-        _polls.handlePollRevokeV3(event);
+      case proto.MessageType.MT_POLL_REVOKE:
+        _polls.handlePollRevoke(event);
         break;
 
       // In-Call Collaboration (§25, planned) — cluster C3 (delegated to CallService)
-      case proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE:
-        _calls.handleWhiteboardStrokeV3(event);
+      case proto.MessageType.MT_WHITEBOARD_STROKE:
+        _calls.handleWhiteboardStroke(event);
         break;
-      case proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE:
-        _calls.handleWhiteboardPageV3(event);
+      case proto.MessageType.MT_WHITEBOARD_PAGE:
+        _calls.handleWhiteboardPage(event);
         break;
-      case proto.MessageTypeV3.MTV3_FILE_EXCHANGE:
-        _calls.handleFileExchangeV3(event);
+      case proto.MessageType.MT_FILE_EXCHANGE:
+        _calls.handleFileExchange(event);
         break;
-      case proto.MessageTypeV3.MTV3_CLIPBOARD_EXCHANGE:
-        _calls.handleClipboardExchangeV3(event);
+      case proto.MessageType.MT_CLIPBOARD_EXCHANGE:
+        _calls.handleClipboardExchange(event);
         break;
-      case proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME:
-        _calls.handleScreenShareFrameV3(event);
+      case proto.MessageType.MT_SCREEN_SHARE_FRAME:
+        _calls.handleScreenShareFrame(event);
         break;
-      case proto.MessageTypeV3.MTV3_CALL_CHAT:
-        _calls.handleCallChatV3(event);
+      case proto.MessageType.MT_CALL_CHAT:
+        _calls.handleCallChat(event);
         break;
-      case proto.MessageTypeV3.MTV3_REMOTE_CONTROL_INPUT:
-        _calls.handleRemoteControlInputV3(event);
+      case proto.MessageType.MT_REMOTE_CONTROL_INPUT:
+        _calls.handleRemoteControlInput(event);
         break;
 
       default:
@@ -686,17 +710,18 @@ extension V3ReceivePathOps on CleonaService {
         // displaced), the previous behaviour applies as everywhere; the
         // justification is in the block header of
         // `cleona_service_msgstate.dart`.
-        if (!_v41DeliveryProven(legIdHex)) return;
+        if (!_deliveryProven(legIdHex)) return;
         msg.deliveredBy.add(memberUserHex);
         if (withheld) {
           msg.withheldBy.add(memberUserHex);
         } else {
           msg.withheldBy.remove(memberUserHex);
         }
-        if (msg.isFullyDelivered &&
-            msg.status.canTransitionTo(MessageStatus.delivered)) {
-          msg.status = MessageStatus.delivered;
-        }
+        // §16.2.3, §21.5.5: the display over ALL legs, by the one rule
+        // (S410 finding 8) — `delivered` once every leg is receipted and none
+        // withholds; otherwise the weakest leg, `failed` included. A post on
+        // the shared key has the state of its placing; the method leaves it.
+        _applyOutgoingLegStatus(msg, msg.fanoutLegs.values.toList());
         // §21.4.1. This place is the reason why the store is NOT supplied
         // via a `dirty` flag in `UiMessage`: `deliveredBy` and `withheldBy`
         // are changed as a COLLECTION, the field itself is never assigned.
@@ -709,7 +734,7 @@ extension V3ReceivePathOps on CleonaService {
     }
   }
 
-  void _sendDeliveryReceiptV3({
+  void _sendDeliveryReceipt({
     required Uint8List recipientUserId,
     required Uint8List messageId,
     Uint8List? senderDeviceId,
@@ -725,7 +750,7 @@ extension V3ReceivePathOps on CleonaService {
           _withholdsDeliveryStatusTo(recipientUserId, groupId);
     sendToUser(
       recipientUserId: recipientUserId,
-      messageType: proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
+      messageType: proto.MessageType.MT_DELIVERY_RECEIPT,
       payload: receipt.writeToBuffer(),
       // B-3 (§16.2.2 "the acknowledgement … of the pair"): a receipt for a
       // group leg names the group, so it can go back over a group pair.
@@ -738,373 +763,8 @@ extension V3ReceivePathOps on CleonaService {
   }
 }
 
-/// The receive path of the V4.1 delivery layer (S349).
-///
-/// WHY THIS EXTENSION EXISTS. Until S349 V4.1 ended one step before the
-/// application: `V41Host.accept()`, `MessageOpener` and
-/// `Aggregate.unpack` together had ZERO callers in `lib/`, and a cell
-/// delivered to this node was counted in `DeliveryNode` as
-/// `CellRole.mine` and dropped. The send path was wired, the receive path
-/// not — the same error class that this migration has already hit eight
-/// times (built in the lab, never entered in the application).
-///
-/// WHAT DOES NOT HAPPEN HERE, and that should be said openly: the V4.1
-/// cell carries no device identity. §7 (multi-device) hangs in V3 on a
-/// `senderDeviceId` from the outer packet; that does not exist here,
-/// because the delivery layer addresses identities and not devices.
-///
-/// UNTIL S349 THE USERID STOOD HERE — as "the only identifier there is".
-/// That was wrong, and measurably so: `senderDeviceId` wanders in the
-/// contact request path into `ContactInfo.deviceNodeIds`, and this set is
-/// not a note but a ROUTING TARGET — `cleona_service_v3_legacy
-/// .dart:149` calls `node.sendToDeviceTracked` for every entry. Every
-/// request received via V4.1 thus polluted the contact's device list with
-/// its identity identifier, and the V3 send path afterwards routed to an
-/// identifier that no node keeps.
-///
-/// Now `null` stands there, and the type system forces every reader to
-/// handle the case. That is the honest information: this path knows no
-/// device (§14.1 "subject, not a signpost"; §14.2 "the delivery path has
-/// no device level"). What a device NEEDS — §7.1 pairing, §7.5
-/// co-authorization — keeps running only via V3 frames until §7 is
-/// brought over, and on this path is discarded with a named reason,
-/// instead of working on an invented identifier.
-extension V41ReceivePathOps on CleonaService {
-  /// Accepts an unsealed, reassembled V4.1 frame.
-  ///
-  /// ── TWO SENDER STATEMENTS, NO SIGNATURE (§4.4.3, S352) ─────────
-  ///
-  /// [mac] is the sender MAC over [frameBytes] under the pair key `K_AB`
-  /// (`v41SenderMac`). It is the LOAD-BEARING proof of whom the frame
-  /// comes from: the sealing only proves that someone sealed against the
-  /// public keys of THIS identity, and those are public. Without the check
-  /// every V4.1 frame would be an identity spoof (B-20).
-  ///
-  /// [peer] is the pair identifier from the TAGLINE — in the secure path
-  /// `<own64>/<foreign64>`, in the speed path empty, because there is no
-  /// field tag there (§4.3: "in Speed-Mode there is **no field tag** — the
-  /// cell is addressed by the onion path"). Where it is present, it is an
-  /// INDEPENDENT second statement: the cell lay under
-  /// `secureTag(K_AB, …)`, and this tag cannot be computed without `K_AB`.
-  /// Both must say the same.
-  ///
-  /// **Why no signature any more.** §4.4.3 lists "1:1 message" and
-  /// "Group leg (pairwise)" with **none** and justifies it: "the tag
-  /// `HKDF(K_AB, …)` authenticates the sender symmetrically … —
-  /// non-repudiation is deliberately given up (deniability)". Until S352
-  /// an Ed25519 check stood here, and the receiver thus held a proof,
-  /// passable to third parties, of who said what — exactly what the
-  /// protocol does not want to issue.
-  /// On the invitation path [peer] is empty, because the mark derives from
-  /// `K_inv(i)` and proves no person (`v41_attach.dart`). The ASSIGNMENT to
-  /// the invitation (`inviteLine`) travelled along until S388; its only
-  /// consumer was `_handleContactRequestV3` (S388-BAU-KONTAKT).
-  Future<void> acceptV41Frame({
-    required String peer,
-    required Uint8List mac,
-    required Uint8List frameBytes,
-  }) async {
-    final proto.ApplicationFrameV3 frame;
-    try {
-      frame = proto.ApplicationFrameV3.fromBuffer(frameBytes);
-    } catch (_) {
-      // Silent (E-83): a malformed frame carries no information.
-      return;
-    }
-
-    // Addressed to US? The sealing has already answered that — but held
-    // twice, as in the V3 path: a frame naming a different recipient
-    // identifier is either an error or an attempt.
-    final recipient = Uint8List.fromList(frame.recipientUserId);
-    if (!constantTimeEquals(recipient, identity.userId)) {
-      _log.warn('V4.1 drop: frame names recipient '
-          '${bytesToHex(recipient).substring(0, 8)}, opened by '
-          '${identity.userIdHex.substring(0, 8)}');
-      return;
-    }
-
-    final sender = Uint8List.fromList(frame.senderUserId);
-    final senderHex = bytesToHex(sender);
-
-    // ── THE SENDER CHECK (§4.4.3) ────────────────────────────────
-    //
-    // The rule itself stands in `verifyV41Sender` (`v41_host.dart`) — in
-    // ONE place, and it also says there why it evaluates two independent
-    // statements. Here only what it needs is obtained, and what follows
-    // from its verdict is decided.
-    //
-    // `K_AB` comes from the same derivation that the sending side uses too
-    // (`v41PairKeyFor`, §15.2 founding keys). It throws when no founding
-    // key is available — that is the situation at FIRST CONTACT and not an
-    // error, hence caught here and not logged.
-    final contact = _contacts[senderHex];
-    Uint8List? kAb;
-    // The identifier of the own device line — needed as MAC root AND as
-    // check value in `verifyV41Sender`. It is formed once, so that the two
-    // uses cannot drift apart.
-    String? ownDeviceLine;
-    if (isDevicePeer(peer)) {
-      // ── THE DEVICE LINE (§14.1, §14.7) ────────────────────────────
-      //
-      // Here lies what differs PER DEVICE: the key package (kind 16), the
-      // initial sync (§14.6.3) and the delivery of delegated keys. The MAC
-      // key is the root of THIS line, not `K_own` and not `K_AB`.
-      //
-      // DERIVED FOR THE OWN DEVICE, not for the one named in the
-      // identifier. Both would be computable here — all own devices have
-      // `K_own`, and every device root follows from it. Precisely for that
-      // reason the derivation must be bound to THIS device: only then does
-      // a frame that lay on a sibling's line fail in `verifyV41Sender`,
-      // instead of being silently opened here with the matching key.
-      try {
-        final kOwn = deriveKOwn(
-          userX25519Secret: identity.x25519SecretKey,
-          userMlKemSecret: identity.mlKemSecretKey,
-        );
-        ownDeviceLine =
-            deviceLineKey(identity.userId, identity.deviceNodeId);
-        kAb = deriveKDevice(
-            kOwn: kOwn, deviceNodeId: identity.deviceNodeId);
-      } catch (e) {
-        _log.warn('V4.1: frame on the device line, but no '
-            'device root can be built ($e)');
-        kAb = null;
-      }
-    } else if (isOwnPeer(peer)) {
-      // ── THE TWIN SYNC (§14.7, G-14) ──────────────────────
-      //
-      // On the own line the MAC key is `K_own`, not `K_AB`: there is no
-      // counterpart, and `v41PairKeyFor` would need two founding keys.
-      // `verifyV41Sender` additionally checks that the frame really names
-      // the own identifier as sender — a frame on this line with a foreign
-      // name fails there.
-      //
-      // DERIVED, NOT READ FROM THE REGISTRY. The registry belongs to the
-      // node and carries the lines of ALL identities of the process; here
-      // the receiver's is needed, and the receiver is fixed by the check
-      // above. Looking it up via the identifier would be the same value on
-      // a longer path — and a path on which a second identity of the same
-      // process could be inserted.
-      try {
-        kAb = deriveKOwn(
-          userX25519Secret: identity.x25519SecretKey,
-          userMlKemSecret: identity.mlKemSecretKey,
-        );
-      } catch (e) {
-        _log.warn('V4.1: twin frame, but no K_own can be built ($e)');
-        kAb = null;
-      }
-    } else {
-      try {
-        kAb = v41PairKeyFor(sender, contact);
-      } on StateError {
-        kAb = null;
-      }
-    }
-
-    final verdict = verifyV41Sender(
-      peer: peer,
-      ownUserIdHex: identity.userIdHex,
-      senderUserIdHex: senderHex,
-      kAb: kAb,
-      mac: mac,
-      frame: frameBytes,
-      ownDeviceLine: ownDeviceLine,
-    );
-    // `skippedBootstrap` is the precise term and not a makeshift: the MAC
-    // was not checked because we cannot form the sender's pair key yet.
-    // `_trustFromV3` maps this correctly to `SenderTrust.unknownKey`, and
-    // the handlers decide whether they may do something with it.
-    var trust = OuterSigStatus.skippedBootstrap;
-    switch (verdict) {
-      case V41SenderVerdict.forged:
-        _log.warn('V4.1 drop: sender ${senderHex.substring(0, 8)} '
-            'not proven '
-            '${peer.isEmpty ? '(MAC)' : '(MAC/Taglinie ${shortPairLabel(peer)})'}'
-            ' — discarded, not downgraded');
-        return;
-      case V41SenderVerdict.verified:
-        trust = OuterSigStatus.verified;
-      case V41SenderVerdict.unverifiable:
-        break;
-    }
-
-    // THE PROOF FOR THE DAY CAPSULE. A delivery confirmation is the proof
-    // that the counterpart REALLY opened one of our messages — i.e.
-    // possesses our day capsule. Until this proof is present, every message
-    // carries it along again (1088 B), so that its loss does not make the
-    // rest of the day unopenable.
-    if (frame.messageType == proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT) {
-      // THE SAME IDENTIFIER UNDER WHICH THE SENDING SIDE ASKS.
-      // `carriesCapsule` looks up `_v41PeerKey` — `<own64>/<foreign64>`, 129
-      // characters —, until S351 the bare sender identifier with 64
-      // characters stood here. The two strings can never meet, so the proof
-      // NEVER took hold and every message kept carrying the capsule
-      // (1088 B): 6 instead of 3 cells, permanently, regardless of the
-      // delivery situation.
-      //
-      // The reason is the same as with B-31 (S349): the pair registry sits
-      // node-wide, which is why the identifier had to include the own
-      // identity. This one caller was not pulled along at the time.
-      // ONLY IF THE RECEIPT MEANS ONE OF OUR V4.1 FRAMES (30.08.).
-      // Here the call stood unconditionally — and a receipt proves delivery,
-      // not the opening of a seal: it also comes for messages that were
-      // delivered via the V3 path. Measured in the field: a receipt at
-      // 11:41:53 switched off the capsule, although our first V4.1 send of
-      // the run only went out at 11:47:10. After that every secure message
-      // in this direction was unopenable until UTC midnight. The
-      // justification with proof stands at `_v41ReceiptProvesCapsule`.
-      if (_v41ReceiptProvesCapsule(frame.payload,
-          verified: verdict == V41SenderVerdict.verified)) {
-        v41Host?.sealer
-            .confirmCapsuleReceived(_v41PeerKey(sender), DateTime.now());
-      }
-
-      // AND THE DELIVERY STATUS (§9.2, D2) — HERE, NOT IN THE HANDLER.
-      //
-      // The verdict about `K_AB` exists only at this place. It stands in
-      // `verdict` (above, from `verifyV41Sender`), and the way from here to
-      // the handler leads through `HarvestEvent` — a structure whose field
-      // list is explicitly "measured, not designed" and which has no
-      // carrier for "came via V4.1, MAC under `K_AB` checked".
-      // `outerSigStatus` does NOT suffice as a substitute: the V3 path sets
-      // `verified` there too, but means the device signature and not the
-      // pair key. And taking `senderDeviceId == null` as a distinguishing
-      // feature would be a guess about the transport path at a place where
-      // a security decision is made.
-      //
-      // That is why the verdict is booked where it is proven. The handler
-      // afterwards only reads the record.
-      _v41NoteReceipt(frame.payload,
-          verified: verdict == V41SenderVerdict.verified);
-    }
-
-    // ── WHOEVER WRITES GETS AN ANSWER — SO A ROUTE IS NEEDED ───
-    //
-    // The second trigger for §6/E-E, and in the field the more important
-    // one. Every accepted frame is followed by an answer of this layer: the
-    // delivery receipt ALWAYS goes out (§21.5.4 — even with display lock,
-    // it is a transport primitive), read confirmation and typing indicator
-    // come on top.
-    //
-    // Without a speed route each of these receipts cost `m x R` cells.
-    // Measured on 29.08. what comes of that: the V3 layer repeated a
-    // message sixteen times, the receiver acknowledged every duplicate, and
-    // every receipt booked 30 control frames against a retry clock that
-    // runs in seconds — queue permanently at ~110/120, 441 discarded
-    // frames, among them real deposits. With a route the same receipt costs
-    // one cell.
-    //
-    // HERE, NOT IN THE SEND PATH OF THE RECEIPT: the request itself needs a
-    // slot and its answer another one. Whoever only asks when the receipt
-    // is already finished will certainly not have the route yet when they
-    // need it. Asked at reception, it runs while the application
-    // processes the frame.
-    //
-    // APPLIES TO GROUPS TOO: `sender` is the member who wrote, and the
-    // answer goes pairwise to exactly this one (§16.2).
-    try {
-      v41Delivery?.prepareSpeed(_v41PeerKey(sender));
-    } catch (e) {
-      _log.debug('prepareSpeed after receive failed: $e');
-    }
-
-    _log.event('V4.1 RECEIVE ${frame.messageType.name} from '
-        '${senderHex.substring(0, 8)} '
-        '(${frameBytes.length} B, '
-        '${kAb == null ? 'MAC not checkable' : 'MAC checked'}'
-        '${peer.isEmpty ? ', speed' : ', tagline confirmed'})');
-
-    await handleApplicationFrame(
-      event: HarvestEvent.fromV3Frame(
-        frame: frame,
-        // See class header: the delivery layer addresses identities, not
-        // devices. `null` is the information here, not the gap.
-        senderDeviceId: null,
-        snapshot: SenderIdentitySnapshot(
-          // `SenderIdentitySnapshot.senderDeviceId` is explicitly the
-          // "wire-level senderDeviceId from `NetworkPacketV3`" — a V3
-          // packet field that does not exist on this path. Outside this
-          // construction it has NO reader (recounted over `lib/`: the class
-          // sets it, nobody reads it).
-          //
-          // Since S351 `null` stands here instead of `Uint8List(0)`: the
-          // field is now optional. An empty field looks like a value; `null`
-          // says what is meant — no packet, no device (§14.2). This place
-          // thus carries the same statement as the `senderDeviceId: null`
-          // one line above, instead of formally contradicting it.
-          senderDeviceId: null,
-          senderUserId: sender,
-          outerSigStatus: trust,
-          verifiedDeviceEd25519Pk: null,
-          verifiedDeviceMlDsaPk: null,
-          newKeyDetectedForSenderUser: false,
-          receivedAt: DateTime.now(),
-        ),
-      ),
-      // NEVER `wasDirect`. A V4.1 cell has come via at least two relays
-      // (speed) or was harvested from a deposit (secure) — in both cases
-      // there is no direct route that a reception confirmation could
-      // confirm.
-      wasDirect: false,
-    );
-  }
-}
-
-/// The ONE place at which `K_AB` is formed (§15.2).
-extension V41PairKeyOps on CleonaService {
-  /// `K_AB` for a counterpart — from the founding keys.
-  ///
-  /// §15.2: "`K_AB` has exactly one source: the founding keys of both
-  /// sides." That is not a question of style. Derived from the CURRENT
-  /// keys, `K_AB` diverges on every rotation and delivery fails silently —
-  /// and at FIRST CONTACT it cannot be formed at all, because the requester
-  /// does not have the counterpart's user X25519 yet (only its device KEM
-  /// from the ContactSeed). Measured in the field on 28.08.: B deposited
-  /// the contact answer, A never harvested, because A could not form a
-  /// pair key.
-  ///
-  /// **WHERE THE COUNTERPART'S FOUNDING KEY COMES FROM:** from
-  /// [ContactInfo.peerFoundingEd25519Pk], the anchor recorded once. See
-  /// [v41PeerFoundingPk] — it also says there why the preference list that
-  /// used to stand here (`ep`, otherwise `ed25519Pk`) broke both times.
-  ///
-  /// **THE OPEN LIMIT, named instead of hidden (path A, S361):** the own
-  /// founding secret is recomputed from the HD wallet
-  /// ([IdentityContext.foundingEd25519SecretKey]) instead of stored. For an
-  /// identity WITHOUT an HD wallet (created legacy; linked device without
-  /// seed, §7.1.1) this recomputation does not exist — it stays on the
-  /// current key and thus on the old behaviour. That is no deterioration,
-  /// but no improvement either, and it is logged instead of silently
-  /// accepted.
-  Uint8List v41PairKeyFor(Uint8List recipientUserId, ContactInfo? contact) {
-    final peerFounding = v41PeerFoundingPk(contact);
-    if (peerFounding != null) {
-      return deriveDeliveryPairKeyFromFounding(
-        // §15.2 LITERALLY: "the founding keys of BOTH sides". Until S361
-        // `identity.ed25519SecretKey` stood here — the CURRENT one. After an
-        // own rotation the own side of the derivation thus changed, while
-        // the counterpart kept computing against the founding pubkey: two
-        // different marks, no delivery, and after the 14-day cap of the
-        // transition window (§14.4) permanently. The warning that stood here
-        // even said so — and let the wrong derivation run anyway.
-        //
-        // [IdentityContext.foundingEd25519SecretKey] recomputes the founding
-        // secret from the HD wallet and CHECKS that it belongs to the
-        // founding pubkey; without an HD wallet it falls back to the current
-        // key and says so in the log.
-        ownEd25519Secret: identity.foundingEd25519SecretKey,
-        peerEd25519Public: peerFounding,
-      );
-    }
-    // No founding key available: that must not silently lead to a
-    // DIFFERENT key, otherwise both sides talk under different marks and
-    // nobody sees why.
-    throw StateError('K_AB cannot be built for '
-        '${bytesToHex(recipientUserId).substring(0, 8)} — neither ContactSeed ep '
-        'nor Ed25519 of the contact is present (§15.2)');
-  }
-
+/// The founding anchor of a counterpart (§4.3, §15.2).
+extension PairKeyOps on CleonaService {
   /// The counterpart's FOUNDING pubkey, or `null`.
   ///
   /// ── ONE SOURCE, AND IT NEVER CHANGES (path A, S361) ─────────────
@@ -1140,16 +800,10 @@ extension V41PairKeyOps on CleonaService {
   /// other way to obtain an anchor without a network query.
   ///
   /// The value goes to disk at the next `_saveContacts()`
-  /// ([ContactInfo.toJson]). It is deliberately NOT saved here: this
-  /// function itself hangs on the save path via [primeV41Pairs], a save
-  /// from here would run in a circle.
-  ///
-  /// OWN FUNCTION, BECAUSE TWO THINGS HANG ON IT. `K_AB` and the outbound
-  /// direction must come from THE SAME anchor (§15.2). Two resolutions
-  /// side by side could deviate, and the deviation would be silent: the
-  /// mark would match, the direction would not, and both sides would only
-  /// see "harvested: 0".
-  Uint8List? v41PeerFoundingPk(ContactInfo? contact) {
+  /// ([ContactInfo.toJson]). It is deliberately NOT saved here: the
+  /// readers (recovery bundle, media transfer) sit on paths that save
+  /// themselves.
+  Uint8List? peerFoundingPk(ContactInfo? contact) {
     if (contact == null) return null;
     final alreadyThere = contact.peerFoundingEd25519Pk;
     if (alreadyThere != null) return alreadyThere;
@@ -1180,288 +834,4 @@ extension V41PairKeyOps on CleonaService {
     }
     return contact.peerFoundingEd25519Pk;
   }
-
-  /// Under which direction this node DEPOSITS to [recipientUserId].
-  ///
-  /// ── WHY NO LONGER VIA THE USER IDS (S353) ──────────────────────
-  ///
-  /// Until S353 `outboundDirection` compared `identity.userId` with the
-  /// counterpart's stored identifier. Both are UserIDs, and V4.1 has
-  /// re-minted every UserID (§4.1: the derivation reads the public domain
-  /// constant instead of a network secret). On 29.08. in the field:
-  /// `0d1c821d` -> `10b3cc3f`, `2708863c` -> `f64b2c3b`, `K_AB` unchanged
-  /// both times. After a re-minting each side compares its NEW identifier
-  /// with the counterpart's OLD, stored one — two different pairs, and the
-  /// invariant "exactly one side deposits under direction 0" only holds by
-  /// chance.
-  ///
-  /// The founding key survives every re-minting and every rotation (§4.1)
-  /// and is the same anchor from which `K_AB` follows.
-  ///
-  /// THROWS LIKE `v41PairKeyFor`, and for the same reason: a silent
-  /// substitute direction would let both sides talk under different marks.
-  int v41OutDirectionFor(Uint8List recipientUserId, ContactInfo? contact) {
-    final peerFounding = v41PeerFoundingPk(contact);
-    if (peerFounding == null) {
-      throw StateError('Direction cannot be built for '
-          '${bytesToHex(recipientUserId).substring(0, 8)} — neither '
-          'ContactSeed ep nor Ed25519 of the contact is present (§15.2)');
-    }
-    return outboundDirection(
-      ownFoundingEd25519Pk: identity.foundingEd25519Pk,
-      peerFoundingEd25519Pk: peerFounding,
-    );
-  }
-}
-
-/// The harvest needs all pair keys, not only those of the ones sent to.
-extension V41PrimeOps on CleonaService {
-  /// Registers the pair key for EVERY known contact.
-  ///
-  /// ── WHY THIS HAS TO BE (B-23, S349) ────────────────────────────────
-  ///
-  /// `harvestTick` runs over `pairs.peers`. Until S349 this set was filled
-  /// at exactly two places — in the body of `sendToUser` and when sending
-  /// a contact request. Both presuppose that this node ITSELF sends
-  /// something. It followed that:
-  ///
-  ///   * A node that only receives never harvests. It is reachable,
-  ///     connected, ready — and still collects nothing.
-  ///   * After every restart reception is dead until the user writes of
-  ///     their own accord. `pairs` lives only in memory; a restart deletes
-  ///     every pair key.
-  ///
-  /// Measured in the field on 28.08.: A sent a text ("V4.1 SENDEN
-  /// MTV3_TEXT … angenommen (6 Beine)"), B harvested 19 times in the same
-  /// time and opened nothing — after its restart B no longer had a pair
-  /// key for A and therefore asked for marks that nobody deposited.
-  ///
-  /// The restoration is possible because `K_AB` comes from the FOUNDING
-  /// KEYS (§15.2): they stand in the contact record and survive the
-  /// restart. From the volatile current keys it would not be.
-  ///
-  /// Returns how many pairs were registered.
-  int primeV41Pairs() {
-    final v41 = v41Delivery;
-    if (v41 == null) return 0;
-    // ── THE OWN LINE FIRST (§14.7, gap G-14) ─────────────────
-    //
-    // It hangs on no contact and must therefore stand before the loop: an
-    // identity without a single contact still has twins. And it must run
-    // on EVERY call, not only the first — `K_own` derives from the user KEM
-    // secrets, and those rotate when a device is locked out (§14.4).
-    v41ArmOwnLine?.call();
-    var n = 0;
-    var withoutAnchor = 0;
-    for (final entry in _contacts.entries) {
-      final c = entry.value;
-      // INCREMENTAL, so that the call stays cheap on every contact save.
-      // `_saveContacts()` has 43 callers; computing over all contacts would,
-      // with 200 contacts, be one key derivation per contact and save. A
-      // pair already registered does not change — `K_AB` hangs on the
-      // FOUNDING keys (§15.2), not on the current key state.
-      if (_v41Primed.contains(entry.key)) continue;
-      // `pending_outgoing` too: there the ANSWER to a contact request is
-      // waiting, and it lies on a tagline that nobody harvests without a
-      // pair key (§15.2 step 1).
-      if (c.status == 'blocked') continue;
-      try {
-        // THE SAME identifier as in the send path — otherwise the one path
-        // registers the pair key under "identity/peer" and the other under
-        // "peer", and the harvest asks past the deposit (B-31).
-        v41.rememberPeer(_v41PeerKey(c.nodeId), v41PairKeyFor(c.nodeId, c),
-            outDirection: v41OutDirectionFor(c.nodeId, c));
-        _v41Primed.add(entry.key);
-        n++;
-      } catch (_) {
-        // No founding key available — this contact can NOT harvest. Do NOT
-        // enter into `_v41Primed`: if the contact gets its anchor later
-        // (contact request, AuthManifest, rotation), the next call from
-        // `_saveContacts()` takes hold.
-        withoutAnchor++;
-      }
-    }
-    if (n > 0) {
-      _log.info('V4.1: $n pair keys registered — the harvest runs '
-          'from now on for all contacts, not only for those to whom this '
-          'node itself has written');
-    }
-    // ── THE SILENCE THAT MADE AN IDENTITY DEAF ON 30.08. ─────────
-    //
-    // Here stood only `catch (_) {}` with the justification that
-    // complaining about all contacts would be noise. That is true per
-    // contact — but not for the case that NOT A SINGLE contact has an
-    // anchor: then this identity harvests for nobody, and the harvest loop
-    // skips it silently as well (`v41_node.dart`, `kAb == null`).
-    //
-    // In the field: the second identity of a node ("AllyCat") reported no
-    // pair keys at all on attach, while the first reported two.
-    // `Ernte fuer` stood at 0 for it all day, against 499 for the first. It
-    // only became reachable when it sent ITSELF — `sendToUser` registers the
-    // pair along the way. Exactly that is what this call was meant to
-    // prevent (B-23).
-    if (n == 0 && withoutAnchor > 0) {
-      _log.warn('V4.1: NO pair key registered — $withoutAnchor '
-          'contact(s) without founding anchor (§15.2). This identity cannot '
-          'harvest for them and stays deaf to incoming messages '
-          'until the anchor is present.');
-    } else if (withoutAnchor > 0) {
-      _log.info('V4.1: $withoutAnchor contact(s) without founding anchor '
-          'skipped — no harvesting for them');
-    }
-    return n;
-  }
-
-  /// Arms the INVITATION LINES of this identity (§15.3.2).
-  ///
-  /// ── WHAT IS MISSING WITHOUT THIS CALL ────────────────────────────────────
-  ///
-  /// The other side of the first request (until S388: `sendContactRequest`;
-  /// on V4.2 it comes about when redeeming an invitation card, §15.5, and
-  /// goes out via `sendToUser`, §22.5). The requester deposits its request
-  /// under `σ(i,e)` — a mark that follows solely from `K_inv(i)`. The
-  /// issuer only finds it if it queries the same mark, and the harvest
-  /// runs (like everything in this layer) via `pairs.peers`. Without this
-  /// call the invitation is a promise that nobody redeems: the requester
-  /// deposits correctly, the issuer never harvests, and **both sides see
-  /// only silence** — the same error class as B-23 one method further up.
-  ///
-  /// ── THREE THINGS THAT MUST BE EXACTLY LIKE THIS HERE ──────────────────────
-  ///
-  /// **1. The direction is the ISSUER's.** It registers itself with
-  /// [kInviteIssuerDirection] = 1, so that `inDirectionFor` makes 0 of it
-  /// — the direction under which the requester deposits. Registered with
-  /// 0, it would harvest its own, empty opposite direction; that is B-22 in
-  /// pure form.
-  ///
-  /// **2. `secure: true`, otherwise the invitation is a presence oracle.**
-  /// The node publishes a liveness for every pair under
-  /// `livenessTag(kAb, …)`, unless it is set to secure
-  /// (`v41_node.dart`, `_secureOnly`). `kAb` here is `K_inv(i)`, and that is
-  /// public for the class "published" (§15.3.1). Every holder of a posting
-  /// could otherwise query when this node was last alive. §15.4 forbids
-  /// exactly that.
-  ///
-  /// **3. The standing seal secret must go into the opener.** The contact
-  /// request carries no day capsule — its `ss_pq` is derived from
-  /// `K_inv(i)` (§15.4). `MessageOpener` only finds it via
-  /// [MessageOpener.rememberStandingSecret]; without that the cell would
-  /// arrive, reassemble and die in the seal.
-  ///
-  /// ── WHICH INVITATIONS, AND WHY NOT THE OPEN ONES ─────────────────
-  ///
-  /// `InviteLedger.harvestedAt`, not `openAt`. §15.3.3 separates the two:
-  /// a revoked or expired invitation is no longer HANDED OUT, but its
-  /// harvest window is still running — otherwise the request deposited
-  /// shortly before the revocation would be lost. Whoever took `openAt`
-  /// here would throw away exactly these requests.
-  int armV41InviteLines() {
-    final v41 = v41Delivery;
-    final opener = v41Host?.opener;
-    if (v41 == null || opener == null) return 0;
-
-    final InviteLedger book;
-    try {
-      book = inviteLedger;
-    } catch (e) {
-      // `inviteLedger` throws if the ledger is there and unreadable (see
-      // there). That must not kill the start, but it is a finding: this
-      // identity accepts no first contacts.
-      _log.error('§15.3: invitation book not readable ($e) — NO '
-          'invitation line is armed, incoming contact requests are '
-          'not harvested.');
-      return 0;
-    }
-
-    final now = DateTime.now();
-    var withoutKey = 0;
-    final desired = <String, Uint8List>{};
-    for (final rec in book.harvestedAt(now)) {
-      final kInv = inviteKeyFor(rec);
-      if (kInv == null) {
-        // Old profile without HD derivation: `inviteKeyFor` already says so
-        // with a line of its own. Only counted here, not repeated.
-        withoutKey++;
-        continue;
-      }
-      desired[invitePeerLabel(kInv)] = kInv;
-    }
-
-    // ── FIRST COMPARE, THEN TOUCH ──────────────────────────────
-    //
-    // BECAUSE OTHERWISE THE CLOCK MAKES IT DEAF. This method is called
-    // periodically (§15.3.3: an expired invitation must LOSE its line,
-    // otherwise it stays a write right into the inbox until the next
-    // restart). `forgetPeer` also deletes `_harvestMemo` in the process —
-    // the have-list with which the node distinguishes what it has already
-    // harvested (B-32). Applied unconditionally, every tick would fetch
-    // anew from storage everything it already had, and m=3 times.
-    //
-    // The comparison via the IDENTIFIERS suffices, because the identifier
-    // is a function of the key (`invitePeerLabel`): the same set of
-    // identifiers means the same set of keys.
-    final unchanged = desired.length == _v41InviteLines.length &&
-        _v41InviteLines.every(desired.containsKey);
-    if (unchanged) return _v41InviteLines.length;
-
-    for (final old in _v41InviteLines) {
-      v41.forgetPeer(old);
-    }
-    _v41InviteLines.clear();
-    opener.clearStandingSecrets();
-
-    var n = 0;
-    for (final e in desired.entries) {
-      v41.rememberPeer(e.key, e.value, outDirection: kInviteIssuerDirection);
-      v41.setChatMode(e.key, secure: true);
-      opener.rememberStandingSecret(inviteSealSecret(e.value));
-      _v41InviteLines.add(e.key);
-      n++;
-    }
-    if (n > 0) {
-      _log.info('§15.3.2: $n invitation line(s) armed — incoming '
-          'contact requests are harvested from now on '
-          '(${opener.standingSecrets} standing seal secrets)');
-    }
-    if (withoutKey > 0) {
-      _log.warn('§15.3.1: $withoutKey invitation(s) without `K_inv(i)` — '
-          'no request can arrive on them');
-    }
-    if (opener.standingRefused > 0) {
-      _log.warn('§15.3.2: ${opener.standingRefused} invitation secret(s) '
-          'rejected (cap ${MessageOpener.maxStandingSecrets}) — that '
-          'many invitations are NOT harvestable. §15.3.2 caps the '
-          'simultaneously open ones at 10; more stand in the harvest window here.');
-    }
-    return n;
-  }
-
-  /// The invitation behind an invitation identifier (§15.3.3).
-  ///
-  /// ── WHY RECALCULATED AND NOT LOOKED UP ────────────────────
-  ///
-  /// `_v41InviteLines` keeps the same identifiers, so it could carry a
-  /// table identifier -> record along. It would be a SECOND truth about
-  /// the same thing and would have to be maintained at every edge at which
-  /// [armV41InviteLines] resets the set — exactly the construction at which
-  /// `_harvestMemo` and `Highwater` have already drifted apart in this
-  /// migration. Here instead the same calculation is repeated that armed
-  /// the line in the first place: `invitePeerLabel(K_inv(i))`. The cap from
-  /// §15.3.2 is ten invitations open at the same time, so the loop runs
-  /// over a single-digit set and computes one SHA-256 per entry.
-  ///
-  /// **Via `harvestedAt`, not `openAt`** — for the same reason as in
-  /// [armV41InviteLines]: a request may still arrive when the invitation
-  /// has long expired for the scanner (§15.3.3, the three decoupled
-  /// deadlines). Whoever took `openAt` here would lose the assignment
-  /// precisely for the requests whose grace window is the point of the
-  /// matter.
-  ///
-  /// Returns `null` if the identifier is not an invitation line, the ledger
-  /// is not readable or no harvested invitation matches. `null` is not an
-  /// error here: the line may have expired or been revoked between harvest
-  /// and assignment.
-  //
-  // S388-BAU-KONTAKT: `inviteRecordForLine` stood here. Its only consumer
-  // was `_handleContactRequestV3`; dropped with it.
 }

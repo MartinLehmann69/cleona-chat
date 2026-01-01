@@ -94,7 +94,8 @@ Address? groupMemberCheck(
 }
 
 /// Fixed neighbours as they travel next to a member entry (the list codec
-/// of `neighbour_list.dart`, count 0..3).
+/// of `neighbour_list.dart`, count 0..3) — never keyed: every member, a
+/// 4.2.3 one too, reads it (S407 B); the reader takes both.
 Uint8List groupMemberNeighboursWire(List<CardAddress> list) {
   final b = BytesBuilder();
   neighbourListWrite(b, neighbourListClean(list));
@@ -107,7 +108,7 @@ List<CardAddress> groupMemberNeighboursRead(Uint8List wire) {
   if (wire.isEmpty) return const [];
   try {
     final l = Reader(wire);
-    final list = neighbourListRead(l.bytes, 'member neighbours');
+    final list = neighbourListRead(l.bytes, 'member neighbours', withKeys: true);
     l.done();
     return list;
   } on Object {

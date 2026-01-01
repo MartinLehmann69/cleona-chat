@@ -2,7 +2,8 @@
 ///
 /// Default ON: as long as nobody explicitly switches it off, the node asks
 /// its router (V4.2 §7.3). This file only PROVIDES the setting: it reads it
-/// for `portMappingToEdge` (`mycelium_seam.dart`), and [portMappingConfigure]
+/// for the host when it first asks (`hostStart`, `mycelium_seam.dart`; the host
+/// holds the mapping, `mycelium/lib/host_router.dart`), and [portMappingConfigure]
 /// writes it for the settings tile (`portMappingSet`, §12.7).
 ///
 /// ── WHY DEVICE-WIDE, NOT PER IDENTITY ───────────────────────────────

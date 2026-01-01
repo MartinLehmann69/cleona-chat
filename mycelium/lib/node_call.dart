@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:mycelium/card.dart' show CardAddress, CardAddressType;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart'
-    show hexFrom, shortFrom, interfaces, roll;
+    show hexFrom, shortFrom, ownTarget, roll;
 import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 import 'package:mycelium/neighbours.dart' as nb;
 import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
@@ -37,24 +37,9 @@ Future<nb.Neighbours> neighbourSearchOpen(
   // which identity runs under which IP, and whoever had the card
   // could compute it.
   final own = hexFrom(k.nodeIdentifier);
-  // S391/W8: a foreign call is a HINT, the answer to one's own
-  // call a CONFIRMATION — it answered a packet of this node
-  // that expected an answer (§11.8 „Every packet that expects an answer
-  // — the neighbour call, ...").
   void find(String identifier, InternetAddress address, int port, bool answer) {
     if (identifier == own) return; // one's own call
-    // `neighbourAdd` reports only a NEW one as new — the edge must
-    // not fire on every answer.
-    final fresh = neighbourAdd(k, address.rawAddress, port);
-    // B1 (S388): whoever names its node identifier counts ONCE under each of its
-    // addresses (`readiness.dart`). One's own address is neither
-    // entered nor confirmed.
-    if (answer && !_ownTarget(k, address, port)) {
-      k.readiness.nodeLearn(address, port, identifier);
-    } else {
-      k.readiness.identifierRemember(address, port, identifier);
-    }
-    if (!fresh) return;
+    if (!neighbourFound(k, identifier, address, port, answer: answer)) return;
     report('Neighbour found: ${shortFrom(identifier)} at '
         '${address.address}:$port');
     onNewNeighbours?.call(address, port);
@@ -92,6 +77,36 @@ Future<nb.Neighbours> neighbourSearchOpen(
   return n..call();
 }
 
+/// A find of the neighbour call (§7.2) at [address]:[port], naming the node
+/// identifier [identifier]: [answer] when it answered this node's own call,
+/// otherwise a foreign call. `true` if the address is NEW in the list.
+///
+/// S391/W8: a foreign call is a HINT, the answer to one's own call a
+/// CONFIRMATION — it answered a packet of this node that expected an answer
+/// (§11.8.4 "the answer to the neighbour call").
+bool neighbourFound(
+    Node k, String identifier, InternetAddress address, int port,
+    {required bool answer}) {
+  // `neighbourAdd` reports only a NEW one as new — the edge must
+  // not fire on every answer. An answer to the own call is a stamp
+  // (§11.8.4), dated now: it returns a removed address (§11.8.6). A foreign
+  // call is a hint that carries no time and does not (S407-LB-P7, C-8).
+  final fresh = neighbourAdd(k, address.rawAddress, port,
+      confirmedAt: answer ? DateTime.now() : null);
+  // B1 (S388): whoever names its node identifier IN AN ANSWER counts ONCE
+  // under each of its addresses (`readiness.dart`). One's own address is
+  // neither entered nor confirmed. A foreign call teaches the readiness
+  // nothing — neither a stamp nor the identifier (S407-LB-P5, C-5): §11.8
+  // groups addresses by "the same node identifier in answers to this
+  // node's requests", and §11.8.6 lets a new identifier withdraw the old
+  // one's addresses only through an answer; until S407 a forgeable call
+  // took answering addresses out of the count.
+  if (answer && !_ownTarget(k, address, port)) {
+    k.readiness.nodeLearn(address, port, identifier);
+  }
+  return fresh;
+}
+
 /// Enters [ip]:[port] as a HINT (without stamp, `neighbourhood.dart`)
 /// and passes the list on to the cover stream. `true` if it was NEW. One's
 /// own address (loopback or own interface, own port)
@@ -113,10 +128,14 @@ Future<nb.Neighbours> neighbourSearchOpen(
 ///
 /// S406 (§5.5, §11.8, §11.9, D-9): [confirmedAt] is when the hint's source
 /// last confirmed the address — the creation of an external record, the age
-/// of a board or cover entry. An address this node removed after two failed
-/// uses is admitted again only when [confirmedAt] lies AFTER the removal
-/// (`neighbour_dropped.dart`). Without [confirmedAt] (the answer to the
-/// neighbour call, the address in an invitation) the hint is always admitted.
+/// of a board or cover entry, or now for the answer to the own neighbour
+/// call (a stamp, §11.8.4). An address this node removed because its request
+/// and repeats stayed unanswered (§11.3a) is admitted again only when
+/// [confirmedAt] lies AFTER the removal (`neighbour_dropped.dart`). A hint
+/// WITHOUT [confirmedAt] — the address in an invitation, a foreign call —
+/// says nothing newer than any removal and does not bring it back (§11.8.6
+/// "or one that carries no time — is not admitted"; S407-LB-P7, C-8: until
+/// here it was always admitted and wiped the removal memory).
 bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
   // S390: here stood `ip.length != 4` — „only IPv4 is remembered". That was
   // the SECOND door next to `Neighbourhood.possible`, and it leads the
@@ -136,12 +155,14 @@ bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
   }
   final known = k.neighbourhood.holding(a, port) != null;
   final dropped = k.readiness.dropped;
+  final removedAt = dropped.removedAt(a, port);
   if (!known &&
-      confirmedAt != null &&
-      dropped.stale(a, port, confirmedAt)) {
+      removedAt != null &&
+      (confirmedAt == null || dropped.stale(a, port, confirmedAt))) {
     k.report('Neighbour hint ${a.address}:$port not admitted — removed after '
-        'two failed uses at ${dropped.removedAt(a, port)!.toIso8601String()}, '
-        'the hint is not newer (§11.8)');
+        'its request and repeats stayed unanswered (§11.3a) at '
+        '${removedAt.toIso8601String()}, the hint '
+        '${confirmedAt == null ? "carries no time" : "is not newer"} (§11.8.6)');
     return false;
   }
   final fresh = k.neighbourhood.remember(a, port);
@@ -157,12 +178,11 @@ bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
   return fresh;
 }
 
-/// One's own address: loopback or own interface, own port.
+/// One's own address (B22-2, S407-LB-P5: the confirmed public address was
+/// admitted as a neighbour; a packet to it never arrives, B-19) — the one
+/// rule of `ownTarget` (`node_helpers.dart`, INTEGRATION3 N-1).
 bool _ownTarget(Node k, InternetAddress a, int port) =>
-    port == k.port && (a.isLoopback || _ownAddress(a));
-
-bool _ownAddress(InternetAddress a) => interfaces
-    .any((s) => s.addresses.any((x) => x.address == a.address));
+    ownTarget(k, CardAddress(Uint8List.fromList(a.rawAddress), port));
 
 /// The neighbour search of a node and the receiver of its finds — next to
 /// the node instead of in it: `node.dart` is at the line budget.

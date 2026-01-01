@@ -6,7 +6,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// A single ephemeral in-call chat message.
 class CallChatEntry {
@@ -44,7 +44,7 @@ class CallChatManager {
   final List<CallChatEntry> messages = [];
 
   /// Callback to send to all call participants.
-  void Function(proto.MessageTypeV3 type, Uint8List payload)? onSendToAll;
+  void Function(proto.MessageType type, Uint8List payload)? onSendToAll;
 
   /// UI callback when a new message arrives.
   void Function(CallChatEntry message)? onMessageReceived;
@@ -85,7 +85,7 @@ class CallChatManager {
     }
 
     onSendToAll?.call(
-      proto.MessageTypeV3.MTV3_CALL_CHAT,
+      proto.MessageType.MT_CALL_CHAT,
       msg.writeToBuffer(),
     );
 

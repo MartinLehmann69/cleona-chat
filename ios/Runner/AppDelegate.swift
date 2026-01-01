@@ -56,6 +56,10 @@ import Network
     // packets (sends work, receives don't — the classic iOS UDP gotcha).
     triggerLocalNetworkPermission()
 
+    // §23.10: cover the content while the screen is captured and in the
+    // app switcher (SceneDelegate.swift, CaptureCover).
+    CaptureCover.shared.start()
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -78,6 +82,23 @@ import Network
     // ("chat.cleona/call_integration") on both platforms.
     if let callKitRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CallKitHandler") {
       CallKitHandler.register(with: callKitRegistrar)
+    }
+
+    // §23.10: the test run's switch lifts the capture cover
+    // (SceneDelegate.swift, CaptureCover).
+    if let captureRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CaptureHandler") {
+      let captureChannel = FlutterMethodChannel(
+        name: "chat.cleona/capture",
+        binaryMessenger: captureRegistrar.messenger()
+      )
+      captureChannel.setMethodCallHandler { (call, result) in
+        if call.method == "allowCapture" {
+          CaptureCover.shared.allowed = true
+          result(nil)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
     }
 
     // Deep link drain: Dart calls consumePendingDeepLink to pick up

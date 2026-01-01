@@ -18,6 +18,7 @@ import 'package:mycelium/node_helpers.dart';
 import 'package:mycelium/node_call.dart';
 import 'package:mycelium/node_cover.dart';
 import 'package:mycelium/node_split.dart';
+import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/node_receipt.dart';
 import 'package:mycelium/ladder.dart';
 import 'package:mycelium/neighbours.dart' as nb;
@@ -35,8 +36,7 @@ import 'package:mycelium/forward.dart' as wr;
 /// This file has no logic of its own. It owns the socket and wires up the
 /// parts; everything domain-related stands in the modules that it brings
 /// together. If a decision is made here that no other module could make, it
-/// belongs there. It exists because without it every module stays an
-/// island: built, checked, and entered by nothing.
+/// belongs there. Without it every module stays an island.
 class Node {
   /// All identities of this node — one socket, one port, all
   /// active at the same time. Changed only via [register]/[deregister].
@@ -73,9 +73,9 @@ class Node {
   Routes? Function(Address to, Address from)? routesTo;
 
   /// Receive sides that the host or the update sets — without them
-  /// 0x50-0x5F (`host_media.dart`), 0x60/0x61 or 0x70-0x7F silently drop away.
+  /// 0x50-0x5F (`host_media.dart`), 0x60-0x6F or 0x70-0x7F silently drop away.
   void Function(Uint8List packet, InternetAddress from, int fromPort)? mediaReception;
-  void Function(Uint8List packet)? groupsReception;
+  void Function(Uint8List p, InternetAddress from, int port, bool forwarded)? groupsReception;
   void Function(Uint8List packet, InternetAddress from, int fromPort)? updateReception;
 
   /// The own code of this DEVICE (§8.1, S392): 16 B, passed by the host from
@@ -94,12 +94,12 @@ class Node {
   /// The running shipment of the message [hex] — for its placing (§8.2).
   Shipment? shipmentOf(String hex) => _shipments[hex];
 
-  /// Recipient and identifier of the message that is being built RIGHT NOW. The
-  /// message layer calls its send callback synchronously from within [send];
-  /// afterwards it is null again. An ANSWER, by contrast, names its
-  /// recipient itself and expects no receipt.
+  /// Recipient, identifier and kind (a call signal, §17.2: steps 1 and 3
+  /// only) of the message being built RIGHT NOW — the message layer calls its
+  /// send callback synchronously within [send]; afterwards they are reset.
   Address? _targetNow;
   Uint8List? _identifierNow;
+  bool _signalNow = false;
 
   /// Remembered ones and what the call finds; cap and displacement: [Neighbourhood] (§11.8).
   final Neighbourhood neighbourhood = Neighbourhood();
@@ -205,7 +205,7 @@ class Node {
         if (e.kind == null) id.author[hexFrom(e.identifier)] = (who: e.from, at: e.at);
         onMessage(e);
       },
-      onReceipt: (out) => _shipments.remove(hexFrom(out.identifier))?.acknowledged(),
+      onReceipt: (out) => _shipments.remove(hexFrom(out.identifier))?.acknowledged(from: out.acknowledgedFrom), // O-2
       report: report,
     );
     id = Identity(postBox: b, messages: receiptWays(n)); // §9.2, node_receipt.dart
@@ -232,9 +232,9 @@ class Node {
     codeRoute = CodeRoute(this);
 
     _deposit = deposit.PostBoxDeposit(
-      send: (p, target) => postBoxSend(_splitter, p, target), // node_split.dart
+      send: (p, target) => postBoxSend(this, _splitter, p, target), // node_split.dart
       records: records,
-      onMute: readiness.mute, report: report, // O2: holders named in the log
+      silence: silence, report: report, // §11.3a; O2: holders named in the log
       onNode: readiness.nodeLearn, // B1: count per node
       nodeIdentifier: nodeIdentifier, // the same as in the call (node_call.dart)
     );
@@ -250,11 +250,12 @@ class Node {
           _splitter.send(p, InternetAddress.fromRawAddress(destination.address), destination.port),
       // Under the code of the shipment, via the own fixed neighbour (§8.1).
       viaNeighbour: (p, destination, target) => codeRoute.stepThree(
-          p, target.neighbours.isEmpty ? [destination] : target.neighbours, target.code),
+          p, target.neighbours.isEmpty ? [destination] : target.neighbours, target.code,
+          recipientAt: [if (target.lan case final l?) l, ...target.recipientOwn]), // S408: no hop
       inPostBox: stepFour, // node_step_four.dart (OP-20)
-      search: search, // extension in node_call.dart
+      search: search, here: deliverHere, // node_call.dart; §4.5.1 node_helpers.dart
       speaks: (c) => speaks(InternetAddress.fromRawAddress(c.address)),
-      report: report,
+      report: report, silence: silence, // §11.3a: step 1 waiting for its receipt
     );
 
     // Above the cover switch, attached to the shell (`node_split.dart`).
@@ -301,7 +302,7 @@ class Node {
   /// acknowledgement of a message just fed — it takes that message's way
   /// (§9.2, [receiptTarget]).
   Shipment? _viaLadder(Uint8List packet, CardAddress? destination,
-      {Address? to, required Address from, bool receipt = false}) {
+      {Address? to, required Address from, bool receipt = false, bool waits = false}) {
     final target = to ?? _targetNow;
     final identifier = to != null ? null : _identifierNow;
     if (target == null) {
@@ -320,7 +321,8 @@ class Node {
         receipt
             ? receiptTarget(three, destination, c, target.identifier)
             : Target.outDueTo(three, lan: destination, neighbours: c?.neighbours ?? const [],
-                code: c?.code, identifier: target.identifier));
+                code: c?.code, identifier: target.identifier, signal: _signalNow),
+        answered: identifier != null || waits, local: hostsOther(target, from)); // §11.3a; §4.5.1
     if (identifier != null) {
       _shipments[hexFrom(identifier)] = s;
       if (c != null) codeRoute.shipmentRemember(c.code, s, target, from);
@@ -328,15 +330,14 @@ class Node {
     return s;
   }
 
-  /// An answer via the ladder whose end the caller reports itself —
-  /// the acceptance (3) of first contact (ES-6, `node_invitation.dart`).
+  /// The acceptance (3) of first contact via the ladder; the caller reports its end (ES-6).
   Shipment answerViaLadder(Uint8List packet, CardAddress? destination, Address to, Address from) =>
-      _viaLadder(packet, destination, to: to, from: from)!;
+      _viaLadder(packet, destination, to: to, from: from, waits: true)!;
 
   /// A finished packet without a ladder — for layers that build their packets
   /// themselves and know their route (groups, media). [foreign]: others'
   /// transmission, bounded per target (§20.2) — the forwarder (§8.1).
-  void rawSend(Uint8List packet, CardAddress destination, {bool foreign = false}) =>
+  Future<SendEnd> rawSend(Uint8List packet, CardAddress destination, {bool foreign = false}) =>
       _splitter.send(packet, InternetAddress.fromRawAddress(destination.address),
           destination.port, foreign: foreign);
 
@@ -346,12 +347,12 @@ class Node {
 
   /// Sends [content] to a contact — raw bytes (`message.dart`). [destination] may be `null`:
   /// §8.2 needs no address of the recipient. [under]: the identifier of a message sent again (§9.3).
+  /// [signal]: a call signal — its [Target.signal] keeps it off step 4 (§17.2).
   Outbound send(Uint8List content, Address to, CardAddress? destination,
-      {Identity? forField, int? kind, Uint8List? under}) {
+      {Identity? forField, int? kind, Uint8List? under, bool signal = false}) {
     final asValue = forField ?? main;
     final identifier = under ?? roll(8);
-    _targetNow = to;
-    _identifierNow = identifier;
+    _targetNow = to; _identifierNow = identifier; _signalNow = signal;
     try {
       final out = asValue.messages.ship(content, to, destination, identifier: identifier, kind: kind);
       // Remember the own message (a pair notice, [kind], has no
@@ -359,8 +360,7 @@ class Node {
       if (kind == null) asValue.author[hexFrom(identifier)] = (who: asValue.postBox.address, at: DateTime.now());
       return out;
     } finally {
-      _targetNow = null;
-      _identifierNow = null;
+      _targetNow = null; _identifierNow = null; _signalNow = false;
     }
   }
 

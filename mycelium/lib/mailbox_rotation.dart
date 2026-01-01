@@ -31,6 +31,7 @@ import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_invitation.dart' show MailboxInvitation;
 import 'package:mycelium/mailbox_outbound.dart' show MailboxOutbound;
 import 'package:mycelium/mailbox_pair.dart' show MailboxPair;
+import 'package:mycelium/day_key_notice.dart' show DayKeyNotice;
 import 'package:mycelium/memory_contact.dart' show contactWithChainState;
 
 extension MailboxRotation on Mailbox {
@@ -44,6 +45,7 @@ extension MailboxRotation on Mailbox {
     for (final k in contacts) {
       contactPut(contactWithChainState(k, acked: false, dayKeysDue: true));
     }
+    dayKeyNoticesForget(); // the notices under way carry the old keys
     final sent = dayKeyDistribute(now: now);
     giveUpAgain(reseal: true);
     final revoked = allInvitationsRevoke();

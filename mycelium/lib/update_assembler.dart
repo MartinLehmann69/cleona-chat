@@ -261,16 +261,15 @@ class UpdateAssembler {
       return;
     }
     final h = l.holder[l.holderNo];
-    if (!l.askedAgain) {
-      l.askedAgain = true;
+    if (l.rounds.again()) {
       updateTrace('ask-again',
           object: _partial?.object,
           reason: '${h.$1.address}:${h.$2} — no answer within the quiet '
-              'period, asked once more');
+              'period, asked again (§11.3a)');
       _plea(l);
       return;
     }
-    _nextHolder(l, 'silent after one more request');
+    _nextHolder(l, 'silent after its request and three repeats');
   }
 
   void _answerEnd(UpdateRun l) {
@@ -283,7 +282,7 @@ class UpdateAssembler {
             'piece(s), ${l.newInRound} new, ${p.describe()}, rtt '
             '${l.rtt?.inMilliseconds ?? '-'} ms, empty answers before '
             '${l.emptyAnswers}');
-    l.askedAgain = false;
+    l.rounds.progress();
     if (l.newInRound > 0) {
       l.emptyAnswers = 0;
     } else if (++l.emptyAnswers >= kEmptyAnswersPerHolder) {

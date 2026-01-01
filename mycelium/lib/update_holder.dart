@@ -44,6 +44,7 @@ import 'package:cleona/core/fountain/fountain_block.dart';
 import 'package:cleona/core/fountain/fountain_encoder.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/send_batch.dart';
+import 'package:mycelium/update_file_check.dart';
 import 'package:mycelium/update_piece.dart';
 import 'package:mycelium/update_trace.dart';
 
@@ -61,8 +62,8 @@ class UpdateHolder {
   /// The 32 B behind each key of [_objects] (for [blockNow]).
   final Map<String, Uint8List> _names = {};
 
-  /// Files that passed their check: size and modification time at the check.
-  final Map<String, (int, DateTime)> _checked = {};
+  /// Checks of held files, one per file state (`update_file_check.dart`).
+  final FileChecks _checks = FileChecks();
   String? _encodedFor;
   Future<_Coded?>? _encoder;
 
@@ -105,8 +106,7 @@ class UpdateHolder {
         reason: held.path == null
             ? 'in memory (read function)'
             : '${held.path} (${_sizeOf(held.path!)})');
-    // The same file held again keeps its check (its stat decides).
-    if (_objects[h]?.path != held.path) _checked.remove(h);
+    // The same file held again keeps its check (path and stat decide).
     _objects[h] = held;
     _names[h] = Uint8List.fromList(object);
     _forget(h);
@@ -118,7 +118,7 @@ class UpdateHolder {
     final h = _hex(object);
     _objects.remove(h);
     _names.remove(h);
-    _checked.remove(h);
+    _checks.forget(h);
     _forget(h);
   }
 
@@ -133,8 +133,8 @@ class UpdateHolder {
       _ready = null;
     }
   }
-
   bool holds(Uint8List object) => _objects.containsKey(_hex(object));
+  int get objectCount => _objects.length; // §5.5 rule 2: the draw among objects
 
   /// A request (0x70). Every other kind is ignored.
   Future<void> receive(Uint8List packet, InternetAddress from, int fromPort) async {
@@ -295,10 +295,7 @@ class UpdateHolder {
           object: object, reason: '$path missing or empty (${before.type})');
       return null;
     }
-    final known = _checked[h];
-    if (known == null ||
-        known.$1 != before.size ||
-        known.$2 != before.modified) {
+    if (!await _checks.check(h, path, before, () async {
       final hash = await sha256OfFile(path);
       final after = await File(path).stat();
       if (after.size != before.size || after.modified != before.modified) {
@@ -306,15 +303,16 @@ class UpdateHolder {
             object: object, reason: '$path changed during its check');
         report?.call('Update holder: ${objectShort(object)} changed during '
             'its check — not distributed');
-        return null;
+        return false;
       }
       final ok = _matches(hash, object);
       updateTrace('object-check',
           object: object,
           reason: '$path ${before.size} B mtime ${before.modified.toIso8601String()} '
               '— SHA-256 ${ok ? 'matches' : 'is ${updateObjectShort(hash)}, does NOT match'}');
-      if (!ok) return null;
-      _checked[h] = (before.size, before.modified);
+      return ok;
+    })) {
+      return null;
     }
     final source = _FileSource(path, before.size, before.modified);
     return _Coded(

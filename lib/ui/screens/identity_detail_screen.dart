@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
@@ -10,10 +9,16 @@ import 'package:cleona/main.dart';
 import 'package:cleona/ui/components/invitation_card_view.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/media/link_preview_fetcher.dart'
+    show BrowserOpenMode, LinkPreviewSettings;
 import 'package:cleona/core/media/transient_files.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/picture_shrink.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/theme/skins.dart';
+import 'package:cleona/ui/screens/settings_screen.dart';
+import 'package:cleona/ui/screens/device_management_screen.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Fullscreen Identity Detail Screen.
 /// Opened by tapping the active identity tab.
@@ -68,6 +73,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(locale.get('identity_detail_title')),
+        actions: const [AppScreenshotButton()],
       ),
       body: SafeArea(
         top: false,
@@ -109,6 +115,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             _buildSkinSection(context, appState),
 
             const Divider(height: 32),
+
+            // ── Settings of this identity (S407-E9) ────────────────
+            IdentitySettingsList(service: widget.service),
 
             // ── 6. Delete Identity ─────────────────────────────────
             _SectionHeader(locale.get('section_delete_identity')),
@@ -429,13 +438,13 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
           subtitle: Text(locale.get('is_adult_subtitle')),
           value: _identity.isAdult,
           onChanged: (value) {
-            IdentityManager().setIsAdult(_identity.id, value);
-            if (!value) {
-              // Disable review when turning off adult
-              IdentityManager().setReviewEnabled(_identity.id, false);
-            }
+            // §15.10, §14.7 Type 8 (D-72): the service stores it and tells
+            // the other own devices; switching off also switches the
+            // review opt-in off. The record here follows at once.
+            widget.service.setIsAdult(value);
             setState(() {
-              _identity = IdentityManager().getActiveIdentity() ?? _identity;
+              _identity.isAdult = value;
+              if (!value) _identity.reviewEnabled = false;
             });
           },
         ),
@@ -446,10 +455,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             subtitle: Text(locale.get('review_enabled_subtitle')),
             value: _identity.reviewEnabled,
             onChanged: (value) {
-              IdentityManager().setReviewEnabled(_identity.id, value);
-              setState(() {
-                _identity = IdentityManager().getActiveIdentity() ?? _identity;
-              });
+              widget.service.setReviewEnabled(value);
+              setState(() => _identity.reviewEnabled = value);
             },
           ),
       ],
@@ -472,9 +479,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
 
       var bytes = await File(path).readAsBytes();
       if (bytes.length > 64 * 1024) {
-        bytes = await _resizeImage(bytes, 200, 75);
+        bytes = await resizePicture(bytes, 200);
         if (bytes.length > 64 * 1024) {
-          bytes = await _resizeImage(bytes, 128, 50);
+          bytes = await resizePicture(bytes, 128);
         }
       }
 
@@ -532,9 +539,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
 
         var bytes = await _readCameraPicture(photo.path);
         if (bytes.length > 64 * 1024) {
-          bytes = await _resizeImage(bytes, 200, 75);
+          bytes = await resizePicture(bytes, 200);
           if (bytes.length > 64 * 1024) {
-            bytes = await _resizeImage(bytes, 128, 50);
+            bytes = await resizePicture(bytes, 128);
           }
         }
         final b64 = base64Encode(bytes);
@@ -574,9 +581,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       if (!await File(tmpPath).exists()) return;
       var bytes = await _readCameraPicture(tmpPath);
       if (bytes.length > 64 * 1024) {
-        bytes = await _resizeImage(bytes, 200, 75);
+        bytes = await resizePicture(bytes, 200);
         if (bytes.length > 64 * 1024) {
-          bytes = await _resizeImage(bytes, 128, 50);
+          bytes = await resizePicture(bytes, 128);
         }
       }
       final b64 = base64Encode(bytes);
@@ -601,31 +608,6 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     if (mounted) setState(() {});
   }
 
-  static Future<Uint8List> _resizeImage(Uint8List bytes, int maxSize, int quality) async {
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frame = await codec.getNextFrame();
-    final image = frame.image;
-
-    final scale = maxSize / (image.width > image.height ? image.width : image.height);
-    final newW = (image.width * scale).round();
-    final newH = (image.height * scale).round();
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, newW.toDouble(), newH.toDouble()));
-    canvas.drawImageRect(
-      image,
-      Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
-      Rect.fromLTWH(0, 0, newW.toDouble(), newH.toDouble()),
-      Paint()..filterQuality = FilterQuality.medium,
-    );
-    final picture = recorder.endRecording();
-    final resized = await picture.toImage(newW, newH);
-    final byteData = await resized.toByteData(format: ui.ImageByteFormat.png);
-    image.dispose();
-    resized.dispose();
-
-    return byteData!.buffer.asUint8List();
-  }
 }
 
 class _SectionHeader extends StatelessWidget {
@@ -646,3 +628,134 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
+/// How a tapped link opens (owner decision 30.10.2026,
+/// gui-09 9.16 = A): normally, in a private window where the platform can
+/// (`chat_screen.dart` `_launchIncognito`, otherwise normally), or asking
+/// every time. Stored with the identity's link-preview settings
+/// (`LinkPreviewSettings.browserOpenMode`; desktop over IPC
+/// `update_link_preview_settings`, Android in-process). Default: normal.
+class LinkOpenModeTile extends StatefulWidget {
+  final ICleonaService service;
+  const LinkOpenModeTile({super.key, required this.service});
+
+  @override
+  State<LinkOpenModeTile> createState() => _LinkOpenModeTileState();
+}
+
+class _LinkOpenModeTileState extends State<LinkOpenModeTile> {
+  static const _labelKeys = {
+    BrowserOpenMode.normal: 'link_open_mode_normal',
+    BrowserOpenMode.incognitoPreferred: 'link_open_mode_private',
+    BrowserOpenMode.alwaysAsk: 'link_open_mode_ask',
+  };
+
+  void _set(BrowserOpenMode mode) {
+    final settings = LinkPreviewSettings.fromJson(
+        widget.service.linkPreviewSettings.toJson())
+      ..browserOpenMode = mode;
+    widget.service.updateLinkPreviewSettings(settings);
+    setState(() {});
+  }
+
+  Future<void> _choose(BuildContext context, AppLocale locale) async {
+    final current = widget.service.linkPreviewSettings.browserOpenMode;
+    final chosen = await showDialog<BrowserOpenMode>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(locale.get('link_open_mode')),
+        children: [
+          for (final mode in BrowserOpenMode.values)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, mode),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(mode == current
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked),
+                title: Text(locale.get(_labelKeys[mode]!)),
+                subtitle: mode == BrowserOpenMode.incognitoPreferred
+                    ? Text(locale.get('link_open_mode_private_sub'))
+                    : null,
+              ),
+            ),
+        ],
+      ),
+    );
+    if (chosen != null && chosen != current) _set(chosen);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.of(context);
+    final mode = widget.service.linkPreviewSettings.browserOpenMode;
+    return ListTile(
+      leading: const Icon(Icons.open_in_browser),
+      title: Text(locale.get('link_open_mode')),
+      subtitle: Text(locale.get(_labelKeys[mode]!)),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => _choose(context, locale),
+    );
+  }
+}
+
+/// The settings stored per identity (the identity's database): media,
+/// notifications, archive, transcription, devices and the rescue bundle.
+/// Owner decision 08.10.2026 (S407-E9): what is stored per identity is set
+/// on the identity screen; the general settings screen keeps only what
+/// applies to the whole device. The identity screen opens only for the
+/// active identity, so [service] is that identity's service.
+class IdentitySettingsList extends StatelessWidget {
+  final ICleonaService service;
+  const IdentitySettingsList({super.key, required this.service});
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    Widget tile(IconData icon, String titleKey, String subtitle,
+        Widget Function() page) {
+      return ListTile(
+        leading: Icon(icon),
+        title: Text(locale.get(titleKey)),
+        subtitle: Text(subtitle),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => page()),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SectionHeader(locale.get('section_media')),
+        tile(Icons.download, 'media_settings_title',
+            locale.get('media_settings_subtitle'),
+            () => MediaSettingsScreen(service: service)),
+        LinkOpenModeTile(service: service),
+        tile(Icons.notifications_outlined, 'notification_settings_title',
+            locale.get('notification_settings_subtitle'),
+            () => NotificationSettingsScreen(service: service)),
+        const Divider(height: 32),
+        _SectionHeader(locale.get('section_archive')),
+        tile(Icons.archive_outlined, 'archive_settings_title',
+            'SMB / SFTP / FTPS / HTTP',
+            () => ArchiveSettingsScreen(service: service)),
+        const Divider(height: 32),
+        _SectionHeader(locale.get('section_transcription')),
+        tile(Icons.record_voice_over_outlined, 'transcription_settings_title',
+            locale.get('whisper_engine'),
+            () => TranscriptionSettingsScreen(service: service)),
+        const Divider(height: 32),
+        _SectionHeader(locale.get('section_devices')),
+        tile(Icons.devices, 'device_management_title',
+            locale.get('device_management_subtitle'),
+            () => DeviceManagementScreen(service: service)),
+        const Divider(height: 32),
+        _SectionHeader(locale.get('section_backup')),
+        RecoveryBundleTile(service: service),
+        const Divider(height: 32),
+      ],
+    );
+  }
+}

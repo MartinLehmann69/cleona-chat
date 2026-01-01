@@ -1,6 +1,6 @@
 /// The mailbox — ONE identity with everything that belongs only to it:
 /// post box, contacts, histories, running shipments, re-dispatch,
-/// invitations, groups. The rest (wire, fixed port, neighbourhood,
+/// invitations. The rest (wire, fixed port, neighbourhood,
 /// cover stream, ladder, storage for third parties, state checker) is held by the
 /// [Host], once for all mailboxes (V4.2 §4.5.1, S385 cut F).
 ///
@@ -14,14 +14,17 @@
 /// (§20.2). A message neither receipted nor placed at stopping stands as
 /// open there AND goes back onto the ladder (§9.3).
 ///
-/// WHERE A ROUTE COMES FROM: exactly three sources, and there should not be more
-/// — every further one could learn a wrong address. (1)
-/// [join]: the address stood in the pasted card. (2) the
+/// WHERE A ROUTE COMES FROM: only where a packet provably came from the
+/// contact's own device — every further source could learn a wrong address.
+/// (1) [join]: the address stood in the pasted card. (2) the
 /// request at the inviter ([requestAccepted]): the joiner dialled the
 /// card itself, the packet came directly. (3) a find of the
-/// search call in the own segment (call D, S385). NOT fit as a source is an
-/// arbitrary incoming message: passed on or fetched from a post box,
-/// its sender address does not belong to the contact (`P14-dienst.md`).
+/// search call in the own segment (call D, S385). (4) every new delivery of
+/// the contact that came DIRECTLY, and (5) every receipt of it that came
+/// directly (§6.3 "updated on every received packet and on every
+/// acknowledgement", S407 P11, `mailbox_inbound.dart`). NOT fit as a source is
+/// an incoming message passed on or fetched from a post box: its sender
+/// address does not belong to the contact (`P14-dienst.md`).
 library;
 
 import 'dart:async';
@@ -30,7 +33,6 @@ import 'dart:typed_data';
 import 'package:mycelium/address_class.dart' show routesToContact;
 import 'package:mycelium/first_contact.dart' show ContactRequest;
 import 'package:mycelium/memory.dart';
-import 'package:mycelium/group.dart';
 import 'package:mycelium/identity.dart';
 import 'package:mycelium/card.dart';
 import 'package:mycelium/node.dart';
@@ -51,6 +53,7 @@ import 'package:mycelium/history.dart';
 import 'package:mycelium/host.dart';
 import 'package:mycelium/host_contact_seats.dart' show HostContactSeats;
 export 'package:mycelium/mailbox_in_transit.dart' show MailboxInTransit;
+export 'package:mycelium/mailbox_signal.dart' show MailboxSignal;
 
 /// Unknown identifier, or no known route to a contact.
 class MailboxError implements Exception {
@@ -86,8 +89,6 @@ class Mailbox {
   final void Function(Edit)? onEdit;
   final void Function(ReadMark)? onReadMark;
 
-  /// The groups of THIS identity, by their identifier.
-  final Map<String, Group> groups = {};
   /// The histories, in the store the caller gave (`mailbox_history.dart`).
   final MailboxHistories histories;
   /// The running shipments, by the identifier of the shipment — public for
@@ -269,8 +270,8 @@ class Mailbox {
   /// Remembers [a]; the address goes via the adoption rule
   /// ([Memory.contactRemember]). If it changes, that is an EDGE: what
   /// is resting for the contact goes out newly sealed (sealing happens
-  /// on every attempt against the remembered address), and the groups carry
-  /// the new address. Says whether the address has changed.
+  /// on every attempt against the remembered address). Says whether the
+  /// address has changed.
   ///
   /// [cardsAddresses] and [neighbours] come from the card of this
   /// counterpart (§15.2) — only the ONE place that has read a card
@@ -291,7 +292,10 @@ class Mailbox {
       Uint8List? pairRandom,
       Map<int, Uint8List>? dayKey,
       DateTime? dayKeySent,
-      String? displayName}) {
+      String? displayName,
+      bool? readsKeys,
+      DateTime? lastSuccess,
+      bool save = true}) {
     final identifier = identifierFrom(a);
     final soFar = contactOrNull(identifier);
     final changed = _memory.contactRemember(Contact(
@@ -304,6 +308,7 @@ class Mailbox {
       // stays — an inbound does not delete it.
       lastSeen:
           ip == null ? soFar?.lastSeen : CardAddress(ip, port!),
+      lastSuccess: lastSuccess ?? soFar?.lastSuccess, // §6.3; only a receipt sets it
       cardsAddresses: cardsAddresses ?? soFar?.cardsAddresses ?? const [],
       neighbours: neighbours ?? soFar?.neighbours ?? const [],
       neverFixedNeighbour: neverFixedNeighbour ?? soFar?.neverFixedNeighbour ?? false,
@@ -312,16 +317,18 @@ class Mailbox {
       dayKey: dayKey ?? soFar?.dayKey ?? const {},
       dayKeySent: dayKeySent ?? soFar?.dayKeySent,
       chainAcked: soFar?.chainAcked ?? false, // set only by `contactPut`
+      readsKeys: readsKeys ?? soFar?.readsKeys ?? false,
     ));
-    _memory.save();
-    if (changed) {
-      for (final g in groups.values) {
-        g.memberAddressAdopt(a);
-      }
-      host.giveUpAgainFor(this, a);
-    }
+    // [save] false: held in memory, written with the next save (D-66).
+    if (save) _memory.save();
+    if (changed) host.giveUpAgainFor(this, a);
     return changed;
   }
+
+  /// Writes what is held in memory only ([contactRemember] `save: false`,
+  /// D-66) — at an orderly stop and before a deregistration
+  /// (`Host.stop`, `Host.deregister`). Nothing on disk when nothing changed.
+  void memorySave() => _memory.save();
 
   Contact? contactOrNull(String identifier) {
     for (final k in _memory.contacts) {

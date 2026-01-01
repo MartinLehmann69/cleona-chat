@@ -5,23 +5,35 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/log/clogger.dart';
 
-/// §19.6.6 — Embedded HTTP server for censorship-resistant binary
-/// distribution. Serves the bootstrap web app and binary/fragment
-/// downloads over plain HTTP on the shared UDP/TLS TCP port.
+/// v4_2 §26.6.5 — embedded HTTP server for censorship-resistant binary
+/// distribution. Serves the browser assembler (`GET /cleona`), the complete
+/// binary (`GET /cleona/binary/<platform>`) and the progress of a foreign
+/// platform fetch (`GET /cleona/status/<platform>`, §26.6.3) over plain
+/// HTTP. It "answers exclusively GET on fixed paths under `/cleona` … and a
+/// generic 404 for everything else": another method (HEAD included) and a
+/// malformed request line get the same 404 as an unknown path. The fragment
+/// path of the 3.x line (`GET /cleona/fragment/<platform>/<index>`) fell with
+/// S407-UPDATEFRAGMENTE; HEAD fell with S407-BROWSERASSEMBLER — its only
+/// reader was the page's padding trim, which went with the fragments.
 ///
-/// Does NOT bind its own socket: [Transport] First-Byte-Sniffs incoming
-/// TCP connections (`GET `/`HEAD` vs. `0x16 0x03` TLS ClientHello) and
-/// hands HTTP connections to [handleConnection].
+/// Every response carries `Access-Control-Allow-Origin: *`: the page of one
+/// node fetches the binary from the further addresses of the invitation
+/// data (§26.6.4, §26.6.5), i.e. from another origin.
+///
+/// Does NOT bind its own socket: [DataPortHttp] (`data_port_http.dart`)
+/// listens on TCP under the host's UDP port number and hands every
+/// connection to [handleConnection]; until `tagline/` falls,
+/// `tagline/v41_attach.dart` does the same behind its four-byte switch.
 class BinaryHttpServer {
   /// How long a connection takes to deliver its request header.
   ///
   /// **5 s, and the number does not come from here (E-83, E-123(iii)).** It
   /// stood at 10 s until 2026-08-20, and that was a
   /// **distinguishing feature**: this server shares its port number
-  /// with the link handshake (§2.1a, §19.6.5), and the switch between the two
+  /// with the link handshake (§2.1a, v4_2 §26.6.5), and the switch between the two
   /// falls after **four bytes**. If one branch closes after 5 s and the
   /// other after 10 s, a single probe of four bytes reveals that
-  /// the port carries two protocols — and exactly that is what §19.6.5 does not want
+  /// the port carries two protocols — and exactly that is what v4_2 §26.6.5 does not want
   /// ("it keeps automatic scanners away"), while RL-12 limits the promise to
   /// "learns that something is listening, but not what".
   ///
@@ -35,7 +47,7 @@ class BinaryHttpServer {
   ///
   /// **The price is narrowly limited:** the deadline covers solely the receipt of the
   /// request header — `tryHandle` cancels it as soon as `\r\n\r\n` is there,
-  /// i.e. **before** any delivery. Downloads, fragments and the
+  /// i.e. **before** any delivery. Downloads and the
   /// bootstrap web app are untouched. Affected is solely a browser
   /// that does not deliver its header within 5 s — it goes out in the first segment
   /// anyway.
@@ -68,7 +80,7 @@ class BinaryHttpServer {
   /// (§16.7 does not list resource exhaustion;
   /// `connection limit`, `backlog`, `half-open`: zero hits in the
   /// architecture document). The reliable limit comes with the
-  /// stream listener: §19.6.5 puts both branches on **one** port behind
+  /// stream listener: v4_2 §26.6.5 puts both branches on **one** port behind
   /// **one** four-byte switch, so the HTTP branch belongs under the same
   /// admission rule (`lib/core/link/admission.dart`, pot B / pot U).
   /// Until then 64 is a number that does not break a browser and does not
@@ -85,11 +97,8 @@ class BinaryHttpServer {
   /// File path for `GET /cleona/binary/<platform>` (streamed in 64KB chunks).
   String? Function(String platform)? binaryProvider;
 
-  /// Single fragment for `GET /cleona/fragment/<platform>/<index>`.
-  Uint8List? Function(String platform, int index)? fragmentProvider;
-
   /// Invoked when `GET /cleona/binary/<platform>` 404s, i.e. a visitor needs a
-  /// platform this node does not hold (§19.6.4). Fire-and-forget: the node may
+  /// platform this node does not hold (v4_2 §26.6.3). Fire-and-forget: the node may
   /// start acquiring it, the visitor polls `/cleona/status/<platform>`.
   void Function(String platform)? onForeignBinaryRequested;
 
@@ -212,7 +221,7 @@ class BinaryHttpServer {
       client.destroy();
     });
 
-    // A short GET/HEAD request can fit entirely in the sniffed prefix
+    // A short GET request can fit entirely in the sniffed prefix
     // (single TCP segment) — check before subscribing for more data.
     if (tryHandle()) return;
 
@@ -269,16 +278,14 @@ class BinaryHttpServer {
       final lines = headerBlock.split('\r\n');
       final requestLine = lines.isNotEmpty ? lines.first : '';
       final parts = requestLine.split(' ');
-      if (parts.length < 2) {
-        _sendResponse(client, 400);
+      // v4_2 §26.6.5: exclusively GET, a generic 404 for everything else —
+      // no 400/405 that would tell a scanner more than an unknown path does.
+      if (parts.length < 2 || parts[0] != 'GET') {
+        _sendResponse(client, 404);
+        _logRequest(parts.isEmpty ? '?' : parts[0], '-', 404, 0);
         return;
       }
-
-      final method = parts[0].toUpperCase();
-      if (method != 'GET' && method != 'HEAD') {
-        _sendResponse(client, 405);
-        return;
-      }
+      const method = 'GET';
 
       final rawPath = parts[1];
       final path = rawPath.split('?').first;
@@ -301,16 +308,6 @@ class BinaryHttpServer {
         _serveForeignStatus(client, path, method, segments[2]);
         return;
       }
-      if (segments.length == 4 && segments[0] == 'cleona' && segments[1] == 'fragment') {
-        final index = int.tryParse(segments[3]);
-        if (index == null || !_knownPlatforms.contains(segments[2])) {
-          _sendResponse(client, 404);
-          _logRequest(method, path, 404, 0);
-          return;
-        }
-        _serveFragment(client, path, method, segments[2], index);
-        return;
-      }
 
       _sendResponse(client, 404);
       _logRequest(method, path, 404, 0);
@@ -325,9 +322,7 @@ class BinaryHttpServer {
       return;
     }
     _sendResponse(client, 200,
-        contentType: 'text/html; charset=utf-8',
-        body: method == 'HEAD' ? null : body,
-        bodyLength: body.length);
+        contentType: 'text/html; charset=utf-8', body: body);
     _logRequest(method, path, 200, body.length);
   }
 
@@ -340,7 +335,7 @@ class BinaryHttpServer {
       filePath = null;
     }
     if (filePath == null) {
-      // §19.6.4: this node does not hold that platform. Ask the service to
+      // v4_2 §26.6.3: this node does not hold that platform. Ask the service to
       // acquire it; the visitor polls /cleona/status/<platform>. Gating,
       // rate limiting and storage caps live in the acquirer, not here.
       try {
@@ -364,16 +359,6 @@ class BinaryHttpServer {
     try {
       final file = File(filePath);
       final fileLength = file.lengthSync();
-      if (method == 'HEAD') {
-        _sendResponse(client, 200,
-            contentType: mime,
-            bodyLength: fileLength,
-            extraHeaders: {
-              'Content-Disposition': 'attachment; filename="cleona$ext"',
-            });
-        _logRequest(method, path, 200, fileLength);
-        return;
-      }
       _streamFile(client, file, fileLength, mime, 'cleona$ext');
       _logRequest(method, path, 200, fileLength);
     } catch (e) {
@@ -384,7 +369,7 @@ class BinaryHttpServer {
   }
 
   /// `GET /cleona/status/<platform>` — on-demand acquisition progress
-  /// (§19.6.4). Always 200 with a JSON body so the browser can poll without
+  /// (v4_2 §26.6.3). Always 200 with a JSON body so the browser can poll without
   /// special-casing errors; unknown platforms report `idle`.
   void _serveForeignStatus(
       Socket client, String path, String method, String platform) {
@@ -397,13 +382,8 @@ class BinaryHttpServer {
       }
     }
     final body = utf8.encode(jsonEncode(status ?? {'state': 'idle'}));
-    if (method == 'HEAD') {
-      _sendResponse(client, 200,
-          contentType: 'application/json', bodyLength: body.length);
-    } else {
-      _sendResponse(client, 200,
-          contentType: 'application/json', body: Uint8List.fromList(body));
-    }
+    _sendResponse(client, 200,
+        contentType: 'application/json', body: Uint8List.fromList(body));
     _logRequest(method, path, 200, body.length);
   }
 
@@ -448,37 +428,13 @@ class BinaryHttpServer {
     }
   }
 
-  void _serveFragment(
-      Socket client, String path, String method, String platform, int index) {
-    Uint8List? body;
-    try {
-      body = fragmentProvider?.call(platform, index);
-    } catch (e) {
-      _log.debug('fragmentProvider threw for platform=$platform index=$index: $e');
-      body = null;
-    }
-    if (body == null) {
-      _sendResponse(client, 404);
-      _logRequest(method, path, 404, 0);
-      return;
-    }
-    _sendResponse(client, 200,
-        contentType: 'application/octet-stream',
-        body: method == 'HEAD' ? null : body,
-        bodyLength: body.length);
-    _logRequest(method, path, 200, body.length);
-  }
-
   void _logRequest(String method, String path, int statusCode, int bodyLength) {
     _log.debug('HTTP $method $path -> $statusCode (${bodyLength}B)');
   }
 
   static const _reasonPhrases = {
     200: 'OK',
-    400: 'Bad Request',
     404: 'Not Found',
-    405: 'Method Not Allowed',
-    503: 'Service Unavailable',
   };
 
   /// Builds and writes a raw HTTP/1.1 response, then closes the connection.
@@ -488,11 +444,9 @@ class BinaryHttpServer {
     int statusCode, {
     String contentType = 'text/plain',
     Uint8List? body,
-    int? bodyLength,
-    Map<String, String>? extraHeaders,
   }) {
     final reason = _reasonPhrases[statusCode] ?? 'Error';
-    final contentLength = bodyLength ?? body?.length ?? 0;
+    final contentLength = body?.length ?? 0;
 
     final header = StringBuffer()
       ..write('HTTP/1.1 $statusCode $reason\r\n')
@@ -501,7 +455,6 @@ class BinaryHttpServer {
       ..write('Access-Control-Allow-Origin: *\r\n')
       ..write('Connection: close\r\n');
 
-    extraHeaders?.forEach((k, v) => header.write('$k: $v\r\n'));
     header.write('\r\n');
 
     try {

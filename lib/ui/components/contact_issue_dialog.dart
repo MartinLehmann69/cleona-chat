@@ -1,15 +1,17 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 
+import 'package:cleona/core/channels/system_channel_api.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/save_text_file.dart';
+import 'package:cleona/ui/components/system_deposit_dialog.dart';
 
 enum ContactIssueDialogResult {
   exported,
   posted,
+  /// The export did not write a file.
+  exportFailed,
   cancelled,
 }
 
@@ -22,11 +24,17 @@ Future<ContactIssueDialogResult> showContactIssueDialog({
   // Reached from a menu handler (`_showContactIssueReport`), so this is a
   // handler-side read, not a build-time watch.
   final locale = AppLocale.read(context);
-  // §22.7.2: the same predicate as in
-  // `contact_issue_reporter.dart` (`canPostToBugLog`) — one definition,
-  // two callers. Before, the condition stood here a second time, and
-  // it stood on a peer COUNT instead of on storage evidence.
-  final canPost = service.isReady;
+  // §16.7 dual path: the export always, the deposit "only an option once
+  // holders are known" (SK-3 finding B-3) — asked at the transport, not
+  // derived from the readiness; an unanswerable question offers only the
+  // export.
+  bool canPost;
+  try {
+    canPost = await service.systemChannelApi.holdersKnown();
+  } catch (_) {
+    canPost = false;
+  }
+  if (!context.mounted) return ContactIssueDialogResult.cancelled;
 
   final result = await showDialog<String>(
     context: context,
@@ -108,23 +116,40 @@ Future<ContactIssueDialogResult> showContactIssueDialog({
   );
 
   if (result == 'export') {
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: locale.get('contact_issue_dialog_save_title'),
-      fileName: 'cleona-contact-issue-${report.contactIdShort}.txt',
-    );
-    if (savePath != null) {
-      await File(savePath).writeAsString(report.toExportText());
-      return ContactIssueDialogResult.exported;
-    }
-    return ContactIssueDialogResult.cancelled;
+    final saved = await exportContactIssueReport(
+        report, locale.get('contact_issue_dialog_save_title'));
+    return switch (saved.outcome) {
+      SaveTextOutcome.saved => ContactIssueDialogResult.exported,
+      SaveTextOutcome.cancelled => ContactIssueDialogResult.cancelled,
+      SaveTextOutcome.failed => ContactIssueDialogResult.exportFailed,
+    };
   }
 
-  if (result == 'post') {
-    final success =
-        await service.publishContactIssueReport(contactNodeIdHex);
-    if (success) return ContactIssueDialogResult.posted;
+  if (result == 'post' && context.mounted) {
+    // §16.7: the deposit goes through the preview (exact publication,
+    // privacy notice, contact line) like every other report.
+    final sent = await showSystemDepositFlow(
+      context: context,
+      api: service.systemChannelApi,
+      draft: SystemDraft.contactIssue(report),
+      titleKey: 'contact_issue_dialog_title',
+      introKey: 'contact_issue_dialog_text',
+    );
+    if (sent != null && sent.ok) return ContactIssueDialogResult.posted;
     return ContactIssueDialogResult.cancelled;
   }
 
   return ContactIssueDialogResult.cancelled;
 }
+
+
+/// Saves [report] as a text file the user picks (§16.7: "file export is
+/// always available").
+@visibleForTesting
+Future<SaveTextResult> exportContactIssueReport(
+        ContactIssueReport report, String dialogTitle) =>
+    saveTextFile(
+      text: report.toExportText(),
+      fileName: 'cleona-contact-issue-${report.contactIdShort}.txt',
+      dialogTitle: dialogTitle,
+    );

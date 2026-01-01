@@ -74,11 +74,11 @@ import 'package:cleona/core/util/local_addresses.dart';
 /// in `ObservedAddress.encode`, and for the same reason: **0 means "nothing
 /// said"**, and a reader that accepts 0 as a family builds a candidate
 /// `0.0.0.0:0` from zero padding.
-const int kCandidateFamilyV4 = 4;
+const int kCandidateFamilyV4 = 4;  // version-name-ok: IP address family
 const int kCandidateFamilyV6 = 6;
 
 /// What a candidate costs on the wire: `fam(1) ‖ addr(4|16) ‖ port(2)`.
-const int kCandidateWireV4 = 7;
+const int kCandidateWireV4 = 7;  // version-name-ok: IP address family
 const int kCandidateWireV6 = 19;
 
 /// How many own candidates are named at most.
@@ -159,7 +159,7 @@ final class CallCandidate {
   static CallCandidate? fromObserved(ObservedAddress o) =>
       CallCandidate.of(o.rawAddress, o.port, fromMirror: true);
 
-  static bool _isV4Mapped(Uint8List a) {
+  static bool _isV4Mapped(Uint8List a) {  // version-name-ok: IP address family
     for (var i = 0; i < 10; i++) {
       if (a[i] != 0) return false;
     }

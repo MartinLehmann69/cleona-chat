@@ -3,7 +3,7 @@
 //
 // ── THE FINDING, MEASURED ────────────────────────────────────────────────
 //
-// `revokeDevice` (`cleona_service.dart`) sent `MTV3_DEVICE_REVOCATION`
+// `revokeDevice` (`cleona_service.dart`) sent `MT_DEVICE_REVOCATION`
 // to every accepted contact via `_detachedSend(...)`. Its body SWALLOWS
 // the future completely — a `catchError` with log, nothing else. The
 // transition thus existed only as a beginning:
@@ -14,13 +14,11 @@
 //
 // ── WHAT THE ARCHITECTURE REQUIRES ────────────────────────────────────────
 //
-// v4_1 §14.4 ("End of the transition", normative): "The old line is closed
-// **as soon as all contacts have acknowledged the announcement, but at the
-// latest after the delivery window** (one recovery-epoch lifetime, 14
-// days). In the normal case, everyone is through after one to two days;
-// the deadline only kicks in for contacts who never come back — otherwise
-// a single orphaned contact would hold the old line open forever, and with
-// it the locked-out device in play."
+// v4_2 §14.4 ("End of the transition"): "The identity asks under its
+// previous day keys for **7 days** after the rotation … The limit is fixed
+// and does not wait for the last contact". The transition therefore ends
+// at its deadline only; the counter below is display, not an end (S408 F-4,
+// until then: 14 days of v4_1 and an early end once all were informed).
 //
 // §14.4 ("Visibility", normative) and §24.4.3 additionally require the
 // parametrised display with TWO counters: "Device locked — fully
@@ -28,10 +26,10 @@
 //
 // ── VIA THE EXISTING DELIVERY REGISTER, NOT VIA NEW MACHINERY ──
 //
-// The owner's decision (E-7 = A). Since AP-4 the application keeps one
-// record per message in the `V41DeliveryRegister`
-// (`lib/core/tagline/delivery_state.dart`), and `_v41ApplyOutgoingStatus`
-// reads it. The announcement is therefore QUEUED there: every fan-out leg
+// The owner's decision (E-7 = A). Since AP-4 the application kept one
+// record per message in the `V41DeliveryRegister` (fallen with
+// `lib/core/tagline/`, S408-P23; since S408 F-4 the proof is read from the
+// mailbox, see `_lockoutDeliveryProven`). The announcement is QUEUED: every fan-out leg
 // gets its own message identifier, under which `sendToUser` creates the
 // record, and a contact counts as informed when for ITS leg there is a
 // delivery receipt authenticated under `K_AB` (§9.2 D2 — only the
@@ -40,7 +38,7 @@
 // ── WHY THE PENDING SET LIVES ON DISK NONETHELESS ────────────
 //
 // The register lives ONLY IN MEMORY and is capped at 2048 records
-// (`V41DeliveryRegister.maxRecords`). The transition runs up to 14 days;
+// (`V41DeliveryRegister.maxRecords`). The transition runs 7 days;
 // a daemon restart falls into this window with certainty. If the set
 // stood only in the register, a restart would see "0 of 0 open" and would
 // have reported the lock as completed without a single contact knowing
@@ -101,8 +99,8 @@ final class LockoutTransition {
   bool closed;
   int? closedAtMs;
 
-  /// `allInformed` or `deadline` — which of the two branches of §14.4
-  /// took hold. Stands in the display and in the log.
+  /// `deadline` since S408 F-4 (§14.4: the limit is fixed); `allInformed`
+  /// only in records closed before. Stands in the display and in the log.
   String? closeReason;
 
   LockoutTransition({
@@ -118,8 +116,8 @@ final class LockoutTransition {
   })  : informed = informed ?? <String>{},
         notSent = notSent ?? <String>{};
 
-  /// The deadline from §14.4: "at the latest after the delivery window (one
-  /// recovery-epoch lifetime, 14 days)".
+  /// The deadline from §14.4: "for 7 days after the rotation … The limit is
+  /// fixed and does not wait for the last contact".
   int get deadlineMs =>
       startedAtMs + CleonaService._lockoutDeadlineDays * 86400 * 1000;
 
@@ -325,7 +323,7 @@ extension DeviceLockoutOps on CleonaService {
   /// An authenticated delivery receipt has arrived — does it concern a
   /// leg of a lock-out announcement?
   ///
-  /// Called from `_handleDeliveryReceiptV3`, AFTER `_v41NoteReceipt`:
+  /// Called from `_handleDeliveryReceipt`, AFTER `_noteReceipt`:
   /// there the record in the delivery register is flipped, here what it
   /// says is read. The question about the proof is thus not answered a
   /// second time — it is asked at the one place that already answers it
@@ -338,7 +336,7 @@ extension DeviceLockoutOps on CleonaService {
       if (t.closed) continue;
       for (final e in t.pendingLegs.entries) {
         if (e.value != legIdHex) continue;
-        if (!_v41DeliveryProvenForLockout(legIdHex)) continue;
+        if (!_lockoutDeliveryProven(legIdHex)) continue;
         if (t.informed.add(e.key)) {
           t.notSent.remove(e.key);
           changed = true;
@@ -355,18 +353,19 @@ extension DeviceLockoutOps on CleonaService {
     }
   }
 
-  /// Does the delivery register prove the delivery of this leg?
+  /// Does the delivery layer prove the delivery of this leg?
   ///
-  /// STRICTER THAN `_v41DeliveryProven`, and that is intentional. There
+  /// STRICTER THAN `_deliveryProven`, and that is intentional. There
   /// "don't know it" means `true`, because a cap must not permanently nail
   /// a message to "not delivered". Here the same leniency would be wrong
   /// the other way round: "don't know it" would count a contact as
-  /// informed whom nobody informed, and report the lock as effective when
-  /// it is not. An unknown leg therefore stays PENDING and in the worst
-  /// case runs into the 14-day deadline — the branch §14.4 provides for
-  /// exactly this case.
-  bool _v41DeliveryProvenForLockout(String legIdHex) =>
-      v41Deliveries.lookup(legIdHex)?.state == DeliveryState.delivered;
+  /// informed whom nobody informed. An unknown leg therefore stays PENDING
+  /// — it only shows in the counter, the deadline ends the transition.
+  ///
+  /// Read from the mailbox (S408 F-4): until then from the V4.1 register,
+  /// which no 4.2 send path ever filled — the counter never moved.
+  bool _lockoutDeliveryProven(String legIdHex) =>
+      _myceliumDeliveryProven(legIdHex) ?? false;
 
   // ── Close ─────────────────────────────────────────────────────────────
 
@@ -389,16 +388,15 @@ extension DeviceLockoutOps on CleonaService {
       // after restart within the register lifetime).
       for (final e in t.pendingLegs.entries) {
         if (t.informed.contains(e.key)) continue;
-        if (!_v41DeliveryProvenForLockout(e.value)) continue;
+        if (!_lockoutDeliveryProven(e.value)) continue;
         t.informed.add(e.key);
         t.notSent.remove(e.key);
         changed = true;
       }
 
-      if (t.allInformed) {
-        _closeLockout(t, 'allInformed');
-        changed = true;
-      } else if (now >= t.deadlineMs) {
+      // §14.4: "The limit is fixed and does not wait for the last contact"
+      // — and it does not end early either; all informed is display only.
+      if (now >= t.deadlineMs) {
         _closeLockout(t, 'deadline');
         changed = true;
       }
@@ -489,10 +487,9 @@ extension DeviceLockoutOps on CleonaService {
   /// How long the old inbound line may stay open.
   ///
   /// 7 days is the value §5.6 sets for an ordinary rotation. If an OPEN
-  /// lock-out transition holds this line, the deadline of §14.4 applies:
-  /// 14 days. The difference has a named reason — an announcement the
-  /// contact has not harvested yet turns closing into a silent message
-  /// loss on THEIR side.
+  /// lock-out transition holds this line, the deadline of §14.4 applies —
+  /// also 7 days since S408 F-4 (v4_2 §14.4), kept as its own constant
+  /// because the two rules are separate.
   int _mailboxTransitionWindowDays() {
     _ensureLockoutsLoaded();
     final setAt = _previousMailboxPrimarySetAt;
@@ -502,7 +499,7 @@ extension DeviceLockoutOps on CleonaService {
       // THE SAME assignment as when closing (`_lockoutHoldsLine`), and that
       // is the condition for both fitting together: what a transition holds
       // open longer must also be what it then closes. Two different
-      // criteria would either hold a line for 14 days and never close it,
+      // criteria would either hold a line open and never close it,
       // or the other way round.
       if (_lockoutHoldsLine(t, setAt)) {
         return CleonaService._lockoutDeadlineDays;
@@ -544,7 +541,7 @@ extension DeviceLockoutOps on CleonaService {
   @visibleForTesting
   void sweepLockoutsForTest() => _sweepLockouts();
 
-  /// Moves the start of a transition into the past, so that the 14-day
+  /// Moves the start of a transition into the past, so that the 7-day
   /// deadline can expire in the test without faking the clock.
   @visibleForTesting
   bool backdateLockoutForTest(String deviceId, Duration at) {
@@ -576,7 +573,7 @@ extension DeviceLockoutOps on CleonaService {
   }
 
   /// Reports an arrived, authenticated receipt for [legIdHex] —
-  /// the same call that `_handleDeliveryReceiptV3` makes.
+  /// the same call that `_handleDeliveryReceipt` makes.
   @visibleForTesting
   void noteLockoutAckForTest(String legIdHex) => _noteLockoutAck(legIdHex);
 

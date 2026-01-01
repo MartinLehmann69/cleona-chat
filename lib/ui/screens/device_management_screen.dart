@@ -6,6 +6,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/main.dart' show CleonaAppState;
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
 /// §7.1 LD-9/LD-10/LD-11: Cert-Status, Renewal, Kopplung.
@@ -580,7 +581,9 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     final appState = context.watch<CleonaAppState>();
 
     return Scaffold(
-      appBar: AppBar(title: Text(locale.get('device_management_title'))),
+      appBar: AppBar(
+          title: Text(locale.get('device_management_title')),
+          actions: const [AppScreenshotButton()]),
       // Working rule #6 (Android edge-to-edge): `top: false`, because the
       // AppBar at the top is already safe; at the bottom the gesture/nav bar
       // otherwise eats the last list entry.

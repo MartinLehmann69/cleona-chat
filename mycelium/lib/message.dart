@@ -5,7 +5,9 @@ import 'package:mycelium/first_contact.dart' show Report;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/envelope.dart';
 import 'package:mycelium/kinds.dart' as kinds;
-import 'package:mycelium/neighbour_list.dart';
+import 'package:mycelium/message_plaintext.dart';
+
+export 'package:mycelium/message_plaintext.dart' show messagePlaintext;
 
 /// A message via an existing contact — two packets.
 ///
@@ -20,12 +22,9 @@ import 'package:mycelium/neighbour_list.dart';
 /// is fed with incoming packets.
 ///
 /// ── IT CARRIES BYTES, IT DOES NOT INTERPRET THEM ───────────────────────────
-/// The content is a [Uint8List] and nothing else. Until S385 it was a
-/// [String]: `ship` did `utf8.encode`, the inbound `utf8.decode`.
-/// Thus this layer could only carry what is valid UTF-8 — but the
-/// application above sends protobuf frames, and a `utf8.decode`
-/// on them throws. Whoever wants to send text encodes it ABOVE, at exactly one
-/// place (`MailboxOutbound.sendText`).
+/// The content is a [Uint8List] and nothing else (until S385 a [String],
+/// which broke the application's protobuf frames). Text is encoded ABOVE, at
+/// exactly one place (`MailboxOutbound.sendText`).
 ///
 /// There is deliberately NO byte here that says what the content is. The
 /// application brings its own typing; a second one here would be
@@ -37,23 +36,18 @@ import 'package:mycelium/neighbour_list.dart';
 /// acknowledgement (0x11):   identifier 8 ‖ fixed neighbours
 /// ```
 /// "Fixed neighbours" is the list of `neighbour_list.dart` (count 0..3 +
-/// addresses, ≤ 58 B): the sender's fixed neighbours as its identity names
-/// them to contacts (D3). A contact learns them only here, sealed — a
-/// change costs no packet of its own (proposal "contacts as fixed
-/// neighbours", rule 5, 6.9; §9.2). The list stands BEHIND the identifier,
-/// so every kind keeps its first 8 bytes, and IN FRONT of the content,
-/// because the content is the application's bytes of any length and has no
-/// end marker a trailing list could hang on.
+/// addresses, ≤ 58 B; keyed only to a contact that reads it, S407): the
+/// sender's fixed neighbours as its identity names them (D3) — a contact
+/// learns them only here, so a change costs no packet (§9.2). BEHIND the
+/// identifier (every kind keeps its first 8 bytes), IN FRONT of the content
+/// (the application's bytes have no end marker a list could hang on).
 enum DeliveryState {
   /// rests at the sender, not yet out
   resting,
-
   /// gone out, no receipt yet
   inTransit,
-
   /// the recipient has receipted
   delivered,
-
   /// given up — no route has carried
   failed,
 }
@@ -81,7 +75,7 @@ class Outbound {
   final Address to;
   DeliveryState state;
   DateTime? acknowledgedAt;
-
+  CardAddress? acknowledgedFrom; // where its receipt arrived; null: a post box (O-2)
   /// The envelope carried the sender's rotation chain (§4.5.4) — its
   /// receipt then tells the book the chain arrived (`anchor_book.dart`).
   bool carriedChain = false;
@@ -94,7 +88,6 @@ class Outbound {
   });
 }
 
-/// A received message as the recipient sees it.
 /// How an ANSWER goes to the sender — the delivery receipt.
 ///
 /// Separate from [Out] because it answers a different question. [Out]
@@ -120,6 +113,7 @@ typedef Back = void Function(
 /// (`berichte/S390-EVAL-NACHRICHT.md`, finding B-2).
 typedef Out = void Function(Uint8List packet, CardAddress? destination);
 
+/// A received message as the recipient sees it.
 class Inbound {
   final Uint8List identifier;
 
@@ -137,6 +131,7 @@ class Inbound {
   /// (`kinds.isPairNotice`): then it is the kind, [content] its
   /// payload — no display, no history entry (`mailbox_pair.dart`).
   final int? kind;
+  final CardAddress? origin; // came DIRECTLY from there; null: forwarded or collected (§6.3)
 
   Inbound({
     required this.identifier,
@@ -145,6 +140,7 @@ class Inbound {
     required this.to,
     required this.at,
     this.kind,
+    this.origin,
   });
 }
 
@@ -174,14 +170,19 @@ class Messages {
   /// decides, without it the receipt is discarded.
   void Function(Uint8List identifier, Address from)? onReceiptUnknown;
 
-  /// The fixed neighbours this identity names to its contacts (D3,
-  /// set in `host_codes.dart`) — sealed into every message and
-  /// acknowledgement it sends.
-  List<CardAddress> Function() ownNeighbours = () => const [];
+  /// An acknowledgement under eight zero bytes from [from]: the answer to an
+  /// own `0x23` (§8.1, `where_are_you_answer.dart`) — D-76 sends again.
+  void Function(Address from)? onWhereAreYouAnswer;
+
+  /// The fixed neighbours this identity names to [to] (D3, `host_codes.dart`)
+  /// — sealed into every message and acknowledgement; [keys]: keyed (S407).
+  ({List<CardAddress> list, bool keys}) Function(Address to) ownNeighbours =
+      (_) => (list: const [], keys: false);
 
   /// A peer's fixed neighbours came in a message or acknowledgement; [from]
-  /// is the sender inside the seal. Empty lists are not reported.
-  void Function(Address from, List<CardAddress> neighbours)? onNeighbours;
+  /// is the sender inside the seal; [keyed]: the list carried the S407 bit.
+  /// An empty list is reported only with the bit.
+  void Function(Address from, List<CardAddress> neighbours, bool keyed)? onNeighbours;
 
   /// Q1: the node keeps the way of a held-back copy ([onHeld], [origin] as
   /// fed) and sends its receipt that way ([heldBack]; `node_receipt.dart`).
@@ -226,9 +227,9 @@ class Messages {
       ..carriedChain = me.carriesChainTo(to);
 
     final envelope = Envelope.seal(
-      plaintext: _head(k, content),
+      plaintext: _head(k, content, to),
       recipient: to,
-      sender: me,
+      sender: me, pairTag: true, // §4.4.3: a pair that reads it gets the tag
     );
 
     _open[_key(k)] = outbound;
@@ -241,22 +242,25 @@ class Messages {
 
   /// Feeds in an incoming packet. [origin] is the address from which
   /// it came — `null` if it was fetched from a post box and the
-  /// address thus belongs to the holder (see [Back]).
-  void receive(Uint8List packet, CardAddress? origin) {
+  /// address thus belongs to the holder (see [Back]). [arrivedAt]: when it
+  /// arrived on this device, if that was earlier than now — a parked cell
+  /// (§4.5.4) keeps its arrival (§22.5.3, `mailbox_parked.dart`).
+  void receive(Uint8List packet, CardAddress? origin, {DateTime? arrivedAt}) {
     if (packet.isEmpty) throw MessageError('empty packet');
     switch (packet[0]) {
       case kKindMessage:
-        _messageCame(packet, origin);
+        _messageCame(packet, origin, arrivedAt);
       case kKindReceipt:
-        _receiptCame(packet);
+        _receiptCame(packet, origin);
       case final s when kinds.isPairNotice(s):
-        _messageCame(packet, origin, kind: s);
+        _messageCame(packet, origin, arrivedAt, kind: s);
       default:
         throw MessageError('unexpected kind ${packet[0]}');
     }
   }
 
-  void _messageCame(Uint8List packet, CardAddress? origin, {int? kind}) {
+  void _messageCame(Uint8List packet, CardAddress? origin, DateTime? arrivedAt,
+      {int? kind}) {
     final (plaintext, sender) = Envelope.unseal(
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
@@ -269,8 +273,9 @@ class Messages {
       content: content,
       from: sender,
       to: me.address,
-      at: DateTime.now(),
+      at: arrivedAt ?? DateTime.now(),
       kind: kind,
+      origin: origin,
     );
     final later = receiptLater?.call(inbound) ?? false;
     if (later) onHeld?.call(identifier, origin);
@@ -286,9 +291,9 @@ class Messages {
     // The receipt is sealed: otherwise a third party could forge it
     // and fake a tick to the sender that does not exist.
     final receipt = Envelope.seal(
-      plaintext: _head(identifier, const []),
+      plaintext: _head(identifier, const [], sender),
       recipient: sender,
-      sender: me,
+      sender: me, pairTag: true,
     );
     // Via the LADDER to the sender's IDENTITY, not to `origin` — for collected
     // post `origin` is the holder, who cannot unseal it. A held-back one
@@ -299,7 +304,7 @@ class Messages {
     held(identifier, (o) => back(p, sender, o ?? origin));
   }
 
-  void _receiptCame(Uint8List packet) {
+  void _receiptCame(Uint8List packet, CardAddress? origin) {
     final (plaintext, sender) = Envelope.unseal(
       envelope: Uint8List.sublistView(packet, 1),
       recipient: me,
@@ -313,6 +318,7 @@ class Messages {
       final late = onReceiptUnknown;
       report?.call('Receipt ${_short(identifier)} without open outbound '
           '— ${late == null ? 'discarded' : 'handed to the application'}');
+      if (identifier.every((b) => b == 0)) onWhereAreYouAnswer?.call(sender);
       late?.call(identifier, sender);
       return;
     }
@@ -325,7 +331,7 @@ class Messages {
       return;
     }
     outbound.state = DeliveryState.delivered;
-    outbound.acknowledgedAt = DateTime.now();
+    outbound..acknowledgedAt = DateTime.now()..acknowledgedFrom = origin;
     if (outbound.carriedChain) me.book.chainArrived(sender);
     _open.remove(_key(identifier));
     report?.call('message ${_short(identifier)} delivered');
@@ -334,29 +340,19 @@ class Messages {
   }
 
   /// identifier ‖ own fixed neighbours ‖ [rest] — see the file header.
-  Uint8List _head(Uint8List identifier, List<int> rest) =>
-      messagePlaintext(identifier, ownNeighbours(), rest);
+  Uint8List _head(Uint8List identifier, List<int> rest, Address to) {
+    final n = ownNeighbours(to);
+    return messagePlaintext(identifier, n.list, rest, keys: n.keys);
+  }
 
-  /// Counterpart to [_head]: identifier and the rest (a copy — a view would
-  /// keep the unsealed buffer alive); the list goes to [onNeighbours].
+  /// Counterpart to [_head]: identifier and the rest
+  /// ([messagePlaintextRead]); the list goes to [onNeighbours].
   (Uint8List, Uint8List) _cut(Uint8List plaintext, Address sender) {
-    var pos = 0;
-    Uint8List read(int n) {
-      if (pos + n > plaintext.length) {
-        throw MessageError('plaintext too short (${plaintext.length} B)');
-      }
-      return Uint8List.sublistView(plaintext, pos, pos += n);
+    final p = messagePlaintextRead(plaintext);
+    if (p.neighbours.isNotEmpty || p.keyed) {
+      onNeighbours?.call(sender, p.neighbours, p.keyed);
     }
-
-    final identifier = Uint8List.fromList(read(kIdentifierLength));
-    final List<CardAddress> list;
-    try {
-      list = neighbourListRead(read, 'fixed neighbours');
-    } on CardFormatError catch (e) {
-      throw MessageError('$e');
-    }
-    if (list.isNotEmpty) onNeighbours?.call(sender, list);
-    return (identifier, Uint8List.fromList(Uint8List.sublistView(plaintext, pos)));
+    return (p.identifier, p.rest);
   }
 
   /// No route has carried — the caller gives up.
@@ -366,17 +362,6 @@ class Messages {
     a.state = DeliveryState.failed;
     report?.call('message ${_short(identifier)} failed');
   }
-}
-
-/// The sealed plaintext of every kind this file sends — message,
-/// pair notice and acknowledgement (`0x11`): identifier ‖
-/// [neighbours] ‖ [rest] (file header). The ONE place that lays it out;
-/// whoever builds such a plaintext outside [Messages] builds it here.
-Uint8List messagePlaintext(
-    Uint8List identifier, List<CardAddress> neighbours, List<int> rest) {
-  final b = BytesBuilder()..add(identifier);
-  neighbourListWrite(b, neighbourListClean(neighbours));
-  return (b..add(rest)).toBytes();
 }
 
 Uint8List _withKind(int kind, Uint8List rest) {

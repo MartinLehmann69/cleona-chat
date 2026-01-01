@@ -103,7 +103,7 @@ class KeepAlive {
   final bool Function((InternetAddress, int) target, Uint8List content) _send;
 
   /// The measured results (`keep_alive_measure.dart`); `null`: defaults.
-  Held? heldV4;
+  Held? heldV4;  // version-name-ok: IP address family
   Held? heldV6;
 
   /// A move report dropped a family back to its default (§8.1).
@@ -115,7 +115,7 @@ class KeepAlive {
   Timer? _clock;
 
   /// Counters for probes and the network statistics (§25).
-  int sentV4 = 0;
+  int sentV4 = 0;  // version-name-ok: IP address family
   int sentV6 = 0;
   int replacedThroughCover = 0;
   int moves = 0;
@@ -137,7 +137,7 @@ class KeepAlive {
 
   bool get runs => _clock != null;
 
-  Duration get intervalV4 => heldV4?.interval ?? kKeepAliveTick;
+  Duration get intervalV4 => heldV4?.interval ?? kKeepAliveTick;  // version-name-ok: IP address family
   Duration get intervalV6 => heldV6?.interval ?? kKeepAliveV6;
 
   void start() {
@@ -205,7 +205,7 @@ class KeepAlive {
   /// or not holdable; (2) IPv6 measured holding at least [kV6Carries], or a
   /// granted pinhole; (3) the fixed neighbour answers under IPv6 and — in
   /// this run — under IPv4 too, so it forwards between the address types.
-  bool v4Rests(DateTime now) {
+  bool v4Rests(DateTime now) {  // version-name-ok: IP address family
     final h4 = heldV4;
     if (h4 == null) return false;
     final i4 = h4.interval;
@@ -257,14 +257,14 @@ class KeepAlive {
   /// router, or found open — nobody is limited to one IPv4 path, and the
   /// rule has no reason to apply (its reason is the one IPv4 path, proposal
   /// "contacts as fixed neighbours", version 3, 3b).
-  bool v4OnlyOnMetered(Neighbour n) => fixed_v6.v4OnlyOnMetered(n,
+  bool v4OnlyOnMetered(Neighbour n) => fixed_v6.v4OnlyOnMetered(n,  // version-name-ok: IP address family
       metered: _k.coverStream.metered &&
           _needsV4(ownAddresses()) &&
           !familyOpen(InternetAddressType.IPv4),
       ownV6: _needsV6(ownAddresses()),
       public: _k.neighbourhood.openNetwork);
 
-  bool _needsV4(List<InternetAddress> own) =>
+  bool _needsV4(List<InternetAddress> own) =>  // version-name-ok: IP address family
       !ipv4Mapped() &&
       !own.any((a) =>
           a.type == InternetAddressType.IPv4 && fromOutsideReachable(a));
@@ -355,8 +355,8 @@ class KeepAlive {
   /// The fixed neighbour if it is IPv4 and dual-stack; otherwise a
   /// dual-stack neighbour; otherwise the fixed one; otherwise the most
   /// recently confirmed IPv4 neighbour.
-  NeighbourAddress? _targetV4(List<Neighbour> confirmed, DateTime now) {
-    final v4 = _in(confirmed, InternetAddressType.IPv4, now);
+  NeighbourAddress? _targetV4(List<Neighbour> confirmed, DateTime now) {  // version-name-ok: IP address family
+    final v4 = _in(confirmed, InternetAddressType.IPv4, now);  // version-name-ok: IP address family
     if (v4.isEmpty) return null;
     final fixed = _k.neighbourhood.fixedNeighbour;
     NeighbourAddress? fixedOne;

@@ -28,10 +28,23 @@ class _LogSinkState {
   _LogSinkState(this.date, this.segment, this.bytesInSegment, this.lastCleanup);
 }
 
+/// Where one flush lands: the segment file and the sink state it belongs to.
+typedef _SinkTarget = ({
+  File file,
+  _LogSinkState state,
+  Directory logDir,
+  String date,
+  DateTime now,
+});
+
 class CLogger {
   static final Map<String, CLogger> _instances = {};
   static final Map<String, StringBuffer> _buffers = {};
   static Timer? _flushTimer;
+
+  /// Set by [writeThrough]: every line goes to its file before `_write`
+  /// returns, no buffering, no 2 s deadline.
+  static bool _writeThrough = false;
 
   // -- Log retention (S120) --------------------------------------------------
   // Two-dimensional retention: age cap AND total-size budget per logs/ dir.
@@ -269,6 +282,17 @@ class CLogger {
     // late, the future has already completed with an unhandled error.
     if (!_sinkWatchRegistered) _watchConsoleSinks();
 
+    // Write-through (the process's last moments, [writeThrough]): the file
+    // comes FIRST. A SIGKILL can land between the console copy and the file
+    // append; with the console first, a line a watcher saw printed was not
+    // on disk (S407-INTEGRATION B-16, smoke_daemon_sigterm_log A2/A3).
+    final buffer = profileDir != null ? _buffers[profileDir] : null;
+    final fileFirst = _writeThrough && buffer != null;
+    if (fileFirst) {
+      buffer.writeln(line);
+      _flushAllSync();
+    }
+
     if (consoleEnabled && level != LogLevel.debug && level != LogLevel.trace) {
       try {
         // The ONLY `print` in `lib/` (S366) — and it must stay so:
@@ -306,10 +330,9 @@ class CLogger {
       if (_ring.length > _ringCapacity) _ring.removeAt(0);
     }
 
-    // Buffer for file write
-    final buffer = profileDir != null ? _buffers[profileDir] : null;
+    // Buffer for file write (already written above in write-through)
     if (buffer != null) {
-      buffer.writeln(line);
+      if (!fileFirst) buffer.writeln(line);
     } else if (consoleEnabled &&
         !_retired.contains(profileDir) &&
         _blindModulesWarned.add(module)) {
@@ -338,7 +361,63 @@ class CLogger {
     // BOTH buffers, not only the file buffer: with `profileDir == null`
     // there is no file buffer, but the iOS mirror fills up
     // nonetheless — arming only on `buffer` would leave it unflushed.
-    if (_buffers.isNotEmpty || _iosMirrorBuffer != null) _ensureFlushTimer();
+    if (_writeThrough) {
+      _flushAllSync();
+    } else if (_buffers.isNotEmpty || _iosMirrorBuffer != null) {
+      _ensureFlushTimer();
+    }
+  }
+
+  /// From now on every line is on disk before the call that logged it
+  /// returns; what is still buffered is written first.
+  ///
+  /// For the process's last moments (S407-KLEIN3). A daemon that receives
+  /// SIGTERM is often ended before its shutdown completes — on a session
+  /// logout the X server goes away at the same moment and the process does
+  /// not live to the [flushAll] at the end of `shutdownAll`. Measured on
+  /// node1 09.10.2026 12:01:45: `SIGTERM received` … `Plane D: deregistered`
+  /// existed only in the console copy; the day log ends at 12:01:42. Since
+  /// S395-2 the console copy is no longer kept on Linux (it repeated the
+  /// whole log), so the buffered lines would be gone everywhere.
+  ///
+  /// This is the established remedy for a buffered logger at shutdown
+  /// (immediate flush, as logback's `immediateFlush` / a syslog writer):
+  /// one locked append per line, which costs nothing for the few dozen lines
+  /// of a shutdown and is not meant for normal operation. One-way: there is
+  /// no way back, the process is ending. Idempotent.
+  ///
+  /// A timer flush already under way when this is called has taken its
+  /// content out of the buffer and finishes asynchronously; its lines are
+  /// not lost but can land behind the first write-through lines (each line
+  /// carries its timestamp).
+  static void writeThrough() {
+    if (_writeThrough) return;
+    _writeThrough = true;
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _flushAllSync();
+  }
+
+  /// Synchronous counterpart of [flushAll], used by [writeThrough].
+  static void _flushAllSync() {
+    for (final entry in Map.of(_buffers).entries) {
+      final buffer = entry.value;
+      if (buffer.isEmpty) continue;
+      final content = buffer.toString();
+      buffer.clear();
+      try {
+        _appendToSinkSync(entry.key, content);
+      } catch (_) {
+        // Non-fatal: logging should never crash the app
+      }
+    }
+    if (iosMirrorPath != null && _iosMirrorBuffer != null && _iosMirrorBuffer!.isNotEmpty) {
+      final content = _iosMirrorBuffer!.toString();
+      _iosMirrorBuffer!.clear();
+      try {
+        _appendToSinkSync(iosMirrorPath!, content);
+      } catch (_) {}
+    }
   }
 
   /// The flush deadline. **One-shot timer, not a permanent runner** — see the
@@ -384,8 +463,25 @@ class CLogger {
   /// Append to the current segment of `$baseDir/logs`, rotating segments and
   /// running retention cleanup (at startup, day roll and every 6h).
   static Future<void> _appendToSink(String baseDir, String content) async {
+    final target = _sinkTarget(baseDir);
+    if (target == null) return;
+    await _lockedAppend(target.file, content);
+    _afterAppend(target, content.length);
+  }
+
+  /// [_appendToSink] with synchronous I/O, for [writeThrough].
+  static void _appendToSinkSync(String baseDir, String content) {
+    final target = _sinkTarget(baseDir);
+    if (target == null) return;
+    _lockedAppendSync(target.file, content);
+    _afterAppend(target, content.length);
+  }
+
+  /// The segment file a flush for [baseDir] appends to, with the sink state
+  /// it belongs to; null for a retired profile.
+  static _SinkTarget? _sinkTarget(String baseDir) {
     // A flush already under way must not bring a deleted profile back.
-    if (_retired.contains(baseDir)) return;
+    if (_retired.contains(baseDir)) return null;
     final logDir = Directory('$baseDir/logs');
     if (!logDir.existsSync()) {
       logDir.createSync(recursive: true);
@@ -399,10 +495,22 @@ class CLogger {
       _sinkStates[baseDir] = state;
       _cleanup(logDir, now);
     }
+    return (
+      file: File(_segmentPath(logDir, date, state.segment)),
+      state: state,
+      logDir: logDir,
+      date: date,
+      now: now,
+    );
+  }
 
-    final file = File(_segmentPath(logDir, date, state.segment));
-    await _lockedAppend(file, content);
-    state.bytesInSegment += content.length;
+  /// Segment rotation and retention after [length] characters were appended.
+  static void _afterAppend(_SinkTarget t, int length) {
+    final state = t.state;
+    final logDir = t.logDir;
+    final date = t.date;
+    final now = t.now;
+    state.bytesInSegment += length;
 
     if (state.bytesInSegment >= segmentBytes) {
       state.segment++;
@@ -484,6 +592,24 @@ class CLogger {
       }
     } finally {
       await raf.close();
+    }
+  }
+
+  /// [_lockedAppend] with synchronous I/O — same lock, same re-read end.
+  static void _lockedAppendSync(File file, String content) {
+    final bytes = utf8.encode(content);
+    final raf = file.openSync(mode: FileMode.writeOnlyAppend);
+    try {
+      raf.lockSync(FileLock.blockingExclusive);
+      try {
+        raf.setPositionSync(raf.lengthSync());
+        raf.writeFromSync(bytes);
+        raf.flushSync();
+      } finally {
+        raf.unlockSync();
+      }
+    } finally {
+      raf.closeSync();
     }
   }
 

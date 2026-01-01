@@ -6,6 +6,10 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cleona/core/util/endpoint_address.dart';
+
+export 'package:cleona/core/util/endpoint_address.dart';
+
 // ---------------------------------------------------------------------------
 // RendezvousProvider Interface (§4.11.2)
 // ---------------------------------------------------------------------------
@@ -19,33 +23,9 @@ abstract class RendezvousProvider {
   /// replaces nothing: kind 30078 with `d` tag is a NIP-33 record, and
   /// a relay only replaces with equal `(pubkey, kind, d-Tag)`. Whoever stores
   /// MULTIPLE times under the same tag accumulates instead of updating.
-  /// For this case there is [publishWithKey].
+  /// `publishWithKey` (a caller-derived signing key) stood next to this for
+  /// the binary distribution and fell with it (V9 A1, 08.10.2026).
   Future<void> publish(Uint8List lookupTag, SignedEndpointRecord record);
-
-  /// Like [publish], but signed with a key DERIVED by the caller
-  /// — so that a republication under the same tag
-  /// REPLACES the own previous record instead of lying next to it
-  /// (NIP-33, v3_0 §4.11.6: "a throwaway key would accumulate garbage
-  /// entries instead of updating in place").
-  ///
-  /// That is a TRADE-OFF, not an improvement across the board: a
-  /// stable signing key is a pseudonym on the relay side and
-  /// links all stores of the same storer over time. It therefore
-  /// belongs only where the key material is anyway as short-lived
-  /// and as narrowly scoped as the tag itself — at first contact
-  /// (§4.11.10, ikm = the one-time nonce of the invitation). Where the derivation would come from
-  /// the NETWORK SECRET (§4.11.9, §19.6.5), the pseudonym would be as
-  /// long-lived as the secret and would cancel the 6 h tag rotation;
-  /// there it stays with the throwaway key, see the justifications in
-  /// `infra_rendezvous_manager.dart` and `binary_rendezvous_manager.dart`.
-  ///
-  /// The fallback is intentional: a substrate without its own signing key
-  /// (future non-Nostr carriers, test-bench doubles) ignores it and
-  /// stores normally. The resolver NEVER derives the key — it only asks
-  /// for the `d` tag —, that is why this is not a wire format change.
-  Future<void> publishWithKey(Uint8List lookupTag, SignedEndpointRecord record,
-          Uint8List signingKey) =>
-      publish(lookupTag, record);
 
   /// Resolve the record under the tag. Returns null if nothing found or
   /// the channel is blocked in the current network.
@@ -58,18 +38,6 @@ abstract class RendezvousProvider {
 // ---------------------------------------------------------------------------
 // EndpointRecord (plaintext, inside AEAD)
 // ---------------------------------------------------------------------------
-
-class EndpointAddress {
-  final String ip;
-  final int port;
-
-  const EndpointAddress(this.ip, this.port);
-
-  Map<String, dynamic> toJson() => {'i': ip, 'p': port};
-
-  static EndpointAddress fromJson(Map<String, dynamic> j) =>
-      EndpointAddress(j['i'] as String, j['p'] as int);
-}
 
 class EndpointRecord {
   final List<EndpointAddress> addresses;
@@ -152,7 +120,6 @@ class SignedEndpointRecord {
 
 // `encryptEndpointRecord` / `decryptEndpointRecord` stood here and are gone
 // (S403, owner decision 5 = B of 02.10.2026). No reading of the norm needs
-// them: the one path that seals a record for a relay is the binary
-// distribution, and it seals with its own two functions
-// (`encryptBinaryRecord` / `decryptBinaryRecord`,
-// `binary_rendezvous_manager.dart`).
+// them. The binary distribution, which sealed its records with its own two
+// functions, no longer uses a relay at all (V9 A1, 08.10.2026; v4_2
+// §26.6.4).

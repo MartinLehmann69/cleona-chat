@@ -13,6 +13,8 @@
 // device, and drawing a placeholder over it is the false statement this
 // rework exists to remove.
 
+import 'dart:typed_data';
+
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/service/service_types.dart' show UiMessage;
 
@@ -44,13 +46,17 @@ class ArchivePlaceholderInfo {
   /// The original file name, `null` when unknown.
   final String? originalFilename;
 
-  /// Tier-3 mini image (~2–5 KB, 64 px) as base64.
+  /// The mini image (~2–5 KB, 64 px) as base64, on tiers 2 and 3.
   ///
-  /// **Empty today and that is not a defect.** The downscaler is S392/B1
-  /// (`archive_thumbnail.dart`); until it lands, `applyArchiveView` never
-  /// fills the wire field. Consumers MUST render the tier without it — a
-  /// missing mini is a missing picture, never a missing placeholder.
+  /// Empty for media without a still image (video, undecodable) — consumers
+  /// MUST render the tier without it: a missing mini is a missing picture,
+  /// never a missing placeholder.
   final String? miniBase64;
+
+  /// The tier-2 preview (up to 50 KB, longest edge 512 px), when the surface
+  /// has fetched it (`ArchivePreviewCache`, S407-VORSCHAU). `null` until it
+  /// arrives and for media without one — the tile then draws the mini.
+  final Uint8List? previewBytes;
 
   /// Whether a retrieval is currently running (S392/B4).
   final bool isRetrieving;
@@ -81,6 +87,7 @@ class ArchivePlaceholderInfo {
     this.mimeType,
     this.originalFilename,
     this.miniBase64,
+    this.previewBytes,
     this.isRetrieving = false,
     this.retrievalProgress,
     this.isPinned = false,
@@ -106,6 +113,7 @@ class ArchivePlaceholder {
     bool isRetrieving = false,
     double? retrievalProgress,
     bool isPinned = false,
+    Uint8List? previewBytes,
   }) {
     final tier = archiveTierFromWire(m.archiveTier);
     if (tier == null || tier == ArchiveTier.original) return null;
@@ -118,6 +126,9 @@ class ArchivePlaceholder {
       mimeType: m.mimeType,
       originalFilename: m.filename,
       miniBase64: m.archiveMiniBase64,
+      // Only tier 2 shows the preview; a cached one from before a tier step
+      // must not reappear on tier 3.
+      previewBytes: tier == ArchiveTier.thumbnail ? previewBytes : null,
       isRetrieving: isRetrieving,
       retrievalProgress: retrievalProgress,
       isPinned: isPinned,

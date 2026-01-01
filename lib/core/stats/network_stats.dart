@@ -19,7 +19,7 @@ import 'dart:io';
 /// onto the display layer. The same reasoning as for the bare
 /// callbacks on `V41Node.start`, and `smoke_link_io_milestone`
 /// (section 5) guards it.
-typedef V41NodeGauges = ({
+typedef NodeGauges = ({
   // ── Connection ────────────────────────────────────────────────────
   /// Known entry records (`EntryCache.size`).
   int entryRecords,
@@ -89,7 +89,7 @@ typedef V41NodeGauges = ({
 ///
 /// NO DUMMY. Without a node there is no cover tick, no harvest and
 /// no placement; `0` is the truth here and not a substitute value.
-const V41NodeGauges kNoNodeGauges = (
+const NodeGauges kNoNodeGauges = (
   entryRecords: 0,
   slotsEmitted: 0,
   slotsSkipped: 0,
@@ -176,7 +176,7 @@ const List<String> kRetiredStatsJsonKeys = <String>[
 /// A ZERO THAT LOOKS LIKE A MEASUREMENT IS WORSE THAN A
 /// MISSING NUMBER. Therefore the fields were not left at 0,
 /// but removed; and what takes their place has a named
-/// writer in the delivery layer (see [V41NodeGauges]).
+/// writer in the delivery layer (see [NodeGauges]).
 ///
 /// The structure now follows the three questions of a user — "am I
 /// connected", "does my mail arrive", "what is the cause if not" — and
@@ -241,6 +241,15 @@ class NetworkStats {
 
   final int dbSizeBytes;
 
+  /// Whether a V4.1 node supplied the [NodeGauges] set. Under mycelium it
+  /// never does: the gauges without a counterpart there are then not shown
+  /// (§25.2 rule 4, "show nothing that is not substantiated"; S407-N2).
+  final bool nodeGauges;
+
+  /// Whether the 4.2 delivery layer (`mycelium/`) supplied its counters for
+  /// [slotsEmitted], [slotsSkipped] and [storedCells] (S407-N2).
+  final bool deliveryCounters;
+
   const NetworkStats({
     this.uptime = Duration.zero,
     this.isRunning = false,
@@ -275,6 +284,8 @@ class NetworkStats {
     this.bulkEvicted = 0,
     this.parkedLost = 0,
     this.dbSizeBytes = 0,
+    this.nodeGauges = false,
+    this.deliveryCounters = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -311,6 +322,8 @@ class NetworkStats {
         'bulkEvicted': bulkEvicted,
         'parkedLost': parkedLost,
         'dbSizeBytes': dbSizeBytes,
+        'nodeGauges': nodeGauges,
+        'deliveryCounters': deliveryCounters,
       };
 
   /// ── WHY EVERY FIELD HAS A DEFAULT VALUE AND THERE IS NO VERSION
@@ -372,6 +385,10 @@ class NetworkStats {
       bulkEvicted: i('bulkEvicted'),
       parkedLost: i('parkedLost'),
       dbSizeBytes: i('dbSizeBytes'),
+      // Missing (a daemon before S407-N2): false — that daemon had no source
+      // for these tiles either, so hiding them shows the truth.
+      nodeGauges: json['nodeGauges'] as bool? ?? false,
+      deliveryCounters: json['deliveryCounters'] as bool? ?? false,
     );
   }
 }
@@ -385,7 +402,7 @@ class NetworkStats {
 ///   collector keeps two periods, "total" and "today". It therefore gets
 ///   the DIFFERENCE to the last look, not the absolute value
 ///   (see [noteNodeCounters]).
-/// * **Passed through** (everything in [V41NodeGauges]): states, not
+/// * **Passed through** (everything in [NodeGauges]): states, not
 ///   increments. "Waiting for pieces" is not a quantity one
 ///   adds up; a difference calculation would simply be wrong here. They
 ///   are remembered and handed out unchanged ([noteNodeGauges]).
@@ -486,10 +503,12 @@ class NetworkStatsCollector {
   // the distribution of the two system channels (Bug Log, Feature
   // Requests, `cleona_service_pure.dart:793`) and has nothing to do with the
   // network statistics. The display metrics are G-10,
-  // and G-10 has been CLOSED since S360 — the chain is completely
-  // in production: `v41_attach.dart` sets `service.v41NodeGauges`,
-  // `cleona_service.dart` fetches them in `getNetworkStats` and passes
-  // them on to [noteNodeGauges].
+  // and G-10 was CLOSED in S360 — for the V4.1 layer: `v41_attach.dart`
+  // sets `service.v41NodeGauges`, `cleona_service.dart` fetches them in
+  // `getNetworkStats` and passes them on to [noteNodeGauges]. Under the 4.2
+  // delivery layer `attachV41` never runs (S407-N2): see
+  // [noteDeliveryCounters] for what took over and [NetworkStats.nodeGauges]
+  // for what is hidden.
   //
   // WHY THEY DO NOT GO THROUGH `noteNodeCounters`. There things are booked,
   // and booking means: form a difference, add, keep over two periods.
@@ -503,9 +522,31 @@ class NetworkStatsCollector {
   // if no node is currently attached, the last state stays instead of jumping to
   // 0. A jump to 0 would look like "the cover stream has
   // stalled", but would only be "nobody is looking right now".
-  V41NodeGauges _gauges = kNoNodeGauges;
+  NodeGauges? _gauges;
 
-  void noteNodeGauges(V41NodeGauges g) => _gauges = g;
+  void noteNodeGauges(NodeGauges g) => _gauges = g;
+
+  // S407-N2 — THE 4.2 DELIVERY LAYER'S COUNTERPARTS (§25.5, §25.6).
+  //
+  // Until here the twenty gauges had one writer, `attachV41` in the replaced
+  // layer, which no production process runs: under mycelium every tile stood
+  // at 0. Three of them have an exact counterpart in `mycelium/`: the cover
+  // stream's sent and skipped points in time (`CoverStream.sent`/`.skipped`,
+  // §25.5 cover) and the post box packets held (`PostBoxDeposit.held`,
+  // §25.6). They are remembered like the gauges — states and running totals
+  // of the node, read when someone looks. The other seventeen have no
+  // counterpart and are not shown ([NetworkStats.nodeGauges]).
+  ({int coverSent, int coverSkipped, int postBoxHeld})? _delivery;
+
+  void noteDeliveryCounters(
+          {required int coverSent,
+          required int coverSkipped,
+          required int postBoxHeld}) =>
+      _delivery = (
+        coverSent: coverSent,
+        coverSkipped: coverSkipped,
+        postBoxHeld: postBoxHeld
+      );
 
   // S398-W4 — THE EVICTIONS OF THE 4.2 LAYER (§21.3.3 item 4, §25).
   //
@@ -562,25 +603,27 @@ class NetworkStatsCollector {
     String? profileDir,
   }) {
     _checkDayReset();
+    final g = _gauges ?? kNoNodeGauges;
+    final d = _delivery;
 
     return NetworkStats(
       uptime: uptime,
       isRunning: isRunning,
-      entryRecords: _gauges.entryRecords,
-      slotsEmitted: _gauges.slotsEmitted,
-      slotsSkipped: _gauges.slotsSkipped,
-      slotsFailed: _gauges.slotsFailed,
-      harvestRuns: _gauges.harvestRuns,
-      lookupRuns: _gauges.lookupRuns,
-      payloadsAssembled: _gauges.payloadsAssembled,
-      payloadsOpened: _gauges.payloadsOpened,
-      openTransfers: _gauges.openTransfers,
-      piecesDiscarded: _gauges.piecesDiscarded,
-      controlQueueDepth: _gauges.controlQueueDepth,
-      controlQueueMax: _gauges.controlQueueMax,
-      droppedControl: _gauges.droppedControl,
-      droppedEphemeral: _gauges.droppedEphemeral,
-      controlFailures: _gauges.controlFailures,
+      entryRecords: g.entryRecords,
+      slotsEmitted: _gauges?.slotsEmitted ?? d?.coverSent ?? 0,
+      slotsSkipped: _gauges?.slotsSkipped ?? d?.coverSkipped ?? 0,
+      slotsFailed: g.slotsFailed,
+      harvestRuns: g.harvestRuns,
+      lookupRuns: g.lookupRuns,
+      payloadsAssembled: g.payloadsAssembled,
+      payloadsOpened: g.payloadsOpened,
+      openTransfers: g.openTransfers,
+      piecesDiscarded: g.piecesDiscarded,
+      controlQueueDepth: g.controlQueueDepth,
+      controlQueueMax: g.controlQueueMax,
+      droppedControl: g.droppedControl,
+      droppedEphemeral: g.droppedEphemeral,
+      controlFailures: g.controlFailures,
       bytesSentTotal: _bytesSent,
       bytesReceivedTotal: _bytesReceived,
       bytesSentToday: _bytesSentToday,
@@ -589,14 +632,16 @@ class NetworkStatsCollector {
       messagesReceived: _messagesReceived,
       messagesRelayed: _messagesRelayed,
       relayDataVolume: _relayBytes,
-      storedCells: _gauges.storedCells,
-      storedEvicted: _gauges.storedEvicted + _postBoxEvicted,
-      blindHeld: _gauges.blindHeld,
-      blindEvicted: _gauges.blindEvicted,
-      blindRefused: _gauges.blindRefused,
+      storedCells: _gauges?.storedCells ?? d?.postBoxHeld ?? 0,
+      storedEvicted: g.storedEvicted + _postBoxEvicted,
+      blindHeld: g.blindHeld,
+      blindEvicted: g.blindEvicted,
+      blindRefused: g.blindRefused,
       bulkEvicted: _bulkEvicted,
       parkedLost: _parkedLost,
       dbSizeBytes: _measureDbSize(profileDir),
+      nodeGauges: _gauges != null,
+      deliveryCounters: d != null,
     );
   }
 

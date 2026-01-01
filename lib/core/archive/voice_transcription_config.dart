@@ -81,12 +81,13 @@ class TranscriptionStatus {
   /// The whisper.cpp library could be loaded (independent of a model).
   final bool whisperAvailable;
 
-  /// The model file of the configured size was present when the service
-  /// started, or a download has completed since.
+  /// The model file of the SET size lies on disk and has passed its
+  /// SHA-256 check (D-64). Transcription is ready only when this AND
+  /// [whisperAvailable] hold.
   final bool modelLoaded;
 
   /// Name of `ModelDownloadStatus` (`idle`, `downloading`, `completed`,
-  /// `failed`) — a name, not an index, because it crosses JSON.
+  /// `failed`, `rejected`) — a name, not an index, because it crosses JSON.
   final String downloadStatus;
 
   /// 0.0 … 1.0 of the running or last download.
@@ -94,6 +95,10 @@ class TranscriptionStatus {
 
   /// The names of the model sizes whose file is present.
   final List<String> downloadedModels;
+
+  /// Why the last download ended as `failed` (`HTTP 404`, the text of a
+  /// socket error, …) — never a URL. `null` while nothing failed.
+  final String? downloadError;
 
   /// The three values the user chose ([VoiceTranscriptionSettings]).
   final String language;
@@ -106,6 +111,7 @@ class TranscriptionStatus {
     required this.downloadStatus,
     required this.downloadProgress,
     required this.downloadedModels,
+    this.downloadError,
     required this.language,
     required this.modelSize,
     required this.retentionDays,
@@ -117,6 +123,7 @@ class TranscriptionStatus {
         'downloadStatus': downloadStatus,
         'downloadProgress': downloadProgress,
         'downloadedModels': downloadedModels,
+        if (downloadError != null) 'downloadError': downloadError,
         'language': language,
         'modelSize': modelSize,
         'retentionDays': retentionDays,
@@ -132,6 +139,7 @@ class TranscriptionStatus {
           for (final m in (j['downloadedModels'] as List? ?? const []))
             if (m is String) m
         ],
+        downloadError: j['downloadError'] as String?,
         language: j['language'] as String? ?? 'auto',
         modelSize: j['modelSize'] as String? ?? 'base',
         retentionDays: (j['retentionDays'] as num?)?.toInt() ?? 30,
@@ -140,13 +148,13 @@ class TranscriptionStatus {
 
 /// Whisper model size (determines quality and resource consumption).
 enum WhisperModelSize {
-  /// ~40 MB, fast, acceptable quality.
+  /// ~78 MB (77 691 713 bytes, see `WhisperFFI.modelSource`), fast, acceptable quality.
   tiny,
 
-  /// ~75 MB, good trade-off between quality and speed.
+  /// ~148 MB (147 951 465 bytes), good trade-off between quality and speed.
   base,
 
-  /// ~250 MB, high quality, slower.
+  /// ~488 MB (487 601 967 bytes), high quality, slower.
   small,
 }
 

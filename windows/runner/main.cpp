@@ -2,6 +2,9 @@
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 
+#include <cstdlib>
+#include <string>
+
 #include "flutter_window.h"
 #include "utils.h"
 
@@ -57,6 +60,31 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   while (::GetMessage(&msg, nullptr, 0, 0)) {
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
+  }
+
+  // v4_2 §26.5.4 (S407-RUECKNAHME R-2): the message loop ended in order — the
+  // window was closed, it did not crash. While a desktop update is pending,
+  // leave a note beside its marker; the next window start reads it
+  // (BinaryUpdateManager.guiStartAfterUpdate) and does not roll back. A crash
+  // or a forced end never reaches this line. The Dart side cannot write it:
+  // the framework's exit request (AppLifecycleListener.onExitRequested) was
+  // measured not to arrive on this runner (lab VM, 20.10.2026), and the
+  // process ends right after this loop. AppPaths.home on Windows is
+  // %USERPROFILE%; the profile is <home>\.cleona.
+  {
+    wchar_t* profile = nullptr;
+    size_t len = 0;
+    if (_wdupenv_s(&profile, &len, L"USERPROFILE") == 0 && profile != nullptr) {
+      std::wstring dir = std::wstring(profile) + L"\\.cleona\\update\\";
+      free(profile);
+      if (::GetFileAttributesW((dir + L"update-pending.json").c_str()) !=
+          INVALID_FILE_ATTRIBUTES) {
+        HANDLE note = ::CreateFileW((dir + L"gui-clean-exit").c_str(),
+                                    GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (note != INVALID_HANDLE_VALUE) ::CloseHandle(note);
+      }
+    }
   }
 
   ::CoUninitialize();

@@ -14,7 +14,7 @@
 
 part of 'cleona_service.dart';
 
-extension V3IdentityDeviceOps on CleonaService {
+extension IdentityDeviceOps on CleonaService {
 
 
   // ── `_pinRecipientUserSigPks`: FALLEN (CUT, 31.08.2026) ──────────
@@ -129,11 +129,25 @@ extension V3IdentityDeviceOps on CleonaService {
     try {
       final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
       final groupInfo = GroupInfo.fromJson(json);
+      // §14.7 Type 6, §16.2.5: the key state of the other own device.
+      _skTwinTake(groupInfo.groupIdHex, json['sharedKey']);
       // The state of the device that created or joined is taken where this
       // device holds none, holds only the invitation, or holds an epoch that
       // is not newer. A newer state here came over the group's own protocol
       // (§16) and stays; the group pairs are taken in every case.
       final known = _groups[groupInfo.groupIdHex];
+      // §16.2.2: the question whether to delete a group this identity is
+      // alone in is asked on each device — another own device's answer is
+      // not taken over.
+      groupInfo.aloneQuestion = known?.aloneQuestion;
+      // Two values of the group are this device's own choice and never the
+      // other device's (S407-EINSTELLUNGEN A-6): "always load images"
+      // (§9.4, "local") and the withholding of the delivery status
+      // (§21.5.5, "local, and not negotiated"; D-72: not in Type 8). A group
+      // new here starts on the defaults.
+      groupInfo.alwaysLoadImages = known?.alwaysLoadImages ?? true;
+      groupInfo.withholdDeliveryStatus =
+          known?.withholdDeliveryStatus ?? false;
       if (known != null &&
           (!groupInfo.joined ||
               (known.joined &&
@@ -220,6 +234,61 @@ extension V3IdentityDeviceOps on CleonaService {
     }
   }
 
+
+  /// Type 22 CHANNEL_JOINED (§14.7, S407 owner decision 08.10.2026 E17 = A):
+  /// another own device created, joined or changed the channel [payload]
+  /// carries. Taken like Type 6 for a group: where this device holds the
+  /// channel not at all or with an epoch that is not newer. A newer state
+  /// here came over the channel's own protocol (§16) and stays. A state that
+  /// does not name the identity is no subscription and is not taken; a
+  /// channel this device left comes back only with a newer state (§16.2.2,
+  /// the same mark as for a group).
+  void _handleTwinChannelJoined(List<int> payload) {
+    try {
+      final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
+      final channel = ChannelInfo.fromJson(json);
+      final id = channel.channelIdHex;
+      if (!channel.members.containsKey(identity.userIdHex)) return;
+      // §14.7 Type 22, §16.2.5: the key state of the other own device.
+      _skTwinTake(id, json['sharedKey']);
+      final known = _channels[id];
+      if (known != null && known.membershipEpoch > channel.membershipEpoch) {
+        return;
+      }
+      if (known == null &&
+          !_groupMayBeHeld(id,
+              epoch: channel.membershipEpoch, namesMe: true)) {
+        return;
+      }
+      // "Always load images" is this device's own choice (§9.4, A-6).
+      channel.alwaysLoadImages = known?.alwaysLoadImages ?? true;
+      _channels[id] = channel;
+      _saveChannels();
+      final conv = conversations.putIfAbsent(
+          id,
+          () => Conversation(
+                id: id,
+                displayName: channel.name,
+                isChannel: true,
+                profilePictureBase64: channel.pictureBase64,
+                notificationsEnabled:
+                    notificationSound.settings.defaultChannelNotify,
+              ));
+      conv.displayName = channel.name;
+      // §14.7 Type 22 "name and settings" (A-5): the settings in force on
+      // the sending device (§21.5.4). Absent from an older 4.2 sender.
+      final settings = json['chatConfig'];
+      if (settings is Map) {
+        conv.config = ChatConfig.fromJson(settings.cast<String, dynamic>());
+      }
+      _saveConversations();
+      _log.info('Twin-synced channel ${id.substring(0, 8)} at epoch '
+          '${channel.membershipEpoch} (§14.7 Type 22)');
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('Twin CHANNEL_JOINED failed: $e');
+    }
+  }
 
   void _handleTwinProfileChanged(List<int> payload) {
     try {

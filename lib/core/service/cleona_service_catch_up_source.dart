@@ -195,10 +195,10 @@ extension CleonaServiceCatchUpSource on CleonaService {
     final payloads = [for (final frame in round.frames) reconcileEncode(frame)];
     for (final payload in payloads) {
       _detachedSend(
-          'MTV3_CATCH_UP answer',
+          'MT_CATCH_UP answer',
           sendToUser(
             recipientUserId: hexToBytes(partyHex),
-            messageType: proto.MessageTypeV3.MTV3_CATCH_UP,
+            messageType: proto.MessageType.MT_CATCH_UP,
             payload: payload,
             groupId: groupHex == null ? null : hexToBytes(groupHex),
           ));

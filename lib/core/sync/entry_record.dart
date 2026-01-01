@@ -307,7 +307,7 @@ List<String> externallyDialableAddresses(List<EntryAddress> addresses) {
 
 List<EntryAddress> dialAddressOrder(
   List<EntryAddress> addresses, {
-  required bool v4Available,
+  required bool v4Available,  // version-name-ok: IP address family
   required bool v6Available,
   Iterable<String> localIps = const <String>[],
   Iterable<String> ownHosts = const <String>[],
@@ -520,7 +520,7 @@ final class EntryRecord {
   /// only a node with both families can mediate between a
   /// v4-only and a v6-only counterpart.
   bool get isDualStack {
-    var v4 = false;
+    var v4 = false;  // version-name-ok: IP address family
     var v6 = false;
     for (final a in addresses) {
       if (a.host.contains(':')) {

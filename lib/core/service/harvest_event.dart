@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/service/sender_identity_snapshot.dart';
 import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Length of the file identifier a waiting message carries (§9.4 "Nothing
 /// overtakes a file": "carries the file's identifier (8 B)").
@@ -27,7 +27,7 @@ const int kDeliveryIdLength = 8;
 /// signature is a seam violation of the same class as a second send path
 /// (§15.5).
 ///
-/// Counterpart of [proto.MessageTypeV3]-carrying `sendToUser` on the send
+/// Counterpart of [proto.MessageType]-carrying `sendToUser` on the send
 /// side: `PlantOutcome` goes out, [HarvestEvent] comes in.
 ///
 /// **Field list is measured, not designed** (migration plan §4a.4): it holds
@@ -71,16 +71,16 @@ class HarvestEvent {
   final Uint8List? senderDeviceId;
 
   /// **V3 transitional:** §15.5.3 specifies `MessageType`. The rename of
-  /// `MessageTypeV3` is work package AP-3 (migration plan §4a.2, class A: the
+  /// `MessageType` is work package AP-3 (migration plan §4a.2, class A: the
   /// seam carries the message type by construction, so this is not a seam
   /// violation — it is a rename that has not happened yet).
-  final proto.MessageTypeV3 type;
+  final proto.MessageType type;
 
-  /// The raw type number when THIS build's [proto.MessageTypeV3] does not
+  /// The raw type number when THIS build's [proto.MessageType] does not
   /// know it, otherwise `null`.
   ///
   /// protobuf keeps an unknown enum value in `unknownFields` and leaves the
-  /// field unset, so [type] then reads the zero value `MTV3_TEXT` (the same
+  /// field unset, so [type] then reads the zero value `MT_TEXT` (the same
   /// measurement as `twinSyncTypeIsUnknown` in `twin_sync_wire.dart`). A
   /// frame of a reserved or future type would be shown as a text message
   /// made of its payload bytes. `handleApplicationFrame` discards every event
@@ -102,9 +102,11 @@ class HarvestEvent {
   /// The sender's own assertion, with no evidence behind it. Anyone who sorts
   /// by this sorts by something the sender is free to choose (§22.5.3).
   ///
-  /// Two readers remain, neither of them display, sorting or expiry: the age
-  /// of a call `INVITE` (`call_service.dart`) and the notification quiet
-  /// rule of the start phase (`CleonaService._claimedSendTimeMs`).
+  /// One reader remains, neither display, sorting nor expiry: the
+  /// notification quiet rule of the start phase
+  /// (`CleonaService._claimedSendTimeMs`). The age of a call `INVITE` reads
+  /// [harvestedAt] since S407-CALLNORM (§17.2: "The caller's claimed send
+  /// time decides nothing").
   final DateTime? claimedSentAt;
 
   /// Set for group and channel traffic, `null` for direct messages.
@@ -204,8 +206,8 @@ class HarvestEvent {
   /// The V4.1 receive path passes `null` in here, because a harvested cell
   /// names no device; the V3 path passes in the identifier from the outer
   /// packet.
-  factory HarvestEvent.fromV3Frame({
-    required proto.ApplicationFrameV3 frame,
+  factory HarvestEvent.fromApplicationFrame({
+    required proto.ApplicationFrame frame,
     required Uint8List? senderDeviceId,
     required SenderIdentitySnapshot snapshot,
     Uint8List? deliveryId,
@@ -225,9 +227,9 @@ class HarvestEvent {
           : DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
       groupId:
           frame.groupId.isEmpty ? null : Uint8List.fromList(frame.groupId),
-      rosterVersion: RosterVersion.fromV3Frame(frame),
+      rosterVersion: RosterVersion.fromApplicationFrame(frame),
       contentMetadata: frame.hasContentMetadata() ? frame.contentMetadata : null,
-      senderTrust: _trustFromV3(snapshot),
+      senderTrust: _trustFromSnapshot(snapshot),
       // Exactly 8 bytes or nothing: any other length names no file.
       afterFile: frame.afterFile.length == kAfterFileLength
           ? Uint8List.fromList(frame.afterFile)
@@ -247,11 +249,11 @@ class HarvestEvent {
     );
   }
 
-  /// The field number of `ApplicationFrameV3.message_type`
-  /// (`proto/transport_v3.proto`).
+  /// The field number of `ApplicationFrame.message_type`
+  /// (`proto/transport.proto`).
   static const int _kFrameTypeField = 6;
 
-  static int? _unknownFrameType(proto.ApplicationFrameV3 frame) {
+  static int? _unknownFrameType(proto.ApplicationFrame frame) {
     final raw = frame.unknownFields.getField(_kFrameTypeField);
     if (raw == null || raw.varints.isEmpty) return null;
     return raw.varints.last.toInt();
@@ -271,7 +273,7 @@ class HarvestEvent {
   /// does happen, but through contact-store comparison inside the
   /// contact-request handlers, not through this field. The enum value stays
   /// because §15.5.3 specifies it; the mapping does not invent a producer.
-  static SenderTrust _trustFromV3(SenderIdentitySnapshot snapshot) {
+  static SenderTrust _trustFromSnapshot(SenderIdentitySnapshot snapshot) {
     if (snapshot.newKeyDetectedForSenderUser) return SenderTrust.keyChanged;
     return snapshot.outerSigStatus == OuterSigStatus.verified
         ? SenderTrust.verified
@@ -288,7 +290,7 @@ class RosterVersion {
 
   /// Returns `null` when the frame carries no membership state — an unset
   /// epoch is `0`, and a roster hash without an epoch is not a version.
-  static RosterVersion? fromV3Frame(proto.ApplicationFrameV3 frame) {
+  static RosterVersion? fromApplicationFrame(proto.ApplicationFrame frame) {
     final epoch = frame.groupMembershipEpoch.toInt();
     if (epoch <= 0 || frame.groupMembershipHash.isEmpty) return null;
     return RosterVersion(
@@ -307,6 +309,6 @@ enum SenderTrust {
   unknownKey,
 
   /// The sender's keys differ from the ones on file. See the note on
-  /// [HarvestEvent._trustFromV3]: no producer in V3.
+  /// [HarvestEvent._trustFromSnapshot]: no producer in V3.
   keyChanged,
 }

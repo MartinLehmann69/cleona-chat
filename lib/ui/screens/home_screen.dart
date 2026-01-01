@@ -11,6 +11,7 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
+import 'package:cleona/ui/screens/system_channel_screen.dart';
 import 'package:cleona/ui/screens/contacts_screen.dart';
 import 'package:cleona/ui/screens/settings_screen.dart';
 import 'package:cleona/ui/components/language_selector.dart';
@@ -24,8 +25,10 @@ import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
 import 'package:cleona/ui/components/contact_name.dart';
+import 'package:cleona/ui/components/create_group_dialog.dart';
 import 'package:cleona/ui/components/reduced_mode_banner.dart';
 import 'package:cleona/ui/components/enrolment_banner.dart';
+import 'package:cleona/ui/components/windows_firewall_banner.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
@@ -37,16 +40,18 @@ import 'package:cleona/ui/screens/nat_wizard/nat_wizard_instructions_screen.dart
 import 'package:cleona/core/platform/router_db.dart';
 import 'package:cleona/core/contact/nfc_platform_bridge.dart' show isNfcAvailable;
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/ui/components/invitation_pending.dart';
 import 'package:cleona/ui/components/invitation_messages.dart'
     show invitationExpiryWarning;
 import 'package:cleona/ui/components/invitation_redeem.dart';
 import 'package:cleona/core/contact/channel_uri.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cleona/core/service/gui_device_setting.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
 import 'package:cleona/ui/components/share_cleona_dialog.dart';
 import 'package:cleona/ui/date_format.dart' as df;
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -325,7 +330,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 ChangeNotifierProvider.value(value: locale),
               ],
               child: Scaffold(
-                appBar: AppBar(title: Text(locale.get('stats_title'))),
+                appBar: AppBar(
+                    title: Text(locale.get('stats_title')),
+                    actions: const [AppScreenshotButton()]),
                 body: SafeArea(top: false, child: NetworkStatsScreen(service: service)),
               ),
             )),
@@ -370,6 +377,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           // until the next restart (which re-shows the splash).
           if (service.reducedMode) const ReducedModeBanner(),
           EnrolmentBanner(service: service), // B-4b, §13.0, D-40
+          // v4_2 §22.x Windows Desktop: inbound firewall rule of the daemon.
+          if (Platform.isWindows && service is IpcClient)
+            WindowsFirewallBanner(client: service),
           // Identity tabs
           SizedBox(
             height: 36,
@@ -416,7 +426,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 // Groups: only groups
                 _ConversationListView(conversations: groupConvs, service: service, emptyKey: 'no_groups'),
                 // Channels: sub-tabs (Subscribed | My Channels | Search)
-                _ChannelTabView(channelConvs: channelConvs, service: service),
+                ChannelTabView(channelConvs: channelConvs, service: service),
                 // Inbox: pending requests
                 _InboxView(service: service),
               ],
@@ -460,90 +470,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   // ── Dialogs ──────────────────────────────────────────────────────
 
   void _showCreateGroupDialog(BuildContext context, ICleonaService service) {
-    final nameController = TextEditingController();
-    final contacts = service.acceptedContacts;
-    final selected = <String>{};
-    final locale = AppLocale.read(context);
-
     showDialog(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: Text(locale.get('create_group')),
-          content: SizedBox(
-            width: 300,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: nameController,
-                    autofocus: true,
-                    // Rebuild on every keystroke so the Create button can
-                    // reflect the name field. Without it the button's enabled
-                    // state is only re-evaluated when a member checkbox
-                    // toggles, and a user who types a name after selecting
-                    // members still faces a disabled button.
-                    onChanged: (_) => setDialogState(() {}),
-                    decoration: InputDecoration(
-                      labelText: locale.get('group_name_label'),
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(locale.get('select_members'),
-                      style: const TextStyle(fontWeight: FontWeight.w500)),
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 300),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: contacts.length,
-                      itemBuilder: (_, i) {
-                        final c = contacts[i];
-                        return CheckboxListTile(
-                          title: Text(shownContactName(c.displayName, locale)),
-                          value: selected.contains(c.nodeIdHex),
-                          onChanged: (v) => setDialogState(() {
-                            if (v == true) {
-                              selected.add(c.nodeIdHex);
-                            } else {
-                              selected.remove(c.nodeIdHex);
-                            }
-                          }),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text(locale.get('cancel')),
-            ),
-            FilledButton(
-              // The button's enabled state must mirror what the callback
-              // actually requires. It used to hang on the member selection
-              // alone while the callback additionally demanded a non-empty
-              // name — so with members picked and the name field empty the
-              // button looked enabled, and clicking it silently did nothing:
-              // no error, no field highlight, no snackbar, the dialog just
-              // stayed open. Verified by screenshot 2026-07-28.
-              onPressed:
-                  (selected.isEmpty || nameController.text.trim().isEmpty)
-                      ? null
-                      : () async {
-                          Navigator.pop(ctx);
-                          await service.createGroup(
-                              nameController.text.trim(), selected.toList());
-                        },
-              child: Text(locale.get('create')),
-            ),
-          ],
-        ),
+      builder: (ctx) => CreateGroupDialog(
+        contacts: service.acceptedContacts,
+        onCreate: (name, members) async {
+          await service.createGroup(name, members);
+        },
       ),
     );
   }
@@ -880,18 +813,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
 // ── Conversation List View ─────────────────────────────────────────────
 
-/// Channel tab with sub-tabs: Subscribed | My Channels | Search.
-class _ChannelTabView extends StatefulWidget {
+/// Channel tab with sub-tabs: Subscribed | My Channels | Search. Public for
+/// its widget test (`smoke_channel_tab_arrival`).
+class ChannelTabView extends StatefulWidget {
   final List<Conversation> channelConvs;
   final ICleonaService service;
 
-  const _ChannelTabView({required this.channelConvs, required this.service});
+  const ChannelTabView(
+      {super.key, required this.channelConvs, required this.service});
 
   @override
-  State<_ChannelTabView> createState() => _ChannelTabViewState();
+  State<ChannelTabView> createState() => ChannelTabViewState();
 }
 
-class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProviderStateMixin {
+class ChannelTabViewState extends State<ChannelTabView> with SingleTickerProviderStateMixin {
   late TabController _subTabController;
 
   @override
@@ -900,6 +835,27 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
     // Default to Search tab (index 2) if no channels subscribed yet
     final initialIndex = widget.channelConvs.isEmpty ? 2 : 0;
     _subTabController = TabController(length: 3, vsync: this, initialIndex: initialIndex);
+  }
+
+  /// S407 G-2 (a): the sub-tab is chosen once, in [initState] — with no
+  /// channel yet it is "Search". A channel that arrives while this tab is
+  /// open (an invitation, possibly days late from a post box) then stood in
+  /// "Subscribed" unseen behind the search. When the first channel arrives
+  /// while the default search is shown, the view moves to the sub-tab that
+  /// holds it. A user who already has channels keeps the sub-tab chosen.
+  @override
+  void didUpdateWidget(covariant ChannelTabView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.channelConvs.isNotEmpty || _subTabController.index != 2) {
+      return;
+    }
+    final arrived = widget.channelConvs.firstOrNull;
+    if (arrived == null) return;
+    final ch = widget.service.channels[arrived.id];
+    final mine = ch != null &&
+        (ch.ownerNodeIdHex == widget.service.nodeIdHex ||
+            ch.members[widget.service.nodeIdHex]?.role == 'admin');
+    _subTabController.index = mine ? 1 : 0;
   }
 
   @override
@@ -1642,9 +1598,11 @@ class _ConversationListViewState extends State<_ConversationListView> {
         );
 
         // Build preview text: prefix deleted/media/text
-        final previewText = lastMsg != null
-            ? _lastMessagePreview(context, lastMsg)
-            : '';
+        final previewText = invitationPending(conv, widget.service)
+            ? locale.get('invitation_label')
+            : lastMsg != null
+                ? _lastMessagePreview(context, lastMsg)
+                : '';
 
         // Build timestamp string from last message or last activity
         final timestampStr = lastMsg != null
@@ -1701,12 +1659,14 @@ class _ConversationListViewState extends State<_ConversationListView> {
                   MaterialPageRoute(
                     builder: (_) => ChangeNotifierProvider.value(
                       value: appState,
-                      child: ChatScreen(
-                        conversationId: conv.id,
-                        displayName: conv.displayName,
-                        isGroup: conv.isGroup,
-                        isChannel: conv.isChannel,
-                      ),
+                      child: systemChannelPage(
+                              widget.service, conv.id, conv.displayName) ??
+                          ChatScreen(
+                            conversationId: conv.id,
+                            displayName: conv.displayName,
+                            isGroup: conv.isGroup,
+                            isChannel: conv.isChannel,
+                          ),
                     ),
                   ),
                 );
@@ -2298,7 +2258,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
     if (msg.senderNodeIdHex.isEmpty) {
       return systemNoticeText(locale, msg.text); // System message
     }
-    return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
+    return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${messageShownText(locale, msg)}';
   }
 
 }
@@ -2599,6 +2559,23 @@ class _IdentityTabBar extends StatelessWidget {
   void _showCreateDialog(BuildContext context) {
     final controller = TextEditingController();
     final locale = AppLocale.read(context);
+    final messenger = ScaffoldMessenger.of(context);
+    void limitReached() => messenger.showSnackBar(
+        SnackBar(content: Text(locale.get('identity_limit_reached'))));
+    if (IdentityManager().loadIdentities().length >= kMaxIdentitiesPerDevice) {
+      limitReached();
+      return;
+    }
+    void create(BuildContext ctx, String name) {
+      Navigator.pop(ctx);
+      appState.createAndSwitchIdentity(name).catchError((Object e) {
+        if (e is IdentityLimitReached) {
+          limitReached();
+          return;
+        }
+        throw e;
+      });
+    }
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2609,7 +2586,7 @@ class _IdentityTabBar extends StatelessWidget {
           autofocus: true,
           onSubmitted: (_) {
             final name = controller.text.trim();
-            if (name.isNotEmpty) { Navigator.pop(ctx); appState.createAndSwitchIdentity(name); }
+            if (name.isNotEmpty) create(ctx, name);
           },
         ),
         actions: [
@@ -2617,7 +2594,7 @@ class _IdentityTabBar extends StatelessWidget {
           FilledButton(
             onPressed: () {
               final name = controller.text.trim();
-              if (name.isNotEmpty) { Navigator.pop(ctx); appState.createAndSwitchIdentity(name); }
+              if (name.isNotEmpty) create(ctx, name);
             },
             child: Text(locale.get('create')),
           ),
@@ -2978,7 +2955,8 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
 
 
 /// Signal-style donation banner — subtle card at top of conversation list.
-/// Dismissible for 30 days via SharedPreferences.
+/// Dismissible for 30 days; the date lies in the device database
+/// (`gui_device_setting.dart`, v4_2 §4.5.3).
 class _DonationBanner extends StatefulWidget {
   const _DonationBanner();
 
@@ -2987,9 +2965,7 @@ class _DonationBanner extends StatefulWidget {
 }
 
 class _DonationBannerState extends State<_DonationBanner> {
-  bool _dismissed = true; // hidden by default until prefs loaded
-
-  static const _prefKey = 'donation_banner_dismissed_until';
+  bool _dismissed = true; // hidden until the stored date is read
 
   @override
   void initState() {
@@ -2997,20 +2973,24 @@ class _DonationBannerState extends State<_DonationBanner> {
     _checkDismissed();
   }
 
-  Future<void> _checkDismissed() async {
-    final prefs = await SharedPreferences.getInstance();
-    final dismissedUntil = prefs.getInt(_prefKey) ?? 0;
+  void _checkDismissed() {
+    final service = context.read<CleonaAppState>().service;
+    // No service, no stored date: stay hidden rather than nag on every start.
+    if (service == null) return;
+    final until =
+        service.guiDeviceSettings[kGuiFieldDonationBannerUntil] as int? ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (mounted) {
-      setState(() => _dismissed = now < dismissedUntil);
-    }
+    if (mounted) setState(() => _dismissed = now < until);
   }
 
   Future<void> _dismiss() async {
-    final prefs = await SharedPreferences.getInstance();
     // Dismiss for 30 days
-    final until = DateTime.now().millisecondsSinceEpoch + 30 * 24 * 60 * 60 * 1000;
-    await prefs.setInt(_prefKey, until);
+    final until =
+        DateTime.now().millisecondsSinceEpoch + 30 * 24 * 60 * 60 * 1000;
+    await context
+        .read<CleonaAppState>()
+        .service
+        ?.setGuiDeviceSetting(kGuiFieldDonationBannerUntil, until);
     if (mounted) setState(() => _dismissed = true);
   }
 

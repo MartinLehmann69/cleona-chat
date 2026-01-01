@@ -1,6 +1,6 @@
-/// Sending the code registration to a fixed neighbour, its answer and the
-/// one re-send (V4.2 §8.1 "How a node learns codes", §11.6, §11.8; F-B,
-/// owner decision 06.10.2026).
+/// Sending the code registration to a fixed neighbour and its answer
+/// (V4.2 §8.1 "How a node learns codes", §11.3a, §11.6; F-B, owner decision
+/// 06.10.2026).
 ///
 /// ── WHY ─────────────────────────────────────────────────────────────────
 ///
@@ -20,20 +20,15 @@
 ///   confirms the address it came from (§11.8 "every packet that expects an
 ///   answer confirms the entry"); the confirmation puts that address first,
 ///   so later sendings go there.
-/// * A piece without `0x25` within the answer deadline (§11.6) is sent once
-///   more — to the NEXT address of the same neighbour if it has one (the
-///   same node under another address: the WLAN -> LTE case), otherwise to
-///   the same address — and then no more until the next edge.
-/// * Unanswered, the round is one use without an answer of each address it
-///   went to — once per address, however many pieces (§11.8: "A single
-///   request is never repeated for this"). Counted here only where the
-///   pairwise link stood: where it did not, the shell's own verdict on the
-///   handshake counts that use (`node_split.dart`, `Shell.onSilent`) and a
-///   second count would remove the address after one use.
+/// * A piece without `0x25` is a packet without an answer like any other:
+///   the transport repeats it and, when it and its repeats stay silent,
+///   declares that address failed and sends it to the next address of the
+///   same neighbour the same way (§11.3a, `silence.dart` — the WLAN -> LTE
+///   case). Nothing is repeated, counted or timed here; until S407 this file
+///   had its own "one second attempt".
 ///
-/// No clock runs between edges: a round's timer lives at most two answer
-/// deadlines. The UTC day change is an edge of §8.1; [UtcDayEdge] fires once
-/// at the day's end and arms itself for the next one.
+/// No clock runs between edges. The UTC day change is an edge of §8.1;
+/// [UtcDayEdge] fires once at the day's end and arms itself for the next one.
 library;
 
 import 'dart:async';
@@ -44,26 +39,23 @@ import 'package:mycelium/code_registration.dart';
 import 'package:mycelium/neighbour.dart';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
-import 'package:mycelium/shell_link.dart' show kAnswerDeadline;
+import 'package:mycelium/silence.dart';
 
 /// The pieces of one edge to one fixed neighbour that wait for `0x25`.
 class _Round {
-  /// `day/piece` -> the piece.
+  /// `day/piece` -> the piece, while it waits for its `0x25`.
   final Map<String, Uint8List> open;
-  NeighbourAddress to;
-  bool resent = false;
+
+  /// `day/piece` -> the answer its request waits for (`silence.dart`).
+  final Map<String, Completer<void>> answers = {};
 
   /// `address:port` each sending of this round went to — a `0x25` from any
   /// of them answers it.
-  final Set<String> sentTo;
-
-  /// `address:port` already counted as a failed use in this round.
-  final Set<String> muted = {};
+  final Set<String> sentTo = {};
 
   /// Who waits for the piece carrying a code ([RegistrationSend.whenRegistered]).
   final List<_Waiter> waiters = [];
-  Timer? clock;
-  _Round(this.open, this.to) : sentTo = {to.key};
+  _Round(this.open);
 
   bool carries(Uint8List code) => open.values.any((p) => _holds(p, code));
 }
@@ -84,22 +76,23 @@ bool _same(Uint8List a, Uint8List b) {
 String _keyOf(int day, int piece) => '$day/$piece';
 
 class RegistrationSend {
-  final void Function(Uint8List packet, CardAddress destination) _out;
+  /// Sends one packet; its future says how the sending ended (`SendEnd`).
+  final FutureOr<Object?> Function(Uint8List packet, CardAddress destination) _out;
 
   /// The fixed neighbour with this [Neighbour.id] as it stands NOW — `null`
   /// if it is gone.
   final Neighbour? Function(int id) _neighbour;
   final bool Function(InternetAddress a) _speaks;
 
-  /// Whether the pairwise link to an address stands (`Node.stands`).
-  final bool Function(InternetAddress a, int port) _stands;
-
-  /// The failed use (`Readiness.mute`, §11.8).
-  final void Function(Iterable<(InternetAddress, int)> withoutAnswer) _mute;
+  /// Where a piece is repeated and given up (§11.3a).
+  final Silence _silence;
 
   /// The confirmation of an address that answered (`Neighbourhood.confirm`).
   final void Function(InternetAddress a, int port) _confirm;
   final void Function(String) _report;
+
+  /// A fixed neighbour named its record key in its `0x25` (S407 a').
+  void Function(CardAddress by, Uint8List key)? onRecordKey;
 
   /// By [Neighbour.id].
   final Map<int, _Round> _rounds = {};
@@ -111,23 +104,21 @@ class RegistrationSend {
   /// neighbour keeps a code until the end of the day after its day (§8.1).
   final Map<int, Map<String, int>> _held = {};
 
-  /// Counters for probes and the network statistics — read only.
+  /// Counters for probes and the network statistics — read only. The repeats
+  /// are counted where they happen ([Silence.repeated]).
   int sent = 0;
-  int resent = 0;
   int answered = 0;
   int unanswered = 0;
 
   RegistrationSend(this._out,
       {required Neighbour? Function(int id) neighbour,
       required bool Function(InternetAddress a) speaks,
-      required bool Function(InternetAddress a, int port) stands,
-      required void Function(Iterable<(InternetAddress, int)>) mute,
+      required Silence silence,
       required void Function(InternetAddress a, int port) confirm,
       required void Function(String) report})
       : _neighbour = neighbour,
         _speaks = speaks,
-        _stands = stands,
-        _mute = mute,
+        _silence = silence,
         _confirm = confirm,
         _report = report;
 
@@ -141,24 +132,70 @@ class RegistrationSend {
           'node speaks — not sent (§11.1)');
       return;
     }
-    final old = _rounds.remove(n.id)?..clock?.cancel();
+    final old = _rounds.remove(n.id);
+    old?.answers.values.where((a) => !a.isCompleted).forEach((a) => a.complete());
     final r = _Round({
       for (final p in pieces)
         _keyOf(pieceKey(p).day, pieceKey(p).piece): p
-    }, to);
+    });
     _rounds[n.id] = r;
     sent += r.open.length;
-    _sendAll(r, n.id, 'out to');
+    for (final MapEntry(:key, value: p) in r.open.entries) {
+      _ask(r, n.id, key, p, to);
+    }
     for (final w in old?.waiters ?? const <_Waiter>[]) {
       r.carries(w.$1) ? r.waiters.add(w) : w.$2(_answeredBy[n.id]);
     }
   }
 
+  /// One piece as a request that expects its `0x25` (§11.3a).
+  void _ask(_Round r, int id, String key, Uint8List p, NeighbourAddress to) {
+    final answer = r.answers[key] = Completer<void>();
+    final a = registrationRead(p);
+    final what = 'piece ${a == null ? "?" : "${a.piece + 1}/${a.pieces}"}';
+    unawaited(_silence
+        .ask(answer.future,
+            to: to.address,
+            port: to.port,
+            send: (ip, port) {
+              final at = '${ip.address}:$port';
+              r.sentTo.add(at);
+              _report('0x24 registration: $what out to $at — day '
+                  '${a?.day ?? "?"}, ${a?.codes.length ?? 0} code(s), first '
+                  '${a == null || a.codes.isEmpty ? "-" : _short(a.codes.first)}');
+              return _out(registrationPacket(p),
+                  CardAddress(Uint8List.fromList(ip.rawAddress), port));
+            },
+            cancelled: () => !identical(_rounds[id], r),
+            what: '0x24 registration $what')
+        .then((_) => _askEnded(r, id, key)));
+  }
+
+  /// The request for [key] has ended — answered ([answer] took the piece out
+  /// of [_Round.open]) or silent at every address of the neighbour.
+  void _askEnded(_Round r, int id, String key) {
+    if (!identical(_rounds[id], r)) return; // superseded: its waiters moved on
+    final piece = r.open.remove(key);
+    if (piece != null) {
+      unanswered++;
+      final n = _neighbour(id);
+      if (n == null) _held.remove(id);
+      _report('0x24 registration: a piece without 0x25 at every address'
+          '${n == null ? " — the neighbour is gone" : ""}; no more until the '
+          'next edge (§8.1)');
+      final done = [for (final w in r.waiters) if (_holds(piece, w.$1)) w];
+      r.waiters.removeWhere(done.contains);
+      for (final w in done) {
+        w.$2(null);
+      }
+    }
+    if (r.open.isEmpty) _rounds.remove(id);
+  }
+
   /// §15.5 "The way back for the bundle": [then] runs once the piece to [n]
   /// that carries [code] is answered by `0x25` — with the address that
-  /// answered —, or once that piece has had its re-send and stayed
-  /// unanswered (`null`), so after at most two answer deadlines. At once if
-  /// no piece carrying [code] waits for [n].
+  /// answered —, or once that piece and its repeats stayed unanswered at
+  /// every address (`null`). At once if no piece carrying [code] waits for [n].
   void whenRegistered(Neighbour n, Uint8List code,
       void Function(CardAddress? answered) then) {
     final r = _rounds[n.id];
@@ -203,17 +240,6 @@ class RegistrationSend {
   static InternetAddress _ip(CardAddress c) =>
       InternetAddress.fromRawAddress(Uint8List.fromList(c.address));
 
-  void _sendAll(_Round r, int id, String how) {
-    for (final p in r.open.values) {
-      _out(registrationPacket(p), r.to.asCardAddress);
-      final a = registrationRead(p);
-      _report('0x24 registration: piece ${a == null ? "?" : "${a.piece + 1}/${a.pieces}"} '
-          '$how ${r.to.key} — day ${a?.day ?? "?"}, ${a?.codes.length ?? 0} code(s), '
-          'first ${a == null || a.codes.isEmpty ? "-" : _short(a.codes.first)}');
-    }
-    r.clock = Timer(kAnswerDeadline, () => _late(id));
-  }
-
   /// A `0x25` from [from]:[port]. Only the answer to a piece this node sent
   /// to exactly that address counts — and confirms it (W8); anything else
   /// is discarded. `true` if it answered a piece.
@@ -236,13 +262,13 @@ class RegistrationSend {
       _hold(e.key, piece); // before [_confirm]: its listeners read [holds]
       final done = [for (final w in r.waiters) if (_holds(piece, w.$1)) w];
       r.waiters.removeWhere(done.contains);
-      if (r.open.isEmpty) {
-        r.clock?.cancel();
-        _rounds.remove(e.key);
-      }
+      final wait = r.answers[key];
+      if (wait != null && !wait.isCompleted) wait.complete();
       _report('0x25 registered from $at: day ${a.day} piece ${a.piece + 1}, '
           '${r.open.length} piece(s) still open');
       _confirm(from, port); // its listeners may start the next edge
+      final rk = a.recordKey;
+      if (rk != null) onRecordKey?.call(by, rk);
       for (final w in done) {
         w.$2(by);
       }
@@ -253,52 +279,9 @@ class RegistrationSend {
     return false;
   }
 
-  void _late(int id) {
-    final r = _rounds[id];
-    if (r == null || r.open.isEmpty) {
-      _rounds.remove(id);
-      return;
-    }
-    _failedUse(r);
-    final n = _neighbour(id);
-    if (r.resent || n == null) {
-      _rounds.remove(id);
-      if (n == null) _held.remove(id);
-      unanswered += r.open.length;
-      _report('0x24 registration: ${r.open.length} piece(s) to ${r.to.key} '
-          'without 0x25${n == null ? " — the neighbour is gone" : " after the re-send"}; '
-          'no more until the next edge (§8.1)');
-      for (final w in r.waiters) {
-        w.$2(null);
-      }
-      return;
-    }
-    // §8.1: once more — to the NEXT address of the same neighbour.
-    final usable = n.addresses.where((a) => _speaks(a.address)).toList();
-    final i = usable.indexWhere((a) => a.key == r.to.key);
-    final next = usable.length > 1
-        ? usable[(i + 1) % usable.length]
-        : usable.firstOrNull ?? r.to;
-    r
-      ..resent = true
-      ..to = next;
-    r.sentTo.add(next.key);
-    resent += r.open.length;
-    _sendAll(r, id, 'without 0x25 in ${kAnswerDeadline.inMilliseconds} ms, re-sent to');
-  }
-
-  /// One failed use of the address the last sending of [r] went to — once
-  /// per address and round, and only over a standing link (see the head).
-  void _failedUse(_Round r) {
-    final to = r.to;
-    if (r.muted.contains(to.key) || !_stands(to.address, to.port)) return;
-    r.muted.add(to.key);
-    _mute([(to.address, to.port)]);
-  }
-
   void stop() {
     for (final r in _rounds.values) {
-      r.clock?.cancel();
+      r.answers.values.where((a) => !a.isCompleted).forEach((a) => a.complete());
     }
     _rounds.clear();
   }

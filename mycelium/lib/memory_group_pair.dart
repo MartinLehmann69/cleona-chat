@@ -152,7 +152,7 @@ class GroupPairStore {
     b.add(_u16(pairs.length));
     for (final p in pairs.values) {
       addressChainWrite(b, p.address);
-      neighbourListWrite(b, neighbourListClean(p.neighbours));
+      neighbourListWrite(b, neighbourListClean(p.neighbours), withKeys: true);
       final days = p.dayKey.keys.toList()..sort();
       final kept = days.length > kDayKeyAtMost
           ? days.sublist(days.length - kDayKeyAtMost)
@@ -191,7 +191,8 @@ class GroupPairStore {
       }
       for (var n = l.u16(); n > 0; n--) {
         final address = addressChainRead(l);
-        final neighbours = neighbourListRead(l.bytes, 'group-pair neighbours');
+        final neighbours =
+            neighbourListRead(l.bytes, 'group-pair neighbours', withKeys: true);
         final dayKey = <int, Uint8List>{};
         for (var d = l.byte(); d > 0; d--) {
           dayKey[l.u32()] = l.bytes(32);

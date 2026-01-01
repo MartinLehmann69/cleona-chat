@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
+import 'package:cleona/core/calls/peer_hearing.dart';
 import 'package:cleona/core/calls/voice_codec.dart';
 import 'package:cleona/core/calls/voice_session.dart';
 import 'package:cleona/core/log/clogger.dart';
@@ -23,6 +24,7 @@ class AudioMixer {
   final Map<String, JitterBuffer> _peerBuffers = {};
   final Map<String, VoiceCodec> _peerDecoders = {};
   final Map<String, double> _peerAudioLevels = {};
+  final Map<String, PeerHearing> _peerHearing = {};
 
   VoiceSession? _voiceSession;
   VoiceCodec? _captureCodec;
@@ -37,6 +39,13 @@ class AudioMixer {
   int _captureSeqNum = 0;
 
   Map<String, double> get peerAudioLevels => Map.unmodifiable(_peerAudioLevels);
+
+  /// Per sender: frames heard, frames heard twice, tone (`peer_hearing.dart`).
+  Map<String, PeerHearing> get peerHearing => Map.unmodifiable(_peerHearing);
+
+  /// Which native library backs the session — `cleona_voice`, or
+  /// `cleona_voice_mock` under a lab tone; empty while not running.
+  String get backendLibrary => _voiceSession?.backendLibrary ?? '';
 
   void Function(Uint8List encryptedFrame)? onAudioFrame;
   void Function(bool speaker)? onSpeakerToggle;
@@ -79,7 +88,7 @@ class AudioMixer {
 
       _running = true;
       _log.info('AudioMixer started (VoiceSession, rate=${format.sampleRate}, '
-          'frame=${format.frameSamples})');
+          'frame=${format.frameSamples}, backend=${_voiceSession!.backendLibrary})');
       return true;
     } catch (e) {
       _log.error('AudioMixer start failed: $e');
@@ -125,6 +134,8 @@ class AudioMixer {
 
     final seqNum =
         ByteData.sublistView(encryptedAudio).getUint32(0, Endian.big);
+    // Counted after the send_key opened it — so it IS this sender's frame.
+    _peerHearing.putIfAbsent(senderNodeIdHex, PeerHearing.new).countFrame(seqNum);
 
     final buffer = _peerBuffers.putIfAbsent(
       senderNodeIdHex,
@@ -173,6 +184,8 @@ class AudioMixer {
           final pcm16 = Int16List.view(
               pcmBytes.buffer, pcmBytes.offsetInBytes, pcmBytes.length ~/ 2);
           pcmFrames.add(pcm16);
+          _peerHearing[entry.key]
+              ?.addPcm(pcm16, _voiceSession!.format.sampleRate);
 
           var peak = 0;
           for (var i = 0; i < pcm16.length; i++) {
@@ -247,6 +260,7 @@ class AudioMixer {
   void removePeer(String nodeIdHex) {
     _peerBuffers.remove(nodeIdHex);
     _peerAudioLevels.remove(nodeIdHex);
+    _peerHearing.remove(nodeIdHex);
     _peerDecoders.remove(nodeIdHex)?.dispose();
   }
 
@@ -277,6 +291,7 @@ class AudioMixer {
     _peerDecoders.clear();
     _peerBuffers.clear();
     _peerAudioLevels.clear();
+    _peerHearing.clear();
     _log.info('AudioMixer stopped');
   }
 

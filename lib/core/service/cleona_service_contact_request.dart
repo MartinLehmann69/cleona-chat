@@ -18,8 +18,8 @@
 
 part of 'cleona_service.dart';
 
-extension V3ContactRequestOps on CleonaService {
-  void _handleContactRequestResponseV3(HarvestEvent event) {
+extension ContactRequestOps on CleonaService {
+  void _handleContactRequestResponse(HarvestEvent event) {
     // No device identifier comes along via mycelium (§14.1/§14.2). Resolved
     // once above.
     final senderDevice = event.senderDeviceId;

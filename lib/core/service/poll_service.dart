@@ -10,7 +10,7 @@ import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/core/service/harvest_event.dart';
 
@@ -144,8 +144,7 @@ class PollService {
         ..showResultsBeforeClose = poll.settings.showResultsBeforeClose
         ..maxChoices = poll.settings.maxChoices
         ..scaleMin = poll.settings.scaleMin
-        ..scaleMax = poll.settings.scaleMax
-        ..onlyMembersCanVote = poll.settings.onlyMembersCanVote);
+        ..scaleMax = poll.settings.scaleMax);
     for (final o in poll.options) {
       msg.options.add(proto.PollOptionMsg()
         ..optionId = o.optionId
@@ -167,7 +166,6 @@ class PollService {
       maxChoices: msg.settings.maxChoices,
       scaleMin: msg.settings.scaleMin == 0 ? 1 : msg.settings.scaleMin,
       scaleMax: msg.settings.scaleMax == 0 ? 5 : msg.settings.scaleMax,
-      onlyMembersCanVote: msg.settings.onlyMembersCanVote,
     );
     final options = msg.options
         .map((o) => PollOption(
@@ -238,15 +236,21 @@ class PollService {
 
   // ── Senders ───────────────────────────────────────────────────────
 
-  Future<void> _fanoutToEntity(String entityIdHex, proto.MessageTypeV3 type, List<int> payload) async {
+  Future<void> _fanoutToEntity(String entityIdHex, proto.MessageType type, List<int> payload) async {
     final recipients = _pollRecipients(entityIdHex);
     if (recipients == null) return;
+    // §16.2.5: on the shared key a poll or a vote is a post of its own —
+    // deposited once and nudged; members without the capability keep legs.
+    final pairwise = await _ctx.sharedKeyServe(
+        entityIdHex, type, Uint8List.fromList(payload));
+    bool leg(String hex) => pairwise == null || pairwise.contains(hex);
 
     final channel = _ctx.channels[entityIdHex];
     if (channel != null) {
       final channelIdBytes = hexToBytes(entityIdHex);
       for (final member in channel.members.values) {
         if (member.nodeIdHex == _ctx.identity.userIdHex) continue;
+        if (!leg(member.nodeIdHex)) continue;
         final contact = _ctx.contacts[member.nodeIdHex];
         final x25519Pk = contact?.x25519Pk ?? member.x25519Pk;
         final mlKemPk = contact?.mlKemPk ?? member.mlKemPk;
@@ -268,6 +272,7 @@ class PollService {
     // contact is reached as a group pair (B-3, §16.2.2 "poll and vote").
     final groupIdBytes = hexToBytes(entityIdHex);
     for (final memberHex in recipients) {
+      if (!leg(memberHex)) continue;
       await _ctx.sendEncryptedPayload(
         hexToBytes(memberHex),
         type,
@@ -279,7 +284,7 @@ class PollService {
 
   Future<void> _sendPollCreate(Poll poll) async {
     final payload = _encodePollCreate(poll).writeToBuffer();
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_CREATE, payload);
+    await _fanoutToEntity(poll.groupId, proto.MessageType.MT_POLL_CREATE, payload);
     _log.info('Sent POLL_CREATE ${poll.pollId.substring(0, 8)} to entity ${poll.groupId.substring(0, 8)}');
   }
 
@@ -287,15 +292,20 @@ class PollService {
     final msg = _encodePollVote(vote);
     final payload = msg.writeToBuffer();
 
-    if (_ctx.channels.containsKey(poll.groupId) &&
+    if (_ctx.tallyAtCreator(poll.groupId) &&
         poll.createdByHex != _ctx.identity.userIdHex) {
+      // §16.2.4/§16.2.5: to the creator, which publishes the tally; in a
+      // group the frame names it (the creator may be a group pair).
       await _ctx.sendEncryptedPayload(
         hexToBytes(poll.createdByHex),
-        proto.MessageTypeV3.MTV3_POLL_VOTE,
+        proto.MessageType.MT_POLL_VOTE,
         Uint8List.fromList(payload),
+        groupId: _ctx.groups.containsKey(poll.groupId)
+            ? hexToBytes(poll.groupId)
+            : null,
       );
     } else {
-      await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_VOTE, payload);
+      await _fanoutToEntity(poll.groupId, proto.MessageType.MT_POLL_VOTE, payload);
     }
   }
 
@@ -325,7 +335,7 @@ class PollService {
     final payload = Uint8List.fromList(msg.writeToBuffer());
     await _sendAnonVote(
       poll: poll,
-      messageType: proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
+      messageType: proto.MessageType.MT_POLL_VOTE_ANONYMOUS,
       payload: payload,
     );
   }
@@ -355,7 +365,7 @@ class PollService {
     final payload = Uint8List.fromList(msg.writeToBuffer());
     await _sendAnonVote(
       poll: poll,
-      messageType: proto.MessageTypeV3.MTV3_POLL_REVOKE,
+      messageType: proto.MessageType.MT_POLL_REVOKE,
       payload: payload,
     );
   }
@@ -410,7 +420,7 @@ class PollService {
   /// Distributes an anonymous vote (§18.4, transition state option A).
   Future<void> _sendAnonVote({
     required Poll poll,
-    required proto.MessageTypeV3 messageType,
+    required proto.MessageType messageType,
     required Uint8List payload,
   }) async {
     final recipients = _pollRecipients(poll.groupId);
@@ -419,7 +429,7 @@ class PollService {
     // Channel special path taken over unchanged from the old version
     // (§18.3.3): subscribers vote only at the creator, the creator then
     // publishes the POLL_SNAPSHOT.
-    final isChannel = _ctx.channels.containsKey(poll.groupId);
+    final isChannel = _ctx.tallyAtCreator(poll.groupId);
     final effectiveRecipients =
         isChannel && poll.createdByHex != _ctx.identity.userIdHex
             ? [poll.createdByHex]
@@ -431,7 +441,7 @@ class PollService {
   /// Option A (§18.4.2): delivery via the normal pairwise legs.
   Future<void> _sendAnonPairwise(
     Poll poll,
-    proto.MessageTypeV3 messageType,
+    proto.MessageType messageType,
     Uint8List payload,
     List<String> recipients,
   ) async {
@@ -488,7 +498,7 @@ class PollService {
     if (removedOptions != null) msg.removedOptions.addAll(removedOptions);
     if (newDeadline != null) msg.newDeadline = Int64(newDeadline);
 
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_UPDATE, msg.writeToBuffer());
+    await _fanoutToEntity(poll.groupId, proto.MessageType.MT_POLL_UPDATE, msg.writeToBuffer());
   }
 
   Future<void> _broadcastPollSnapshot(Poll poll) async {
@@ -515,7 +525,7 @@ class PollService {
           ..count = entry.value);
       }
     }
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_SNAPSHOT, msg.writeToBuffer());
+    await _fanoutToEntity(poll.groupId, proto.MessageType.MT_POLL_SNAPSHOT, msg.writeToBuffer());
   }
 
   void _startPollDeadlineTimer() {
@@ -526,7 +536,7 @@ class PollService {
         final poll = pollManager.polls[id];
         if (poll != null && poll.createdByHex == _ctx.identity.userIdHex) {
           _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_CLOSE);
-          if (_ctx.channels.containsKey(poll.groupId)) {
+          if (_ctx.tallyAtCreator(poll.groupId)) {
             _broadcastPollSnapshot(poll);
           }
         }
@@ -557,6 +567,19 @@ class PollService {
     if (channel != null && !_ctx.hasChannelPermission(channel, 'post')) {
       _log.warn('createPoll blocked: no post permission in channel');
       return '';
+    }
+    // §16.2.2: in announcement mode a member starts no poll.
+    if (_ctx.groups.containsKey(groupIdHex) && !_ctx.mayPostInGroup(groupIdHex)) {
+      _log.warn('createPoll blocked: announcement mode, this identity is a '
+          'member');
+      return '';
+    }
+    // §16.2.1, §18.4.3: on the shared key a vote carries its author's
+    // signature — an anonymous poll cannot be built there.
+    if (settings.anonymous && !_ctx.anonymousPollPossible(groupIdHex)) {
+      _log.warn('createPoll refused: anonymous poll on the shared key '
+          '(§16.2.1) in ${groupIdHex.substring(0, 8)}');
+      throw StateError('anonymous poll not possible here (§16.2.1)');
     }
     final normalisedOptions = <PollOption>[];
     for (var i = 0; i < options.length; i++) {
@@ -631,7 +654,7 @@ class PollService {
     if (!pollManager.recordVote(vote)) return false;
     await _sendPollVoteNonAnonymous(poll, vote);
 
-    if (_ctx.channels.containsKey(poll.groupId) &&
+    if (_ctx.tallyAtCreator(poll.groupId) &&
         poll.createdByHex == _ctx.identity.userIdHex) {
       await _broadcastPollSnapshot(poll);
     }
@@ -801,7 +824,7 @@ class PollService {
     if (close == true) {
       pollManager.closePoll(pollId);
       await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_CLOSE);
-      if (_ctx.channels.containsKey(poll.groupId)) {
+      if (_ctx.tallyAtCreator(poll.groupId)) {
         await _broadcastPollSnapshot(poll);
       }
     }
@@ -846,7 +869,7 @@ class PollService {
 
   // ── V3 Application Frame Handlers ────────────────────────────────
 
-  void handlePollCreateV3(HarvestEvent event) {
+  void handlePollCreate(HarvestEvent event) {
     try {
       final msg = proto.PollCreateMsg.fromBuffer(event.payload);
       final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
@@ -887,11 +910,11 @@ class PollService {
       _ctx.notifyStateChanged();
       _log.info('Received POLL_CREATE ${poll.pollId.substring(0, 8)} from ${senderHex.substring(0, 8)}');
     } catch (e) {
-      _log.warn('handlePollCreateV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollCreate: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollVoteV3(HarvestEvent event) {
+  void handlePollVote(HarvestEvent event) {
     try {
       final msg = proto.PollVoteMsg.fromBuffer(event.payload);
       final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
@@ -915,17 +938,17 @@ class PollService {
         onPollTallyUpdated?.call(pollIdHex);
         _ctx.notifyStateChanged();
 
-        if (_ctx.channels.containsKey(poll.groupId) &&
+        if (_ctx.tallyAtCreator(poll.groupId) &&
             poll.createdByHex == _ctx.identity.userIdHex) {
           _broadcastPollSnapshot(poll);
         }
       }
     } catch (e) {
-      _log.warn('handlePollVoteV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollVote: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollVoteAnonymousV3(HarvestEvent event) {
+  void handlePollVoteAnonymous(HarvestEvent event) {
     try {
       final msg = proto.PollVoteAnonymousMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
@@ -1000,11 +1023,11 @@ class PollService {
       onPollTallyUpdated?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollVoteAnonymousV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollVoteAnonymous: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollUpdateV3(HarvestEvent event) {
+  void handlePollUpdate(HarvestEvent event) {
     try {
       final msg = proto.PollUpdateMsg.fromBuffer(event.payload);
       final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
@@ -1062,11 +1085,11 @@ class PollService {
       onPollStateChanged?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollUpdate: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollSnapshotV3(HarvestEvent event) {
+  void handlePollSnapshot(HarvestEvent event) {
     try {
       final msg = proto.PollSnapshotMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
@@ -1110,11 +1133,11 @@ class PollService {
       onPollTallyUpdated?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollSnapshotV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollSnapshot: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollRevokeV3(HarvestEvent event) {
+  void handlePollRevoke(HarvestEvent event) {
     try {
       final msg = proto.PollVoteRevokeMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
@@ -1143,7 +1166,7 @@ class PollService {
         _ctx.notifyStateChanged();
       }
     } catch (e) {
-      _log.warn('handlePollRevokeV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
+      _log.warn('handlePollRevoke: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 

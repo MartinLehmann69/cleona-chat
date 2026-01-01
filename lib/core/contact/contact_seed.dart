@@ -937,7 +937,7 @@ class ContactSeedBuilder {
   /// Both families are represented after two positions, provided the
   /// record has both; that is what matters.
   static List<String> _familiesChange(List<String> addresses) {
-    final v4 = <String>[];
+    final v4 = <String>[];  // version-name-ok: IP address family
     final v6 = <String>[];
     for (final a in addresses) {
       (_isV6Address(a) ? v6 : v4).add(a);

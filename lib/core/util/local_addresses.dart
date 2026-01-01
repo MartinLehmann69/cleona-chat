@@ -110,38 +110,44 @@ bool isTunnelIpv6(String ip) {
 /// no forwarding left behind (AP-1b).
 
 Future<List<String>> dialableLocalAddresses() async {
-  final private = <String>[];
-  final public = <String>[];
+  final all = <NetworkInterface>[];
   try {
-    for (final iface
-        in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
-      if (!interfaceLeadsAfterOutside(iface.name)) continue;
-      for (final addr in iface.addresses) {
-        final ip = addr.address;
-        if (addr.isLoopback || ip == '0.0.0.0') continue;
-        if (isUndialableIpv4(ip)) continue;
-        (isPrivateIpv4(ip) ? private : public).add(ip);
-      }
-    }
+    all.addAll(await NetworkInterface.list(type: InternetAddressType.IPv4));
   } catch (_) {
     // Enumeration during an interface change — silent (E-83).
   }
-
-  final v6 = <String>[];
   try {
-    for (final iface
-        in await NetworkInterface.list(type: InternetAddressType.IPv6)) {
-      if (!interfaceLeadsAfterOutside(iface.name)) continue;
-      for (final addr in iface.addresses) {
-        if (addr.isLoopback || addr.isLinkLocal) continue;
-        if (isTunnelIpv6(addr.address)) continue;
-        v6.add(addr.address);
-      }
-    }
+    all.addAll(await NetworkInterface.list(type: InternetAddressType.IPv6));
   } catch (_) {
     // IPv6 not available — no error.
   }
+  return dialableFrom(all);
+}
 
+/// The same answer from interfaces read elsewhere — the delivery layer's
+/// list, read at its edges start and network change (S408-LEBENSLAUF P16,
+/// finding A-5: one source, no second enumeration beside the host). Private
+/// IPv4 first, then public IPv4, then IPv6 — the NAT assistant's forwarding
+/// target is the first.
+List<String> dialableFrom(Iterable<NetworkInterface> interfaces) {
+  final private = <String>[];
+  final public = <String>[];
+  final v6 = <String>[];
+  for (final iface in interfaces) {
+    if (!interfaceLeadsAfterOutside(iface.name)) continue;
+    for (final addr in iface.addresses) {
+      final ip = addr.address;
+      if (addr.type == InternetAddressType.IPv4) {
+        if (addr.isLoopback || ip == '0.0.0.0') continue;
+        if (isUndialableIpv4(ip)) continue;
+        (isPrivateIpv4(ip) ? private : public).add(ip);
+      } else {
+        if (addr.isLoopback || addr.isLinkLocal) continue;
+        if (isTunnelIpv6(ip)) continue;
+        v6.add(ip);
+      }
+    }
+  }
   return <String>[...private, ...public, ...v6];
 }
 
@@ -259,69 +265,18 @@ bool samePrivateClass(String a, String b) {
   return pa.length >= 2 && pb.length >= 2 && pa[0] == '172' && pb[0] == '172';
 }
 
-/// Is an address EVENT also an address CHANGE?
-///
-/// ── THE FINDING THAT FORCES THIS FUNCTION (S380, 10.09.2026) ──────
-///
-/// `service_daemon.dart` knew two detections and gave them two
-/// different answers to the same question. The poll (Windows/macOS)
-/// compared the dialable addresses and returned on equality.
-/// The `ip monitor` branch (Linux) compared **nothing**: it took every
-/// netlink event for a change.
-///
-/// On an IPv6 network that is a continuous fire. A router advertisement
-/// refreshes the LIFETIMES of an existing address, and `ip
-/// monitor address` reports that as an event. Measured on 10.09.2026 on
-/// the bootstrap:
-///
-///     09:20:44  ip monitor: 2001:db8:a::ae01:…:21c/64 dynamic mngtmpaddr
-///                           valid_lft 6126sec preferred_lft 2526sec
-///               ip monitor: fdb2:e5c0:3432:0:…:21c/64   dynamic mngtmpaddr
-///                           valid_lft 7200sec preferred_lft 3600sec
-///     09:20:46  [daemon] Network change detected (ip monitor)
-///     09:20:46  [daemon] `Netzwechsel: 3 Sitzung(en) fallen gelassen`
-///
-/// The address inventory was identical before and after — only the
-/// lifetimes were renewed (the ULA jumped back to 7200/3600). Six such
-/// events in 40 minutes, and each tore down **all** sessions.
-/// `V41Node._dropPartner` takes `readiness.forgetPartner` along; `ready`
-/// could therefore structurally not stay standing — reached that same morning
-/// at 08:59:12 and lost again five seconds later.
-///
-/// The two nodes WITHOUT IPv6 in the same test network had in the same
-/// time **zero** events, and their session to each other stood
-/// uninterrupted. So it never lay with the routed path, but with who
-/// stands at its end.
-///
-/// ── WHAT IT COMPARES, AND WHY EXACTLY THAT ────────────────────────
-///
-/// [dialableLocalAddresses] returns **addresses, not lifetimes**. Thus
-/// an RA refresh is by construction no change, without any
-/// special case for IPv6 or `mngtmpaddr` standing here — a
-/// special case would be the next place that would have to be updated at the
-/// next new event type.
-///
-/// ── THE FIRST RUN COUNTS AS A CHANGE ──────────────────────────────────
-///
-/// If [before] is empty, this process knows nothing about the previous
-/// state — then the observation itself is the news. That is the
-/// semantics that the poll branch has had since S370 (`&& _lastPollIps
-/// .isNotEmpty`), and it moves here unchanged: two empty
-/// sets are equal, and without this branch nothing would happen at start.
-///
-/// ── WHAT IT DOES NOT SEE ────────────────────────────────────────────
-///
-/// A real change that does not touch the dialable addresses —
-/// a different gateway, for instance. That is **no new class**: the
-/// poll branch has had this property as long as it has existed. The one edge
-/// that would thereby stay open — only the EXTERNAL address changes — is covered by
-/// §17.3 via `onAgreedChanged`; the poll branch says so at its
-/// place expressly ("Without it exactly this one case would stay open —
-/// and only this one").
-bool isRealNetworkChange({
-  required List<String> before,
-  required List<String> after,
-}) {
-  if (before.isEmpty) return true;
-  return before.join(',') != after.join(',');
-}
+// ── "IS AN ADDRESS EVENT ALSO AN ADDRESS CHANGE?" (S380 → S407-LB-P14) ──
+//
+// `isRealNetworkChange` stood here from S380: daemon and app compared the
+// dialable addresses before and after an event, so a router advertisement
+// that only renews lifetimes (measured on the bootstrap on 10.09.2026: six
+// in 40 minutes, each tearing down all sessions) is no change —
+// [dialableLocalAddresses] returns addresses, not lifetimes. It also said
+// "the first run counts as a change": every caller started with an EMPTY
+// list, so the first report after a start ran the whole edge for nothing
+// (finding A-1). The decision moved with S407-LB-P14 into the delivery
+// layer (`mycelium/lib/network_watch.dart`), which reads the own addresses
+// at the start; [dialableLocalAddresses] stays here as the one list it
+// compares. What it does not see is unchanged: a change that leaves the
+// dialable addresses alone (another gateway, only the EXTERNAL address) —
+// the latter is covered by §17.3 via `onAgreedChanged`.

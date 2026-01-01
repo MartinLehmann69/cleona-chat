@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/storage/device_state_legacy.dart';
+import 'package:cleona/core/storage/device_store.dart';
 
 /// Where the running APK was installed from.
 enum InstallSource {
@@ -20,8 +22,8 @@ enum InstallSource {
 /// Resolution order:
 /// 1. Build-time override `--dart-define=INSTALL_SOURCE=playstore|sideload`
 ///    (used for CI builds where the distribution channel is known upfront).
-/// 2. Cached result from a previous [detect] call, persisted to
-///    `install_source.txt` in the app's data directory.
+/// 2. Cached result from a previous [detect] call, kept in the device
+///    database (`DeviceStore.keyInstallSource`, §4.5.3; until S407 a file).
 /// 3. Live query of the installer package name via `pm dump <package>` —
 ///    `com.android.vending` means Play Store, anything else (null,
 ///    sideload installer, file manager) means sideload.
@@ -30,8 +32,6 @@ enum InstallSource {
 /// towards *disabling* self-update, rather than risking a Play Store policy
 /// violation on a misdetected install.
 class InstallSourceDetector {
-  static const _kStorageKey = 'install_source_v2';
-
   static const _buildTimeOverride =
       String.fromEnvironment('INSTALL_SOURCE', defaultValue: 'auto');
 
@@ -40,16 +40,19 @@ class InstallSourceDetector {
   // Lazily static (Dart initialises every `static final` field individually on
   // first access, not at class load): `_log` is reached exclusively
   // from the Android branch of [detect], at which point
-  // `AppPaths.dataDir` has already been regularly resolved (see `_cacheFile` above).
+  // `AppPaths.dataDir` has already been regularly resolved.
   static final CLogger _log =
       CLogger.get('InstallSourceDetector', profileDir: AppPaths.dataDir);
 
   /// Detect the install source. On non-Android platforms, always returns
   /// [InstallSource.unknown]. The result is determined once (build-time
   /// override, disk cache, or a live `pm` query) and then cached both in
-  /// memory and on disk for subsequent calls/launches.
-  static Future<InstallSource> detect() async {
+  /// memory and in the device database [store] for subsequent
+  /// calls/launches. Without a [store] (no master seed yet) it is kept in
+  /// memory only.
+  static Future<InstallSource> detect({DeviceStore? store}) async {
     if (_cached != null) return _cached!;
+    legacyDeviceStateDrop(AppPaths.dataDir, kLegacyInstallSourceFile);
 
     if (!Platform.isAndroid) {
       return _cached = InstallSource.unknown;
@@ -59,17 +62,17 @@ class InstallSourceDetector {
       final source = _buildTimeOverride == 'sideload'
           ? InstallSource.sideload
           : InstallSource.playStore;
-      _persist(source);
+      _persist(store, source);
       return _cached = source;
     }
 
-    final restored = _readCacheFile();
+    final restored = _readStored(store);
     if (restored != null) {
       return _cached = restored;
     }
 
     final detected = await _detectViaPackageManager();
-    _persist(detected);
+    _persist(store, detected);
     return _cached = detected;
   }
 
@@ -77,16 +80,15 @@ class InstallSourceDetector {
   /// Returns null if [detect] hasn't been called yet in this process.
   static InstallSource? get cached => _cached;
 
-  static File get _cacheFile =>
-      File('${AppPaths.dataDir}/$_kStorageKey.txt');
-
-  static InstallSource? _readCacheFile() {
+  static InstallSource? _readStored(DeviceStore? store) {
+    if (store == null) return null;
     try {
-      final file = _cacheFile;
-      if (!file.existsSync()) return null;
-      return _fromStorageString(file.readAsStringSync().trim());
+      final row =
+          store.entry(DeviceStore.areaDevice, DeviceStore.keyInstallSource);
+      final v = row?['v'] as String?;
+      return v == null ? null : _fromStorageString(v);
     } catch (e) {
-      _log.warn('Failed to read cached install source: $e');
+      _log.warn('Failed to read the stored install source: $e');
       return null;
     }
   }
@@ -129,13 +131,13 @@ class InstallSourceDetector {
     }
   }
 
-  static void _persist(InstallSource source) {
+  static void _persist(DeviceStore? store, InstallSource source) {
+    if (store == null) return;
     try {
-      final file = _cacheFile;
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync(_toStorageString(source));
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyInstallSource,
+          {'v': _toStorageString(source)});
     } catch (e) {
-      _log.warn('Failed to persist install source: $e');
+      _log.warn('Failed to store install source: $e');
     }
   }
 

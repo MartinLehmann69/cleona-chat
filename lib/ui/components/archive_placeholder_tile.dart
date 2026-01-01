@@ -35,6 +35,7 @@ import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_placeholder.dart';
 import 'package:cleona/core/service/service_types.dart' show UiMessage;
 import 'package:cleona/ui/components/archive_placeholder_labels.dart';
+import 'package:cleona/ui/components/archive_preview_cache.dart';
 import 'package:cleona/ui/components/archive_retrieval_state.dart';
 
 /// Which of the three tiles an archived medium gets.
@@ -66,12 +67,13 @@ class ArchiveTileLayout {
 
   /// Chooses the tile for [info].
   ///
-  /// **A missing picture is never a missing tile.** `miniBase64` is empty
-  /// today for two independent reasons and both are permanent enough to
-  /// design for: `ArchiveManager.applyArchiveView` does not yet stamp the
-  /// field at all (`archive_manager.dart:567`), and video has no still to
-  /// stamp — S392/B1 refuses it outright with `videoNoFrameGrab`
-  /// (`S392-BAU-ARCHIV-B1.md` §1). A tier 2 or 3 medium without bytes
+  /// Tier 2 draws the preview once the surface has fetched it
+  /// ([ArchivePlaceholderInfo.previewBytes]) and the mini until then — the
+  /// mini travels with the message, the preview is asked for (S407-VORSCHAU).
+  ///
+  /// **A missing picture is never a missing tile.** Video has no still —
+  /// `ArchiveThumbnails` refuses it with `videoNoFrameGrab` — and an
+  /// undecodable image has none either. A tier 2 or 3 medium without bytes
   /// therefore falls to the metadata tile, which is the tier the norm
   /// describes for exactly this content: date, size, type icon. Drawing an
   /// empty box instead would be the "silently wrong effect" the whole rework
@@ -82,6 +84,12 @@ class ArchiveTileLayout {
   /// suggestion, and a tier 4 entry that still carries a stale mini must not
   /// show a picture the archive considers gone.
   factory ArchiveTileLayout.of(ArchivePlaceholderInfo info) {
+    final preview = info.previewBytes;
+    if (info.tier == ArchiveTier.thumbnail &&
+        preview != null &&
+        preview.isNotEmpty) {
+      return ArchiveTileLayout._(ArchiveTileKind.preview, preview);
+    }
     final bytes = decodeArchiveMini(info.miniBase64);
     if (bytes == null) return const ArchiveTileLayout._(ArchiveTileKind.metadata, null);
     switch (info.tier) {
@@ -146,13 +154,15 @@ IconData archiveTypeIcon(String? mimeType) {
 ///    for this message on a tier below `original` (S392/C1); and
 ///  * [localFilePresent] is false — the original is really gone.
 ///
-/// The second one is not belt and braces. §21.6's tiers are computed from the
-/// age of the message alone (`ArchiveManager._checkTierTransition`), while the
-/// eviction that actually removes the original is S392/B2, which is not built.
-/// Today a year-old photo therefore sits on tier 4 in the index while the
-/// full-size file is still on disk. Without this check the chat would hide a
+/// The second one is not belt and braces. The index can name a tier below
+/// `original` while the file is still on disk: a deletion that failed, and
+/// stock written before S407-VORSCHAU (the upload wrote the tier of the age)
+/// until its next archive run. Without this check the chat would hide a
 /// picture it can display behind a metadata card — a regression, and the same
 /// species of false statement as the three branches this tile replaces.
+///
+/// [previews] supplies the tier-2 preview; asked only for an archived medium
+/// on tier 2, so a chat full of ordinary pictures asks nothing.
 ///
 /// Lives here and not in `chat_screen.dart` so that the rule the app runs is
 /// the rule a probe can measure; a probe that re-implemented it would only
@@ -161,12 +171,16 @@ ArchivePlaceholderInfo? archivedMediumFor(
   UiMessage message, {
   required bool localFilePresent,
   required ArchiveRetrievalState retrievals,
+  ArchivePreviewCache? previews,
 }) {
   if (localFilePresent) return null;
+  final wantsPreview = previews != null &&
+      archiveTierFromWire(message.archiveTier) == ArchiveTier.thumbnail;
   return ArchivePlaceholder.forMessage(
     message,
     isRetrieving: retrievals.isRetrieving(message.id),
     retrievalProgress: retrievals.progressOf(message.id),
+    previewBytes: wantsPreview ? previews.previewFor(message.id) : null,
   );
 }
 

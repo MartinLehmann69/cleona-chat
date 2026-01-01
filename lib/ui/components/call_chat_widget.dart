@@ -4,7 +4,7 @@
 // `lib/` importer of this widget). Short version: the send path
 // (`GroupCallManager._sendCollaborationToAll` ->
 // `CallTransport.sendSecuredToParticipant`) is a declared no-op
-// (`lib/core/calls/call_transport_v41.dart:451-468`, `noCarrier`,
+// (`lib/core/calls/plane_d_call_transport.dart:451-468`, `noCarrier`,
 // as long as §17.5's group topology is open, C-9/C-10/C-11). A
 // chat window here would be the promise that one's own message arrives at
 // the other side — that is not true today.

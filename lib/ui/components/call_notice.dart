@@ -2,7 +2,8 @@
 //
 // The short hint after a 1:1 call that ended for a reason the user did not
 // cause (§17.4 "UI: connection lost"), or that did not come about because
-// Plane D carries no media (§17.3 "clear message").
+// Plane D carries no media (§17.3 "clear message") or because the user
+// switched calls off for that contact (§17 principle, RL-7).
 //
 // A SnackBar on the app's root messenger, reached through the navigator's
 // context: the call screen closes itself when the call ends, and a refused
@@ -17,6 +18,8 @@ String? callEndNoticeKey(CallEndReason reason) {
   switch (reason) {
     case CallEndReason.connectionLost:
       return 'call_connection_lost';
+    case CallEndReason.notReachable:
+      return 'call_not_reachable';
     case CallEndReason.unspecified:
       return null;
   }
@@ -25,6 +28,8 @@ String? callEndNoticeKey(CallEndReason reason) {
 /// i18n key of the hint for a call that did not come about for [reason].
 String callUnavailableNoticeKey(CallUnavailableReason reason) {
   switch (reason) {
+    case CallUnavailableReason.callsNotAllowed:
+      return 'call_unavailable_calls_not_allowed';
     case CallUnavailableReason.noCommonConnectionType:
       return 'call_unavailable_no_common_type';
     case CallUnavailableReason.noMediaPath:

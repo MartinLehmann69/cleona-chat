@@ -80,12 +80,18 @@ Uint8List foundingPk(Address a) =>
 
 /// `K_AB` from the view of [me] towards [counterpart] — both sides
 /// compute the same value, from the FOUNDING keys (§4.3).
-Uint8List pairSecret(PostBox me, Address counterpart, Uint8List sAB) {
+Uint8List pairSecret(PostBox me, Address counterpart, Uint8List sAB) =>
+    pairSecretWith(me, foundingPk(counterpart), sAB);
+
+/// [pairSecret] from the counterpart's FOUNDING Ed25519 key [otherPk] alone:
+/// a contact restored from the bundle has no address before its first
+/// envelope, only the founding key and `s_AB` the bundle names (§13.2.1,
+/// §13.3.2) — and that is all `K_AB` hangs on (§4.3).
+Uint8List pairSecretWith(PostBox me, Uint8List otherPk, Uint8List sAB) {
   if (sAB.length != kPairRandomLength) {
     throw ArgumentError('s_AB must have $kPairRandomLength B, has ${sAB.length}');
   }
   final ownPk = foundingPk(me.address);
-  final otherPk = foundingPk(counterpart);
   final dh = _na.x25519ScalarMult(
       _na.ed25519SkToX25519(me.secretParts().foundingEd25519Sk),
       _na.ed25519PkToX25519(otherPk));

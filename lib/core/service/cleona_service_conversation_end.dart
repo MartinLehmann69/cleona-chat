@@ -191,6 +191,8 @@ extension ConversationEndOps on CleonaService {
         store.removeEntry(VoiceTranscriptionService.kArea, id);
       }
     });
+    // Edits buffered for a message of this conversation (§21.5.1, E17 A).
+    step('buffered edits', () => _pendingEditsOfConversationDrop(conversationId));
     _eraseMediaStateOfMessages(ids,
         collecting: (entry) => entry['conv'] == conversationId, step: step);
     // Polls of the group or channel (§18.3).
@@ -221,9 +223,9 @@ extension ConversationEndOps on CleonaService {
     step('parked messages', () {
       var parked = 0;
       for (final id in wire) {
-        if (v41Outbox.remove(id)) parked++;
+        if (localOutbox.remove(id)) parked++;
       }
-      if (parked > 0) saveV41Outbox();
+      if (parked > 0) saveLocalOutbox();
     });
   }
 
@@ -247,7 +249,9 @@ extension ConversationEndOps on CleonaService {
           ? store.areaKeys(ArchiveManager.kEntriesArea)
           : store.loadAreaPrefix(ArchiveManager.kEntriesArea, one).keys;
       for (final id in keys.where(ids.contains).toList()) {
-        _archiveManager?.forget(id);
+        // Also a manager switched off meanwhile: it keeps its index for
+        // being switched on again (`_archiveSettingChanged`).
+        (_archiveManager ?? _archiveOff)?.forget(id);
         store.removeEntry(ArchiveManager.kEntriesArea, id);
       }
     });
@@ -276,7 +280,6 @@ extension ConversationEndOps on CleonaService {
       for (final e in announced.entries) {
         if (!collecting(e.value)) continue;
         _bulkIncomingRemove(e.key);
-        _streamSeeds.remove(e.key);
         myceliumMailbox?.bulkCollector.abandon(hexToBytes(e.key));
       }
     });

@@ -8,6 +8,7 @@ library;
 import 'dart:ffi';
 import 'dart:io';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -192,13 +193,9 @@ class OqsFFI {
     if (Platform.isIOS) return DynamicLibrary.process();
     if (Platform.isAndroid) return DynamicLibrary.open('liboqs.so');
     if (Platform.isLinux) {
-      for (final p in [
-        'liboqs.so',
-        '${AppPaths.bundleLibDir}/liboqs.so',
-      ]) {
-        try { return DynamicLibrary.open(p); } catch (_) {}
-      }
-      throw StateError('liboqs.so not found');
+      // S410, I-6: liboqs ships in the bundle and is found there first;
+      // the list lives in `platform/linux_native_libraries.dart`.
+      return openLinuxNativeLibrary(linuxOqs);
     }
     if (Platform.isMacOS) {
       for (final p in [
@@ -221,7 +218,7 @@ class OqsFFI {
       }
       throw StateError('liboqs.dll not found');
     }
-    return DynamicLibrary.open('liboqs.so');
+    throw StateError('Unsupported platform for liboqs');
   }
 
   // ---- ML-KEM-768 sizes ----

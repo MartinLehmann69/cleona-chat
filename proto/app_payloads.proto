@@ -8,7 +8,7 @@ package cleona;
 // is only ever read by the network layer.
 //
 // AP-1a step 6 (MIGRATION §9.15.6): split out of `cleona.proto` so that
-// the V4 network rebuild (AP-3) can replace `transport_v3.proto` without touching the
+// the V4 network rebuild (AP-3) can replace `transport.proto` without touching the
 // app payloads. Field tags and enum values are wire numbers and were
 // NOT changed during the split (MIGRATION §2.3). The comments of the
 // original stand unchanged at the declarations to which they belonged.
@@ -107,11 +107,11 @@ message GroupCreate {
   repeated bytes member_ids = 4;
   bytes picture = 5;
 }
-message GroupInviteV3 {
+message GroupInvite {
   bytes group_id = 1;
   string group_name = 2;
   bytes inviter_id = 3;
-  repeated GroupMemberV3 members = 4;
+  repeated GroupMember members = 4;
   bytes group_picture = 5;
   string group_description = 6;
   // GM-1 (§9.1.4): monotonic epoch + canonical membership hash + hybrid sig
@@ -123,8 +123,11 @@ message GroupInviteV3 {
   // that member with every co-member that is not the inviter. Per leg,
   // outside the membership hash.
   repeated GroupPairSeed pair_seeds = 11;
+  // §16.2.5 "Joining": on the shared key, the generation and the step after
+  // the joining this update reports. An older 4.2 device ignores it.
+  SharedKeyStep shared_key_step = 12;
 }
-message GroupMemberV3 {
+message GroupMember {
   bytes node_id = 1;
   string display_name = 2;
   string role = 3;              // "owner", "admin", "member"
@@ -139,6 +142,19 @@ message GroupMemberV3 {
   bytes address_sig_ed25519 = 8;
   bytes address_sig_ml_dsa = 9;
   bytes neighbours = 10;        // its fixed neighbours as the inviter knows them
+  // §16.2.2 (S407 channel step 1): only between owner and admins of a
+  // private channel. The capabilities the member showed in its acceptance
+  // (`GroupJoin.capabilities`) and, for a subscriber, the epoch of the
+  // short list (owner and admins) it was last given — 0: it holds the
+  // complete list. An older 4.2 device ignores both.
+  uint32 capabilities = 11;
+  uint64 view_epoch = 12;
+  // S407-UMSCHLAG (§4.4.3, §1.2 principle 8): the member reads the envelope
+  // with the pair tag instead of signatures — set by the member itself in its
+  // own entry (13: fields 11/12 belong to the channel list). 4.2.3 does not
+  // know the field and skips it; a co-member that sees it seals its group
+  // legs to this member with the tag.
+  bool reads_pair_tag = 13;
 }
 // B-3 (§4.3): the pair secret seed of the receiver with one co-member.
 message GroupPairSeed {
@@ -149,7 +165,15 @@ message GroupPairSeed {
 // to the member who invited it.
 message GroupJoin {
   bytes group_id = 1;
-  GroupMemberV3 member = 2;
+  GroupMember member = 2;
+  // Retired before any release (S407 channel step 2): the capability now
+  // travels in its own notice (`CapabilityNotice`, §16.2.5). Never written,
+  // never read; the number stays taken.
+  uint32 capabilities = 3;
+  // §16.2.5 "Joining": the author key the joining member names, where it may
+  // post on the shared key; owner or admin certify it. Absent at an older
+  // 4.2 device and where nothing is posted on the shared key.
+  bytes author_pk = 4;
 }
 // GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
 message GroupMembershipResyncRequest {
@@ -191,7 +215,7 @@ message ChannelInvite {
   bytes welcome_message = 5;
   bytes channel_picture = 6;
   string channel_description = 7;
-  repeated GroupMemberV3 members = 8;   // reuse GroupMemberV3 for full member list
+  repeated GroupMember members = 8;   // reuse GroupMember for full member list
   bool is_public = 9;
   bool is_adult = 10;
   string language = 11;
@@ -200,6 +224,20 @@ message ChannelInvite {
   bytes membership_hash = 13;          // SHA-256(epoch || channelId || sorted members)
   bytes membership_sig_ed25519 = 14;   // 64 bytes, over membership_hash
   bytes membership_sig_ml_dsa = 15;    // ~3300 bytes, over membership_hash
+  // §4.3, §16.2.2: s_AB of the receiver with each co-member that this
+  // invitation makes a co-member — as GroupInvite.pair_seeds.
+  repeated GroupPairSeed pair_seeds = 16;
+  // §16.2.2 (S407 channel step 1): `role_view` — the list names the owner,
+  // the admins and the receiver only; `membership_epoch` and the hash are
+  // then those of this short list. `role_epoch` is the epoch of the role
+  // state (owner and admins), `members_epoch` the membership epoch that
+  // owner and admins keep, as a number. An older 4.2 device reads the
+  // short list as the whole list and ignores the three fields.
+  bool role_view = 17;
+  uint64 role_epoch = 18;
+  uint64 members_epoch = 19;
+  // §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  SharedKeyStep shared_key_step = 20;
 }
 message ChannelRoleUpdate {
   bytes channel_id = 1;
@@ -208,6 +246,50 @@ message ChannelRoleUpdate {
 }
 message ChannelLeave {
   bytes channel_id = 1;
+  // §16.2.2 (S407 channel step 1): the leaving of an owner or admin changes
+  // the role state; the epochs after it, and for an owner the member that
+  // takes the role — its entry and the receiver's `s_AB` with it, where the
+  // receiver did not know it. Absent from an older 4.2 device.
+  uint64 role_epoch = 2;
+  uint64 members_epoch = 3;
+  GroupMember new_owner = 4;
+  GroupPairSeed pair_seed = 5;
+}
+// §16.2.2 (S407 channel step 1): a membership change of a private channel
+// as a change — never the whole list again. `upserted`: members new to the
+// receiver (full entry) or whose role changed; `removed`: members gone.
+// Sent only to members that showed the capability (`GroupJoin`).
+message ChannelMembersChange {
+  bytes channel_id = 1;
+  uint64 members_epoch = 2;
+  uint64 role_epoch = 3;
+  repeated GroupMember upserted = 4;
+  repeated bytes removed = 5;
+  repeated GroupPairSeed pair_seeds = 6;
+  // The canonical hash of the state after the change, as the receiver
+  // should hold it (complete list for owner and admins, role state for a
+  // subscriber); a different local hash asks a resync.
+  bytes state_hash = 7;
+  // §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  SharedKeyStep shared_key_step = 8;
+}
+// §16.2.2 (S407 group list): a membership change of a GROUP as a change —
+// never the whole list again. `upserted`: members new to the receiver (full
+// entry only for them) or whose role changed; `removed`: members gone (the
+// receiver itself: its removal). The receiver applies it on top of the state
+// it holds and checks `state_hash` — the canonical membership hash after the
+// change; a different local hash asks a resync. Sent only to members that
+// showed the capability of the member list (`CapabilityNotice`, bit 1); an
+// older 4.2 member gets the `GroupInvite` update as before.
+message GroupMembersChange {
+  bytes group_id = 1;
+  uint64 membership_epoch = 2;
+  repeated GroupMember upserted = 3;
+  repeated bytes removed = 4;
+  repeated GroupPairSeed pair_seeds = 5;
+  bytes state_hash = 6;
+  // §16.2.5 "Joining": as GroupInvite.shared_key_step.
+  SharedKeyStep shared_key_step = 7;
 }
 // ── Chat Config ────────────────────────────────────────────────────────
 
@@ -221,6 +303,28 @@ message ChatConfigUpdate {
   sint64 edit_window_ms = 7;
   bool read_receipts = 8;
   bool typing_indicators = 9;
+  // §16.2.2 (S407 group list): the owner's choice of a group between
+  // discussion and announcement mode. Explicit presence: an older 4.2 admin
+  // does not set it, and its absence leaves the mode as it was — it never
+  // switches the mode off.
+  optional bool announcement_only = 10;
+  // §16.2.2 (S407 group profile): a change of the name, the description or
+  // the image of a group or private channel. An update that carries it
+  // changes those and nothing else — its other fields are not read. Sent
+  // only to members that showed the capability (`kCapGroupProfile`); its
+  // other fields carry the settings in force, so that a device that does
+  // not read it would only take the same settings again.
+  GroupProfile profile = 11;
+}
+// The fields present are the ones that changed: a description present but
+// empty removes it, `picture_removed` removes the image; a name is never
+// empty. (An empty `bytes` does not read back as present in Dart protobuf,
+// hence the flag.)
+message GroupProfile {
+  optional string name = 1;
+  optional string description = 2;
+  optional bytes picture = 3;
+  bool picture_removed = 4;
 }
 // ── Identity Deleted ───────────────────────────────────────────────────
 
@@ -234,7 +338,7 @@ message IdentityDeletedNotification {
 // `RestoreResponse` with `ContactEntry`, `StoredMessage`,
 // `RestoreGroupInfo`/`-Member`, `RestoreChannelInfo`/`-Member`). Removed
 // with the path in S398 (finding R-1); the message types 30 and 31 are
-// reserved in `transport_v3.proto`. Message names are not wire numbers, so
+// reserved in `transport.proto`. Message names are not wire numbers, so
 // nothing needs reserving here.
 // ── Calls ──────────────────────────────────────────────────────────────
 
@@ -304,7 +408,7 @@ message CallInvite {
   // Capping: minor < 1000.
   //
   // THE CHECK ITSELF DOES NOT LIE HERE. It belongs to V2.1
-  // (`call_service.dart`, `handleCallInviteV3`), together with the rejection reason visible to the
+  // (`call_service.dart`, `handleCallInvite`), together with the rejection reason visible to the
   // user and its translation. §10.4: a
   // call between incompatible versions is explicitly rejected,
   // "never allowed to fail silently".
@@ -371,7 +475,7 @@ message CallInvite {
   // benefit. What does change in the middle of the call is resolution
   // and bitrate (V1.17); those already stand in `VideoFrame.width/height`
   // and are a preset, not a format. A change of the format itself
-  // requires a rebuild (`MTV3_CALL_REJOIN`), which renegotiates.
+  // requires a rebuild (`MT_CALL_REJOIN`), which renegotiates.
   // The negotiation is reliable: `CALL_INVITE`/`CALL_ANSWER` are
   // setup frames with ML-DSA, zstd and the normal delivery cascade, not
   // live media — they cannot get lost silently.
@@ -543,6 +647,13 @@ message CallRingAck {
 }
 message CallHangup {
   bytes call_id = 1;
+}
+// §17.2 "Missed call": "It carries the `callId` and whether the call was
+// audio or video." Sent by the caller for a call that ended unanswered; the
+// callee shows it with its own arrival time.
+message CallMissed {
+  bytes call_id = 1;
+  bool is_video = 2;
 }
 message IceCandidate {
   bytes call_id = 1;
@@ -730,6 +841,44 @@ message EmojiReaction {
   string emoji = 2;
   bool remove = 3;
 }
+
+// §16.2.4: the reactions to the posts of a private channel as totals — how
+// many of each, no identity. The owner sends them to every subscriber and
+// admin, each as an ordinary 1:1 delivery. They are a state, not a message:
+// a receiver keeps the newest per post (by `at_ms`).
+message ChannelReactionTotals {
+  int64 at_ms = 1;                  // the owner's clock when it took them
+  repeated PostReactionTotals posts = 2;
+}
+
+message PostReactionTotals {
+  bytes post_id = 1;                // the post as the receiver knows it
+  repeated ReactionCount counts = 2;
+}
+
+message ReactionCount {
+  string emoji = 1;
+  uint32 count = 2;
+}
+
+// §16.2.4: who holds which reaction — from the previous owner of a private
+// channel to the new one when ownership passes (§16.2.2), and from a device
+// that is no longer the owner for a reaction that still reached it.
+message ChannelReactionHandover {
+  repeated PostReactionHolders posts = 1;
+  int64 first_change_at_ms = 2;     // start of the pending round, 0 = none
+}
+
+message PostReactionHolders {
+  bytes post_id = 1;                // the post as the receiver knows it
+  repeated ReactionHolder holders = 2;
+  bool pending = 3;                 // changed since the last totals
+}
+
+message ReactionHolder {
+  bytes user_id = 1;
+  string emoji = 2;                 // empty: the person holds none
+}
 // ── App-Level Chunking for Relay/S&F (V3.1.9) ───────────────────────
 
 message MediaChunk {
@@ -742,19 +891,19 @@ message MediaChunk {
 // ── Two-Stage Media Stage-2 (V3) ────────────────────────────────────
 //
 // MEDIA_ANNOUNCE (Stage 1) carries metadata + thumbnail. The receiver
-// then asks for the actual content via MTV3_MEDIA_REQUEST (payload =
+// then asks for the actual content via MT_MEDIA_REQUEST (payload =
 // original messageId bytes). The sender splits the file into
-// MediaChunkV3 frames, each shipped as its own ApplicationFrameV3
+// MediaRequestChunk frames, each shipped as its own ApplicationFrame
 // (per-chunk KEM-encrypted via sendToUser), and finalises with a
-// MediaCompleteV3 carrying the SHA-256 of the assembled bytes for
+// MediaRequestComplete carrying the SHA-256 of the assembled bytes for
 // receiver-side integrity-check. Architecture §5.7 + §1797.
-message MediaChunkV3 {
+message MediaRequestChunk {
   bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
   uint32 chunk_index = 2;         // 0-based chunk index
   uint32 total_chunks = 3;        // Total number of chunks
   bytes data         = 4;         // Chunk payload (≤32 KB after compression)
 }
-message MediaCompleteV3 {
+message MediaRequestComplete {
   bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
   bytes content_hash = 2;         // SHA-256 of the fully reassembled file
   uint64 total_size  = 3;         // Total file size in bytes (sanity-check)
@@ -998,7 +1147,7 @@ message GroupCallSenderKey {
 // ── In-Call Collaboration (§10.5) ───────────────────────────────────
 
 // Whiteboard stroke data — real-time streaming via Overlay Multicast Tree.
-// MTV3_WHITEBOARD_STROKE = 210
+// MT_WHITEBOARD_STROKE = 210
 message WhiteboardStroke {
   bytes stroke_id = 1;              // 16-Byte unique stroke identifier
   bytes author_id = 2;              // 32 bytes — stroke author's user-id
@@ -1014,7 +1163,7 @@ message WhiteboardStroke {
   int32 page_index = 12;            // Target page index
 }
 // Whiteboard page management — add/switch pages, snapshot for late joiners.
-// MTV3_WHITEBOARD_PAGE = 211
+// MT_WHITEBOARD_PAGE = 211
 message WhiteboardPage {
   int32 action = 1;                 // 0=ADD_PAGE,1=SWITCH_PAGE,2=SNAPSHOT_REQUEST,3=SNAPSHOT_RESPONSE
   int32 page_index = 2;             // Target page index
@@ -1023,7 +1172,7 @@ message WhiteboardPage {
   bytes requester_id = 5;           // Who requested the snapshot (SNAPSHOT_REQUEST only)
 }
 // File sharing within a call — metadata announcement via Overlay Multicast Tree.
-// MTV3_FILE_EXCHANGE = 212
+// MT_FILE_EXCHANGE = 212
 message CallFileShare {
   bytes file_id = 1;                // 16-Byte unique file identifier
   string file_name = 2;             // Original filename
@@ -1035,7 +1184,7 @@ message CallFileShare {
   int32 action = 8;                 // 0=ANNOUNCE,1=REQUEST_DOWNLOAD,2=DOWNLOAD_READY
 }
 // Clipboard exchange within a call.
-// MTV3_CLIPBOARD_EXCHANGE = 213
+// MT_CLIPBOARD_EXCHANGE = 213
 message CallClipboardExchange {
   bytes sender_id = 1;              // 32 bytes — sender's user-id
   string sender_name = 2;           // Sender's display name
@@ -1045,7 +1194,7 @@ message CallClipboardExchange {
   int64 timestamp = 6;              // Unix millis
 }
 // Screen share control — start/stop/quality negotiation.
-// MTV3_SCREEN_SHARE_FRAME = 214
+// MT_SCREEN_SHARE_FRAME = 214
 message ScreenShareControl {
   bool is_sharing = 1;              // true=start, false=stop
   int32 width = 2;                  // Capture width
@@ -1055,7 +1204,7 @@ message ScreenShareControl {
   bytes sharer_id = 6;              // 32 bytes — who is sharing
 }
 // Ephemeral in-call chat message — NOT persisted after call ends.
-// MTV3_CALL_CHAT = 215
+// MT_CALL_CHAT = 215
 message CallChatMessage {
   bytes message_id = 1;             // 16-Byte unique message identifier
   bytes sender_id = 2;              // 32 bytes — sender's user-id
@@ -1106,12 +1255,12 @@ enum TwinSyncType {
   //
   // WIRE EXTENSION, not a changed value: 17 was never assigned. A
   // device with an older state does not know it — what it then does is
-  // measured and documented in `_handleTwinSyncV3`.
+  // measured and documented in `_handleTwinSync`.
   TWIN_IDENTITY_DELETED = 17;
 
   // §14.7 Type 18, §14.2, D-37 (E5): a delivery from a contact, mirrored by
   // the own device that collected it to the other own devices. Payload: the
-  // contact's ApplicationFrameV3 as received. The other devices show it as
+  // contact's ApplicationFrame as received. The other devices show it as
   // if they had received it and do not acknowledge it again.
   DELIVERY_MIRROR = 18;
 
@@ -1134,6 +1283,14 @@ enum TwinSyncType {
   // same mark; a post the leaving device discarded is not forwarded to the
   // other own devices. Payload: JSON (`group` as hex, `epoch`).
   GROUP_LEFT = 21;
+
+  // §14.7 Type 22 (S407, owner decision 08.10.2026 E17 = A): the identity
+  // created, joined or changed a channel on this device — the channel's
+  // state as it stands here (`ChannelInfo.toJson`), sent only while the
+  // identity is a member; leaving travels as Type 21. The receiving device
+  // takes it where it holds the channel not at all or with an epoch that
+  // is not newer, like Type 6 for a group. Payload: JSON (`ChannelInfo`).
+  CHANNEL_JOINED = 22;
 }
 
 // ── §14.6.3 Type 20 RECONCILE (D-42) ─────────────────────────────────────
@@ -1293,6 +1450,14 @@ message TwinSyncEnvelope {
   // keeps it in the same received memory as the device that received
   // it first. Not written by any other type.
   bytes delivery_id = 6;
+  // §14.7 (D-46): "Every own-line deposit carries, sealed, the depositing
+  // device's fixed neighbours and its segment addresses", so that a device
+  // knows where its siblings are reachable — for the mirror of a call
+  // signal on steps 1 and 3. Each is the neighbour-list codec of the
+  // delivery layer (count 0..3, `mycelium/lib/mailbox_own_signal.dart`,
+  // `ownWhereWire`). Added after 4.2.3: an older device skips both.
+  bytes neighbours = 7;
+  bytes segment_addresses = 8;
 }
 message DeviceRecord {
   bytes device_id = 1;             // UUID (16 bytes), generated once on first launch
@@ -1445,7 +1610,11 @@ message PollSettingsMsg {
   int32 max_choices = 5;           // For MULTIPLE_CHOICE (0 = unlimited)
   int32 scale_min = 6;             // For SCALE (default 1)
   int32 scale_max = 7;             // For SCALE (default 5)
-  bool only_members_can_vote = 8;  // Channels: members only, not subscribers
+  // v4_2 §18.3.3 POLL-4 (owner 14.10.2026): "members only" had no checkable
+  // denominator and was never enforced — removed. An older 4.2 peer may still
+  // send field 8; it is parsed as an unknown field and ignored.
+  reserved 8;
+  reserved "only_members_can_vote";
 }
 message PollCreateMsg {
   bytes poll_id = 1;               // UUID (16 bytes)
@@ -1525,7 +1694,7 @@ message PollVoteRevokeMsg {
 // as a fresh APPLICATION_FRAME under its own device identity.
 message PollAnonSubmitEntry {
   bytes  recipient_user_id    = 1;  // 32 bytes — who to deliver to
-  bytes  kem_blob             = 2;  // pre-encrypted PerMessageKemV3 (inner = de-attributed ApplicationFrame)
+  bytes  kem_blob             = 2;  // pre-encrypted PerMessageKemEnvelope (inner = de-attributed ApplicationFrame)
   repeated bytes device_ids   = 3;  // cached recipient device IDs for routing
 }
 message PollAnonSubmitMsg {
@@ -1575,7 +1744,7 @@ enum DeviceDelegationCapability {
 // V2 packed text as raw UTF-8 into encrypted_payload. V3 wraps every
 // payload type into a proto message of its own — gives us version fields per
 // type and a clear schema for future extensions (formatHint etc.).
-message TextMessageV3 {
+message TextMessage {
   string text         = 1;
   string format_hint  = 2;   // "plain" | "markdown" — V3.0 only "plain"
 
@@ -1604,14 +1773,14 @@ message TextMessageV3 {
 // X25519+ML-KEM PK from the signedPairToken.
 
 // New device → Primary: "I want to pair, here are my device keys"
-message DevicePairRequestV3 {
+message DevicePairRequest {
   bytes   device_ed25519_pk     = 1;  // 32B — new device's Device-Sig PK
   bytes   device_ml_dsa_pk      = 2;  // 1952B — new device's Device-Sig PQ PK
   bytes   pair_token_signature  = 3;  // proves possession of the pairToken
   uint64  timestamp_ms          = 4;
 }
 // Primary → New device: delegation material (KEM-encrypted end-to-end)
-message DevicePairApproveV3 {
+message DevicePairApprove {
   // Delegated Sig keys (per-device, derived from seed via HKDF)
   bytes  delegated_ed25519_pk   = 1;  // 32B
   bytes  delegated_ed25519_sk   = 2;  // 64B (Ed25519 expanded secret)
@@ -1655,7 +1824,7 @@ message RotationApprovalToken {
 // a device set change would thus be confirmed under a false description
 // (§7.5). Field 6 default 0 = rotation, so that old senders
 // are interpreted unchanged.
-enum ApprovalKindV3 {
+enum ApprovalKind {
   APPROVAL_KIND_KEY_ROTATION     = 0;
   APPROVAL_KIND_DEVICE_SET_CHANGE = 1;
 }
@@ -1665,7 +1834,7 @@ message RotationApprovalRequestPayload {
   bytes new_ml_dsa_pk    = 3;
   bytes new_x25519_pk    = 4;
   bytes new_ml_kem_pk    = 5;
-  ApprovalKindV3 approval_kind = 6;  // P4: occasion, see above
+  ApprovalKind approval_kind = 6;  // P4: occasion, see above
   // Only set with APPROVAL_KIND_DEVICE_SET_CHANGE — the device list after
   // the change, so that the dialog can name what is being removed.
   repeated bytes new_device_node_ids = 7;
@@ -1725,7 +1894,7 @@ message DeviceSetChangeProof {
 // the contact relation; the announcement adds the device COUNT and the
 // device-sig pubkeys of a person they already correspond with. It does not
 // widen the social graph by one edge.
-message DeviceSetAnnounceV3 {
+message DeviceSetAnnounce {
   // Monotonic per announcing identity. Replay defence: a receiver keeps the
   // highest seq it has accepted per contact and refuses anything <=.
   // Without it a captured older announcement — with a LARGER device set —
@@ -1829,4 +1998,87 @@ message SysChanPush {
   bytes channel_id       = 1;
   repeated bytes records = 2;  // serialized SystemChannelRecord blobs
   uint32 ttl             = 3;  // eager new-record flood: forward with ttl-1, dedup by fingerprint
+}
+
+// ── Groups and channels on the shared key (§16.2.5, S407 channel step 2) ──
+//
+// Every message below travels as an ordinary 1:1 delivery over a pairwise
+// leg (§4.3), only to members that showed the capability; an older 4.2
+// device never receives one.
+
+// §16.2.5 "Mixed operation within 4.2": what this version builds, each a
+// bit (1: the member list of §16.2.2 as owner and admins, changes as
+// changes; 2: the shared key of §16.2.5), and the device class (1 desktop,
+// 2 phone). Sent with the acceptance of an invitation, once to each owner
+// and admin of every group and channel, once to every contact whose fixed
+// neighbour the node is.
+message CapabilityNotice {
+  uint32 capabilities = 1;
+  uint32 device_class = 2;
+}
+
+// §16.2.5: the keys of a group or channel on the shared key for ONE member —
+// at a joining (`step_key` = S_g(d, j), `day_key` = D_g(d+1)), at a new
+// generation (`day_key` = D_g(d), `step` 0: a leaving, a removal, a transfer
+// of ownership, the switch at 17), or the return to pairwise legs
+// (`pairwise`). `generation_seed` (W_g) goes to owner and admins only; a
+// certificate only to an author, for the key it named.
+message SharedKeyDelivery {
+  bytes group_id = 1;
+  uint32 generation = 2;
+  bytes generation_id = 3;
+  uint32 day = 4;
+  uint32 step = 5;
+  bytes step_key = 6;
+  bytes day_key = 7;
+  bytes keeper_key = 8;
+  bytes generation_pk = 9;
+  bytes generation_seed = 10;
+  repeated bytes keepers = 11;   // type 1 | address 4/16 | port 2, at most 5
+  bytes author_pk = 12;
+  bytes certificate = 13;
+  repeated bytes served = 14;    // UserIDs served on the shared key
+  bool pairwise = 15;
+  uint64 membership_epoch = 16;
+  // The keeper list's version: a member uses the newest list it has read.
+  uint32 keepers_version = 17;
+}
+
+// §16.2.5: an author names the author key it wants certified for a
+// generation (when it holds none for it); owner or admin answer with a
+// SharedKeyDelivery carrying the certificate.
+message SharedKeyAuthor {
+  bytes group_id = 1;
+  uint32 generation = 2;
+  bytes generation_id = 3;
+  bytes author_pk = 4;
+}
+
+// §16.2.5 step 1: what an entry of kind "post" carries, sealed — the
+// application frame as a pairwise leg would carry it, and the author's
+// identity signature (Ed25519, §4.4.3) over the entry header and the frame.
+// `objects`: the hashes of the inline objects (< 256 KB) deposited as their
+// own entries, in the order of the frame's attachments.
+message SharedKeyPost {
+  bytes frame = 1;
+  bytes signature = 2;
+  repeated bytes objects = 3;
+  // The author key the author names for the next generation: owner and
+  // admins certify it in the next generation delivery (§16.2.5 "Leaving and
+  // removal": "to every author, a certificate for its next author key").
+  bytes next_author_pk = 4;
+  // §16.2.5 "Keepers": every post carries the keeper list; a member uses the
+  // newest list it has read. When a keeper fails at the owner's deposit, the
+  // owner's next post carries a list without it.
+  repeated bytes keepers = 5;
+  uint32 keepers_version = 6;
+}
+
+// §16.2.5 "Joining": the generation and step a membership update reports —
+// the owner or admin who admitted a member advanced `j` by one.
+message SharedKeyStep {
+  uint32 generation = 1;
+  bytes generation_id = 2;
+  uint32 day = 3;
+  uint32 step = 4;
 }

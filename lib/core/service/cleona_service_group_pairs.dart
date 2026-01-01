@@ -18,8 +18,8 @@
 //  * A leg with no way — neither a contact nor a group pair — is `failed` and
 //    named once in the group (stage 0, [_groupLegWithoutWay]).
 //
-// NOT HERE: private channels (§4.3 names them too). Their legs still reach
-// only contacts; a subscriber without one gets `failed` + the same notice.
+// Private channels (§4.3 names them too) form their pairs the same way —
+// `cleona_service_channel_pairs.dart`.
 
 part of 'cleona_service.dart';
 
@@ -28,51 +28,98 @@ part of 'cleona_service.dart';
 /// membership update (owner/admin, checked by its handler against the OLD
 /// member state), leave, and the acknowledgement. The day-key notice of the
 /// pair is a mycelium kind and never reaches this set.
-const Set<proto.MessageTypeV3> kGroupPairTypes = {
-  proto.MessageTypeV3.MTV3_TEXT,
-  proto.MessageTypeV3.MTV3_REPLY,
-  proto.MessageTypeV3.MTV3_MEDIA_INLINE,
-  proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
-  proto.MessageTypeV3.MTV3_MEDIA_HOLDERS,
+const Set<proto.MessageType> kGroupPairTypes = {
+  proto.MessageType.MT_TEXT,
+  proto.MessageType.MT_REPLY,
+  proto.MessageType.MT_MEDIA_INLINE,
+  proto.MessageType.MT_MEDIA_ANNOUNCE,
+  proto.MessageType.MT_MEDIA_HOLDERS,
   // The failure of a group file, both ways (§9.4 "Reasons"): part of the
   // group post it ends — without it a member who is no contact would show
   // another reason than the sender (OP-30).
-  proto.MessageTypeV3.MTV3_MEDIA_ABORT,
-  proto.MessageTypeV3.MTV3_VOICE_MESSAGE,
-  proto.MessageTypeV3.MTV3_REACTION,
-  proto.MessageTypeV3.MTV3_EDIT,
-  proto.MessageTypeV3.MTV3_DELETE,
-  proto.MessageTypeV3.MTV3_READ_RECEIPT,
-  proto.MessageTypeV3.MTV3_POLL_CREATE,
-  proto.MessageTypeV3.MTV3_POLL_VOTE,
-  proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
-  proto.MessageTypeV3.MTV3_POLL_UPDATE,
-  proto.MessageTypeV3.MTV3_POLL_SNAPSHOT,
-  proto.MessageTypeV3.MTV3_POLL_REVOKE,
-  proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
-  proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
-  proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
-  proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
-  proto.MessageTypeV3.MTV3_GROUP_INVITE,
-  proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE,
-  proto.MessageTypeV3.MTV3_GROUP_LEAVE,
-  proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
+  proto.MessageType.MT_MEDIA_ABORT,
+  proto.MessageType.MT_VOICE_MESSAGE,
+  proto.MessageType.MT_REACTION,
+  proto.MessageType.MT_EDIT,
+  proto.MessageType.MT_DELETE,
+  proto.MessageType.MT_READ_RECEIPT,
+  proto.MessageType.MT_POLL_CREATE,
+  proto.MessageType.MT_POLL_VOTE,
+  proto.MessageType.MT_POLL_VOTE_ANONYMOUS,
+  proto.MessageType.MT_POLL_UPDATE,
+  proto.MessageType.MT_POLL_SNAPSHOT,
+  proto.MessageType.MT_POLL_REVOKE,
+  proto.MessageType.MT_CALENDAR_INVITE,
+  proto.MessageType.MT_CALENDAR_UPDATE,
+  proto.MessageType.MT_CALENDAR_DELETE,
+  proto.MessageType.MT_CALENDAR_RSVP,
+  proto.MessageType.MT_GROUP_INVITE,
+  proto.MessageType.MT_CHANNEL_ROLE_UPDATE,
+  proto.MessageType.MT_GROUP_LEAVE,
+  proto.MessageType.MT_DELIVERY_RECEIPT,
+  // §17.2 "Missed call" (S408): the message the initiator of a group call
+  // sends a member whose invitation ended unanswered — an ordinary message,
+  // over the group pair as the INVITE it follows (§16.2.2: "the signals of a
+  // call in their group go over the group pair").
+  proto.MessageType.MT_CALL_MISSED,
   // §9.5 "Who is asked: every contact and every group pair": the request,
   // the answer and the progress report of catching up, each naming a group
   // both belong to. (§16.2.2 does not list it among the group types yet.)
-  proto.MessageTypeV3.MTV3_CATCH_UP,
+  proto.MessageType.MT_CATCH_UP,
+  // A private channel (§4.3 "of a group or private channel"): its post, its
+  // membership update and leaving, and the reactions of §16.2.4.
+  proto.MessageType.MT_CHANNEL_POST,
+  proto.MessageType.MT_CHANNEL_INVITE,
+  proto.MessageType.MT_CHANNEL_LEAVE,
+  proto.MessageType.MT_CHANNEL_REACTION_TOTALS,
+  proto.MessageType.MT_CHANNEL_REACTION_HANDOVER,
+  // §16.2.2: a membership change as a change (owner/admin, checked by its
+  // handler against the OLD member state).
+  proto.MessageType.MT_CHANNEL_MEMBERS_CHANGE,
+  proto.MessageType.MT_GROUP_MEMBERS_CHANGE,
+  // §16.2.2 "Settings (name, description, image, posting policy, message
+  // expiry) are changed by the owner or admin" — and reach every member,
+  // also one that is no contact of that owner or admin (owner/admin only,
+  // checked by its handler; S407 group list, norm proposal in the report).
+  proto.MessageType.MT_CHAT_CONFIG_UPDATE,
+  // §16.2.2/§16.2.5: the capability notice and the key deliveries of the
+  // shared key (`cleona_service_shared_key*.dart`), each naming a group or
+  // channel both belong to. The nudge is a mycelium kind (`0x68`).
+  proto.MessageType.MT_CAPABILITY_NOTICE,
+  proto.MessageType.MT_SHARED_KEY,
+  proto.MessageType.MT_SHARED_KEY_AUTHOR,
+  // §16.2.2 "the signals of a call in that group (§17.2)", §17.2 "To a
+  // fellow member who is not a contact, the signals of a call in their group
+  // go over the group pair … on the same two steps; every member may start a
+  // call in its group" (D-69). Exactly the signals the group call sends
+  // (`GroupCallManager._signal`, `_sendReject`); they never carry Plane D
+  // material to a member that is no contact with call consent (§17.3,
+  // `GroupCallManager._callPairAdmissible`). The seam sends them as call
+  // signals, steps 1 and 3 only ([_groupPairFrameSend]). CALL_MEDIA_STATE
+  // and CALL_KEYFRAME_REQUEST are not sent in the group path and are not
+  // here. RING_ACK is, since S407-GAMUTE (H-1): the ringing member tells the
+  // initiator, which may be no contact (§17.2).
+  proto.MessageType.MT_CALL_RING_ACK,
+  proto.MessageType.MT_CALL_INVITE,
+  proto.MessageType.MT_CALL_ANSWER,
+  proto.MessageType.MT_CALL_REJECT,
+  proto.MessageType.MT_CALL_HANGUP,
+  proto.MessageType.MT_CALL_CANCEL_OTHERS,
+  proto.MessageType.MT_CALL_GROUP_LEAVE,
+  proto.MessageType.MT_CALL_REJOIN,
+  proto.MessageType.MT_CALL_GROUP_SENDER_KEY,
 };
 
 /// The kinds whose leg without a way is NAMED in the group (stage 0) — what
 /// the user posted. A receipt or a read mark without a way is only `failed`.
-const Set<proto.MessageTypeV3> _kGroupPostTypes = {
-  proto.MessageTypeV3.MTV3_TEXT,
-  proto.MessageTypeV3.MTV3_REPLY,
-  proto.MessageTypeV3.MTV3_MEDIA_INLINE,
-  proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
-  proto.MessageTypeV3.MTV3_VOICE_MESSAGE,
-  proto.MessageTypeV3.MTV3_POLL_CREATE,
-  proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
+const Set<proto.MessageType> _kGroupPostTypes = {
+  proto.MessageType.MT_TEXT,
+  proto.MessageType.MT_REPLY,
+  proto.MessageType.MT_MEDIA_INLINE,
+  proto.MessageType.MT_MEDIA_ANNOUNCE,
+  proto.MessageType.MT_VOICE_MESSAGE,
+  proto.MessageType.MT_POLL_CREATE,
+  proto.MessageType.MT_CALENDAR_INVITE,
 };
 
 extension CleonaServiceGroupPairs on CleonaService {
@@ -81,7 +128,7 @@ extension CleonaServiceGroupPairs on CleonaService {
   /// Whether [frame] from [senderHex] — no contact — passes as from a group
   /// pair: a group type naming a group both belong to in the CURRENT member
   /// state, which this identity joined and which carries the pair.
-  bool _groupPairAdmits(proto.ApplicationFrameV3 frame, String senderHex) {
+  bool _groupPairAdmits(proto.ApplicationFrame frame, String senderHex) {
     final p = myceliumMailbox;
     if (p == null ||
         !kGroupPairTypes.contains(frame.messageType) ||
@@ -89,6 +136,16 @@ extension CleonaServiceGroupPairs on CleonaService {
       return false;
     }
     final gid = bytesToHex(Uint8List.fromList(frame.groupId));
+    final c = _channels[gid];
+    if (c != null) {
+      // A private channel both belong to (§4.3, §16.2).
+      if (c.isPublic ||
+          !c.members.containsKey(senderHex) ||
+          !c.members.containsKey(identity.userIdHex)) {
+        return false;
+      }
+      return p.groupPairOrNull(senderHex)?.groups.contains(gid) ?? false;
+    }
     final g = _groups[gid];
     if (g == null ||
         !g.joined ||
@@ -103,10 +160,16 @@ extension CleonaServiceGroupPairs on CleonaService {
 
   /// Hands [frame] to the group pair [recipientHex] — only for a group type
   /// naming a group the pair carries. `null`: no such pair.
+  ///
+  /// A call signal ([_kCallSignalTypes]) goes as a signal: steps 1 and 3,
+  /// no post box, no history entry (§17.2, D-45) — the same send as to a
+  /// contact ([_myceliumSignalSend]). Through `groupPairSend` it would take
+  /// the full ladder with the post box and be sent again at every edge.
   mycelium.Outbound? _groupPairFrameSend(mycelium.Mailbox p,
       {required String recipientHex,
       required Uint8List frame,
-      proto.MessageTypeV3? messageType,
+      required String messageIdHex,
+      proto.MessageType? messageType,
       Uint8List? groupId}) {
     if (messageType == null ||
         !kGroupPairTypes.contains(messageType) ||
@@ -117,6 +180,13 @@ extension CleonaServiceGroupPairs on CleonaService {
     final pair = p.groupPairOrNull(recipientHex);
     if (pair == null || !pair.groups.contains(bytesToHex(groupId))) {
       return null;
+    }
+    if (_kCallSignalTypes.contains(messageType)) {
+      return _myceliumSignalSend(p, recipientHex, frame,
+          messageIdHex: messageIdHex,
+          type: messageType,
+          short: recipientHex.substring(0, 8),
+          groupPair: true);
     }
     try {
       return p.groupPairSend(recipientHex, frame);
@@ -131,7 +201,7 @@ extension CleonaServiceGroupPairs on CleonaService {
   /// names the member ONCE (not per message) — instead of dropping it
   /// silently, as the seam did until S398.
   void _groupLegWithoutWay(String messageIdHex, String recipientHex,
-      {Uint8List? groupId, proto.MessageTypeV3? messageType}) {
+      {Uint8List? groupId, proto.MessageType? messageType}) {
     _myceliumLegsWithoutWay.add(messageIdHex);
     while (_myceliumLegsWithoutWay.length > _kMyceliumOutboundsMax) {
       _myceliumLegsWithoutWay.remove(_myceliumLegsWithoutWay.first);
@@ -157,8 +227,8 @@ extension CleonaServiceGroupPairs on CleonaService {
   // ── Member entries (§16.2.2, E2 = a + c, E3) ─────────────────────────
 
   /// [m] on the wire; with its signed entry only when [full].
-  proto.GroupMemberV3 _groupMemberWire(GroupMemberInfo m, {required bool full}) {
-    final w = proto.GroupMemberV3()
+  proto.GroupMember _groupMemberWire(GroupMemberInfo m, {required bool full}) {
+    final w = proto.GroupMember()
       ..nodeId = hexToBytes(m.nodeIdHex)
       ..displayName = m.displayName
       ..role = m.role
@@ -172,6 +242,9 @@ extension CleonaServiceGroupPairs on CleonaService {
         ..addressSigMlDsa = m.addressSigMlDsa!;
       if (m.neighbours != null) w.neighbours = m.neighbours!;
     }
+    // §4.4.3 (S407-UMSCHLAG): the mark rides in the compact entry too (2 B),
+    // so a renewed one reaches co-members without the 6.7 KB entry.
+    if (m.hasSignedEntry && m.readsPairTag) w.readsPairTag = true;
     return w;
   }
 
@@ -186,7 +259,8 @@ extension CleonaServiceGroupPairs on CleonaService {
       ..address = e.address
       ..addressSigEd25519 = e.ed
       ..addressSigMlDsa = e.dsa
-      ..neighbours = groupMemberNeighboursWire(p.ownNeighbours);
+      ..neighbours = groupMemberNeighboursWire(p.ownNeighbours)
+      ..readsPairTag = true; // this build reads the tagged envelope (§4.4.3)
   }
 
   /// The seed of the pair [x]–[y] in [seeds] — drawn once per update, so
@@ -200,7 +274,7 @@ extension CleonaServiceGroupPairs on CleonaService {
   /// identifier the member's UserID); one that does not goes into
   /// [unconfirmed]. A compact entry keeps what [old] held.
   Map<String, GroupMemberInfo> _groupMembersFromInvite(
-      proto.GroupInviteV3 invite, GroupInfo? old, Set<String> unconfirmed) {
+      proto.GroupInvite invite, GroupInfo? old, Set<String> unconfirmed) {
     final gid = Uint8List.fromList(invite.groupId);
     final members = <String, GroupMemberInfo>{};
     for (final m in invite.members) {
@@ -224,7 +298,8 @@ extension CleonaServiceGroupPairs on CleonaService {
             ..address = Uint8List.fromList(m.address)
             ..addressSigEd25519 = Uint8List.fromList(m.addressSigEd25519)
             ..addressSigMlDsa = Uint8List.fromList(m.addressSigMlDsa)
-            ..neighbours = opt(m.neighbours) ?? prev?.neighbours;
+            ..neighbours = opt(m.neighbours) ?? prev?.neighbours
+            ..readsPairTag = m.readsPairTag;
         } else {
           unconfirmed.add(nid);
         }
@@ -233,12 +308,51 @@ extension CleonaServiceGroupPairs on CleonaService {
           ..address = prev.address
           ..addressSigEd25519 = prev.addressSigEd25519
           ..addressSigMlDsa = prev.addressSigMlDsa
-          ..neighbours = prev.neighbours;
+          ..neighbours = prev.neighbours
+          ..readsPairTag = prev.readsPairTag || m.readsPairTag;
       }
       members[nid] = info;
     }
     return members;
   }
+
+  /// A LATE update (§16.2.2, owner decision 08.10.2026, V1 = A): an update
+  /// whose epoch is not above [g]'s decides nothing — members, roles, name
+  /// and epoch stay those of the newer state — but a self-signed entry it
+  /// carries for a member [g] holds WITHOUT one is taken. The entry proves
+  /// itself (`groupMemberCheck`), and an update E that a later E+1 overtook
+  /// in transport is otherwise the only copy of the entry of the member who
+  /// joined with E (S406-CATCHUP, open point 2). Returns how many were taken.
+  int _groupLateEntriesTake(proto.GroupInvite invite, GroupInfo g) {
+    final gid = Uint8List.fromList(invite.groupId);
+    var taken = 0;
+    for (final m in invite.members) {
+      final held = g.members[m.nodeId.hex];
+      if (m.address.isEmpty || held == null || held.hasSignedEntry) continue;
+      final a = groupMemberCheck(gid, Uint8List.fromList(m.address),
+          Uint8List.fromList(m.addressSigEd25519),
+          Uint8List.fromList(m.addressSigMlDsa));
+      if (a == null || bytesToHex(a.identifier) != held.nodeIdHex) continue;
+      held
+        ..address = Uint8List.fromList(m.address)
+        ..addressSigEd25519 = Uint8List.fromList(m.addressSigEd25519)
+        ..addressSigMlDsa = Uint8List.fromList(m.addressSigMlDsa)
+        ..readsPairTag = m.readsPairTag
+        ..neighbours ??= m.neighbours.isEmpty
+            ? null
+            : Uint8List.fromList(m.neighbours);
+      taken++;
+    }
+    return taken;
+  }
+
+  /// The membership update [_broadcastGroupUpdate] builds from [g] for
+  /// [recipientHex] — for probes that hand a device updates in an order of
+  /// their choosing (`smoke_group_update_late_run.dart`).
+  @visibleForTesting
+  Uint8List groupUpdateForTesting(GroupInfo g, String recipientHex,
+          {Set<String> fresh = const {}}) =>
+      _buildSignedGroupInviteBytes(g, recipientHex: recipientHex, fresh: fresh);
 
   /// The ML-DSA key of [m] from its signed entry — for a membership update
   /// of an admin who is not a contact (build step 9 of the proposal).
@@ -253,7 +367,7 @@ extension CleonaServiceGroupPairs on CleonaService {
 
   /// The seeds of an update for THIS identity wait in the mailbox until the
   /// pair can be formed (only after the explicit join, §16.2.2).
-  void _groupPairSeedsTake(proto.GroupInviteV3 invite, GroupInfo g) {
+  void _groupPairSeedsTake(proto.GroupInvite invite, GroupInfo g) {
     final p = myceliumMailbox;
     if (p == null) return;
     final gid = Uint8List.fromList(invite.groupId);
@@ -291,7 +405,7 @@ extension CleonaServiceGroupPairs on CleonaService {
       if (!g.joined || !m.hasSignedEntry) continue;
       final r = p.groupPairFromEntry(
           gid, m.address!, m.addressSigEd25519!, m.addressSigMlDsa!,
-          neighboursWire: m.neighbours);
+          neighboursWire: m.neighbours, readsTag: m.readsPairTag);
       if (r.address == null) {
         _groupNotice(g, m.nodeIdHex, kNoticeGroupMemberUnconfirmed,
             'unconfirmed');
@@ -313,13 +427,22 @@ extension CleonaServiceGroupPairs on CleonaService {
     _groupOwnEntrySign(g);
     g.joined = true;
     _saveGroups();
+    // §16.2.5: the capability notice goes with the acceptance — ahead of
+    // it, so that the owner can admit this device on the shared key.
+    await _capabilityNoticesDue();
     final to = g.inviterNodeIdHex ?? g.ownerNodeIdHex;
     final join = proto.GroupJoin()
       ..groupId = hexToBytes(groupIdHex)
       ..member = _groupMemberWire(me, full: true);
+    if (!sharedKeyOff) {
+      // §16.2.5 "Joining": the author key it names in its acceptance.
+      final s = _skOrNew(groupIdHex);
+      join.authorPk = _skNameAuthorKey(s);
+      _skSave(s);
+    }
     final sent = await sendToUser(
       recipientUserId: hexToBytes(to),
-      messageType: proto.MessageTypeV3.MTV3_GROUP_JOIN,
+      messageType: proto.MessageType.MT_GROUP_JOIN,
       payload: Uint8List.fromList(join.writeToBuffer()),
       groupId: hexToBytes(groupIdHex),
     );
@@ -334,7 +457,7 @@ extension CleonaServiceGroupPairs on CleonaService {
   /// `GROUP_JOIN` at the inviter: the joiner's self-signed entry is checked,
   /// kept with the fixed neighbours this identity knows of it, and goes to
   /// every member in the next update (a full entry only for it, E2 = c).
-  void _handleGroupJoinV3(HarvestEvent event) {
+  void _handleGroupJoin(HarvestEvent event) {
     final senderHex = event.senderUserId.hex;
     final proto.GroupJoin join;
     try {
@@ -345,6 +468,11 @@ extension CleonaServiceGroupPairs on CleonaService {
     }
     final gid = join.groupId.hex;
     final g = _groups[gid];
+    // §4.3, §16.2.2: a subscriber's entry for a private channel.
+    if (g == null && _channels.containsKey(gid)) {
+      _channelJoinReceived(senderHex, join);
+      return;
+    }
     final member = g?.members[senderHex];
     if (g == null || member == null || !_hasGroupPermission(g, 'invite')) {
       _log.warn('GROUP_JOIN from ${senderHex.substring(0, 8)}: no such member '
@@ -352,6 +480,9 @@ extension CleonaServiceGroupPairs on CleonaService {
       return;
     }
     final w = join.member;
+    // §4.4.3 (S407-UMSCHLAG): only the mark, no entry — the one-time renewal
+    // of a member that joined before (`cleona_service_pair_tag.dart`).
+    if (_groupEntryMarkOnly(g, senderHex, member, w, join)) return;
     final a = w.nodeId.hex == senderHex
         ? groupMemberCheck(hexToBytes(gid), Uint8List.fromList(w.address),
             Uint8List.fromList(w.addressSigEd25519),
@@ -369,14 +500,30 @@ extension CleonaServiceGroupPairs on CleonaService {
       ..address = Uint8List.fromList(w.address)
       ..addressSigEd25519 = Uint8List.fromList(w.addressSigEd25519)
       ..addressSigMlDsa = Uint8List.fromList(w.addressSigMlDsa)
+      ..readsPairTag = w.readsPairTag
       ..neighbours = known.isNotEmpty
           ? groupMemberNeighboursWire(known)
           : (w.neighbours.isEmpty ? null : Uint8List.fromList(w.neighbours));
     g.membershipEpoch++;
     _saveGroups();
+    if (join.authorPk.length == 32) {
+      final s = _skOrNew(gid);
+      s.named[senderHex] = bytesToHex(Uint8List.fromList(join.authorPk));
+      _skSave(s);
+    }
     _log.info('GROUP_JOIN: ${senderHex.substring(0, 8)} joined '
         '${gid.substring(0, 8)} — entry passed on');
+    // §16.2.5 "Joining": the keys first — `_skAdmit` advances the step before
+    // its first `await` —, so that the membership update, built before its
+    // own first `await` from THIS state, carries the step; then the size.
+    // No `await` between them: a second joining must not overtake the
+    // update of the first (`smoke_group_join_concurrent_run`).
+    unawaited(_skAdmit(gid, senderHex));
     unawaited(_broadcastGroupUpdate(g, fresh: {senderHex}));
+    unawaited(_skSizeCheck(gid));
+    // §16.2.2, §21.5.4: a member who joins is told the settings in force —
+    // one 1:1 delivery, none on the defaults.
+    _settingsToNewcomer(gid, senderHex);
     onStateChanged?.call();
   }
 }

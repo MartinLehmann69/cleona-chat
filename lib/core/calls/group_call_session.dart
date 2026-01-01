@@ -1,6 +1,10 @@
 import 'dart:typed_data';
 import 'package:cleona/core/calls/overlay_tree.dart';
 import 'package:cleona/core/calls/media_relay.dart';
+import 'package:cleona/core/calls/group_media_admission.dart';
+import 'package:cleona/core/calls/group_call_broker.dart';
+import 'package:cleona/core/calls/group_call_crystal.dart';
+import 'package:cleona/core/calls/group_call_ringing.dart';
 import 'package:cleona/core/calls/rtt_measurement.dart';
 import 'package:cleona/core/calls/collaboration/whiteboard_manager.dart';
 import 'package:cleona/core/calls/collaboration/call_chat_manager.dart';
@@ -18,6 +22,12 @@ class GroupCallParticipant {
   int framesReceived;
   bool isMuted;
   double audioLevel;
+
+  /// This device's hearing of the participant (`peer_hearing.dart`),
+  /// copied from the mixer four times a second.
+  int framesHeard = 0;
+  int framesDuplicate = 0;
+  double toneHz = 0;
 
   GroupCallParticipant({
     required this.nodeIdHex,
@@ -216,6 +226,44 @@ class GroupCallSession {
   MediaRelay? relay;
   RttMeasurement? rtt;
 
+  /// Over which edge a sender's frames are taken (§17.5). The broker
+  /// binding of §17.7 is entered here.
+  final GroupMediaAdmission admission = GroupMediaAdmission();
+
+  /// The media pairs and brokers of the mesh (§17.7) — set by the manager
+  /// when the call starts on this device.
+  GroupCallBroker? broker;
+
+  /// The §17.2 clocks of this call (`group_call_ringing.dart`): on the
+  /// initiator per invited member, on a callee its own ringing.
+  GroupCallRinging? ringing;
+
+  /// The forwarding of the pairs this device carries as a broker.
+  PairRelay? pairRelay;
+
+  /// This device's place in the crystal of §17.7 — set once the call grew
+  /// past the mesh (from 7 participants on) and kept for the rest of the
+  /// call (`group_call_crystal.dart`).
+  GroupCallCrystal? crystal;
+
+  /// How [peerHex] is heard: in the mesh the broker says it; in the crystal
+  /// a participant no tree link reaches is shown "No common contact in the
+  /// call" (§17.7) — known for certain where nothing links this device at
+  /// all, and at the root, below which the whole tree lies.
+  GroupPeerReach reachOf(String peerHex) {
+    final c = crystal;
+    if (c == null) return broker?.reachOf(peerHex) ?? GroupPeerReach.direct;
+    if (c.parent != null || peerHex == c.ownHex) return GroupPeerReach.direct;
+    if (c.seekingPlace) return GroupPeerReach.pending;
+    return c.below.contains(peerHex)
+        ? GroupPeerReach.direct
+        : GroupPeerReach.noCommonContact;
+  }
+
+  /// Which voice library the group mixer runs on — `cleona_voice`, or
+  /// `cleona_voice_mock` under a lab tone; empty while no mixer runs.
+  String audioBackend = '';
+
   /// Audio frame counter.
   int totalFramesSent = 0;
   int totalFramesReceived = 0;
@@ -250,6 +298,23 @@ class GroupCallSession {
   /// F-C) has logged its "active" line for this group call — prevents
   /// per-frame log spam (audio alone runs at ~50 frames/sec).
   bool liveMediaFastPathLogged = false;
+
+  /// §17.7: video is offered only up to a participant count set by
+  /// measurement, until then up to the mesh ceiling of 6
+  /// ([GroupCallManager.maxParticipantsVideo]). Once a call grows past it,
+  /// video is switched off for the rest of THIS call — it does not come
+  /// back when someone leaves, so the picture does not flicker on and off
+  /// around the threshold.
+  bool videoSwitchedOff = false;
+
+  /// Switches video off when more than [maxVideo] participants have
+  /// joined. Returns `true` exactly once: in the call where it happens now.
+  bool applyVideoCap(int maxVideo) {
+    if (videoSwitchedOff) return false;
+    if (joinedParticipantIds.length <= maxVideo) return false;
+    videoSwitchedOff = true;
+    return true;
+  }
 
   GroupCallSession({
     required this.callId,
@@ -288,11 +353,32 @@ class GroupCallSession {
                   state: p.state,
                   isMuted: p.isMuted,
                   audioLevel: p.audioLevel,
+                  framesHeard: p.framesHeard,
+                  framesDuplicate: p.framesDuplicate,
+                  toneHz: p.toneHz,
+                  reach: p.state == ParticipantState.joined
+                      ? reachOf(p.nodeIdHex)
+                      : GroupPeerReach.direct,
                 ))
             .toList(),
         totalFramesSent: totalFramesSent,
         totalFramesReceived: totalFramesReceived,
         videoFramesSent: videoFramesSent,
         videoFramesReceived: videoFramesReceived,
+        videoSwitchedOff: videoSwitchedOff,
+        audioBackend: audioBackend,
+        crystal: _crystalInfo(),
       );
+
+  /// The own place in the crystal (§17.7), or `null` while in the mesh.
+  GroupCallCrystalInfo? _crystalInfo() {
+    final c = crystal;
+    if (c == null) return null;
+    return GroupCallCrystalInfo(
+      root: c.root,
+      parent: c.parent,
+      children: c.children.keys.toList()..sort(),
+      seeking: c.seekingPlace,
+    );
+  }
 }

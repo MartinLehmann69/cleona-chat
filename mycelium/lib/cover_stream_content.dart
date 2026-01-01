@@ -16,7 +16,11 @@
 ///   (0x03 is no content any more: the code registration travels as `0x24`,
 ///   §5.5, §8.1 — F-B, owner 06.10.2026)
 ///   0x04 keep-alive         content: device code 16 | token 8 (§8.1)
+///   0x05 identifiers        content: count 1 | count × 20 (`durable_id.dart`, §16.0)
 /// ```
+///
+/// A reader that does not know a content byte treats the packet as fill
+/// ([coverPayloadRead] returns `null`, §5.5) — this is how 4.2.3 reads `0x05`.
 ///
 /// ── WHY THE TWO ZERO BYTES ─────────────────────────────────────────────
 ///
@@ -49,6 +53,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:mycelium/address_entries.dart';
+import 'package:mycelium/durable_id.dart';
 import 'package:mycelium/wire.dart' show PacketRoute;
 import 'package:mycelium/card_address.dart' show CardFormatError;
 import 'package:mycelium/shell_start.dart' show kPayloadAtMost;
@@ -63,6 +68,8 @@ const int kContentPiece = kinds.kCoverPiece;
 const int kContentEntries = kinds.kCoverEntries;
 /// The keep-alive (§8.1) — device code and token, `mapping_echo.dart`.
 const int kContentKeepAlive = kinds.kCoverKeepAlive;
+/// Durable-object identifiers (§5.5 rule 2, §16.0).
+const int kContentIdentifiers = kinds.kCoverIdentifiers;
 
 /// Device code (16 B) + token (8 B) of a keep-alive.
 const int kKeepAliveContent = 24;
@@ -99,6 +106,7 @@ Uint8List coverPayloadBuild(
   Random random, {
   Uint8List? piece,
   AddressList? entries,
+  List<DurableId>? identifiers,
 }) {
   final b = BytesBuilder(copy: false);
   switch (kind) {
@@ -122,6 +130,12 @@ Uint8List coverPayloadBuild(
         throw ArgumentError('Keep-alive ${s.length} B, exactly $kKeepAliveContent');
       }
       b.add(s);
+    case kContentIdentifiers:
+      final l = identifiers ?? (throw ArgumentError('Identifiers missing'));
+      if (l.isEmpty || l.length > kIdentifiersPerCover) {
+        throw ArgumentError('${l.length} identifiers, 1 to $kIdentifiersPerCover');
+      }
+      identifiersWrite(b, l);
     default:
       throw ArgumentError('unknown content kind $kind');
   }
@@ -144,6 +158,7 @@ typedef CoverContent = ({
   Uint8List? piece,
   AddressList? entries,
   Uint8List? keepAlive,
+  List<DurableId>? identifiers,
 });
 
 /// Reads a cover payload; `null` if it is not a valid one. An error
@@ -166,7 +181,8 @@ CoverContent? coverPayloadRead(Uint8List p) {
           kind: kContentFill,
           piece: null,
           entries: null,
-          keepAlive: null
+          keepAlive: null,
+          identifiers: null
         );
       case kContentPiece:
         final l = read(2);
@@ -176,21 +192,34 @@ CoverContent? coverPayloadRead(Uint8List p) {
           kind: kContentPiece,
           piece: Uint8List.fromList(read(n)),
           entries: null,
-          keepAlive: null
+          keepAlive: null,
+          identifiers: null
         );
       case kContentEntries:
         return (
           kind: kContentEntries,
           piece: null,
           entries: addressListRead(read),
-          keepAlive: null
+          keepAlive: null,
+          identifiers: null
         );
       case kContentKeepAlive:
         return (
           kind: kContentKeepAlive,
           piece: null,
           entries: null,
-          keepAlive: Uint8List.fromList(read(kKeepAliveContent))
+          keepAlive: Uint8List.fromList(read(kKeepAliveContent)),
+          identifiers: null
+        );
+      case kContentIdentifiers:
+        final l = identifiersRead(read);
+        if (l.isEmpty || l.length > kIdentifiersPerCover) return null;
+        return (
+          kind: kContentIdentifiers,
+          piece: null,
+          entries: null,
+          keepAlive: null,
+          identifiers: l
         );
       default:
         return null;

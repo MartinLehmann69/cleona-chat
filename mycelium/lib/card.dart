@@ -5,7 +5,8 @@
 /// publisher-key flag and the publisher key (0 or 32 B) between the
 /// neighbour address and the relay count, version byte `0x02`. A card of
 /// version `0x01` is rejected as "unknown card version" before any other
-/// field is read — no partial read (§15.2).
+/// field is read — no partial read (§15.2). It stays so in S407: 4.2.3
+/// reads exactly this layout (owner 09.10.2026: 4.2.x stays compatible).
 ///
 /// History in brief: the first version carried the complete keys and a
 /// signature (6543 B, fits no QR); since the second it carries only what
@@ -29,24 +30,22 @@
 /// | one own IPv4, no key, no relays          |  98 B |         143 | V6   |
 /// | 4x IPv6 + neighbour + key + 3 relays     | 413 B |         563 | V16  |
 ///
-/// The text form computes `ceil(n x 4 / 3)` base64url characters plus 9 for
-/// the prefix (`card_text.dart`). The QR carries the BINARY form.
+/// Text: `ceil(n x 4 / 3)` base64url characters + 9 for the prefix
+/// (`card_text.dart`), + 47 for the S407 key suffix. The QR carries the BINARY form.
 ///
-/// NO SIGNATURE. The card travels over a visible channel (Bob's
-/// screen); a signature from a key whose fingerprint stands in
-/// the same card secures nothing additional. The binding is provided by
+/// NO SIGNATURE. The card travels over a visible channel (Bob's screen); a
+/// signature from a key whose fingerprint stands in the same card secures
+/// nothing additional. The binding is provided by
 /// matching the later received bundle against the fingerprint
 /// ([matchesIdentifier]).
 ///
-/// This file deliberately depends on nothing but `dart:core`, `dart:typed_data`
-/// and `dart:convert` (base64url) — no FFI, no crypto library,
-/// so that it stays testable without the native libs.
+/// This file depends on nothing but `dart:core`, `dart:typed_data` and
+/// `dart:convert` — no FFI, no crypto library, testable without native libs.
 ///
 /// OPEN SEAM: [fingerprintFrom] needs a SHA-256 function from
 /// outside; [Card.matchesIdentifier] only compares bytes. `package:crypto`
 /// is NOT directly in `mycelium/pubspec.yaml` (only transitively via the
-/// `cleona` dependency) — therefore this file passes the choice of the
-/// hash function through to the caller as a callback ([CardHashFunction]).
+/// `cleona` dependency) — the caller passes the hash ([CardHashFunction]).
 library;
 
 import 'dart:convert';
@@ -162,9 +161,12 @@ class Card {
   /// under it (`publisher_lookup.dart`).
   final Uint8List? publisherKey;
 
-  /// Leading zero bits that a proof of work must have before the
-  /// holder of this card even looks at a request.
+  /// Leading zero bits a proof of work must have before the holder looks.
   final int difficulty;
+
+  /// Not packed: the issuer reads keyed neighbour lists — shown behind the
+  /// text line (`card_text_key.dart`, S407), where a 4.2.3 reader stops.
+  final bool readsKeys;
 
   final Uint8List code;
 
@@ -186,6 +188,7 @@ class Card {
     this.difficulty = difficultyDefault,
     required Uint8List code,
     required this.expiryUnixSeconds,
+    this.readsKeys = false,
   })  : letterKeyX25519 = Uint8List.fromList(letterKeyX25519),
         fingerprint = Uint8List.fromList(fingerprint),
         ownAddresses = List.unmodifiable(ownAddresses),

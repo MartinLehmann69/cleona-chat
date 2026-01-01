@@ -2,6 +2,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/service/service_types.dart' show MessageStatus;
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 
@@ -12,6 +13,13 @@ class MessageBubble extends StatelessWidget {
   final String? statusTicks;
   final String? replyTo;
   final List<String> reactions;
+
+  /// The emojis among [reactions] that are the own reaction — marked.
+  final Set<String> ownReactions;
+
+  /// A tap on a reaction: the caller takes the own one back or makes the
+  /// tapped one the own (one reaction per person). Null: not tappable.
+  final void Function(String emoji)? onReactionTap;
   final VoidCallback? onTap;
   /// Opens the message-actions menu (reply/react/copy/edit/delete/...).
   /// Architecture §18.6.2: every actionable bubble shows a 3-dot icon in the
@@ -27,6 +35,27 @@ class MessageBubble extends StatelessWidget {
   /// or lower epoch — split-view anomaly detected.
   final bool membershipMismatch;
 
+  /// §21.5.1: an edited message carries the suffix "(edited)" with the time
+  /// of the last change. The caller passes the finished text; null for a
+  /// message that was never edited.
+  final String? editedLabel;
+
+  /// §12.2 as symbols: waiting mark, ONE tick, TWO ticks, warning mark —
+  /// the [statusTicks] the chat passes for an own message. Lives beside the
+  /// bubble so the golden test renders the same marks the app does.
+  static String statusTicksFor(MessageStatus status) {
+    switch (status) {
+      case MessageStatus.resting:
+        return '⏳';
+      case MessageStatus.inTransit:
+        return '✓';
+      case MessageStatus.delivered:
+        return '✓✓';
+      case MessageStatus.failed:
+        return '✗';
+    }
+  }
+
   const MessageBubble({
     super.key,
     required this.text,
@@ -35,10 +64,13 @@ class MessageBubble extends StatelessWidget {
     this.statusTicks,
     this.replyTo,
     this.reactions = const [],
+    this.ownReactions = const {},
+    this.onReactionTap,
     this.onTap,
     this.onActionsPressed,
     this.expiryActive = false,
     this.membershipMismatch = false,
+    this.editedLabel,
   });
 
   @override
@@ -87,6 +119,10 @@ class MessageBubble extends StatelessWidget {
     final textColor = useBlur
         ? Colors.white
         : (isOwn ? Colors.white : theme.colorScheme.onSurface);
+    // Secondary text (timestamp, ticks, reply quote, timer and menu glyph):
+    // photo mode uses the one 85%-white colour of all frosted-glass surfaces.
+    Color secondary(double alpha) =>
+        useBlur ? kPhotoSecondaryText : textColor.withValues(alpha: alpha);
 
     // Photo mode mirrors the tile chrome: hairline white border, no shadow
     // (BackdropFilter does the depth cue). Solid skins keep the original
@@ -123,12 +159,12 @@ class MessageBubble extends StatelessWidget {
                 color: Colors.black.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(tokens.radius.sm),
                 border: Border(
-                  left: BorderSide(color: textColor.withValues(alpha: 0.6), width: 2),
+                  left: BorderSide(color: secondary(0.6), width: 2),
                 ),
               ),
               child: Text(
                 replyTo!,
-                style: tokens.typography.caption.copyWith(color: textColor.withValues(alpha: 0.7)),
+                style: tokens.typography.caption.copyWith(color: secondary(0.7)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -174,10 +210,21 @@ class MessageBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: isOwn ? MainAxisAlignment.end : MainAxisAlignment.start,
             children: [
+              if (editedLabel != null) ...[
+                Text(
+                  editedLabel!,
+                  style: tokens.typography.caption.copyWith(
+                    color: secondary(0.6),
+                    fontSize: 10,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+                SizedBox(width: tokens.spacing.xs),
+              ],
               Text(
                 timestamp,
                 style: tokens.typography.mono.copyWith(
-                  color: textColor.withValues(alpha: 0.6),
+                  color: secondary(0.6),
                 ),
               ),
               if (statusTicks != null) ...[
@@ -185,7 +232,7 @@ class MessageBubble extends StatelessWidget {
                 Text(
                   statusTicks!,
                   style: tokens.typography.mono.copyWith(
-                    color: textColor.withValues(alpha: 0.6),
+                    color: secondary(0.6),
                   ),
                 ),
               ],
@@ -194,7 +241,7 @@ class MessageBubble extends StatelessWidget {
                 Icon(
                   Icons.timer_outlined,
                   size: tokens.typography.mono.fontSize ?? 12,
-                  color: textColor.withValues(alpha: 0.6),
+                  color: secondary(0.6),
                 ),
               ],
             ],
@@ -203,7 +250,26 @@ class MessageBubble extends StatelessWidget {
             SizedBox(height: tokens.spacing.xs),
             Wrap(
               spacing: tokens.spacing.xs,
-              children: reactions.map((r) => Text(r, style: const TextStyle(fontSize: 16))).toList(),
+              children: reactions.map((r) {
+                final mine = ownReactions.contains(r);
+                final label = Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: mine
+                      ? BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: textColor.withValues(alpha: 0.8)),
+                        )
+                      : null,
+                  child: Text(r, style: const TextStyle(fontSize: 16)),
+                );
+                if (onReactionTap == null) return label;
+                return InkWell(
+                  key: ValueKey('reaction_chip_$r'),
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => onReactionTap!(r),
+                  child: label,
+                );
+              }).toList(),
             ),
           ],
         ],
@@ -247,7 +313,7 @@ class MessageBubble extends StatelessWidget {
                       child: Icon(
                         Icons.more_vert,
                         size: 16,
-                        color: textColor.withValues(alpha: 0.7),
+                        color: secondary(0.7),
                       ),
                     ),
                   ),

@@ -157,7 +157,7 @@ final class ObservedAddressBook {
   /// quantity [onAgreedChanged] hangs on. Kept separate because
   /// §17.3 keeps the families separate: a new IPv6 observation must not
   /// touch a standing IPv4 announcement.
-  ({ObservedAddress? v4, ObservedAddress? v6}) get _state =>
+  ({ObservedAddress? v4, ObservedAddress? v6}) get _state =>  // version-name-ok: IP address family
       (v4: agreed(ipv6: false), v6: agreed(ipv6: true));
 
   /// Forgets what [partner] has said.

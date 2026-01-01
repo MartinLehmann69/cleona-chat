@@ -25,17 +25,14 @@ import 'dart:io';
 import 'package:mycelium/memory.dart' show Contact;
 import 'package:mycelium/card.dart' show Card;
 import 'package:mycelium/card_address.dart' show CardAddress, Routes;
-import 'package:mycelium/node_helpers.dart' show outTheSegment;
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
-import 'package:mycelium/own_segment.dart' show inOwnSegment;
+import 'package:mycelium/own_segment.dart' show withinOwnSegment;
 
 /// Whether [a] is a private address that lies in the own segment from the
 /// view of THIS node — step 1 (§7.2; S405 V6: the private address of a
 /// foreign segment is neither step 1 nor step 2, it is discarded).
-bool _inSegment(CardAddress a) {
-  final ip = InternetAddress.fromRawAddress(a.address);
-  return outTheSegment(ip) && inOwnSegment(ip);
-}
+bool _inSegment(CardAddress a) =>
+    withinOwnSegment(InternetAddress.fromRawAddress(a.address));
 
 /// Whether [a] is reachable from the open network — step 2 (§7.3).
 bool _open(CardAddress a) =>

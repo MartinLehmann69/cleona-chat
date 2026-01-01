@@ -71,6 +71,13 @@ class ReachabilityProof implements PacketRoute {
 
   bool get proven => provenAt != null;
 
+  /// The address types an unsolicited packet arrived over since start or the
+  /// last network change — what makes a SEEN address of that type publishable
+  /// (§11.9, S410 A); [onFamily] is the edge, once per type.
+  final Set<InternetAddressType> _types = {};
+  void Function(InternetAddressType family)? onFamily;
+  bool provenFor(InternetAddressType family) => _types.contains(family);
+
   /// Inbound partners (§25.4, E-41): distinct addresses from the open network
   /// that reached this node unasked since start or the last network change.
   /// The norm keeps partner counts separately by inbound and outbound; until
@@ -91,6 +98,7 @@ class ReachabilityProof implements PacketRoute {
     provenFrom = null;
     _contacted.clear();
     _inbound.clear();
+    _types.clear();
     _full = false;
   }
 
@@ -119,6 +127,7 @@ class ReachabilityProof implements PacketRoute {
     if (!fromOutsideReachable(from)) return;
     if (_contacted.contains(from.address)) return;
     if (_inbound.length < kInboundAtMost) _inbound.add(from.address);
+    if (_types.add(from.type)) onFamily?.call(from.type);
     if (provenAt != null) return;
     provenAt = DateTime.now();
     provenFrom = '${from.address}:$fromPort';

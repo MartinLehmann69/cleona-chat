@@ -240,8 +240,11 @@ class Amendments {
     report?.call('Read mark for ${_short(identifier)} in transit');
   }
 
-  /// Feeds in an arriving packet.
-  void receive(Uint8List packet, CardAddress origin) {
+  /// Feeds in an arriving packet; [arrivedAt] as for `Messages.receive` — a
+  /// parked cell keeps its arrival (§22.5.3), which also starts its edit
+  /// window check.
+  void receive(Uint8List packet, CardAddress origin, {DateTime? arrivedAt}) {
+    final at = arrivedAt ?? DateTime.now();
     if (packet.isEmpty) throw AmendmentError('empty packet');
     // A copy of a sending already taken (§7.1 sends every step at once; §9.2
     // "duplicate … ignored"): the same bytes — see [kAmendmentsSeenAtMost].
@@ -267,11 +270,11 @@ class Amendments {
 
     switch (packet[0]) {
       case kinds.kReaction:
-        _reactionCame(identifier, rest, sender);
+        _reactionCame(identifier, rest, sender, at);
       case kinds.kEdit:
-        _editCame(identifier, rest, sender);
+        _editCame(identifier, rest, sender, at);
       case kinds.kReadMark:
-        _readMarkCame(identifier, rest, sender);
+        _readMarkCame(identifier, rest, sender, at);
       default:
         throw AmendmentError('unexpected kind ${packet[0]}');
     }
@@ -283,7 +286,8 @@ class Amendments {
   /// insertion order, the oldest gives way ([kAmendmentsSeenAtMost]).
   final Set<String> _seen = <String>{};
 
-  void _reactionCame(Uint8List identifier, Uint8List rest, Address from) {
+  void _reactionCame(
+      Uint8List identifier, Uint8List rest, Address from, DateTime at) {
     if (rest.length < kEffectLength + 1) {
       throw AmendmentError('Reaction without emoji');
     }
@@ -296,11 +300,12 @@ class Amendments {
       from: from,
       to: me.address,
       isSet: isSet,
-      at: DateTime.now(),
+      at: at,
     ));
   }
 
-  void _editCame(Uint8List identifier, Uint8List rest, Address from) {
+  void _editCame(
+      Uint8List identifier, Uint8List rest, Address from, DateTime at) {
     // Only the author may change — otherwise a recipient would put words
     // in the sender's mouth that would stand on the sender's side as the sender's
     // own.
@@ -315,7 +320,7 @@ class Amendments {
           'author — discarded');
       return;
     }
-    if (DateTime.now().difference(author.at) > kEditWindow) {
+    if (at.difference(author.at) > kEditWindow) {
       report?.call('Edit of ${_short(identifier)} came after expiry '
           'of the deadline — discarded');
       return;
@@ -328,11 +333,12 @@ class Amendments {
       newContent: Uint8List.fromList(rest),
       from: from,
       to: me.address,
-      at: DateTime.now(),
+      at: at,
     ));
   }
 
-  void _readMarkCame(Uint8List identifier, Uint8List rest, Address from) {
+  void _readMarkCame(
+      Uint8List identifier, Uint8List rest, Address from, DateTime at) {
     if (rest.isNotEmpty) {
       throw AmendmentError('Read mark with ${rest.length} B attachment');
     }
@@ -353,7 +359,7 @@ class Amendments {
     report?.call('Read mark for ${_short(identifier)} arrived');
     onReadMark?.call(
         ReadMark(
-            identifier: identifier, from: from, to: me.address, at: DateTime.now()));
+            identifier: identifier, from: from, to: me.address, at: at));
   }
 
   void _send(int kind, Uint8List plaintext, Address to,
@@ -361,7 +367,7 @@ class Amendments {
     final envelope = Envelope.seal(
       plaintext: plaintext,
       recipient: to,
-      sender: me,
+      sender: me, pairTag: true, // §4.4.3, as every message to a pair
     );
     final p = Uint8List(1 + envelope.length);
     p[0] = kind;

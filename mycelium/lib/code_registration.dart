@@ -13,7 +13,7 @@
 /// ```
 /// 0x24 | day u32 BE | piece u8 | pieces u8 | count u8 | device code 16 B
 ///                                                     | count × 16 B
-/// 0x25 | day u32 BE | piece u8
+/// 0x25 | day u32 BE | piece u8 [| record key 32 B]
 /// ```
 ///
 /// Every piece stands for itself: the neighbour registers what arrives, and
@@ -73,8 +73,11 @@ const int _kHeader = _kBeforeCode + kCodeLength;
 /// `0x24` of 1048 B, one part of the splitter (`kMaxPayload`, 1158 B).
 const int kPieceLength = _kHeader + kCodesPerPiece * kCodeLength;
 
-/// Length of a `0x25`: kind, day, piece.
+/// Length of a `0x25`: kind, day, piece — and, from a neighbour that writes
+/// an address record (§11.9), its record key (S407 a'): the registering
+/// device names it with the neighbour's address to its contacts.
 const int kRegisteredLength = 1 + 4 + 1;
+const int kRegisteredKeyedLength = kRegisteredLength + 32;
 
 /// The `0x24` that carries [piece] (`registrationBuild`).
 Uint8List registrationPacket(Uint8List piece) =>
@@ -82,23 +85,41 @@ Uint8List registrationPacket(Uint8List piece) =>
       ..[0] = kinds.kRegistration
       ..setRange(1, 1 + piece.length, piece);
 
-/// The `0x25` answering the piece [piece] of day [day].
-Uint8List registeredPacket(int day, int piece) {
-  final p = Uint8List(kRegisteredLength)..[0] = kinds.kRegistered;
+/// The `0x25` answering the piece [piece] of day [day], with [recordKey]
+/// when this node writes an address record.
+Uint8List registeredPacket(int day, int piece, [Uint8List? recordKey]) {
+  final p = Uint8List(recordKey == null ? kRegisteredLength : kRegisteredKeyedLength)
+    ..[0] = kinds.kRegistered;
   ByteData.sublistView(p).setUint32(1, day);
   p[5] = piece;
+  if (recordKey != null) p.setRange(kRegisteredLength, p.length, recordKey);
   return p;
 }
 
 /// Reads a `0x25`; `null` if it is none. Never throws.
-({int day, int piece})? registeredRead(Uint8List p) {
-  if (p.length != kRegisteredLength || p[0] != kinds.kRegistered) return null;
-  return (day: ByteData.sublistView(p).getUint32(1), piece: p[5]);
+({int day, int piece, Uint8List? recordKey})? registeredRead(Uint8List p) {
+  if ((p.length != kRegisteredLength && p.length != kRegisteredKeyedLength) ||
+      p[0] != kinds.kRegistered) {
+    return null;
+  }
+  return (
+    day: ByteData.sublistView(p).getUint32(1),
+    piece: p[5],
+    recordKey: p.length == kRegisteredKeyedLength
+        ? Uint8List.fromList(Uint8List.sublistView(p, kRegisteredLength))
+        : null,
+  );
 }
 
 /// Day and piece of a piece (`registrationBuild`) — the key its `0x25` names.
 ({int day, int piece}) pieceKey(Uint8List piece) =>
     (day: ByteData.sublistView(piece).getUint32(0), piece: piece[4]);
+
+/// Bit in the pieces byte of a `0x24`: the registering device reads a `0x25`
+/// that carries the neighbour's record key (S407 a'). A device of 4.2.3 sets
+/// it not and reads only the six-byte `0x25` — it gets that; it uses the
+/// pieces byte for nothing but its log, so the bit costs it nothing either.
+const int kReadsKeyedRegistered = kinds.kBitReadsKeyedRegistered;
 
 /// A read piece.
 typedef RegisterPiece = ({
@@ -106,6 +127,7 @@ typedef RegisterPiece = ({
   Uint8List device,
   int piece,
   int pieces,
+  bool readsKey,
   List<Uint8List> codes
 });
 
@@ -138,7 +160,7 @@ List<Uint8List> registrationBuild(
         final b = BytesBuilder(copy: false)
           ..add((ByteData(4)..setUint32(0, day)).buffer.asUint8List())
           ..addByte(s)
-          ..addByte(pieces)
+          ..addByte(pieces | kReadsKeyedRegistered) // S407 a', see there
           ..addByte(kCodesPerPiece)
           ..add(device);
         for (var i = 0; i < kCodesPerPiece; i++) {
@@ -154,12 +176,14 @@ RegisterPiece? registrationRead(Uint8List p) {
   if (p.length < _kHeader) return null;
   final d = ByteData.sublistView(p);
   final count = p[6];
-  if (p.length != _kHeader + count * kCodeLength || p[4] >= p[5]) return null;
+  final pieces = p[5] & ~kReadsKeyedRegistered;
+  if (p.length != _kHeader + count * kCodeLength || p[4] >= pieces) return null;
   return (
     day: d.getUint32(0),
     device: Uint8List.fromList(Uint8List.sublistView(p, _kBeforeCode, _kHeader)),
     piece: p[4],
-    pieces: p[5],
+    pieces: pieces,
+    readsKey: p[5] & kReadsKeyedRegistered != 0,
     codes: [
       for (var i = 0; i < count; i++)
         Uint8List.fromList(Uint8List.sublistView(

@@ -95,8 +95,15 @@ class CardAddress {
   final CardAddressType kind;
   final int port;
 
-  CardAddress(Uint8List address, this.port)
+  /// The key under which this node writes its address record (§11.9), when
+  /// it is a fixed neighbour that told it (S407 a'): a reader whose address
+  /// has gone silent looks the current one up under it. Not part of
+  /// [equal] — it names the node, the address names where it was.
+  final Uint8List? recordKey;
+
+  CardAddress(Uint8List address, this.port, {Uint8List? recordKey})
       : address = Uint8List.fromList(address),
+        recordKey = recordKey == null ? null : Uint8List.fromList(recordKey),
         kind = CardAddressType.fromLength(address.length) ??
             (throw ArgumentError(
                 'CardAddress needs 4 (IPv4) or 16 (IPv6) bytes, '
@@ -105,7 +112,14 @@ class CardAddress {
       throw ArgumentError(
           'CardAddress.port must be between 0 and 65535, was $port');
     }
+    if (recordKey != null && recordKey.length != 32) {
+      throw ArgumentError('recordKey must be 32 bytes, was ${recordKey.length}');
+    }
   }
+
+  /// This address carrying [key] as its node's record key.
+  CardAddress withRecordKey(Uint8List? key) =>
+      CardAddress(address, port, recordKey: key);
 
   /// Old name of the bytes, so that callers from the time before the type byte
   /// still compile. For [CardAddressType.ipv6] it is 16 bytes, not

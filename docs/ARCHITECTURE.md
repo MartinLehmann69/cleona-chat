@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:97aecab7e485, 2026-10-08). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:4bb608ce8b6b, 2026-10-30). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -65,7 +65,6 @@
 | A | Parameters & tuning | every tunable value in one place |
 | B | Declared limits | what the design does not attempt |
 | C | Open work | measurement and build work still to do |
-| D | Settled decisions | what is decided and must not be asked again |
 
 ---
 ## 1. Executive Summary
@@ -145,12 +144,24 @@ to block (§5, §9, §10). The threat model is stated in §2.
    otherwise the device waits at most 30 s and then says why, with the
    same-W/LAN invitation as an explicit choice (§12.4).
 
+8. **Separate from everything before 4.2, compatible within it.** Nothing
+   of a version before 4.2 is read, migrated or answered: no old profile,
+   no earlier wire format, no field kept for an older peer. Every 4.2
+   version stays compatible with every other: a format change reads the
+   old form and the new, and sends to an older 4.2 peer only what that
+   peer reads, recognising the capability from what the peer has itself
+   shown. A cover packet needs no capability: content an older 4.2 reader
+   does not know is fill to it (§5.5). Groups and private channels are the
+   exception towards v4.2.3, where their exchange never worked: a group
+   format need not be readable by v4.2.3, only by the current 4.2
+   versions (D-61).
+
 ### 1.3 How a message is delivered
 
 ```
 text
  │ compress
- │ seal          hybrid KEM, signature inside the seal      §4
+ │ seal          hybrid KEM, pair tag inside the seal       §4
  │ split         above 1200 B into numbered parts           §11
  ▼
  ladder, all steps at once, first acknowledgement wins      §7, §8
@@ -191,8 +202,8 @@ implementation has to discover them.
 **Design target — strong Jurisdictional State (D5).** The adversary has
 border DPI, can compel ISPs, participates in Five-Eyes-style sharing,
 and buys commercial aggregator data. Crucially, the adversary **sees the
-egresses** (a sender planting, a recipient harvesting) but **not the
-middle**: relays are peers that can sit outside the adversary's
+egresses** (a node sending, a node collecting from a post box) but **not
+the middle**: forwarders and holders are peers that can sit outside the adversary's
 jurisdiction. This jurisdictional gap is what thin cover exploits.
 
 **Declared boundary — Global Passive Adversary (GPA).** A GPA sees the
@@ -212,8 +223,9 @@ always safe; linkability degrades gracefully under GPA approach.
   (§4, §10): the harvest/liveness tag is `HKDF(K_AB, …)` and `K_AB` is
   the pairwise secret; a remote non-contact cannot compute it and does
   not know where the victim sits in the tag space.
-- **Silently delete** — closed by mandatory E2E receipts plus m-family
-  redundancy (§9).
+- **Silently delete** — closed by mandatory E2E receipts (§9.2), three
+  holders per post box (§8.2) and re-sending at every edge for 14 days
+  (§9.3).
 - **Forge a receipt** — needs `K_AB`, which only the recipient has (§9).
 
 **What the state can do (residual, bounded):**
@@ -227,8 +239,8 @@ always safe; linkability degrades gracefully under GPA approach.
   per-target price. What it still does not buy is **deanonymization**:
   an observed tag is not a person (§10.2).
 - **Whitelist-total-filter.** Block the entire Cleona protocol at the
-  border. This is a bounded edge (§10.4); it requires door-connect work
-  and is outside the anonymity design.
+  border. This is a bounded edge (§10.4); 4.2 builds no door against it
+  (§23.9.3), and it is outside the anonymity design.
 - **Arrival timing, hop-exit observation, delay/drop its own copies.**
   None of these reveal content or identity (§10).
 
@@ -284,7 +296,7 @@ chapter, however desirable its other properties.
 |---|---|---|---|
 | 1 | Wire | one UDP socket: packet out, packet in | §11 |
 | 2 | Split | payloads above 1200 B into numbered parts; missing parts re-requested | §11 |
-| 3 | Envelope | hybrid post-quantum seal, sender signature inside the seal | §4 |
+| 3 | Envelope | hybrid post-quantum seal; inside it the pair tag, a signature only where §4.4.3 names one | §4 |
 | 4 | Ladder | four ways to reach the recipient, attempted together | §7, §8 |
 
 Each layer is usable and testable without the layer above it. An
@@ -314,7 +326,7 @@ message exists
 
 Steps are attempted **together**, never one after the other: steps 1
 and 3 leave at once; step 4 leaves as soon as its proof of work (§8.2) is
-ready. A step is never paused, resumed or repeated; only the
+ready. A step is never paused, resumed or sent again as a step; only the
 acknowledgement ends a sending. A slow step therefore costs nothing: it is
 overtaken, not waited for.
 
@@ -379,8 +391,7 @@ The KEM keys are not part of the identifier: they rotate every 7 days
 
 **No backward compatibility for identity derivation.** `computeUserId`
 and `computeDeviceNodeId` derive exclusively from `kIdentityDomain` as
-shown above — never from `NetworkSecret.identitySecret` or any other
-maintainer-key-derived secret. There is no transition window for
+shown above — never from a maintainer-key-derived secret. There is no transition window for
 identity derivation and none is provided: the derivation takes the
 break rather than carrying the maintainer key in its identities. The
 fail-closed test above exists precisely to catch a regression that
@@ -463,7 +474,7 @@ no confidentiality or authenticity property depends on it.
   state, no desync.
 - **No TLS as a crypto layer.** The substantive statement is:
   **end-to-end encryption reaches from sender to receiver; link
-  encryption always covers only one relay relationship.** Link-level
+  encryption always covers only one hop.** Link-level
   confidentiality is carried by the link layer (an Elligator2-encoded
   X25519 handshake on the outside, an ML-KEM-768 exchange on the
   inside, link key = `KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)`).
@@ -594,9 +605,12 @@ group or private channel (§16.2) are not contacts of each other, `s_AB`
 is drawn by the owner or admin whose invitation makes them co-members and
 travels, sealed, in the invitation leg to each of the two (§16.2.2); the
 formula above is unchanged. Where two members share more than one group
-that carries an `s_AB` for them, both use the one carried by the group
-with the smallest group identifier, so that both sides form the same
-`K_AB` whatever the order in which they joined. When that group ends for
+that carries an `s_AB` for them, both send under the one carried by the
+group with the smallest group identifier, so that both sides form the same
+`K_AB` whatever the order in which they joined. The two sides learn of a
+new shared group one after the other; until both carry it, each receives
+under the `s_AB` of every group it carries for the pair and of every one
+waiting for it, and registers those codes too (§8.1). When that group ends for
 the pair, the next smallest takes its place; the pair's codes change with
 it. Such a pair is a **group pair**, not a
 contact (§12.5): it carries only the group types of §16.2.2, never takes
@@ -616,10 +630,8 @@ ephemeral always sits inside the sealed part.
 The prekey selection is **not** a free choice per implementation and
 does not depend on the delivery stage: a 4 B pseudorandom selector
 `SHA-256(pk_n ‖ eph_pk)` sits at the head of the sealed part regardless
-of stage (§4.6 item 2). The wire format carries no PoW field
-(`tag ‖ ttl ‖ pow ‖ sealed_payload`): proof-of-work does not defend
-against a state-level adversary, and the censorship lever is
-redundancy m=3, not proof-of-work (§9).
+of stage (§4.6 item 2). Proof of work stands only in front of a
+deposit (§8.2) and a request (§15.5.1), never in the envelope.
 Version negotiation runs inside the sealed frame.
 
 **Exactly one exception.** The only thing excluded from the
@@ -741,8 +753,8 @@ documented exception to HD-wallet determinism (§4.5.1).
 |---|---|---|
 | 1:1 message | **none** | The tag `HKDF(K_AB, …)` authenticates the sender symmetrically and thus post-quantum-securely; non-repudiation is deliberately given up (deniability) |
 | Group leg (pairwise) | **none** | identical to 1:1 — groups are N ordinary 1:1 deliveries (E-22) |
-| Post in a large private channel (`K_C`, N > 16, §16.2.1) | **Ed25519** (64 B) | sender attribution among N receivers who all know `K_C` |
-| Public object space (§16: registrations, directory entries, cases, verdicts, tombstones) | **Ed25519** | the vote is an Ed25519 ring signature, the pseudonym key **must** be an Ed25519 curve point; a hybrid outer shell would secure a door next to a missing wall and would cost a factor of ~17 in storage |
+| Post in a large group or channel (`K_C`, §16.2.5) | **Ed25519** (64 B), by the author's identity signing key, inside the encryption | sender attribution among members who all hold `K_C` |
+| Public object space (§16: registrations, directory entries, cases, verdicts, tombstones; system-channel reports, their +1 entries and retractions, §16.7) | **Ed25519** | the vote is an Ed25519 ring signature, the pseudonym key **must** be an Ed25519 curve point; a hybrid outer shell would secure a door next to a missing wall and would cost a factor of ~17 in storage. For system-channel reports the signer is an unregistered report pseudonym that anyone may replace with a fresh one at no cost, so a post-quantum signature would protect nothing an attacker needs (§16.7) |
 | Key continuity proof / rotation announcement (§4.5.4, §15) | **hybrid** | ditto |
 | Out-of-band invitation `cleona:2:` — binding of the invitation keys (§15.6) | **Ed25519** (64 B) | checked once, by the requester at redemption, and protects nothing but the line in transit; no third party ever verifies it later, so the reason for hybrid above does not apply. A forgery would have to be made in real time, while the line is on its way — the only gap is an active quantum-capable attacker at that moment (§15.11). Hybrid would cost 3,373 B more and double the line |
 | Update manifest (maintainer key) | **hybrid** | ditto |
@@ -765,6 +777,20 @@ into a footnote:**
    against it, not a signature. Whoever finds an unsigned frame path
    here and is tempted: the symmetric tag *is* the authentication this
    section relies on.
+
+   **On the wire (normative).** Inside the seal the tagged form carries,
+   in place of the signature length and both signatures, the value
+   `0xFFFF` and 32 B `HMAC-SHA-256(HKDF(K_AB, "cleona-envelope-tag/v1"),
+   header code ‖ sender address ‖ recipient identifier ‖ plaintext)`; the
+   receiver checks it under the `K_AB` of the pair the sender address
+   names. It is used for messages, pair notices, acknowledgements and
+   amendments to a pair. A reader of an earlier 4.2 version discards it,
+   so it goes only to a pair that has shown it reads it — a contact by
+   the marks of §15.2, §9.2 and §8.1 or a tagged envelope from it, a
+   group pair by the pair-tag field in its own member entry (§16.2.2) or
+   a tagged leg from it, a pair from a private channel by its own signed
+   channel entry; every other peer gets the signed form. Both
+   forms are always read.
 2. **The public object space is classically secured.** This is a
    deliberate trade-off from the moderation ballot-secrecy-via-ring-
    signature decision and not a consequence of the signature choice:
@@ -799,7 +825,7 @@ device keys are the documented exception (§4.4.2).
 **One daemon, one port, all identities at once.** Every identity a device
 holds is active at the same time in one process and uses the device's one
 data port (§11.1); switching the displayed identity changes nothing on the
-network (Appendix D, D-19).
+network.
 
 **Seed derivation (normative).** The master seed is produced from the
 entropy of the recovery phrase by **one** SHA-256 round under a domain
@@ -884,20 +910,30 @@ files/.cleona/                 (Android, app-private)
   device.db                              # the device database (§4.5.3, §21.4.1): the identities
                                          #   with their HD index, the device keys, device-wide
                                          #   settings, the secret of the daemon–GUI connection
-                                         #   (§22.1), and the node's own state: fixed port and
-                                         #   remembered neighbours (§11.1, §11.8), what this node
-                                         #   holds for others (§8.2), the key of the own address
-                                         #   record (§11.9)
+                                         #   (§22.1), and the node's own state (area `node`):
+                                         #   fixed port and remembered neighbours (§11.1, §11.8),
+                                         #   what this node holds for others in its post box
+                                         #   (§8.2), the key of the own address record (§11.9)
   mycelium/
     bulk/                                # pieces held for others, lane 3 (§9.4, §21.3.3)
+  update/                                # the update path (§26.6): pending-update marker
+  transient/                             # plaintext in transit of the surface (§23.10)
+  models/                                # transcription models, program data (§21.7)
+  logs/
   identities/
-    0/
+    identity-<n>/
       messages.db                        # the identity's database: messages, conversations,
-                                         #   contacts, groups, channels, settings (§4.5.3)
+                                         #   contacts, groups, channels, settings, calendar,
+                                         #   polls, the identity's keys, the delivery layer's
+                                         #   history (area `delivery_history`) (§4.5.3)
       media/                             # attachments as <name>.cmenc (§4.5.3)
-      mycelium/                          # per identity: contacts' delivery state,
-                                         #   group pairs, first contact, parked cells
-      transient/                         # plaintext in transit, emptied at start (§23.10)
+      mycelium/                          # per identity, sealed files: memory (own post box,
+                                         #   contacts' delivery state, invitations), group
+                                         #   pairs, first contact, parked cells; bulk/ — the
+                                         #   opened blocks of a collection in progress
+      update-target/                     # partial state of an in-network update (§26.6.1)
+      transient/                         # plaintext in transit of the service (§23.10)
+      logs/
 ```
 
 **Key cascade:**
@@ -910,7 +946,7 @@ files/.cleona/                 (Android, app-private)
    file. Only where the system has no keyring, or where the session
    logs in automatically so that the keyring stays locked, the
    file-based variant is used (XSalsa20-Poly1305, key from
-   `SHA-256(hostname + salt)`, v2); on its first start the application
+   `SHA-256` of a random salt stored next to it, v3); on its first start the application
    then tells the user once which attack this allows — whoever can read
    the disk can open the identity and every message. Every keyring call
    is bounded in time; a locked keyring never makes the application
@@ -933,12 +969,12 @@ files/.cleona/                 (Android, app-private)
    identities on one device (§4.5.3). Neither is ever persisted.
 
 **Fail-loud is normative.** `DeviceKeysStore.loadOrCreate()` and
-`loadMasterSeed()` **never** silently regenerate new keys when
-encrypted material sits on disk but cannot be decrypted. The same
-holds for `FileEncryption._loadOrCreateLegacyKey()` on a `db.key` of
-the wrong length. The only exception is a 0-byte `db.key` with no
-profile data whatsoever (an aborted first write). The reason: silent
-regeneration is identity loss followed by unreadable files.
+`loadMasterSeed()` **never** silently regenerate new keys when key
+material is present — in the device database or the keyring — but
+cannot be read. No code path creates a `db.key`; one an earlier build
+left is only read (`FileEncryption.legacyOrNull`), never written or
+replaced by a new one. The reason: silent regeneration is identity loss
+followed by unreadable data.
 
 **Memory hygiene:** active overwriting of private keys and every KEM
 intermediate value (DH-shared, KEM-shared, IKM, message key) via
@@ -952,8 +988,8 @@ against software that reads the process's memory, and on a device
 whose swap space is not encrypted, key material can reach the disk.
 
 **Profile watchdog:** the daemon's 30-second watchdog also checks
-whether critical profile files still exist and writes them back from
-RAM. It protects against external deletion, not against attackers.
+whether the master seed is still in the keyring and the device database
+still exists, and writes them back from RAM. It protects against external deletion, not against attackers.
 
 #### 4.5.3 Encryption at rest
 
@@ -974,9 +1010,26 @@ RAM. It protects against external deletion, not against attackers.
    key of its own address record. Configuration state of an identity
    lives in that identity's database. Individually encrypted files
    (`FileEncryption`) remain for the delivery layer's state per
-   identity (§4.5.2). What is needed before any database can be opened
-   is not a file at all: the master seed and the 24 words live in the
-   OS keyring (§4.5.2).
+   identity and for the pieces the node holds for others
+   (`mycelium/bulk/`, §4.5.2). What is needed before any database can be opened
+   is not a file: the master seed and the 24 words live in the OS
+   keyring (§4.5.2). The one exception are plain process markers in the
+   profile directory — the process id (`cleona.pid`), the locks
+   (`cleona.lock`, `gui.lock`), start and show triggers (`cleona.start`,
+   `gui.show`), the ready flag (`cleona.ready`), the endpoint
+   (`cleona.sock`; on Windows `cleona.port`, the port number only), the
+   data port of the running node (`cleona.udp`), the Android watchdog
+   stamp (`.dart-heartbeat`), the first-start marker, the Windows
+   launcher (`daemon-start.cmd`), and on the update path the
+   pending-update marker (`update/update-pending.json`) and the last
+   verified manifest (`update_manifest_cache.json`, a public signed
+   document). They are read before a keyring or database is available,
+   or by a script or watchdog outside the application, and carry no key,
+   no content, no identity, no contact and no remote address; anything
+   that would must live in a database. State of the update path that is
+   read only after the device database is open — the highest manifest
+   sequence seen, an in-network update being available, the install
+   source, the Windows firewall rule — lives in the device database.
 3. **Media attachments** are stored as `<name>.cmenc` under a framed,
    streamed AEAD (`lib/core/crypto/media_cipher.dart`) and read through
    a decrypting reader on `127.0.0.1`
@@ -1021,8 +1074,10 @@ chosen here has neither property, and that is why it was chosen.
   harmful direction, and would say nothing about content whose type is
   unknown.
 - **Binary payloads stay uncompressed.** `writeBinaryFile` /
-  `readBinaryFile` carry fixed-shape artefacts — key material above all
-  (`device_keys.bin.enc`, 6 096 B). Key material is indistinguishable
+  `readBinaryFile` carry the delivery layer's binary records — its memory
+  with the pair secrets and day keys (`mycelium/memory.enc`), group
+  pairs, first contact, parked cells and the pieces under
+  `mycelium/bulk/`. Key material is indistinguishable
   from random and does not compress; and unlike the JSON path, its
   plaintext has no fixed first byte that could carry the detection. The
   binary path therefore keeps the format `[24-byte nonce][ciphertext]`
@@ -1047,9 +1102,10 @@ chosen here has neither property, and that is why it was chosen.
 
 **Not encrypted with the identity key:**
 
-- `relay_cache.json.enc` — FileEncryption instead of DB encryption,
-  because the file belongs to shared, cross-identity state (liveness
-  addresses are device-global under multi-identity).
+- The state of the device — the node's own state included — lies in the
+  device database under `deriveSharedFileEncKey(master_seed)` (form 2);
+  the pieces held for others under `mycelium/bulk/` are sealed with the
+  same key.
 - Log files — unencrypted, because they are debug output. The logger
   redacts display names (own, contacts, groups, channels), the host name,
   private IP addresses and the home directory path, replacing each with a
@@ -1059,22 +1115,19 @@ chosen here has neither property, and that is why it was chosen.
   identity through the user ID. That is the basis on which these files are
   left unencrypted, not an assumption that they are harmless.
 
-**The local relay/cache holdings.** A node acting as a responsible
-relay (holding mailbox placements for others, delivery stage 4,
-Chapter 8) holds foreign cover cells and liveness records locally.
-These are already ciphertext, so a second shell does not protect their
-content. What needs protecting is the **cache index**: which tags this
-node holds and which of them are inbox vs. decoy harvests — that list
-narrows the contact circle. Normatively: **FileEncryption over the
-cache index, raw cells remain unwrapped.** A forensic access thus
-sees only indistinguishable heaps of cells. **Key assignment:** the
-relay holdings are **device-bound, not identity-bound** (one daemon, N
-identities, one shared relay stream). The index key is derived from
-the device-sig key —
-`SHA-256(device_ed25519_sk[0:32] ‖ "cleona-relay-index-v1")`, analogous
-to the DB-key derivation — and not from the identity-bound DB key. The
-identity-bound quantities (expectation set, `inbox_key`, prekey pool,
-own outbox) sit under the DB key (§21.4).
+**What the node holds for others.** A post-box packet (§8.2) and a
+media piece (§9.4) are sealed by their sender and carry no key
+reference; a second shell would not protect their content. What needs
+protecting is what the holdings reveal: which day values and
+identifiers this node holds. Post-box packets therefore lie in the
+device database, one row per held packet, so that a deposit, a
+collection or an expiry touches only its own row; media pieces lie as
+files under `mycelium/bulk/`, sealed with the device-wide key, under
+file names that are a hash of the identifier, not the identifier. Both
+are device-bound, not identity-bound: one node holds for others once,
+whatever number of identities it carries. What the delivery layer keeps
+for one identity — its memory and its history — lies under that
+identity's key (§4.5.2, §21.4.2).
 
 #### 4.5.4 Key Rotation
 
@@ -1401,19 +1454,25 @@ after use, so `mk` is not reconstructable even with the daily ML-KEM
 key on hand. Only the composite attacker (CRQC **and** device access
 within the 15-day retention) falls back to daily granularity.
 
-**Groups inherit the 1:1 FS.** Since group messages run as pairwise
-legs (§16), each leg consumes one one-time prekey of the respective
-pair — groups therefore have the same per-message granularity as 1:1.
-Price: one message in an N-group consumes N prekeys (one per pair); for
-very active groups the refill cadence rises accordingly, the fallback
-ladder catches bursts. Sender keys with epoch rotation remain
-exclusively for calls (§17) and large private channels (`K_C`, §16) —
-there, daily granularity plus rotation on membership change applies;
-the epoch is **24 h**. For group calls, the same rule applies as a
-default — one sender key per session, mandatory rotation on every
-participant change, a 24 h cap for marathon sessions — the
-distribution mechanism falls due with the group-call topology open
-items (§17.5) and is not preempted here.
+**Groups inherit the 1:1 FS.** Since messages in groups and channels on
+pairwise legs run as one leg per member (§16.2), each leg consumes one
+one-time prekey of the respective pair — they therefore have the same
+per-message granularity as 1:1. Price: one message to N members
+consumes N prekeys (one per pair); for very active groups the refill
+cadence rises accordingly, the fallback ladder catches bursts. Sender
+keys remain exclusively for calls (§17) and for groups and channels on
+the shared key (§16.2.5). There a symmetric key chain runs per
+generation, not a Double Ratchet (§4.3): each day's key is derived from
+the previous day's by a one-way function, so the daily change costs no
+packet; a new member receives the chain at its current position and
+reads from its joining on; leaving or removal starts a new generation
+for every remaining member. A device keeps the keys of the last 7 days —
+the time the keepers hold a post — so that it can read what it collects
+after being off; within those 7 days a seized device opens what the
+keepers still hold. For group calls the default is one sender key per
+session, mandatory rotation on every participant change and a 24 h cap
+for marathon sessions; the distribution mechanism falls due with the
+group-call topology open items (§17.5) and is not preempted here.
 
 **Limits.** No substitute for post-compromise security. The recovery
 bundle (§13) is by construction not forward-secret — and it also
@@ -1488,16 +1547,15 @@ or real by its arrival time.
 | minimum gap | 200 ms (prevents pathological bursts) |
 | platform variation | none |
 | link variation | `R_metered` = 1 packet / 60 s on metered mobile data (§5.3) |
-| open set | 4 neighbours, redrawn at the edges of §11.8 |
+| open set | 4 places (§11.8.8) |
 
 **Cover is addressed like real traffic.** Cover packets go to the node's
 own neighbours (§11.8), in the same size (1200 B) and on the same port —
 never to an address the node has no other business with. A filler
 addressed to strangers would be as readable as a fixed tick.
 
-**The draw picks from an open set of four.** Of the up to 32 neighbours,
-four form the open set, drawn anew at the edges of §11.8. The Poisson
-clock picks among these four only, so each receives a packet about every
+**The draw picks from an open set of four.** The Poisson clock picks
+among the four places of the open set (§11.8.8) only, so each receives a packet about every
 32 s at `R_cover` — within the minimum UDP mapping lifetime RFC 4787
 requires of a translator (2 min). A node behind address translation thereby
 keeps four mappings open without sending a single packet beyond cover:
@@ -1511,8 +1569,8 @@ under a public address (not private, not shared carrier space, not
 link-local) — whenever the node has one; a neighbour known only under a
 private address takes it only while there is no other, and gives it up at
 the next edge to a reachable one unless a standing invitation still names
-it. Otherwise the invitation neighbour changes only when it is removed
-(§11.8); invitations issued afterwards name the new one,
+it. When and why the place changes otherwise: §11.8.8; invitations issued
+afterwards name the new one,
 and holders of older invitations find the issuer through its publisher key
 (§15.2). **This place never goes to a contact's device:** the invitation
 travels to people not yet accepted and is passed on, and a contact's
@@ -1522,9 +1580,9 @@ address in it would hand a friend's address to every reader.
 contacts that is reachable from the open network under the same rule and
 has answered since the last start or network change takes a place before
 any other neighbour — one such contact holds one place, more hold up to
-three. When a use of one fails and it is removed (§11.8), another contact
-that qualifies at that moment takes its place: an edge, not a tick. A
-contact the user has excluded (§15.10) never takes one. These contact
+three. When a place falls free (§11.8.8), another contact that qualifies at
+that moment takes it. A contact the user has excluded (§15.10) never takes
+one. These contact
 places and the invitation neighbour's place are the node's **fixed neighbours**; they
 hold its codes (§8.1) and they are the ones step 3 reaches it through.
 Where no contact qualifies, the invitation neighbour is the only fixed
@@ -1543,8 +1601,8 @@ servers; a neighbour drawn from the open network can (§10.2). And the
 places stay fixed rather than being redrawn per message: with a
 compromised node among five candidates, a fixed choice exposes a pair with
 probability one in five and otherwise never, a choice per message after
-twenty messages with probability 1 − (4/5)^20 ≈ 99 %. The fixed places are
-stored with the neighbours (§21) and survive a restart. Their price is
+twenty messages with probability 1 − (4/5)^20 ≈ 99 %. The fixed places
+survive a restart (§11.8.8). Their price is
 named: a contact, not a stranger, learns when and how much the node sends
 and receives, and the fixed neighbours receive more cover than the others.
 
@@ -1606,7 +1664,7 @@ the whole system run on a clock:
 
 | Transmission | When | To whom | Interval |
 |---|---|---|---|
-| keep-alive | only on a family where the node sits behind address translation or a firewall (§8.1) | one neighbour per family | measured per network (§8.1); IPv4 30 s and IPv6 60 s until measured |
+| keep-alive | only on a family where the node sits behind address translation or a firewall (§8.1) | as §8.1 says | measured per network (§8.1); IPv4 30 s and IPv6 60 s until measured |
 | address-record refresh | only while the node has a reachable address (§11.9) | 2–3 public relays, **not** the data port | checked hourly, written at most once per ~19 h |
 | port-mapping renewal | only while a mapping exists (§7.3) | the node's own router, local segment, **not** the data port | shortly before the lifetime the router granted lapses |
 
@@ -1619,9 +1677,8 @@ socket, the queue or the budget — which is the reason this section exists.
 Everything else is event-driven. The post box (§8.2) is queried once at
 start and again when the network changes, when a new neighbour is found or
 when the user opens the application — never on a schedule. The keep-alive interval is measured at
-the same edges, on a probe port of its own (§8.1). The neighbourhood is refilled when an
-entry is removed, and stale entries are retried at the next edge (§11.8) —
-never on a schedule either. No liveness is published as a packet of its
+the same edges, on a probe port of its own (§8.1). The neighbourhood changes only at
+the edges of §11.8.2 — never on a schedule either. No liveness is published as a packet of its
 own, and nothing is polled; what a node knows about reachability travels
 inside cover (§5.5).
 
@@ -1629,22 +1686,24 @@ The reason is structural: periodic maintenance traffic competes with
 delivery for the same socket, the same queue and the same budget, and a
 queue that is never empty throttles delivery permanently.
 
-### 5.5 Cover may carry update pieces and address entries
+### 5.5 Cover may carry update pieces, address entries and object identifiers
 
 A cover packet may carry, instead of nothing, one piece of the signed
-public update (§26.6.1) **or a set of address entries**: the sender's own
+public update (§26.6.1), **a set of address entries**, **or a set of
+durable-object identifiers** (§16.0): the sender's own
 current addresses — one per address family it holds a socket for, marked as
 its own — and the addresses of neighbours the sender has confirmed to answer
 under exactly that address (§11.8). This adds no packet, no
 byte and no change of timing. Neither is a delivery path: the update
 arrives without it (§3.1), and a node finds neighbours without it
-(§11.8, §11.8a).
+(§11.8, §11.8a). Identifiers are not a delivery path either: an object is
+fetched from the node that named it (§16.0), and a node learns the stock
+it missed by asking at an edge (§16.0).
 
 **Address entries are how the network learns that an address changed.**
-After a network change the node's new address leaves with the next cover
-packet to each of its open neighbours (§5.2) — without a packet of its
-own, without a clock of its own. Entries are hints like the records of
-§11.9: an address that does not answer is dropped by whoever tries it.
+They are how a move reaches the open neighbours (§11.8.9) — without a
+packet of its own, without a clock of its own. An entry is a hint
+(§11.8.3).
 
 **Pushed entries reach only open paths.** A neighbour behind address
 translation receives a cover packet only while its mapping towards the
@@ -1661,6 +1720,7 @@ mapping the question has just opened.
 | `0x01` | an update piece (§26.6.1) |
 | `0x02` | address entries |
 | `0x04` | keep-alive: the device code (§8.1) and an 8-byte random token — only in keep-alive packets (§8.1) |
+| `0x05` | durable-object identifiers (§16.0): count (1), then per identifier 20 B — channel (1), age in hours (2), kind and size class (1), hash (16); at most 57 |
 
 Address entries use the same codec as the board (§11.8a): the number of
 the sender's own entries (1, at most 2) and those entries, then count (1)
@@ -1670,7 +1730,12 @@ this address, last confirmed so many minutes ago" — has one format, not
 two. The rest of the payload is random fill, so all three kinds look alike
 on the wire. The price is one byte per packet.
 
-The four rules below hold for both kinds of content alike.
+**A reader that does not know a content byte treats the packet as fill.** This is how a cover packet with content an
+older 4.2 version does not read stays harmless (§1.2): it is sent to every open neighbour alike, the older reader
+discards the content as it discards fill, nothing is answered and nothing is counted. `0x03` is retired and not
+reused.
+
+The four rules below hold for every kind of content alike.
 
 1. **Never a packet of its own.** A piece replaces the content of a cover
    packet the Poisson clock (§5.2) has already drawn. It never creates a
@@ -1681,27 +1746,42 @@ The four rules below hold for both kinds of content alike.
    sends a piece to the neighbour that needs it; whichever neighbour §5.2
    draws gets a piece drawn uniformly across every object the node holds
    pieces of — never preferring its own platform, which would make the
-   platform readable off the stream.
+   platform readable off the stream. **The identifiers of all system
+   channels together count as one more such object, and only while the
+   node holds identifiers younger than 24 hours;** within it, the youngest
+   go first. Identifiers older than that leave the stream: whoever missed
+   them asks at an edge (§16.0). A node holding no update object and no
+   young identifier sends fill.
 3. **Every cover packet is sealed pairwise — filled or empty.** The piece
    is public; the wrapper is secret to protect the cover, not the content.
    A wrapper that more than the two ends can open turns it into a sieve:
    opens = cover, fails = real traffic.
 4. **No back channel, never a packet of its own.** Nothing is requested or
-   acknowledged; a request would name the version a node lacks. A received
-   piece is never forwarded as a packet of its own — that would break
-   rule 1. It leaves the node again only inside a later cover packet the
-   clock has drawn anyway.
+   acknowledged **inside the stream**; a request would name the version a
+   node lacks. A received piece is never forwarded as a packet of its own —
+   that would break rule 1. It leaves the node again only inside a later
+   cover packet the clock has drawn anyway. **An identifier is the one
+   content that may cause traffic:** a holder that receives one it neither
+   holds nor has rejected, and would keep, fetches the object from the node
+   that named it (§16.0). That fetch is demand traffic outside the stream,
+   like the update fetch (§26.6.1), and it happens only when there is
+   something new — in idle it is nothing. Its price is RL-19 (§23.7).
 
 **What a node keeps.** Pieces of the node's own platform are stored and
 assembled automatically within the retention tier's budget (§22.6); the
-object of the node's own update target is exempt from the bulk-cache cap
+object of the node's own update target, together with its partial state on
+disk (the record of received blocks included, at most about twice the
+object until it is complete), is exempt from the bulk-cache cap
 until it is installed or superseded (owner decision 07.10.2026); once
 all pieces are present the update is offered to the user (§26.6.1).
 Always-on nodes additionally keep a bounded cache of pieces for other
 platforms and offer them again under rule 2 — without that cache, spread
 is limited to neighbours of the same platform. Retention-bounded nodes
 keep only their own platform's pieces and put none into their cover
-packets.
+packets. The same holds for identifiers: an identifier says ‘I hold this
+object and hand it out’ (§16.0), so only a node that holds system
+channels — every always-on desktop — names any; a retention-bounded node
+names none.
 
 ### 5.6 Budget
 
@@ -1719,10 +1799,16 @@ packets.
 | message over the internet (§8.1) | 7 packets each way, acknowledgement included 14 (measured: message 7879 B, acknowledgement 7779 B) |
 | shell companion packet (§11.6) | 1 packet per single-packet sending to a counterpart silent for more than 2 s, at most once until it is heard again; none in idle |
 | where-are-you (§8.1, exception) | ≈ 1,000 packets, 1.2 MB per event, at most one per contact per hour |
+| durable-object fetch (§16.0) | per fetched system-channel object ≈ 16 KB on the wire at the fetching and ≈ 16 KB at the handing node (a report of ≈ 10 KB in fountain blocks of 1041 B, question and end mark); only when an object is new or missing — see §16.7 for the volume per network size |
+| durable-object question "identifiers since T" (§16.0) | 1 packet each way when the state roots agree; otherwise at most 44 answer packets (≈ 53 KB) per system channel; only at the edges of §16.0 |
+| port-mapping request to the own router (§7.3) | 2 packets per edge, local segment only |
+| post in a group or channel on the shared key (§16.2.5) | computed, not measured: a short text post is one packet; the deposit at three keepers with their acknowledgements 6 packets, one nudge per member over at most two links — ≈ 7.2 KB + 2.4 KB per member in the network (N = 100: ≈ 247 KB, of which ≈ 124 KB leave the author's device); a member that was off adds 4 packets at its collection |
+| question at an edge, shared key (§16.2.5) | 1 packet each way per group or channel when the state roots agree (2.4 KB); only at start, on a network change and when the user opens the group or channel |
+| keys, shared key (§16.2.5) | a joining: one 1:1 delivery to the new member; a leaving, a removal or a change of construction: one 1:1 delivery per remaining member, once; the daily change: none |
+| keeper, shared key (§16.2.5) | per entry the deposit and its acknowledgement, and one hand-out per collecting member that lacks it |
 
 Every packet on the data port is 1200 B (§11), whatever it carries; a
 figure in this table that counts only the payload is wrong.
-| port-mapping request to the own router (§7.3) | 2 packets per edge, local segment only |
 
 An implementation reports its own measured figure in the network
 statistics (§25), so that a node whose traffic diverges from this table
@@ -1742,8 +1828,8 @@ reached is never asked of a third party and never stored by one. The
 and where routers can be found travels openly as hints — in invitation data
 (§15.2), in the external records (§11.9), in cover (§5.5) and on the
 boards of reachable nodes (§11.8a). None of these says anything about a
-person, and none is trusted: an address is tried, and an address that
-does not answer is dropped.
+person, and none is trusted: an address is a hint until it answers
+(§11.8).
 
 ### 6.2 What a node knows about another
 
@@ -1769,10 +1855,11 @@ A node keeps, per contact:
 |---|---|---|
 | `lastSeenAddress` | typed address + port | from the most recent received packet; type (1) + address (4/16) + port (2), so an IPv6 peer is remembered as what it is |
 | `lastSuccess` | timestamp | last acknowledged delivery |
-| `cardAddresses` | up to three | as handed over in the invitation data |
+| `cardAddresses` | up to four | as handed over in the invitation data (§15.2) |
 
-Records are updated on every received packet and on every
-acknowledgement. They are never exchanged with third parties.
+Records are updated on every new message received directly and on every
+acknowledgement; a copy already received does not move `lastSeenAddress`.
+They are never exchanged with third parties.
 
 ### 6.4 Declaring a contact unreachable
 
@@ -1791,7 +1878,7 @@ from the address itself** — an address inside the sender's own segment
 serves step 1, one reachable from the open net serves step 2, and the same
 invitation can feed both. It attempts **every applicable step together**:
 steps 1 and 3 leave at once; step 4 leaves as soon as its proof of work
-(§8.2) is ready. A step is never paused, resumed or repeated; only the
+(§8.2) is ready. A step is never paused, resumed or sent again as a step; only the
 acknowledgement ends a sending. The first acknowledgement wins; the
 remaining attempts are cancelled — a proof of work still running and a
 placement not yet sent are dropped.
@@ -1835,8 +1922,8 @@ There are two calls, and they answer different questions.
 every start.** The neighbour call never carries an identity identifier,
 neither in the call nor in the answer: a listener on the segment learns
 that a Cleona node runs at an address, not which identity, and cannot
-link the same device across two starts by its identifier. Neighbours are
-therefore held by address and port, not by node identifier (§11.8).
+link the same device across two starts by its identifier. How addresses
+form one neighbour: §11.8.
 
 **The search call names the identity it looks for.** Every listener on
 the segment learns that somebody is sending to that identifier, and the
@@ -1852,7 +1939,7 @@ answer is discarded.
 | multicast group | 239.192.67.76 |
 | port | 41341 |
 | also sent to | IPv4 broadcast |
-| repeat | 3 calls, 300 ms apart, then silence — per call kind |
+| repeat | as §11.3a, 300 ms apart, then silence — per call kind |
 | answer | unicast, directly to the caller, carrying the answerer's data port |
 
 An answer on the wire is below a millisecond once both sides are
@@ -1964,12 +2051,12 @@ neighbour, which answers each with a `0x25`. It is sent when it changes,
 when the UTC day changes, when a fixed neighbour is new and after a network
 change (the neighbour learns the device's new address only from a
 registration) — at these edges and at no other time. A piece without `0x25` within the answer
-deadline (§11.6) is sent once more, then no more until the next edge.
+deadline (§11.6) is repeated (§11.3a), then no more until the next edge.
 
 | Packet | Content |
 |---|---|
-| `0x24` registration | kind + day (4) + piece (1) + pieces (1) + count (1) + the device code (16) + count × 16 B codes |
-| `0x25` registered | kind + day (4) + piece (1) |
+| `0x24` registration | kind + day (4) + piece (1) + pieces (1; bit `0x80`: the device reads a `0x25` with record key) + count (1) + the device code (16) + count × 16 B codes |
+| `0x25` registered | kind + day (4) + piece (1), followed by the neighbour's record key (32) when the `0x24` set that bit and the neighbour writes a record (§11.9) |
 
 The neighbour keeps a code until the end of the day
 after its day, at most 4,096 codes per device and 256 devices (the device
@@ -1977,7 +2064,8 @@ registered longest ago gives way); the first device to register a code
 keeps it until it expires. A device identifies itself in every
 registration by its own 16-byte code, drawn once at first start and kept
 across restarts; the neighbour keys its table by that value and writes
-the current source address into the entry with every registration. A
+the current source address into the entry of that address family with
+every registration. A
 device that changes its address is therefore the same device, not a new
 one. A registration names codes, never a person or an identifier.
 
@@ -1994,8 +2082,8 @@ the same way under the reverse code.
 
 **No node may be both hops.** A node the recipient named holds the
 recipient's codes and would take the inner packet itself, seeing both
-ends. The first hop is therefore the first own fixed neighbour the
-recipient did not name, failing that an open neighbour that is neither a
+ends. The first hop is therefore the first own fixed neighbour that is
+neither the recipient nor named by it, failing that an open neighbour that is neither a
 contact's device nor named. **Last resort, named:** where the only
 possible first hop is a node the recipient named too — two new users whose
 one neighbour is the same node — the `0x20` goes to that node directly, as
@@ -2005,7 +2093,12 @@ two acknowledgements (§8.2). Each such sending is reported in the log.
 
 A contact learns its peer's fixed neighbours only from the peer, sealed:
 they ride in every acknowledgement and every message the peer sends it
-(§9.2), so a change costs no packet of its own; nothing about them is
+(§9.2), each with the record key its node named (§8.1) where one is
+known — to a contact that showed it reads keyed lists: a keyed list from
+it, the suffix of its invitation line (§15.6), or a `0x24` with the bit
+from one of its devices. Every other peer, every group entry and the
+acceptance (§15.5) get the list without keys. A change costs no packet of
+its own; nothing about them is
 published. A list that arrives with post collected from a post box may be
 older than one already held; the next acknowledgement corrects it, and
 until then the two other addresses and the `0x21`/`0x23` path (below)
@@ -2034,12 +2127,23 @@ carry.
 **Losing the way.** A sender that receives `0x21` and has no
 acknowledgement from step 4 within its window sends one `0x23` — one part,
 no message inside, only its own fixed neighbours sealed to the recipient.
+The content is sealed under `K_AB` alone, with neither a per-message key
+nor a signature: only the two holders of `K_AB` can open or forge it.
+Forward secrecy deliberately does not hold for it — whoever breaks `K_AB`
+can already compute every code of the pair and so link both sides at the
+fixed neighbour; the neighbour address adds nothing to that (D-62).
 It reaches every node within two hops (about 1,000 packets, 1.2 MB). The
 recipient answers on the ordinary way; its acknowledgement carries its
-current fixed neighbours (§9.2). At most
+current fixed neighbours (§9.2), and what rests for it goes again (§9.3). At most
 one `0x23` per contact per hour; a node hands on at most one `0x23` per
 minute per incoming neighbour. A call signal does not start a `0x23`; the
-missed-call message that follows it does, under this rule.
+missed-call message that follows it does, under this rule. The same holds
+when the post box placing of a message ends unplaced and unacknowledged —
+its holders, the recipient's fixed neighbours, did not answer: the sender
+first looks up every such neighbour that came with its record key
+(§11.9); a neighbour that moved is taken at its current address and the
+message goes again (§9.3). Only when that finds nothing new does it send
+the one `0x23`, also without a `0x21` before it, under the same bounds.
 
 **What each node on the way sees.** The sender's neighbour sees the sender
 and the address of the recipient's neighbour; the recipient's neighbour
@@ -2100,7 +2204,7 @@ needed state to let it in: the family is **open**, no keep-alive runs on
 it, and the node's reachability is evidenced (§11.8a) — it may hold a
 fixed place for others (§5.2). An open IPv6 carries for the rest of IPv4
 like a granted pinhole. If nothing arrives, the family counts as not open
-and keep-alive runs; silence is not evidence of anything else (§11.8), and
+and keep-alive runs; silence is not evidence of anything else (§11.3a), and
 a second check follows at the next edge, not before a minute has passed. A
 neighbour answers `0x48` only for a device registered with it (§8.1), at
 most once a minute per device, and a helper sends at most one `0x4A` per
@@ -2177,10 +2281,12 @@ aim it at a third party.
 
 **Safety net: the neighbour reports a move.** A keep-alive (content
 `0x04`) carries the device code of this section and an 8-byte random
-token. The fixed neighbour moves the device's code-table entry to the
-address the keep-alive came from — step 3 follows at once instead of at the
-next registration — and when the address in that family changed, it
-answers once with `0x47` and the token, at most once a minute per device.
+token. When it arrives from another address than the device's entry in that
+family holds, the fixed neighbour treats that address as §11.8.6 says: one
+request to it, and only on its answer does it move the entry there — step 3
+follows one round trip later instead of at the next registration, and a
+replayed keep-alive moves nothing. After the move it answers once with
+`0x47` and the token, at most once a minute per device.
 A move means the mapping lapsed despite the interval: the node falls back
 to the default for that family and measures again, unless it measured
 within the last 30 minutes.
@@ -2231,10 +2337,10 @@ the sender makes.
 | retention | 7 days |
 | at most per day value | 100 packets |
 | deletion | only after the collector acknowledges receipt, to every holder it asked — except the public manifest entry of §26.5.4, which is read, never deleted |
-| placing ends | placed at the second `0x31`; not placed when the transmission to every holder has ended without it — ended as §11.3 defines it: at the recipient's end mark, or 1.1 s after the last part, which for a single part is 1.1 s after it (D-41) — never on a deadline of its own, never repeated; a holder that did not answer counts as one use without an answer (§11.8) |
-| collection ends | per holder, and no holder waits for another: a holder is done when it has handed out the number it announced (`0x34`: none, `0x37`: refused) or its link has ended unanswered (§11.6). Every piece is taken over and acknowledged for deletion when it arrives. Every packet a holder sends back to a collector names the request identifier of the question that packet answers: a challenge (`0x35`) names the question it was issued for, and what is handed out, found empty or refused under that challenge (`0x33`, `0x34`, `0x37`) names the same question; answers are matched to their question by the identifier. A proof under a challenge the holder does not know is refused with the identifier left zero, and the collector matches that refusal by its value. The receipt `0x31` answers a deposit, not a question, and carries the field as zero. What a conversation still lacks is asked for the way §11.3 asks for missing parts: after a quiet period of 300 ms without a new answer from that holder the collector asks once more for everything still open — the question, if no challenge has come; otherwise the proofs of the values still unanswered — and the holder answers a repeated proof as it answered the first. If that brings nothing within another quiet period, the holder is done for this edge with what it has handed out; if it answered nothing at all, that is one use without an answer (§11.8) — at most one per holder and edge, however many questions were waiting for it. No timer runs while answers are arriving, so a slow way is never cut off. Questions to the same holder follow one another, and nothing a holder leaves unanswered delays another holder, another identity or another value |
-| a holder answers | every `0x32` and `0x36`: with content, `0x34` or `0x37`; a holder never stays silent to a collector. A `0x30` without a valid proof of work is not a collector's request and is still discarded silently (below) |
-| a holder hands out | entry by entry under the flow of §11.3: an entry of two or more parts waits for the end mark of the one before it, single-part entries do not wait (D-41); what a collector did not receive it asks for once more within the edge (above), and the holder hands it out again |
+| placing ends | placed at the second `0x31`; a holder that does not answer — its transmission ended as §11.3 defines it: at the recipient's end mark, or 1.1 s after the last part, which for a single part is 1.1 s after it — is asked again (§11.3a) and, once failed, gives way to the next holder; not placed when no holder is left — never on a deadline of its own |
+| collection ends | per holder, and no holder waits for another: a holder is done when it has handed out the number it announced (`0x34`: none, `0x37`: refused) or its link has ended unanswered (§11.6). Every piece is taken over and acknowledged for deletion when it arrives. Every packet a holder sends back to a collector names the request identifier of the question that packet answers: a challenge (`0x35`) names the question it was issued for, and what is handed out, found empty or refused under that challenge (`0x33`, `0x34`, `0x37`) names the same question; answers are matched to their question by the identifier. A proof under a challenge the holder does not know is refused with the identifier left zero, and the collector matches that refusal by its value. The receipt `0x31` answers a deposit, not a question, and carries the field as zero. What a conversation still lacks is asked for the way §11.3 asks for missing parts: after a quiet period of 300 ms without a new answer from that holder the collector asks again (§11.3a) for everything still open — the question, if no challenge has come; otherwise the proofs of the values still unanswered — and the holder answers a repeated proof as it answered the first. If that brings nothing, the holder is done for this edge with what it has handed out; if it answered nothing at all, that address has failed (§11.3a) — once per holder and edge, however many questions were waiting for it. No timer runs while answers are arriving, so a slow way is never cut off. Questions to the same holder follow one another, and nothing a holder leaves unanswered delays another holder, another identity or another value |
+| a holder answers | every `0x32` and `0x36`: with content, `0x34` or `0x37`; a holder never stays silent to a collector. A `0x30` without a valid proof of work is not a collector's request and is still discarded silently (below). A deposit with a valid proof that the holder does not take is answered `0x37`; one it already holds is acknowledged `0x31` |
+| a holder hands out | entry by entry under the flow of §11.3: an entry of two or more parts waits for the end mark of the one before it, single-part entries do not wait; what a collector did not receive it asks for again within the edge (above), and the holder hands it out again |
 | proof of work on `0x30` | `D_box` = 18 leading zero bits |
 
 **Day keys.** Every identity derives one Ed25519 key pair per UTC day from
@@ -2342,7 +2448,9 @@ latest list it heard. An identity names to its contacts only fixed
 neighbours that are its own contacts, otherwise the invitation neighbour — a
 friend of one identity is never named to the contacts of another.
 Twin-sync deliveries (§14.7) carry no acknowledgement; placed (§8.2) is
-their final observation. Where §14.7 requires acknowledgement by every
+their final observation. A post in a group or channel on the shared key
+carries none either: its nudges are not acknowledged, and placed with
+two keepers is its final observation (§16.2.5). Where §14.7 requires acknowledgement by every
 device (revocations), it is a twin-sync delivery back to the originating
 device.
 
@@ -2351,11 +2459,13 @@ device.
 | kind | `0x11` |
 | content | the 8-byte message identifier; count (1) + up to three addresses, type + address + port each (≤ 58 B) |
 | sealed to | the original sender |
-| signed by | the recipient, inside the seal |
+| authenticated by | the recipient's pair tag inside the seal (§4.4.3); signed only towards a peer that has not shown it reads the tag (§1.2 principle 8) |
 
-**The acknowledgement is sealed and signed.** An unsealed acknowledgement
+**The acknowledgement is sealed and authenticated.** An unsealed acknowledgement
 could be forged by any party that saw the identifier, showing a sender a
-delivery that never happened.
+delivery that never happened. The pair tag binds it to the one party that
+shares `K_AB` with the sender; like every message it proves nothing to a
+third party (§4.4.3).
 
 | Situation | Behaviour |
 |---|---|
@@ -2376,7 +2486,8 @@ reports what each step did; the application decides when to stop. There
 is no timer in the delivery layer that expires messages and no background
 retry loop. At the edges of §8.2 the node sends again, under the same
 identifier, what is neither acknowledged nor placed — except call
-signals, which are sent once and end with their call (§17.2). Where the
+signals, which are not sent again at an edge and end with their call
+(§17.2). Where the
 application sets itself a limit — a call must ring within 10 s (§17.2) —
 the limit is the application's: it stops the sending, as this section
 provides, and the delivery layer learns of nothing but the stop.
@@ -2391,7 +2502,7 @@ user may send it again under a new identifier. The check runs only where
 the message would be sent again — at start and at the edges — never on a
 clock; a device never wakes to declare a message dead. Fourteen days, not
 the seven of the post box (§8.2): there a packet occupies a holder's
-storage, here the sender's own. A file keeps its own rule (§9.4, D-34).
+storage, here the sender's own. A file keeps its own rule (§9.4).
 A message closed this way stays in the sender's conversation; when its
 recipient later asks for what it missed (§9.5), it is sent with the
 answer under its own identifier and becomes `delivered` — unless the
@@ -2411,9 +2522,17 @@ through the recipient's request (§9.5). The copy kept for sending again
 is dropped at the next edge once the placing is more than 7 days old.
 
 Where a user retries, the message is sent again under a new identifier;
-the old one is closed as `failed`. A file is never sent again: when its
+the old one is closed as `failed`. In a group or channel, a retry sends
+again only the legs that failed, each under its own identifier, to the
+members they were sent to; the message is not closed and no other member
+receives anything — a member that holds the identifier already drops the
+copy and acknowledges it again (§9.2). A file is never sent again: when its
 transfer fails it is `failed` at once, with its reason, at the sender and
-the recipient (§9.4).
+the recipient (§9.4). The one exception is an image: a recipient
+that finds it incomplete because the pieces it kept are lost asks the
+sender once for the missing stripes; the sender places only those on
+lane 3. If that fails too, or the sender no longer holds the image, the
+image is `failed`. Video, audio and other files are never asked for again.
 
 ### 9.4 Large payloads — three lanes for media
 
@@ -2438,7 +2557,7 @@ no refill round.
 | block size | 1024 B |
 | fragment surplus `d` | 4 |
 | resulting overhead `N/K` | 1.571 |
-| relay size cap `C` | 25 MB of payload (D-1) |
+| relay size cap `C` | 25 MB of payload |
 | bulk rate `R_bulk` | 32 cells/s (38.4 KB/s), one transfer at a time — proposed, to be measured |
 
 **Pieces are lane-neutral.** All three lanes carry the same
@@ -2455,6 +2574,10 @@ content post-quantum sealed on every lane. `K_T` is never derived from
 rotation (§4.5.4), and would let whoever holds `K_AB` test whether a
 guessed object was sent. A group transfer draws one `K_T` and hands it
 to each member over that member's own leg — encode once, place once.
+On the shared key (§16.2.5) `K_T` travels inside the post under `K_C`,
+which reaches members only under the hybrid seal, so the content stays
+post-quantum sealed there too; an inline object is deposited once
+together with its post.
 
 **Lane 1 is one message.** The pieces of an inline object travel together
 in one sealed message and take the ladder like any other (§7, §8),
@@ -2479,7 +2602,8 @@ node with evidenced reachability (§11.8a) that keeps a bulk cache
 (§21.3.3): every desktop installation, and a phone whose address the
 check of §8.1 found open. The sender takes them in this
 order: the recipient's fixed neighbours as the recipient last told them
-(§9.2), then its own fixed neighbours (§5.2) — both are devices of
+(§9.2) — on the shared key the keepers of the group or channel
+(§16.2.5) —, then its own fixed neighbours (§5.2) — both are devices of
 contacts —, then other neighbours with evidenced reachability. Among
 candidates of equal rank desktops go first; a holder states its class
 in `0x53`. A sender
@@ -2504,12 +2628,17 @@ change, when the application opens — never on a timer; the holder
 answers with the fragments it holds (`0x51`, sealed under
 `HKDF(K_T, "bulk/seal")`) and closes every pass with `0x55` carrying the
 number of fragments it sent, or answers `0x55` "nothing here" without a
-number. `0x54` may name the first stripe the recipient still lacks; the
-holder then hands out only from that stripe on. When every named holder
-has closed its pass and stripes are still missing, the recipient asks
-again at once from the first missing stripe — the loss rule of §11.3
-driven by the holders' end marks, not by a clock; after three such rounds
-without a new complete stripe the file is `failed`, incomplete (x of y
+number. `0x54` may name the first stripe the recipient still lacks — the
+holder then hands out only from that stripe on — or the stripes it lacks
+by name (first stripe and a bitmap) — the holder then hands out only
+those. A holder of an older 4.2 version reads only the form from the
+first missing stripe and stays silent to the named form; the recipient
+sends the named form only to holders that have answered it, and asks a
+holder that leaves it unanswered for 1.1 s (§11.3) again from the
+first missing stripe, and from then on only that way. When every named holder has closed its pass and stripes are still
+missing, the recipient asks again at once for the stripes still missing — the loss rule of §11.3
+driven by the holders' end marks, not by a clock; when such a request and
+its repeats (§11.3a) bring no new complete stripe the file is `failed`, incomplete (x of y
 stripes). A holder that sends no end mark leaves the next moment of §8.2
 to ask. Stripes already complete are kept on the recipient's disk,
 encrypted, up to 256 MiB, so that a restart asks only for the rest. Knowing the
@@ -2521,6 +2650,15 @@ expire with `TTL_media`.
 file takes either lane, the sender is asked for this transfer only, with
 the linkability named (§24.4.5); without consent nothing is sent. No
 remembered blanket consent is offered.
+
+**Loading images in a group or channel.** Each group and channel has a
+setting "always load images", which the user can change at any time in
+the settings of that group or channel. While it is on, the device
+collects every image of that group or channel as it arrives — from the
+keepers (§16.2.5) or from lane 3 holders. While it is off, the post
+shows the image as not loaded, and a tap loads that one image. What
+arrives inside a message on pairwise legs is there already and needs no
+loading.
 
 **The rest goes into the network.** A transfer that is interrupted — the
 recipient goes offline during a stream, the volunteer is lost — places
@@ -2563,7 +2701,7 @@ derives the codec from the object length, which the announcement already
 carries; no additional field is needed.
 
 **The relay size cap `C`** protects the volunteer: above `C` a transfer
-takes the bulk lane even when both parties are online (D-1). At
+takes the bulk lane even when both parties are online. At
 `C` = 25 MB a transfer is 3,488 stripes of 11 fragments; at the 1200 B
 frame size of §17.6 the volunteer forwards at most 46 MB in each
 direction per transfer. The cap is set, not measured; the volunteer's
@@ -2594,7 +2732,10 @@ including the seal, at most 4 packets per round, the next round on the
 requester's progress report (§20.2); the identifiers of its messages
 deleted in that time; and the identifiers of the requester's messages it
 holds from that time. A group post therefore reaches the requester from
-its author, under the author's seal, as §16.2 delivers it. What the
+its author, under the author's seal, as §16.2 delivers it;
+a post on the shared key does too, under the pair's seal and not under
+`K_C`, and the owner's answer also carries the current keys for the
+requester, as at a joining (§16.2.5). What the
 party has deleted, and what has expired there (§21.5.3), is not sent —
 deleted is deleted (§13.5.2). A file is named by its record and not sent
 again (§9.4). For each conversation in that scope it also names the
@@ -2603,8 +2744,10 @@ number of its messages from that time that expired there unacknowledged
 in that conversation.
 
 **What the requester does.** It takes a message only if it holds none
-with that identifier, acknowledges every packet (§9.2) and reports the
-messages as delivered. Its own messages the answer names as held become
+with that identifier; of a message it holds, it takes the text when the
+record names a later edit than its copy and the message is the party's
+own — an edit that lapsed in a post box comes with the answer. It
+acknowledges every packet (§9.2) and reports the messages as delivered. Its own messages the answer names as held become
 `delivered`.
 
 **Bounds.** One open request per party; one answer per party and named
@@ -2724,7 +2867,8 @@ only `0x40`, `0x41` and `0x46`, never delivery, and a blocked probe port
 changes nothing but the measurement. The untouched port of the open check
 (§8.1) lives for a few seconds; it receives `0x4A` and answers nothing but
 the shell handshake of that packet, never delivery. Apart from that there is
-no second port and no second protocol.
+no second port and no second protocol for delivery; the HTTP server of §26.6.5
+listens on TCP under the same port number and carries no delivery.
 
 | Property | Value |
 |---|---|
@@ -2754,7 +2898,7 @@ it arises but at the first send, asynchronously, and it ends the socket. A
 node knows its network environment instead of exploring it by failing.
 Should the bind fail nonetheless, that is not an error either and the node
 continues with IPv4 alone. When the set of interfaces changes, the node
-re-reads it at the same edge as everything else (§11.8) and opens or
+re-reads it at the network change of §11.8.2 and opens or
 closes the second socket accordingly — a phone leaving Wi-Fi for mobile
 data may lose its IPv6, and keeping the socket would keep a socket whose
 first send ends it.
@@ -2808,21 +2952,54 @@ transmission to that recipient (§20.2).
 |---|---|
 | quiet period before asking | 300 ms without a new part |
 | request | one packet listing the missing indices |
-| rounds | as long as each brings new parts; at most 3 in a row that bring none |
-| after 3 rounds without progress, or 30 s | the transmission fails and the caller is told |
+| rounds | as long as each brings new parts; a request that brings none is repeated as §11.3a says |
+| when the request and its repeats bring no new part, or after 30 s | the transmission fails and the caller is told |
 | incomplete transmissions discarded after | 30 s |
 | end mark | an empty request (no missing index), once per complete transmission of two or more parts |
 | sender without end mark or request | treats the transmission as ended 1.1 s after its last part (quiet period 300 ms + one answer deadline, §11.6) |
 
 There is no timer that runs while parts are arriving, and no
 per-part acknowledgement. A transmission that never completes fails
-cleanly rather than hanging.
+cleanly rather than hanging. A step-3 transmission of two or more parts
+that ends without the first hop's end mark counts as that hop not
+answering (§11.3a), and the sending goes to the next possible hop; a
+one-part transmission gives no such verdict.
+
+### 11.3a Silence
+
+**One rule for every request, and only here.** A packet that expects an
+answer and gets none within its answer wait is repeated, at most three
+times. When it and its repeats all stay without an answer, that address
+has failed — provided this node has confirmed, since its start or last
+network change, another neighbour that it reaches the same way and that
+is not itself silent: an address of the same family (IPv4 or IPv6) that
+lies, like the failed one, inside the node's own segment or outside it
+(§7.1), and to which no request of this node stands unanswered. A node
+that confirms nobody that way — offline, a dead uplink, a router without
+internet whose segment still answers, IPv6 lost while IPv4 carries —
+learns nothing from silence about that way and declares nothing failed
+on it. A neighbour is gone only when every address it
+is known under has failed; until then the packet goes to its other
+addresses the same way. This holds for every packet that expects an
+answer, whatever it carries. Call media is the only exception among
+packets sent to a peer: the audio and video packets of a call (§17)
+expect no answer, are never repeated, and their loss says nothing about
+a neighbour. The two measurements of §8.1 — the open check and the
+keep-alive measurement — are no requests to a peer: their silence is
+their result and says nothing about a neighbour.
+
+**The transport alone handles silence.** The layers above it — the
+delivery layer of §7–§10 and the application — hand a packet to the
+transport and learn one of two things: answered, or failed. They do not
+repeat, count or time anything themselves. A message that rests because
+it has no way is not silence: it leaves again at the edges of §8.2
+(§9.3), as a new sending.
 
 ### 11.4 Address translation
 
 A node behind address translation learns its public address by asking a
-neighbour what it saw (§7.3) and keeps the path open with the keep-alive
-of §8.1 — one neighbour per address family. Where both sides are
+neighbour what it saw (§7.3) and keeps its paths open with the keep-alive
+of §8.1. Where both sides are
 translated, both knock simultaneously (§7.3); if knocking does not
 succeed within five attempts, the ladder carries the packet through a
 neighbour or the post box (§8).
@@ -2846,9 +3023,12 @@ from here rather than choosing one:
 | 0x20-0x2F | handing on by code (§8.1): `0x20`–`0x23` |
 | 0x30-0x3F | post box (§8.2) |
 | 0x40-0x4F | public-address discovery and knocking (§7.3); board question `0x43` and answer `0x44` (§11.8a); keep-alive measurement `0x45`–`0x47` and open check `0x48`–`0x4A` (§8.1) |
-| 0x50-0x5F | media (§9.4): announcement `0x50`, fragment `0x51`, hold `0x52`, held `0x53`, collect `0x54` (identifier ‖ optional first missing stripe), nothing here or end of pass `0x55` (identifier ‖ optional fragments sent); stream (§17.6): ask `0x56`, cookies or refusal `0x57`, join `0x58`, frame `0x59`, missing `0x5A` |
-| 0x60-0x6F | groups (§16.2) |
-| 0x70-0xFF | free |
+| 0x50-0x5F | media (§9.4): announcement `0x50`, fragment `0x51`, hold `0x52`, held `0x53`, collect `0x54` (identifier ‖ optional first missing stripe, or first stripe ‖ bitmap of the missing ones), nothing here or end of pass `0x55` (identifier ‖ optional fragments sent); stream (§17.6): ask `0x56`, cookies or refusal `0x57`, join `0x58`, frame `0x59`, missing `0x5A` (the recipient's lists; the sender's end of pass) |
+| 0x60-0x6F | groups (§16.2) — shared key (§16.2.5): hold `0x60` (channel value ‖ collect public key ‖ generation public key ‖ author key with its certificate ‖ signature ‖ entry ‖ proof of work on the first deposit under a value), held or refused `0x61`, question `0x62` (channel values ‖ state root ‖ collect public key ‖ generation public key ‖ signature), same `0x63`, list of entry hashes, each with the kind of its entry, `0x64`, fetch `0x65`, entry `0x66`, end of pass `0x67` (number handed out, or nothing here), nudge `0x68` |
+| 0x70-0x7F | update (§26.6.1) |
+| 0x80-0x8F | enrolment of an own device (§14.6.1) |
+| 0x90-0x9F | durable objects (§16.0): deposit `0x90`, deposit acknowledged `0x91`, fetch `0x92` (identifier ‖ optional fountain state), object piece `0x93`, not held here or refused `0x94`, question "identifiers of channel K since T" `0x95` (channel ‖ T ‖ own state root), answer `0x96` ("same", or a list of identifiers in the codec of §5.5), question "crash fingerprint known?" `0x97`, answer `0x98` (head of the group, or "unknown", §16.7) |
+| 0xA0-0xFF | free |
 
 The calls of §7.2 are not in this table: it has its own socket on
 port 41341 and therefore its own numbering.
@@ -2874,22 +3054,9 @@ packet never triggers one. This does not hide the node: the exception
 below and the anonymous handshake (§4.2) let anyone who reaches the data
 port confirm that a node listens there (RL-12).
 
-One exception, on the shell (§4.2) only: a node that receives from one
-address two 1200-B packets it can open under no key and that do not
-form a handshake starts a shell handshake to that address itself — two
-packets in, two out, at most once per 10 s per address and port and at
-most 8 at a time; a single such packet stays unanswered. This is how a node that
-restarted lets its peers back in. A node whose counterpart has been
-silent for more than 2 s adds one empty sealed packet behind its first
-single-packet sending, so that a restarted counterpart holds two. Link
-keys live in memory only. Whether a counterpart lives is judged only by
-what arrives from it — its cover counts, this node's own cover and
-keep-alive packets to it do not: they never renew a link and do not count
-as sending for this rule; there is no renewal on silence while real
-sending continues. A request
-that expects an answer — the post box's `0x32` and `0x36` — to a
-counterpart not heard for more than 2 s renews the link first; if the
-handshake stays unanswered, the link has ended unanswered (§8.2).
+One exception, on the shell (§4.2) only: a restarted counterpart is let
+back in by a shell handshake this node starts itself, two packets in, two
+out, as §11.8.7 says. The link and its renewal are §11.8.7.
 
 ### 11.7 The first entry
 
@@ -2905,88 +3072,259 @@ uses the external records of §11.9. Once stable nodes of our own exist,
 their addresses travel in the invitation data instead of or alongside the relays;
 they, too, are ordinary nodes without privileges.
 
-### 11.8 Finding neighbours
+### 11.8 Neighbours
 
-A node needs neighbours before it can do anything except show its invitation
-(§12.4). It looks in the first three places, **all three at once**, and
-keeps whatever answers first. As soon as one of them has produced a
-neighbour that is reachable under its address, it asks that neighbour's
-board (§11.8a). The fourth is read while the node is below 32 answering
-neighbours (§11.9):
+This section is the one place that says how a node finds, keeps, loses and
+finds again the nodes it exchanges packets with. Every other section that
+touches a neighbour's state refers here.
+
+**A neighbour is a node, not an address.** It is held as the set of
+addresses it answers under — type, address and port each, each address with
+a state of its own (§11.8.1). Two addresses belong to the same neighbour
+when it names them as its own (§5.5, §11.8a) in a sealed packet that
+arrives from one of them, when a packet under its link (§11.8.7) arrives
+from the second and is confirmed there (§11.8.6), or when, within one run,
+it names the same node identifier (§7.2) in answers to this node's requests
+from both. Across runs the node identifier plays no part — it is drawn anew
+at every start. A use goes to an address of a family this node has (§11.1).
+The list holds at most 32 neighbours; 32 counts neighbours, not addresses.
+A contact's device is a counterpart like any other: where it is a
+neighbour, this section governs it; its address record as a contact is
+§6.3.
+
+#### 11.8.1 States
+
+| Of | State | Meaning | Left by |
+|---|---|---|---|
+| address | hint | learned, never answered: from a source of §11.8.3, or the address a genuine packet arrived from (§11.8.6) | a stamp → confirmed; a failure → removed |
+| address | confirmed | answered a packet of this node that expected an answer (§11.8.4); carries the time of that answer, its stamp | 1 day without a stamp → stale; a failure → removed |
+| address | stale | confirmed, but not for a day | a stamp → confirmed; a failure → removed |
+| address | removed | a use failed (§11.3a) | a return (§11.8.6) |
+| neighbour | acquaintance | known — remembered from the last run, heard calling on the segment, named by a hint, or held under a family this node has no socket for — but no address stamped since this start or the last network change | a stamp → answering |
+| neighbour | answering | at least one address stamped since this start or the last network change and not removed since | a network change → acquaintance; its last such address removed → acquaintance, or gone |
+| neighbour | gone | every address it is known under is removed | a return (§11.8.6) |
+
+There is no other state: no score, no probation, no decay curve (§6.2).
+`ready` (§22.7.1) counts answering neighbours. A board entry (§11.8a), an
+address entry in cover (§5.5) and the neighbour address in invitation data
+(§15.2) name only addresses that are confirmed and not stale.
+
+#### 11.8.2 Edges
+
+Nothing in this section runs on a clock. What it does, it does at an
+**edge**:
+
+| Edge | What it triggers here |
+|---|---|
+| start | sources 1–3 at once, then the board, then the external records (§11.8.3); stale addresses are tried (§11.8.5) |
+| network change — another interface, a new or lost own address, a return from sleep, or the user's "reconnect" (§25.7) | every neighbour becomes an acquaintance; the node discards its observed public address (§7.3) and the removal memory (§11.8.6); it re-reads its interfaces and opens or closes its second socket (§11.1); every remembered address is tried (§11.8.5); then as at start |
+| a neighbour answers for the first time in this run | its board is asked once (§11.8a) |
+| a removal | while below 32: sources 1–3, the board, the external records — at most one round per minute |
+
+Other sections hang their own work on these edges: the post box is asked
+(§8.2), codes are registered (§8.1), the keep-alive is measured and the
+open check runs (§8.1), the router is asked for a mapping (§7.3), records
+are read and published (§11.9), the open set is redrawn (§11.8.8), the
+durable-object stock is asked for (§16.0). Each says which of these edges
+it uses; none adds an edge of its own to the neighbourhood.
+
+#### 11.8.3 Found
+
+A node needs neighbours before it can do anything except show its
+invitation (§12.4). It looks in the first three places **all three at
+once** and keeps whatever answers first. As soon as one of them has
+produced a neighbour that is reachable under its address, it asks that
+neighbour's board (§11.8a). The fourth is read while the node is below 32
+answering neighbours, after sources 1–3 have finished and the board has
+been asked (§11.9).
 
 | | Source | Content | Typical result |
 |---|---|---|---|
-| 1 | remembered | the neighbours from the last run, stored with the contacts (§21) | instant, and usually enough |
+| 1 | remembered | the neighbours from the last run, stored with the device state (§21.4.1) | instant, and usually enough |
 | 2 | the local segment | the neighbour call of §7.2 | milliseconds, when anybody is on the same network |
-| 3 | the first contact's invitation data | the addresses and relays carried in the invitation data of §15.2, and those learned from later invitations | one round trip |
+| 3 | invitation data | the addresses and relays carried in the invitation data of §15.2, and those learned from later invitations | one round trip |
 | 4 | external records | signed address records published on a public relay network (§11.9) | seconds, and works where none of the others do |
+
+Besides these four, a node learns addresses from boards (§11.8a), from
+address entries in cover (§5.5), and from the source address of every
+genuine packet it opens (§11.8.6). Every address learned in any of these
+ways is a hint until it answers; none is trusted (§6.1).
 
 Sources 1–3 are attempted together, not in order: a remembered neighbour
 that has moved must not delay the neighbour call, and an empty local
-segment must not delay the addresses in the invitation data. Sources 1–3 count as finished
-when the call's three rounds are over and the addresses in the invitation data have been
-tried once; external records (§11.9) are then read if the node is still
-below 32 answering neighbours.
+segment must not delay the addresses in the invitation data. They count as
+finished when the call is over and the addresses in the invitation data
+have been tried (§11.3a for both).
 
 **32 answering neighbours is the optimum, and the node works towards it.**
 It is a target, not a condition: a node with one neighbour works, and two
 freshly installed phones that have just found each other are a healthy
-state, not a deficiency. A neighbour is a node, held as the set of
-addresses it answers under, each with its port and confirmed on its own.
-Two addresses belong to the same neighbour when it names them as its own
-(§5.5, §11.8a) in a sealed packet that arrives from one of them; the node
-identifier plays no part — it is drawn anew at every start (§7.2). A use
-goes to an address of a family this node has (§11.1). 32 counts neighbours,
-not addresses.
-A neighbour counts only while it answers **under the address it
-advertises**; only such a neighbour is passed on to others (§5.5, §11.8a,
-§15.2). When the list is full, the entry confirmed longest ago gives way to
-a fresher one. There is no score and no probation.
+state, not a deficiency. When the list is full, the neighbour whose newest
+stamp is oldest gives way to a fresher one; a neighbour holding a fixed
+place (§11.8.8) does not.
+
+#### 11.8.4 Confirmed
+
+**Only an answer confirms.** Every answer to a packet of this node that
+expected one stamps the address that packet went to — the answer to the
+neighbour call (§7.2), an acknowledgement (§9.2), a board answer (§11.8a),
+the address answer of §7.3, a post-box answer (§8.2), a `0x25` (§8.1), the
+answer to a shell handshake (§11.8.7), and every other. This is the rule of
+every acknowledging transport (TCP, QUIC): an answer proves the path it
+came back on, and an unanswered request is the only evidence against it
+(§11.3a).
+
+A packet that merely arrives — cover, a keep-alive, a call on the local
+segment (it comes from the call port, not the data port), a request from
+the neighbour — confirms nothing: a stamp says that **this** node reaches
+the neighbour, and only the outbound direction answers that. The shell
+has no protection against replay (§4.2), so an authentic packet proves
+only that its sender once held the link key, not where it is now.
 
 **Reachability has a direction, and the list holds the direction that
-matters: outbound.** A node behind address translation reaches a node
-with a public address; the reverse works only while a mapping is open
-(§5.2). The far node is a good neighbour of the near one, and the near one
-is not a neighbour of the far one until it sends. **Silence is therefore
-never evidence that a neighbour is gone** — it is the normal state of a
-path whose mapping has closed.
+matters: outbound.** A node behind address translation reaches a node with
+a public address; the reverse works only while a mapping is open (§5.2).
+The far node is a good neighbour of the near one, and the near one is not a
+neighbour of the far one until it sends. Only a neighbour that answers
+under the address it advertises is passed on to others (§5.5, §11.8a,
+§15.2).
 
-**An address is removed when a use of it fails, not when it is quiet; the
-neighbour goes with its last address.** Every
-packet that expects an answer — the neighbour call, a receipt, a board
-answer, the address answer of §7.3 — confirms the entry and stamps it. An
-entry not confirmed for a day is stale: at the next edge it is tried
-**once**, and only a failure removes it. **A removed address returns only
-with a hint confirmed after its removal**; a hint that says nothing newer —
-a record, a board entry or an address entry older than the removal — is not
-admitted. A network change clears this.
+#### 11.8.5 Quiet, failed, removed, gone
 
-An entry counts as failed only when two uses of it failed — each a
-request without an answer — **and** this node has confirmed at least one
-other neighbour since its start or last network change. A single request
-is never repeated for this. A node that confirms nobody — offline, a dead
-uplink — learns nothing about its neighbours from silence and removes
-none. The price is that a dead neighbour stays one use longer.
+**Quiet is never evidence.** A neighbour that sends nothing is in the
+normal state of a path whose mapping has closed. Only an unanswered request
+is evidence, and only as §11.3a says.
 
-**A removal is an edge.** Falling below 32 triggers what a cold start
-triggers — sources 1–3, the board (§11.8a), the external records (§11.9) —
-at most one round per minute, and only after something was removed. While
-nothing is removed, nothing happens: no timer, no probe, no traffic.
+**An address is removed when a use of it fails, not when it is quiet, and
+the neighbour is gone with its last address.** Until then every use goes
+to its other addresses the same way (§11.3a). An address under a family the
+node has lost is not removed: it waits, unused, for the family to return
+(§11.1). A stale or remembered address is tried at the next edge with the
+address question `0x40` of §7.3 — a request whose only purpose is its
+answer, as an echo is; at an edge where that neighbour's board is asked
+anyway, the board question (§11.8a) does it. Only a failure removes it.
+
+**A removal is an edge** (§11.8.2). While nothing is removed, nothing
+happens: no timer, no probe, no traffic.
+
+#### 11.8.6 Return and move: one rule
+
+**A genuine packet triggers one request; only its answer counts.** When a
+packet opens under a link (§11.8.7) and comes from an address that is not a
+confirmed address of that counterpart — its neighbour is gone, the address
+is removed, or the address is new to it — this node sends that address
+**one** request: the address question `0x40` of §7.3, repeated as §11.3a
+says. Only the answer confirms the address: it lifts the removal, takes the
+address into the neighbour's set as confirmed and makes the neighbour
+answering again (§22.7.1). Until the answer, the packet itself is handled
+as any packet — its content is read and answered where it asks for an
+answer — but it confirms, lifts and adopts nothing. A packet replayed from
+another address, or one whose sender cannot be reached there, brings no
+answer and changes nothing. This is path validation as QUIC does it
+(RFC 9000 §8.2) and as §17.4 does it for calls; the request is ordinary
+traffic of the node and at most one per address and edge.
+
+**A packet from an address that holds no link** is first tried under the
+keys of the links this node holds before it counts as unreadable
+(§11.8.7). If it opens under one, the counterpart of that link has moved —
+the endpoint roaming WireGuard does by the most recent authenticated
+packet, found here by trying the keys, because the shell carries no
+identifier in the clear (§4.2). The new address then goes through the rule
+above.
+
+**A removed address returns** with that answer, or with a hint confirmed
+after its removal; a hint that says nothing newer — a record, a board
+entry, an address entry or an invitation address older than the removal,
+or one that carries no time — is not admitted. A network change clears
+the removal memory.
+
+**A neighbour that restarted** has no link any more (§11.8.7); its packets
+reach this node through a new shell handshake, like a new connection after
+a QUIC stateless reset. Arriving from an address of an existing entry, it
+is that neighbour again; arriving from any other address, it is a new one,
+and the old entry ends by the rules above. Addresses that named the
+neighbour's previous node identifier count again only with their next
+answer.
+
+#### 11.8.7 The link
+
+Packets between two nodes travel under a pairwise **link**: the anonymous
+shell of §4.2, set up by one shell handshake and held in memory only
+(§11.6). A link names a counterpart, not a person: who the counterpart is,
+the envelope decides (§4.3).
+
+- **Whether the counterpart of a link lives** is judged only by what
+  arrives from it; its cover counts. This node's own cover and keep-alive
+  to it never renew the link and do not count as sending. Whether the
+  counterpart is an answering neighbour is a different question (§11.8.4).
+- **No renewal while real sending continues.** A link from which nothing
+  arrived for 120 s is renewed before the next real sending that follows a
+  pause of this node's own — the interval at which WireGuard renews its
+  handshake. A request that expects an answer — the post box's `0x32` and
+  `0x36` (§8.2), first sending and repeats alike — to a counterpart not
+  heard for more than 2 s renews the link first; when that handshake stays
+  unanswered (§11.3a), the link has ended unanswered.
+- **A restarted counterpart is let back in.** A node that receives from one
+  address two 1200-B packets it can open under no key — none of its links
+  either (§11.8.6) — and that do not form a handshake starts a shell
+  handshake to that address itself: at most once per 10 s per address and
+  port, and at most 8 such handshakes at a time, not counting those its own
+  sending started; a single such packet stays unanswered. A node whose
+  counterpart has been silent for more than 2 s adds one empty sealed packet
+  behind its first single-packet sending, so that a restarted counterpart
+  holds two.
+- **At most 64 links** are held; the one used longest ago gives way.
+
+#### 11.8.8 Fixed neighbours and the open set
+
+The **open set** has four places among the answering neighbours. Up to
+four of them are **fixed**: the invitation neighbour's place and up to
+three contact places (§5.2 says who qualifies and why); the others are
+drawn anew at every edge. Cover goes to the open set (§5.2); the fixed
+neighbours hold the node's codes (§8.1) and keep its paths open (§8.1).
+
+A fixed place changes only at an edge, and only because its neighbour is
+gone (§11.8.5); because a better qualified neighbour answers for the first
+time — for the invitation neighbour's place, one reachable from the open
+network replacing one known only under a private address, unless a
+standing invitation names the holder (§5.2); or because the contact ends,
+is excluded (§15.10) or no longer qualifies on a metered link (§5.2). A
+place whose neighbour is merely an acquaintance after a network change
+stays. The fixed places are stored with the neighbours and survive a
+restart.
+
+#### 11.8.9 Moves
+
+**This node moves** at a network change (§11.8.2). Its new address reaches
+its open neighbours with the next cover packet to each (§5.5) and its fixed
+neighbours with its code registration (§8.1); a node behind address
+translation that misses it asks a board (§11.8a). Its contacts learn a new
+fixed neighbour only from the node itself, sealed (§9.2). Nothing about a
+move travels in a packet of its own.
+
+**A neighbour moves** when a packet under its link arrives from a new
+address; the address is taken as §11.8.6 says. A fixed neighbour moves the
+code-table entry of a registered device, in that address family, to the
+address the device's keep-alive or registration came from, once that
+address has answered the one request of §11.8.6 (§8.1). A call
+follows a move of its own path by path validation (§17.4).
+
+#### 11.8.10 Parameters
 
 | Parameter | Value |
 |---|---|
 | optimum | 32 answering neighbours |
-| open set for cover | 4 of them (§5.2) |
-| stale after | 1 day without confirmation |
-| retry of a stale entry | once, at the next edge |
-| refill after a removal | at most one round per minute |
-
-**After a network change** — a different interface, a new address, a
-return from sleep — the remembered addresses are re-attempted once and
-the neighbour call is repeated once. The open set (§5.2) is redrawn, and
-the node's new address leaves with the next cover packet to each open
-neighbour (§5.5). Nothing else is triggered, and nothing is repeated on a
-timer.
+| full list | the neighbour whose newest stamp is oldest gives way; fixed places excepted |
+| open set | 4 places, of them up to 4 fixed (§5.2) |
+| stale after | 1 day without a stamp |
+| try of a stale or remembered address | at the next edge, address question `0x40` |
+| failure of an address | §11.3a |
+| new or returning address of a genuine packet | one request `0x40` (§11.3a repeats); confirmed only by its answer |
+| refill after a removal | at most one round per minute, while below 32 |
+| removal memory | until the next network change |
+| link renewal after silence | 120 s, before the next real sending after an own pause |
+| links held | 64, the one used longest ago gives way |
+| restart handshakes | 1 per 10 s per address and port, 8 at a time |
 
 ### 11.8a The board
 
@@ -3027,7 +3365,7 @@ discarded.
 | Property | Value |
 |---|---|
 | kept by | nodes whose reachability is evidenced (above) |
-| entries | at most 32, only confirmed ones (§11.8) |
+| entries | at most 32, only confirmed and not stale ones (§11.8.1) |
 | asked | once per edge, after sources 1–3 and before the external records |
 | size of the answer | payload at most 32 × 21 B + 17 B = 689 B; on the wire 1200 B, the same as the question |
 | trust | none — an entry is a hint like a record (§11.9) |
@@ -3056,8 +3394,8 @@ public relay network.
 |---|---|
 | what is published | the node's own address record: addresses, node key, validity |
 | signed with | secp256k1 Schnorr, the signature scheme the relay network requires |
-| read by | any node looking for neighbours |
-| trust | none — a record is a hint, and an address that does not answer is simply dropped |
+| read by | any node looking for neighbours, and a sender or a reader of invitation data looking up a named neighbour under the record key that came with its address (§8.1, §15.6) |
+| trust | none — a record is a hint (§11.8.3) |
 | which relays | a built-in list of public relays, extended by the relay lists of invitations it has read; the node's own invitation data carry the relays it knows |
 | publisher key | a node with a reachable address keeps **one key for its records**, so that a new record replaces the old one and its standing is readable; a node without a reachable address publishes nothing and therefore needs no key |
 | relays written and read | 2–3 |
@@ -3093,8 +3431,8 @@ for good may additionally delete its record, because it still holds the key.
 **Standing is readable, and it is a hint like everything else here.** The age
 of the oldest record still carried under a node's key says how long that node
 has been standing — the same quantity §10.3 gates relay eligibility on. It
-carries no authority: an address that does not answer is dropped (§6.1),
-however long it has stood.
+carries no authority, however long it has stood: the address is a hint
+(§11.8.3).
 
 The relay network is a start aid only:
 once stable nodes of our own can be offered through the invitation data, it may be
@@ -3102,8 +3440,7 @@ read in parallel or not at all.
 
 This is the only part of the system that uses infrastructure it does not
 own, and it is used for exactly one thing: learning an address to try.
-Reading is the last resort: a node that finds neighbours by any of the
-other three sources never reads from it (§11.8). No content passes
+Reading is the last resort (§11.8.3). No content passes
 through it; the only thing held there is the published address record.
 
 **It is a hint, not an authority.** A record carries no weight beyond
@@ -3138,8 +3475,8 @@ A recipient who is offline is shown as `in transit`, not as an error.
 
 ### 12.3 Per connection
 
-One indicator, derived from what the node has actually observed (§6.2):
-whether at least one neighbour has answered recently. No tier scale and
+One indicator: the readiness state (§22.7), derived from the answering
+neighbours (§11.8.1). No tier scale and
 no derived score — a value the user cannot act on does not belong in the
 interface.
 
@@ -3159,7 +3496,11 @@ other directly), or, for a device reachable only through a neighbour
 internet, and showing them produces a request that never arrives.
 
 **Until such invitation data can be made, the device shows a waiting
-indicator — at most 30 s.** Then it says plainly that the device cannot
+indicator — at most 30 s.** While it waits, the device asks its invitation
+neighbour once over each address that is reachable from the open network
+but not confirmed in this run — at most two requests, with the address
+question of §7.3 —; an answer confirms the address (§22.7.1), silence
+changes nothing. Then it says plainly that the device cannot
 be reached from the internet right now and that the invitation should be
 tried again later. Below that message a button shows the invitation
 anyway, marked as usable only in the same W/LAN: two devices on one
@@ -3339,8 +3680,8 @@ exclusion is structural, not rule-based") — and this is exactly what the
 central statement of this chapter follows from:
 
 > **If all devices are gone, the current signing and KEM keys are gone
-> with them — after a rotation neither follows from the 24 words (§4.3,
-> D-33).** The recovery bundle carries them (§13.3), found and opened only
+> with them — after a rotation neither follows from the 24 words
+> (§4.3).** The recovery bundle carries them (§13.3), found and opened only
 > with the seed. As long as it lies with its holders — up to 7 days after
 > its last placement (§13.3.4) — the phrase therefore brings back the day
 > keys (§8.2) and with them the post still waiting; after that only the
@@ -3396,10 +3737,21 @@ exactly two paths for this — §13.3 and §13.4.
 The bundle contains the current signing key (§13.3.2); the day keys of
 the last 7 days follow from it (§8.2), and the recovering device asks its
 former fixed neighbours, which the bundle names, for the post still lying
-under them. For the contacts nothing changes at first: they keep writing
-to the same day values, and their messages arrive. A contact's address is
+under them — at the takeover and at every collection edge after it
+(§8.2), until each restored contact is anchored by its first envelope, at
+most 7 days. For the contacts nothing changes at first: they keep writing
+to the same day values and leaving post with the former fixed neighbours,
+and their messages arrive. A contact's address is
 taken from its first envelope that proves its UserID (§4.1); its `s_AB`
-comes from the bundle.
+comes from the bundle. At the takeover the recovering device forms `K_AB`
+and the codes of every restored contact from the bundle (§13.3.2) and
+registers them (§8.1) with its fixed neighbours and with the former fixed
+neighbours the bundle names, until that contact is anchored; a contact's
+packet under its code then reaches the recovering device as after a move
+(§11.8.9) once the lost device's own registration there has expired
+(§8.1), at the latest from the second UTC day after its last one; until
+then its post reaches the recovering device through the post box (above);
+and a `0x23` under such a code is its own.
 
 **During recovery, rotation is explicitly not performed.** The reason is
 given in §13.6: a rotation in the middle of the process would have the
@@ -3443,7 +3795,7 @@ where the recovering device reaches one of its holders — a former fixed
 neighbour (a contact's device, §5.2), reached for instance by reading that
 contact's invitation again, or a neighbour it happens to find (§13.3.1).
 
-#### 13.3.1 Location, Tag Line and Delivery
+#### 13.3.1 Location, Value and Delivery
 
 ```
 recovery_key(i) = HKDF(seed, "recovery" ‖ i)                 // i = identity_index
@@ -3520,7 +3872,7 @@ of the three holders. All it would have bought is that the
 **first** delivery to a contact could already be sealed against that
 contact's current KEM key instead of their long-term key (§4.6 stage 3).
 Everything else — current pubkeys, prekey batch, profile data, history —
-comes from the contact: its current keys with its first envelope (D-35),
+comes from the contact: its current keys with its first envelope,
 the history from the contact's response once §13.5 is restated
 (Appendix C). A small security gain at 30 times the
 cost, at a point every user pays permanently.
@@ -3532,7 +3884,7 @@ The bundle is sealed **symmetrically**, with a key from the seed:
 
 This immediately follows the commitment from §4.6: **by construction, the
 recovery bundle is not forward-secret.** Whoever obtains the seed and has
-archived the responsible relays can read every bundle within the archive
+archived its holders (§8.2) can read every bundle within the archive
 window, and with it the complete contact list **and the Shared Key**. This
 is not an implementation deficiency but the definition of the matter: a
 backup that the seed alone is meant to open cannot have a key the seed does
@@ -3905,7 +4257,7 @@ The following protective measures apply:
   the manifest of the pair's own conversation and the groups and channels
   both belong to, never another conversation and never the contact list.
   An answer that no own broadcast asked for is discarded; an answer never
-  creates a contact (D-16).
+  creates a contact (§12.5).
 
 #### 13.5.5 Last stage: contact rebuild
 
@@ -3980,7 +4332,7 @@ nothing a question that finds nothing does not already say.
 
 The run is not a clock. It repeats at the post-box edges of §8.2
 together with the search for the first bundle (§13.0), and "no further
-identity" is never concluded automatically (D-40): the interface shows
+identity" is never concluded automatically (§13.0): the interface shows
 how many identities were found and lets the user name an index of their
 own. That is the case of §13.2.2, when every bundle has expired — the
 user recalls how many identities they had, and recovery runs once per
@@ -4116,7 +4468,7 @@ not an addressing means; it carries exactly the following tasks:
 | Device revocation: the revocation delivery names the device | §14.4 |
 | Quorum count at lock-out and at emergency key rotations — the quorum counts devices | §14.4, §14.8 |
 | Twin-sync attribution (“which of my devices") | §14.7 |
-| Local device-key management (`device_keys.enc`) | §14.4 |
+| Local device-key management (device database, area `device_keys`) | §14.4 |
 
 In short: the DeviceID is a **subject**, not a **signpost** — for
 authorization, revocation, and attribution.
@@ -4339,7 +4691,7 @@ informed (3 of 47 still open)". A lock that is visibly not yet in
 effect is more honest than one that suggests a security it only reaches
 after days.
 
-**Adding a device** rotates no key (D-39) and opens no transition. The
+**Adding a device** rotates no key (§14.6.1) and opens no transition. The
 **routine KEM rotation** (§4.5.4) has its own: the previous generation
 is kept for 7 days, and the other own devices receive the new one before
 the contacts do (Type 19, §14.7).
@@ -4454,10 +4806,10 @@ give:
 
 | Item | Purpose |
 |---|---|
-| current identity signing secret keys (Ed25519 + ML-DSA-65) and the rotation chain | signing in the identity's name after an Emergency Key Rotation (D-33) |
+| current identity signing secret keys (Ed25519 + ML-DSA-65) and the rotation chain | signing in the identity's name after an Emergency Key Rotation (§4.5.4) |
 | current and previous user KEM generation with its time | opening the same cells as the other devices (§4.5.4) |
 | per contact and group pair: address with chain, `s_AB`, the peer's day keys and fixed neighbours, invitation addresses, name, verification level | the codes, step 3 and the post box at once (§4.3, §8.1, §8.2) |
-| standing invitations with their random keys, codes and waiting requests | harvesting contact requests (D-28) |
+| standing invitations with their random keys, codes and waiting requests | harvesting contact requests (§15.6) |
 | display name, profile, groups, channels, shared settings, the device set | basic state of the UI |
 | **NOT:** device keys, node keys, the network view, local UI settings | individual per device (§14.7) |
 
@@ -4474,7 +4826,7 @@ missing before a lock-out (§14.4).
 
 **Normative:** the initial reconciliation uses the **manifest-and-pull
 machinery from §13.5.2**, just under a different carrier — the
-own-device line of §14.7 (D-37), the post-box value of
+own-device line of §14.7, the post-box value of
 `HKDF(K_own, "device" ‖ deviceId ‖ d)`, `d` the UTC day, as twin-sync
 Type 20 `RECONCILE`, and directly on the LAN while both devices are
 present, like §14.6.1 step 4. Everything stated there therefore also
@@ -4507,7 +4859,7 @@ and the **twin-sync backlog**. Both are bounded by the post box: a
 deposit lives 7 days (§8.2). From this follows, normatively:
 
 > **A device that was switched off for more than 7 days after a lock-out
-> or an Emergency Key Rotation is re-enrolled** (§14.6.1, D-39) — it no
+> or an Emergency Key Rotation is re-enrolled** (§14.6.1) — it no
 > longer finds its key packet. The UI states this
 > plainly (“This device was offline for too long and must be
 > re-enrolled"), instead of letting it run silently into a half-dead
@@ -4519,13 +4871,13 @@ twin-sync state before it harvests invitation lines or places delivery
 receipts; until then the UI shows “reconciling state" instead of a
 possibly stale state.
 
-### 14.7 Twin-Sync: 21 Content Types
+### 14.7 Twin-Sync: 23 Content Types
 
 When multiple devices are active, changes to application state must be
 reconciled between them. The Twin-Sync content types handle this.
-There are 21 of them.
+There are 23 of them.
 
-**Types 0–20** (canonical `proto/app_payloads.proto::TwinSyncType`).
+**Types 0–22** (canonical `proto/app_payloads.proto::TwinSyncType`).
 *Types 14–16 are assigned here and **reserved** on the wire
 (`reserved 14, 15, 16;`) but not built in `lib/` yet; whoever spends one
 of those numbers on something else makes this document's numbering and
@@ -4539,9 +4891,9 @@ the wire's permanently different.*
 | 3 | MESSAGE_EDITED | edit within the edit window (default 60 min, §21.6) |
 | 4 | MESSAGE_DELETED | deletion is **unbounded** — the author may delete at any time (§21.6) |
 | 5 | TWIN_READ_RECEIPT | own read on one device → other devices mark it too |
-| 6 | GROUP_CREATED | own device created or joined a group (§16.2.2) — with the group's member state and, per group pair (D-36), the pair secret `s_AB`, the member's day keys and fixed neighbours, as Type 0 carries them per contact, so that every device of the user can reach every member; sent by the device that created or joined, and again when a member's entry it was waiting for arrives |
+| 6 | GROUP_CREATED | own device created or joined a group (§16.2.2) — with the group's member state and, per group pair (§4.3), the pair secret `s_AB`, the member's day keys and fixed neighbours, as Type 0 carries them per contact, so that every device of the user can reach every member; on the shared key also the key state it holds (§16.2.5); sent by the device that created or joined, and again when a member's entry it was waiting for arrives |
 | 7 | PROFILE_CHANGED | the own profile changed — display name, picture or description (§15.8); only the changed field travels, so that two changes collected out of order do not undo each other |
-| 8 | SETTINGS_CHANGED | shared settings of the identity — what the identity decides and a contact notices, today the transcription language (§21.7); never a path, a model, a sound or a network setting |
+| 8 | SETTINGS_CHANGED | shared settings of the identity — what the identity decides and a contact notices, today the transcription language (§21.7), per contact "allow calls" (§17, RL-7), the self-declaration `isAdult` and the opt-in "evaluate channel reports" (§15.10); each value travels with the time of its change, and the later change wins; never a path, a model, a sound or a network setting |
 | 9 | DEVICE_ANNOUNCE | announce a new device to the existing devices (carries a `DeviceRecord`) |
 | 10 | DEVICE_RENAMED | one of the user's own devices was renamed (§14.9) |
 | 11 | TWIN_DEVICE_REVOKED | device locked out — propagated to the remaining devices |
@@ -4550,11 +4902,12 @@ the wire's permanently different.*
 | 14 | INVITE_LIST | invitation list (`i`, `exp`, class, label, revoked) — in particular carries the **revocation of an invitation**, which is therefore not a purely local act (§15.3.1/§15.3.3) |
 | 15 | PREKEY_CONSUMED | consumption notice: this one-time prekey has been used, delete it (§14.3) |
 | 16 | DEVICE_SET_CHANGED | device-set change with the **package of wrapped new shared keys** — one packet per remaining device, placed in the **old** line. On lock-out, the rotated user KEM secret key and the identity signing secret keys travel along underneath it — they are placed under the new shared key (§14.4) |
-| 17 | TWIN_IDENTITY_DELETED | the identity was deleted on another of the user's own devices (§21.5.2). The receiving device wipes its local copy **in full** — the store (`messages.db` and its journals) and every `*.json.enc`, keys first (§21.4.1) — and its host then removes the identity entry and the profile directory, attachments included. **If it was the last identity on that device, the device ends with zero identities and returns to the first-start state; it does not exit.** No second broadcast to the contacts goes out: the deletion already reached them from the deleting device (§15.7) |
-| 18 | DELIVERY_MIRROR | a delivery from a contact, mirrored by the own device that collected it to the other own devices (§14.2) — the other devices show it as if they had received it themselves and do not acknowledge it again |
+| 17 | TWIN_IDENTITY_DELETED | the identity was deleted on another of the user's own devices (§21.5.2). The receiving device wipes its local copy **in full** — the store (`messages.db` and its journals), which holds the identity's keys with everything else it owns (§21.4.1) — and its host then removes the identity entry and the profile directory, attachments included. **If it was the last identity on that device, the device ends with zero identities and returns to the first-start state; it does not exit.** No second broadcast to the contacts goes out: the deletion already reached them from the deleting device (§15.7) |
+| 18 | DELIVERY_MIRROR | a delivery from a contact — or, over a group pair (§4.3), a group's or channel's settings change and a call signal of that group (§16.2.2, §17.2) — mirrored by the own device that collected it to the other own devices (§14.2) — the other devices show it as if they had received it themselves and do not acknowledge it again |
 | 19 | KEM_ROTATED | the routine KEM rotation of the identity (§4.5.4): the new generation's secret keys (X25519 + ML-KEM-768) with its time, placed by the rotating device to each other own device before the announcement to contacts; the receiving device takes it as its current generation and opens the cells it parked |
 | 20 | RECONCILE | the initial reconciliation (§14.6.3): header, manifest block, fetch, deliver, progress, cancel — device-scoped |
 | 21 | GROUP_LEFT | the identity left a group (§16.2.2) — group identifier and the membership epoch at leaving; the receiving device removes the conversation and sets the same mark. A post the leaving device discarded is not forwarded to the other own devices |
+| 22 | CHANNEL_JOINED | the identity created, joined or changed a channel on this device (§16) — the channel's state as it stands there (members with roles, epoch, name and settings; on the shared key also the key state it holds, §16.2.5), sent only while the identity is a member; the receiving device takes it where it holds the channel not at all or with an epoch that is not newer, and shows its conversation. A channel the device left comes back only with a newer state (§16.2.2); leaving travels as Type 21 |
 
 The type carries **17** on the wire (`proto/app_payloads.proto`).
 
@@ -4564,15 +4917,16 @@ carries **secret material per recipient device**: one deposit per
 remaining device under that device's value (§14.1), sealed against that
 device's KEM key. A locked-out device sees the deposits and can open
 none — so distribution needs no channel of its own (§14.4). The deposit
-lives as long as any post-box deposit, 7 days (§8.2, D-6); a longer-lived
+lives as long as any post-box deposit, 7 days (§8.2); a longer-lived
 class for it is excluded for the same reason as for the recovery bundle
 (§13.3.4).
 
 **Deliberately not on the list:** `CONTACT_VERIFIED`,
-`CONVERSATION_OPENED`, `CHANNEL_SUBSCRIBED`,
-`CHANNEL_UNSUBSCRIBED`. An upgrade of verification travels as a fresh
-`CONTACT_ADDED`, the existence of a conversation follows from the first
-message, and group or channel joins run over their own protocols (§16).
+`CONVERSATION_OPENED`. An upgrade of verification travels as a fresh
+`CONTACT_ADDED`, and the existence of a conversation follows from the
+first message. Group and channel joins run over their own protocols
+(§16); what they leave on one device reaches the other own devices as
+Type 6 or Type 22 (owner decision 08.10.2026).
 
 **Transport and mode.**
 
@@ -4591,7 +4945,7 @@ message, and group or channel joins run over their own protocols (§16).
   fixed neighbours under the own-device code
   `ring(A→B, d) = first 16 B of HKDF(K_own, "ring" ‖ deviceId_A ‖ deviceId_B ‖ d)`,
   which every device registers for each other own device like a contact's
-  code (§8.1); step 2 carries no message (D-4). A mirror through the post
+  code (§8.1); step 2 carries no message (§7.1). A mirror through the post
   box appears at the other device's next collection edge (§8.2), not
   within seconds; the mirror of a call signal rings within the seconds of
   its steps or not at all. Twin-sync deliveries carry no acknowledgement
@@ -4600,8 +4954,10 @@ message, and group or channel joins run over their own protocols (§16).
   message carries them to a contact (§9.2) — so that a device knows where
   its siblings are reachable; a change of fixed neighbours with no deposit
   pending costs one deposit per other own device.
-- **Type 18 `DELIVERY_MIRROR`:** a delivery from a contact, mirrored by
-  the device that collected it to the other own devices (§14.2).
+- **Type 18 `DELIVERY_MIRROR`:** a delivery from a contact — or, over a
+  group pair (§4.3), a group's or channel's settings change and a call
+  signal of that group (§16.2.2, §17.2) — mirrored by the device that
+  collected it to the other own devices (§14.2).
 - **Before two devices run one identity,** the routine KEM rotation
   (§4.5.4) must reach the other own devices as twin sync; otherwise a
   device collects and deletes post it cannot open. It does so as Type 19
@@ -4986,8 +5342,7 @@ addresses it is bound to, in its order of preference, link-local excluded
 first second, before anyone has ever reached it.
 
 **The neighbour address is carried only when it is verified**: that
-neighbour has answered under exactly that address and the entry is not
-stale (§11.8). And it is **one of the issuer's open neighbours** (§5.2)
+address is confirmed and not stale (§11.8.1). And it is **one of the issuer's open neighbours** (§5.2)
 **reachable from the open network (§5.2, fixed place); a private address is
 never carried as the neighbour — a reader on the same segment reaches the
 issuer's own addresses (§7.2) anyway, and a reader elsewhere cannot use
@@ -5002,7 +5357,12 @@ the other fixed neighbours sealed (§9.2).
 **The publisher key lets an invitation outlive an address change.** It is the
 stable key under which the issuing device publishes its record (§11.9); a
 recipient whose invitation addresses no longer answer looks the current ones up
-under it. The addresses stay in the invitation data regardless: they are the only way
+under it, once, and tries what the record names once: for invitation data handed
+over in person (QR, NFC) when their round trip passed its deadline without a
+bundle; for an out-of-band line, which has no deadline, at the first edge of §8.2
+after each start at which its request is still unanswered — the same request then
+goes directly to the addresses the record names. No timer runs for either, and
+with source 4 switched off there is no query (§11.9). The addresses stay in the invitation data regardless: they are the only way
 in that needs no third party — two phones in one W/LAN — and a device
 without a reachable address has no record the key could point to.
 
@@ -5077,7 +5437,7 @@ same test that decides between ladder step 1 and step 2. A stored
 classification would be a second truth that can go stale, and the issuer
 is not the one who can answer it: whether its `192.168.x.y` is in *your*
 segment is a fact about you. A node with no usable address at all — mobile
-data behind CGNAT — carries a count of `0`, and says so rather than
+data on carrier IPv4 behind CGNAT without IPv6 — carries a count of `0`, and says so rather than
 inventing one.
 
 **The neighbour address is the one entry that is not the issuer's.** It
@@ -5086,6 +5446,12 @@ case: behind NAT, and especially behind CGNAT, the issuer has no address
 of its own worth carrying, and a neighbour both sides can reach is then
 the only way in. Invitation data without it, and without own addresses, offer a
 requester on the open internet no path except the records of §11.9.
+
+The record key of the card neighbour (§11.9) does not travel in the
+invitation data — an older 4.2 reader rejects any other version, flag or
+byte. It travels behind the out-of-band line (§15.6); a reader whose card
+neighbour does not answer looks the current address up under it and
+sends the request there.
 
 Addresses in the invitation data are hints for reaching the issuer; they are not
 delivery state, and a stale hint produces no answer and no error.
@@ -5122,7 +5488,7 @@ bundle (§15.6).
 |---|---|---|
 | QR code | 91–413 B binary, or 122–551 base64url characters | binary, error correction M: **version 16, 81×81 modules** for the largest invitation, version 6, 41×41 for the smallest. Measured 17.09.2026 with the generator in use (`package:qr` 3.0.2, `QrCode.fromUint8List` as in `invitation_card_view.dart`), per level L/M/Q/H: largest invitation V13 / V16 / V19 / V22, smallest V5 / V6 / V8 / V9. The publisher key moved the largest invitation one version up at level M (V15 at 380 B). |
 | NFC exchange | the packed bytes in one NDEF record | physical contact; both sides may exchange invitations in one operation |
-| out-of-band invitation | `cleona:2:<base64url>`, 4,487–4,916 characters (about 11,600–12,100 after an Emergency Key Rotation) | for pasting into a chat, a mail, a note; redeemable while the issuer is off (§15.1, §15.6) |
+| out-of-band invitation | `cleona:2:<base64url>.<suffix>`, 4,534–4,963 characters (about 11,600–12,100 after an Emergency Key Rotation) | for pasting into a chat, a mail, a note; redeemable while the issuer is off (§15.1, §15.6) |
 
 The character counts follow from the byte counts: base64url without padding
 is `ceil(n × 4 / 3)` characters. The out-of-band line additionally carries the
@@ -5135,7 +5501,8 @@ signature 64 B and the chain count 1 B) and 5,357 B per Emergency Key
 Rotation of the issuer (§4.5.4) before the checksum:
 `9 + ceil((n + 3267 + 5357·r) × 4 / 3)` characters — 4,487 for the
 smallest invitation data (91 B), 4,496 for 98 B and 4,916 for the largest (413 B)
-without rotation; about 11,600 to 12,100 after one.
+without rotation; about 11,600 to 12,100 after one. The suffix of §15.6
+adds 47 characters.
 It no longer fits a text message on a phone network; chat and mail carry
 it.
 
@@ -5491,6 +5858,9 @@ single kind (§15.3) and therefore works against him.
 | out-of-band invitation through another channel | accept / decline / block |
 | posted or printed QR code | accept / decline / block |
 
+The row follows from the medium the invitation travelled by; the issuer
+chooses no hand-over class.
+
 **Declining** sends the answer with the decision byte `0x00`. The requester
 holds a valid code and therefore already knows the issuer exists; leaving
 them waiting would buy nothing and cost clarity. Refusals of the code
@@ -5525,6 +5895,14 @@ padding characters, so the line survives being pasted anywhere.
 `cleona:1:` — the same without `pk_inv`, bundle and signature — is still read; an invitation
 read from it is redeemable only while the issuer is on (§15.1).
 
+Every line is followed by a full stop and 46 base64url characters: the
+card neighbour's record key (32 B, all zero when none is known) and a
+CRC-16 over the invitation data and that key. A reader takes it only when
+the checksum fits this invitation; a missing or damaged one leaves the
+invitation readable without it. Its presence says the issuer reads keyed
+neighbour lists (§8.1). An older 4.2 reader ends the line at the full
+stop and never sees it. QR code and NFC carry the invitation data alone.
+
 **Truncated and corrupted are told apart, and the order matters.** The
 length of complete invitation data follows from a few bytes read in field order
 alone — the address count, then each own address's type byte, then the
@@ -5544,7 +5922,9 @@ one length, between 91 and 413 bytes; under `cleona:2:` the expected length is t
 | characters outside the alphabet, or an impossible length for base64url | bad characters | "the text was mangled in transit" |
 
 Checking the length **before** the checksum is what makes the first two
-distinguishable. Telling users their paste was truncated when it was
+distinguishable. A complete line of another version — its checksum holds
+over everything — is reported as wrong version: its flags have no defined
+layout, so no length can be read from them. Telling users their paste was truncated when it was
 complete makes them copy too little again.
 
 **Reading a pasted out-of-band line tolerates what programs do to text:** line breaks
@@ -5706,8 +6086,9 @@ localAlias ?? displayName`. If a contact with an alias set renames itself, a
 banner asks "adopt / keep alias". This is interface and storage logic and
 touches no packet.
 
-**Age declaration.** `isAdult` is a local self-declaration and a property of
-the identity. It is defined here, travels in the request and the answer
+**Age declaration.** `isAdult` is a self-declaration and a property of
+the identity; it and the opt-in "evaluate channel reports" hold on every
+own device (§14.7 Type 8). It is defined here, travels in the request and the answer
 (§15.5), and is presupposed elsewhere rather than redefined.
 
 **Deduplication.** Incoming requests are deduplicated by the hash of their
@@ -5808,7 +6189,7 @@ are placeholders and are to be treated as such.
 |---|---|
 | invitation data size | **91 B** (no address at all, count `0`, no publisher key) … **98 B** (one own IPv4 address) … **413 B** (four own IPv6 addresses, a neighbour in IPv6, the publisher key, three relay entries of 64 characters) |
 | invitation data as base64url | 122 / 131 / 551 characters — `ceil(n × 4 / 3)`, no padding |
-| out-of-band line, whole | `cleona:2:` 4,487 / 4,496 / 4,916 characters (invitation data + `pk_inv` 32 B + bundle 3168 B + Ed25519 signature 64 B + chain count 1 B + 2-byte checksum); `cleona:1:` 133 / 143 / 563 still read |
+| out-of-band line, whole | `cleona:2:` 4,534 / 4,543 / 4,963 characters (invitation data + `pk_inv` 32 B + bundle 3168 B + Ed25519 signature 64 B + chain count 1 B + 2-byte checksum, then the 47-character suffix of §15.6); `cleona:1:` 133 / 143 / 563 still read |
 | signature of the out-of-band line | Ed25519, 64 B, issuer identity key, over domain label ‖ channel ‖ code ‖ expiry ‖ `pk_inv` ‖ letter key ‖ invitation ML-KEM key; not hybrid (§4.4.3) |
 | invitation box key | `pk_inv`, Ed25519, random per invitation, kept with the record (secret 64 B); value `first 16 B of SHA-256(pk_inv)` |
 | invitation key pair | X25519 + ML-KEM-768 per invitation, random, kept with the invitation record and deleted with it; ≈ 2.4 KB secret per invitation, at most 10 |
@@ -5844,6 +6225,7 @@ are placeholders and are to be treated as such.
 | request payload cap | 8 KB including preview |
 | picture preview in the request | ≤ 4 KB |
 | picture in a profile update | ≤ 64 KB |
+| image and description of a group or channel (§16.2.2) | ≤ 64 KB, ≤ 500 characters |
 | profile description | ≤ 500 characters, plain text |
 | profile updates | max. 1 per hour |
 | envelope fixed cost | 7696 B |
@@ -5879,180 +6261,251 @@ are placeholders and are to be treated as such.
 
 ### 16.0 The durable-object class
 
-Moderation needs objects that **outlast a single delivery's TTL** and
-**cannot be evicted by flooding**: a case must survive a 30-day
-procedure, a verdict must survive indefinitely, a juror registration
-must age for 7+ days. Ordinary cells (placed to relays, harvested on
-cadence, TTL-bounded) do not offer this — they are a delivery
-primitive, not a storage primitive. Hence the **durable-object class**:
-a set of public, self-verifying objects (registrations, directory
-entries, cases, verdicts, tombstones) replicated across relays by
-**anti-entropy** (gossip/sync between relay pairs), with a per-class
-**state root** (a Merkle root over the sorted object IDs of the class)
-as the convergence anchor.
+Some public objects must outlast a single delivery and must be readable by anyone who wants them: a system-channel
+report (§16.7), and later a directory entry, a registration, a case, a verdict (§16.3–§16.6). They are **public and
+self-verifying**: each carries its author's Ed25519 signature (§4.4.3) and, where a type needs it, its proof. They are
+not messages — there is no recipient who could be asked (§8.2) — and they are not the network-wide index that
+recovery rejects (§13.3.4): a private object readable only by its owner is never a durable object.
 
-**What this is, and is not.** This is a per-class, relay-replicated
-anti-entropy store for *public, verifiable* moderation objects. It is
-**not** the global network-wide Merkle
-index that recovery (§13) rejected: there is no single convergent root
-every node must hold, and a private object readable only by its owner
-(a recovery bundle) is explicitly excluded from being a durable object
-(§13.3.4 — no checkable proof, unbounded producer). Public moderation
-objects have neither problem: every node can verify them, and their
-production is gated by registration age and the procedure.
+**Two sizes, two ways.** What exists is small and goes everywhere; the object itself is large and goes only to whoever
+holds or reads it. This is how updates travel (§26.6.1) and how Bitcoin announces transactions (`inv`/`getdata`).
 
-**Feed-in via the cover stream.** Registration, case, and verdict
-objects are **fed in via the cover stream** — first placed as an
-ordinary cell in the cover stream and only adopted into the
-class after diffusion by relays (authorship hidden within the cover; a
-latency of hours is uncritical for these types). The durable-object
-class therefore inherits the cover-stream mixing for feed-in, and the
-anti-entropy replication for durability — two different substrates for
-two different needs.
+- **Identifier.** 20 B: channel, age in hours, kind and size class, and the first 16 B of the SHA-256 of the signed
+  object. An identifier means **"I hold this object and hand it out"** — only a holder names one, and a node fetches
+  only from the node that named it. Identifiers travel inside cover packets (§5.5, content byte `0x05`) to the open
+  neighbours, and only while they are younger than 24 hours.
+- **Holders.** Every always-on desktop installation holds the system channels within their budget (§21.3.1); a
+  retention-bounded node holds none and names none (§5.5). A holder is chosen for a deposit as in §9.4 lane 3 —
+  evidenced reachability, desktops first — with the contact rule of §16.7.
+- **Fetching is an event, never a clock.** A holder that receives an identifier it neither holds nor has rejected,
+  and that it would keep under the channel's rules (§16.7), fetches the object from the naming node at once (`0x92`).
+  The object comes in fountain blocks as an update does (§26.6.1): after three answers without a new block, or a
+  `0x94`, the node stops. A node whose named identifiers it cannot fetch — `0x94`, or nothing after three answers —
+  is written off as a namer for the day, and its identifiers count for nothing until then (§11.8 logic). Nothing is
+  fetched in idle, because in idle nothing new is named.
+- **The stock at an edge.** At start, on a network change, when a new neighbour is found and when the user opens a
+  system channel, a node asks one neighbour that has named an identifier or answered such a question before:
+  "identifiers of channel K since T" (`0x95`), carrying its own **state root** — SHA-256 over the sorted 16-byte hashes
+  of the identifiers it holds **and** has rejected; channel, age and kind do not enter, so the root does not change
+  with the hour and every 4.2 version computes the same. If the roots agree, the answer is one packet, "same"; otherwise the list of identifiers
+  newer than T (`0x96`), and the node fetches what it lacks. T is the age of the newest identifier the node already
+  holds; a node with nothing asks from the beginning. This is the only moment the state root is compared.
+- **Rejected identifiers.** An identifier enters the rejected set only after its object was fetched and refused —
+  signature wrong, limit exceeded (§16.7), retracted. Identifiers that were heard but never delivered are forgotten,
+  not rejected. A rejected identifier is never fetched again and never named; the set is part of the state root, so
+  two nodes that disagree only about rejected objects do not keep offering them to each other. The set holds at most
+  100,000 identifiers per channel (2 MB); when it is full the oldest leave it. This is the lesson of
+  the V3 system-channel loop (3.17 GB per node and day): a rejection that is not remembered is offered again in every
+  round.
+- **Older 4.2 versions.** A version that does not read content byte `0x05` treats it as fill; the kinds `0x90`–`0x9F`
+  it discards without answering (§1.2). It holds nothing, names nothing and is never asked twice, because it never
+  shows the capability (§16.0 "the stock at an edge").
 
-**Anti-backdating anchor.** A backdated registration acknowledgment is
-checked against the **previous epoch's class-state root**, named in
-`k = 2` cross-partition relay attestations (the same primitive §13.4.2
-established for the distress call). Cross-partition relay attestations
-provide this anti-backdating property instead of a global
-Merkle-convergence anchor: weaker in the global sense but sufficient,
-and it reuses one primitive across recovery and moderation.
-Whether the roots converge sufficiently network-wide is **not proven**
-and remains a review item; until then, registry age counts as a strong
-hurdle, not proof.
+**What is not yet restated.** Moderation objects need two things system-channel reports do not: authorship hidden by
+feeding them in through the cover stream bundled with others (§16.5), and an anchor against backdating, checked
+against the previous epoch's state root in `k = 2` cross-partition attestations (§13.4.2). Both stand on this class
+but are restated with moderation (Appendix C); until then registry age counts as a strong hurdle, not proof.
 
 ### 16.1 Two spheres
 
 | | Private sphere | Public sphere |
 |---|---|---|
 | Objects | contacts, groups, private channels | public channels, directory, moderation cases, system channels |
-| Tags | from pairwise secrets — only participants can form them | publicly derivable **tag families**, e.g. `HKDF(objektId, zweck[, epoch])` — concrete families: §16.3 |
-| Reading | tag match of the participants | passive harvesting |
+| Tags | from pairwise secrets — only participants can form them; the channel value of a group or channel on the shared key from its keys (§16.2.5) | publicly derivable **tag families**, e.g. `HKDF(objektId, zweck[, epoch])` — concrete families: §16.3 |
+| Reading | delivery to each member (§16.2); on the shared key collection from the keepers (§16.2.5) | passive harvesting |
 | Writing | secret possession = write right (KEX gate as a structural property) | only with **carried proof** (role, verdict, registration) |
 | Moderation | does not exist — no unauthorized person can reach you | core of this chapter |
 
-The private sphere follows §4.3; groups create no shared tag-line
-correlation.
+**In 4.2 the public sphere is restated for the system channels only.** Reading a system channel is fetching by
+identifier from the node that named it (§16.0), not harvesting; the rows "Tags", "Reading" and "Writing" still
+describe public channels and moderation as the withdrawn layer had them, until §16.3–§16.6 are restated (Appendix C).
 
-**Read anonymity, honestly.** Whoever reads a public channel reveals
-to their respective **sync partner** the candidate set of their
-subscriptions: the directory is public, the tag-line prefix is
-computable from every published `channel_secret`, and the partner sees
-the subscription list. Decoy dilution works against this enumerable
-target space only as a factor, not as an anonymity set; decoys for the
-public sphere are therefore drawn from the same set as the real
-subscriptions (tag lines of real channels). Against **all other
-observers**, reading is unobservable. Only objects — never persons —
-are publicly addressable.
+The private sphere follows §4.3. Groups and private channels on pairwise
+legs leave nothing with a third party but the post box of a member that
+is off (§8.2); on the shared key they leave their posts with their
+keepers, who can count the addresses that collect them (§16.2.5, RL-3).
+
+Only objects — never persons — are publicly addressable.
 
 ### 16.2 Groups (private sphere)
 
 **This section is the only place that constructs group delivery.**
 Chapter 9 describes the delivery of *one* message; a group message is not
-a new kind of delivery, it is N of them. Nothing about groups is defined
-outside this section.
+a new kind of delivery, it is N of them. Nothing about groups and private
+channels is defined outside this section.
 
-Groups use **pairwise legs** — a group message is N ordinary 1:1
-deliveries, one per member, each sealed to that member alone (§4.3) and
-carried by the ladder (§7, §8); no group key, no group-level address, no
-inner signature (the pairwise seal authenticates each leg in a
-symmetric-deniable way). Roles, invites, and member management travel the
-same way, as ordinary 1:1 deliveries over the same legs.
+Up to the threshold of §16.2.1, groups and private channels use
+**pairwise legs** — a message is N ordinary 1:1 deliveries, one per
+member, each sealed to that member alone (§4.3) and carried by the
+ladder (§7, §8); no group key, no group-level address, no inner
+signature (the pairwise seal authenticates each leg in a
+symmetric-deniable way). Above it they use the **shared key** of
+§16.2.5. The construction is the only thing the threshold changes: a
+group stays a group and a channel a channel, with the same roles,
+settings and posting rights. Roles, invites, member management and every
+key travel as ordinary 1:1 deliveries over pairwise legs in both
+constructions.
 
 **A group post carries one post identifier.** The author draws 16 random
 bytes per post and carries them in every leg. A reaction, a quote and a
 read mark name the post identifier; acknowledgement, delivery state and
 re-sending stay with the identifier of the leg (§9.2). An edit and a
 deletion are the author's and name, per leg, the identifier of that leg
-(§21.5.1).
+(§21.5.1); on the shared key, where a post has no legs, they name the
+post identifier (§16.2.5).
 
 **Fan-out does not serialize.** Every leg leaves the device the moment
 it exists (§3.1); legs to different members do not wait on each other.
 
 #### 16.2.1 The threshold, and what it buys
 
-A group is one kind of object; a **large private channel** is another.
-The line between them is a size:
+A group or private channel has one of two constructions, and its size
+decides which:
 
-| | Group, **N ≤ 16** | Large private channel, **N > 16** |
+| | Pairwise legs (§16.2) | Shared key `K_C` (§16.2.5) |
 |---|---|---|
-| construction | pairwise legs | shared key `K_C` |
-| inner signature | none | Ed25519 (§4.4) |
-| forward secrecy | **per message** (§4.6) | daily, plus rotation on membership change |
+| used by | groups and private channels up to 16 members, and those on the shared key that have shrunk to 12 or fewer | groups and private channels from 17 members on, until they shrink to 12 or fewer |
+| inner signature | none | Ed25519 (§4.4.3) |
+| forward secrecy | **per message** (§4.6) | a daily key chain; a device keeps the keys of the last 7 days so that it can read what it collects; a new generation on every leaving or removal, and a new member reads from its joining on |
 | deniability | symmetric | none — the signature attributes |
 | anonymous polls (§18.4) | possible | not possible |
-| subscription correlation toward the sync partner | structurally absent | mitigated only statistically (§23.6, RL-3) |
+| held by third parties | nothing but the post box of a member that is off (§8.2) | every post, for 7 days, by the keepers, who see how many addresses collect it (§23.6, RL-3) |
 
-Measured cost for a short line of text:
+Wire bytes per short text post, **computed, not measured**, from the
+packet counts of §5.6 (a 1:1 message over the internet 7 packets, its
+acknowledgement 7) and of §16.2.5 (a post of one packet), every packet
+1,200 B, every packet that goes over a neighbour counted on both links;
+every member on:
 
-| Members | pairwise legs | shared key |
-|---|---|---|
-| 3 | 23,181 B | 19,953 B |
-| 10 | 77,270 B | 19,953 B |
-| 16 | ~123,600 B | 19,953 B |
-| 50 | 386,350 B | 19,953 B |
+| Members | pairwise: network | pairwise: leaving the author | shared key: network | shared key: leaving the author |
+|---|---|---|---|---|
+| 17 | ≈ 571 KB | ≈ 143 KB | ≈ 48 KB | ≈ 24 KB |
+| 50 | ≈ 1.7 MB | ≈ 420 KB | ≈ 127 KB | ≈ 64 KB |
+| 100 | ≈ 3.4 MB | ≈ 840 KB | ≈ 247 KB | ≈ 124 KB |
+| 1,000 | ≈ 34 MB | ≈ 8.4 MB | ≈ 2.4 MB | ≈ 1.2 MB |
 
-**Pairwise is never the cheaper way** — the two constructions meet at
-N ≈ 2.6, and beyond that the pairwise cost grows by roughly 7,730 B per
-member. The threshold therefore does not ask which construction is
-cheaper. It asks **up to which size the four properties in the first
-table are worth their bytes**, and that is a judgement, not a
-calculation.
+A member that was off adds, on pairwise legs, the post box of §8.2 —
+three placed copies of the message and of its acknowledgement —, and on
+the shared key 4 packets at its collection. Membership costs, computed
+the same way: a joining is one 1:1 delivery on the shared key (≈ 34 KB
+over a neighbour) and, on pairwise legs, a membership update to every
+member; a leaving or removal on the shared key is one 1:1 delivery per
+remaining member (N = 100: ≈ 3.4 MB; N = 1,000: ≈ 34 MB, of which
+≈ 8.4 MB leave the device of the member who records it); the daily
+change costs nothing.
+
+**Pairwise is never the cheaper way.** The threshold therefore does not
+ask which construction is cheaper. It asks **up to which size the
+properties in the first table are worth their bytes**, and that is a
+judgement, not a calculation.
 
 **Sixteen is set, not derived.** It caps the most expensive pairwise
-group at roughly 124 KB and leaves the group sizes a private messenger
+post at roughly 540 KB and leaves the group sizes a private messenger
 normally has inside the class that keeps everything. A different number
 changes this one place and nothing else — which is the point of not
 introducing a third construction.
 
-**This is a property of the object, not a mode.** §3.3 allows exactly one
-way to send, and nothing here selects a way per message or per chat: a
-group is a group, a large private channel is a large private channel, and
-each has exactly one construction.
+**The construction follows the size, with a gap.** A group or channel
+moves to the shared key when it reaches 17 members and returns to
+pairwise legs only when it has shrunk to 12 or fewer; between 13 and 16
+it keeps the construction it has, so that one member joining and leaving
+does not switch it back and forth. A switch costs one 1:1 delivery per
+member, once (§16.2.5). It changes how posts travel and nothing else: a
+group stays a group, its members post as its discussion or announcement
+setting allows, and a channel stays a channel. Nothing selects a
+construction per post or per chat: at any moment a group or channel has
+exactly one, and §3.3 allows exactly one way to send.
 
 **Why the shared key is not used below the threshold.** It would cost
-per-message forward secrecy (down to daily), symmetric deniability (a
-shared key requires an inner signature) and the property that groups
-hold no subscription at all, and those three are the reason pairwise
-legs exist.
+per-message forward secrecy (down to daily, readable for 7 days),
+symmetric deniability (a shared key requires an inner signature) and the
+property that nothing of the conversation stays with a third party
+beyond the post box, and those three are the reason pairwise legs exist.
 
 #### 16.2.2 Roles, invites, membership
 
 - **Role model.** Groups know three roles: **Owner** (full control,
   appoints admins, configures the group), **Admin** (invites/removes
   members, moderates, changes settings), **Member** (reads + posts).
-  Private channels use the same hierarchy with **Subscriber** (read
-  only) instead of Member. The owner decides whether members may post
+  Private channels use the same hierarchy with **Subscriber** (reads
+  and reacts, §16.2.4) instead of Member. The owner decides whether members may post
   (discussion vs. announcement mode). Settings (name, description,
   image, posting policy, message expiry) are changed by the owner or
-  admin. Role updates go to **all** members, not only the one affected —
+  admin. A change of name, description or image travels as a settings
+  change carrying only what changed, to every member that has shown the
+  capability of it (§16.2.5); a member that has not is told the whole of
+  them when its capability notice reaches the device that made the
+  change, and a member on an earlier 4.2 version takes them from the next
+  invitation or complete member list it receives, which carry them. The
+  description is at most 500 characters, the image at most 64 KB. Role updates go to **all** members, not only the one affected —
   otherwise the members' views would diverge.
+- **Size at creation.** A group is created with at least two members
+  besides its owner — accepted contacts, each counted once; with one
+  other person the conversation is a direct chat. The bound applies to creating only: an invitation into a
+  smaller group from an earlier 4.2 version is taken (§1.2), and a group
+  that shrinks below it through leaving or removal stays a group. A
+  private channel needs one subscriber. When every other member has left
+  or been removed and the own identity is the only member, the
+  application asks once whether to delete the group; deleting removes it
+  as leaving does, and keeping it leaves the conversation readable.
 - **UserID invariant (normative).** Groups and channels are **user
   constructs**: the member list is keyed exclusively on the stable,
   device-independent UserID (§4), never on device identities. All
   checks — roles, administrative rights, post authorization,
   leaving/joining, ownership transfer — run against the UserID.
 - **Invites.** An invitation contains the group ID, name, optionally an
-  image and description, as well as the **complete member list** (the
-  invitee knows every participant before joining) and travels as an
-  ordinary 1:1 delivery over the pairwise leg to the invitee — only they can
-  read it. For every member the list carries that member's address as the
-  member itself signed it on joining (all four public keys, key state,
-  rotation chain where there is one) and its fixed neighbours as the
-  inviter knows them; a membership change carries full entries only for
-  members who are new. In the leg to each member it also carries the
-  `s_AB` of that member with every co-member that is not the inviter
-  (§4.3); a member that is already a contact keeps its own and ignores it.
+  image and description, as well as the member list, and travels as an
+  ordinary 1:1 delivery over the pairwise leg to the invitee — only they
+  can read it. When the invitee joins, the owner or admin who takes its
+  joining sends it the settings in force (§21.5.4, and in a group the
+  posting policy) as one 1:1 delivery, unless all of them are the
+  defaults. In a group the list is **complete** (the invitee knows
+  every participant before joining). In a private channel of any size the
+  list a subscriber receives names the **owner, the admins and the
+  subscriber itself** only; the owner and the admins receive the complete
+  list. For every member the
+  list names it carries that member's address as the member itself signed
+  it on joining (all four public keys, key state, rotation chain where
+  there is one), whether it reads the pair tag (§4.4.3) as the member
+  itself said, and its fixed neighbours as the inviter knows them. The
+  mark also rides in a compact entry and in a change. A member whose
+  entry predates the mark sends the mark alone, once, to the owner or
+  admin that passes entries on; that one passes it on at the held epoch
+  — no membership change — to the members that carry the mark
+  themselves. A membership change carries full entries only for members who are new
+  and is a change, never the whole list again; in a private channel it
+  reaches only the members whose list it touches — a subscriber's
+  joining, leaving or removal goes to the owner, the admins and that
+  subscriber, a change of role to every member. In the leg to each member
+  the invitation also carries the `s_AB` of that member with every
+  co-member the list names that is not the inviter (§4.3); a member that
+  is already a contact keeps its own and ignores it. A group member that
+  has not shown the capability of the member list receives the complete
+  list on every change. A subscriber that
+  has not shown the capability of the member list (§16.2.5, capability
+  notice) receives the same list but never a change: whenever the role
+  state changes it receives that list again, and its legs carry the epoch
+  of the list it was last given and the hash over that list. A channel
+  whose owner or an admin has not shown the capability keeps the complete
+  list for every member.
   **Joining is an explicit act of the invitee**; only then are its group
   pairs formed. The **group types** a group pair may send are: group
   post, reaction, edit, deletion, read mark, poll and vote, calendar entry
-  of a group event, membership update (owner/admin only, checked as
-  below), leave, and the acknowledgement and day-key notice of the pair.
+  of a group event, membership update and settings change (owner/admin
+  only, checked as below), leave, the acknowledgement and day-key notice of the pair, the
+  catching up of §9.5, the capability notice, the key deliveries and
+  the nudge of §16.2.5, and the signals of a call in that group (§17.2),
+  which between a group pair never carry address candidates, a session
+  cookie or key material of Plane D (§17.7).
 - **Membership consistency.** Every group keeps a **monotonically
   increasing membership epoch**; every mutating operation (creation,
   invite, removal, role change, leaving) increments it before sending.
-  Recipients discard updates with an epoch ≤ their local state
-  (replay/downgrade protection). Over (epoch, group ID, sorted
+  Recipients do not apply updates with an epoch ≤ their local state
+  (replay/downgrade protection): members, roles and epoch stay those of
+  the newer state. One thing only is taken from such a late update,
+  after the authority gate: the self-signed entry of a member the
+  recipient holds without one — the entry proves itself, and an update
+  that a later one overtook in transport may be its only copy. Over (epoch, group ID, sorted
   UserID-role pairs), a **canonical membership hash** is formed —
   deterministic, independent of insertion order, without display names
   and images. Only the owner/admin may mutate; the recipient checks this
@@ -6064,28 +6517,47 @@ legs exist.
   epoch** (who responds with the full signed member state); the same
   epoch state with a differing hash is logged as a **split-view
   anomaly**.
+  In a private channel a subscriber knows only the owner and the admins:
+  the epoch and hash a post carries, and a subscriber checks and asks a
+  resync for, are those of the **role state** — owner and admins with
+  their roles —, which every member holds. A subscriber's joining,
+  leaving or removal advances the membership epoch that owner and admins
+  keep among themselves, not the role state; an invitation into a
+  private channel carries both epochs, the membership epoch as a number.
+  The epoch of the role state is the membership epoch at its last
+  change, so that it only grows and an invitation that carries it is
+  always newer than any list the member held before.
 - **Leaving & ownership transfer.** Leaving removes the local
   conversation along with the membership record (an ex-member can no
   longer interact anyway). A device that left a group keeps a mark of
   the group identifier; a post for a group it left is discarded, and a
   new invitation — a member list that names the identity and carries a
-  higher epoch than the one at leaving — lifts the mark. A member removed
-  by the owner or an admin receives the new member list as well; its
-  device keeps the conversation readable, marked as removed, blocks
-  writing and discards later posts of the group, as after leaving. A post
-  for a group the device does not hold yet is buffered and applied when
-  the invitation arrives (§21.5.4). If the owner leaves a group with remaining
-  members, the owner role passes **automatically** to the first admin,
-  or otherwise to the first remaining member; the transfer is
-  distributed to everyone before the leave, and recipients apply the
-  same transfer logic independently. If the last member leaves, the
-  group is silently removed. The UI secures leaving with a two-stage
-  confirmation dialog that names the transfer recipient to the owner.
-  The same mark is kept for a channel the device left.
+  higher epoch than the one at leaving (in a private channel the
+  membership epoch) — lifts the mark. A member removed by the owner or
+  an admin receives the new member list as well — a subscriber the notice
+  of its own removal —; its device keeps the conversation readable,
+  marked as removed, blocks writing and discards later posts of the
+  group, as after leaving. A post for a group or channel the device does
+  not hold yet is buffered and applied when the invitation arrives
+  (§21.5.4). If the owner leaves a group with remaining members, the
+  owner role passes **automatically** to the first admin, or otherwise to
+  the first remaining member; the transfer is distributed to everyone
+  before the leave, and recipients apply the same transfer logic
+  independently. In a private channel the owner names the new owner in
+  its leaving itself, with the subscriber's `s_AB` with it where the
+  subscriber did not know it; a subscriber that holds the short list
+  follows only that or an admin. If the last member leaves, the group is silently
+  removed. The UI secures leaving with a two-stage confirmation dialog
+  that names the transfer recipient to the owner. The same mark is kept
+  for a channel the device left. On the shared key a leaving, a removal
+  and a transfer of ownership also start a new key generation (§16.2.5).
 
-There is no group-level shared addressable state: every leg is an
-ordinary pairwise delivery, and a group has no address of its own that a
-departed member could keep watching.
+There is no group-level shared addressable state on pairwise legs: every
+leg is an ordinary pairwise delivery, and a group has no address of its
+own that a departed member could keep watching. On the shared key a
+group or channel has one — the channel value under which its keepers
+hold its posts (§16.2.5); it changes every day and with every
+generation, and a departed member does not learn the next one.
 
 #### 16.2.3 Delivery state of a group message
 
@@ -6093,6 +6565,9 @@ The state shown for a group message is the **weakest across all members**,
 using the four states of §9.1 and no others — the set of four is not
 extended for groups. Members are fixed at the moment of sending: whoever
 joins afterwards does not receive a message that is already on its way.
+`failed` is the weakest of the four: one member whose leg no rung
+carried shows the message as `failed`, and a retry (§9.3) sends that leg
+again.
 
 **Per-member delivery tracking:** whether delivery confirmations may
 appear as a delivery symbol at the sender is decided by each recipient
@@ -6105,6 +6580,235 @@ leg has confirmed **and** is disclosing; a withholding leg never
 contributes to the visible aggregate status — otherwise the aggregate
 would reveal exactly what the member wanted to conceal. Partial
 displays ("3 of 5") count only disclosing members.
+
+**A post on the shared key** has the state of its placing with the
+keepers (§16.2.5): `resting` until two keepers have acknowledged it,
+`in transit` from then on, and that is final. There is no `delivered`
+per member and no aggregate over members, and members send no read
+marks. Legs to members served on pairwise legs (§16.2.5, older 4.2
+versions) are delivered and acknowledged as above but do not enter the
+state shown.
+
+#### 16.2.4 Reactions in a private channel
+
+Everyone in a private channel sees the reactions to a post as totals —
+how many of each — and nobody, the owner included, is shown who reacted.
+
+- A subscriber's reaction, its removal and its replacement (§21.5.1)
+  travel as an ordinary 1:1 delivery to the owner only.
+- The owner's device keeps per post which person holds which reaction —
+  it needs this for one reaction per person — and sends the **totals**
+  (post identifier, each reaction with its count, no identity) to every
+  subscriber and admin as ordinary 1:1 deliveries; on the shared key it
+  sends them as a post of its own (§16.2.5) — deposited once and
+  nudged — and as 1:1 deliveries only to members served on pairwise
+  legs. A received reaction alone triggers this: the totals leave no
+  earlier than ten minutes after the first change since the last
+  sending and then carry every change together; without a reaction
+  nothing is sent.
+- The totals are a state: a receiver keeps the newest (by the timestamp
+  in the content), and totals that newer ones replace are not re-sent.
+- The reacting device shows its own choice and counts it until totals
+  from the owner arrive that are newer than it.
+- When ownership passes (§16.2.2), the previous owner hands over who
+  holds which reaction.
+
+#### 16.2.5 Large groups and channels
+
+A group or private channel on the shared key (§16.2.1) encrypts and signs
+a post once, has it held once by its **keepers**, and nudges every
+member with it; a member collects from the keepers what the nudge did
+not bring. It stays the group or channel it was: roles, settings and
+posting rights are those of §16.2.2. Keys travel only in ordinary 1:1
+deliveries over pairwise legs (§4.3).
+
+**Authors.** An author is whoever may post: in a channel and in a group
+in announcement mode the owner and the admins; in a group in discussion
+mode every member. In a group every member holds a pair (§4.3) with
+every other member; in a channel the owner and the admins hold one with
+every member, and a subscriber with the owner and the admins only. When
+a group on the shared key switches to announcement mode, the owner or
+admin who switches it draws the next generation, whose certificates go
+to the owner and the admins only.
+
+**The key chain.** For each generation `g` the owner, or the admin of
+§16.2.2 who records a change, draws a 32-byte root `r_g` and an 8-byte
+generation identifier. From the root:
+
+- the day key of the UTC day `d₀` on which it was drawn,
+  `D_g(d₀) = HKDF(r_g, "channel/day")`, and of every following day
+  `D_g(d+1) = HKDF(D_g(d), "channel/next-day")` — the daily change costs
+  no packet;
+- the step keys of a day, `S_g(d, 0) = HKDF(D_g(d), "channel/step")` and
+  `S_g(d, j+1) = HKDF(S_g(d, j), "channel/next-step")`;
+- the keeper key `A_g = HKDF(r_g, "channel/keeper")` and the generation
+  key `W_g = HKDF(r_g, "channel/generation")`, from which an Ed25519
+  key pair is seeded; its public key is the **generation public key**.
+
+`r_g` never leaves the device that drew it. Every member receives the
+day key, `A_g` and the generation public key; the owner and the admins
+also receive `W_g`. Every author draws its own Ed25519 **author key**
+per generation and receives for it a certificate — a signature with the
+generation secret key over the author key and `g` — from the owner or
+an admin. A post is encrypted with the AEAD of §4.3 under
+`HKDF(S_g(d, j), "channel/post" ‖ post identifier)` and names `(g, d, j)`;
+a member that sees a later day or step derives forward and never
+backward. A device keeps the day and step keys of the last 7 UTC days,
+the keepers' retention, and deletes older ones.
+
+**Joining.** The owner or admin who admits a member advances `j` by one
+and gives the newcomer, inside the invitation (§16.2.2), `g`, `d`, `j`,
+`S_g(d, j)`, `D_g(d+1)`, `A_g`, the generation public key, the keeper
+list and, where the newcomer may post, the certificate for the author
+key it names in its acceptance: one 1:1 delivery. The newcomer derives
+forward and reads from its joining on, nothing before. The membership
+update to the owner and the admins carries the new `j`; the other
+members learn it from the next post.
+
+**Leaving and removal.** The owner, on recording a leaving, or the owner
+or admin who removes a member, draws generation `g+1` and gives every remaining member
+its day key, `A_{g+1}`, the generation public key, to owner and admins
+`W_{g+1}`, the keeper list and, to every author, a certificate for its
+next author key — the key it named in its acceptance or in its last
+post, or asks for with its author key when it holds none —, in one 1:1
+delivery each; the departed member receives
+none. Where two generations with the same number meet, the one with the
+smaller generation identifier holds, and a member reads posts under the
+other for its 7 days. A post under an earlier generation is taken while
+its day keys are kept and its author may still post.
+
+**A post.**
+
+1. The author builds the post — post identifier (§16.2), `(g, d, j)`,
+   the epoch and hash of §16.2.2, the keeper list, the content —, signs
+   it with its identity signing key (§4.4.3) and encrypts it once. An
+   object below 256 KB travels inline with it, as its own entry that the
+   post names; a larger one takes the lane §9.4 gives it, with `K_T`
+   inside the post.
+2. **Deposit.** From `A_g` the author derives the day's collect key pair
+   (Ed25519, seeded with `HKDF(A_g, "channel/collect" ‖ d)`); the
+   **channel value** is the first 16 B of SHA-256 over the collect public
+   key and the generation public key. It leaves the post with the first
+   three keepers of the list that answer (`0x60`), carrying both public
+   keys, its author key with the certificate, and a signature with the
+   author key over the entry and the keeper's address; the first deposit
+   under a value at a keeper also carries a proof of work of `D_box`
+   (§8.2) bound to that value. A keeper takes an entry only if the value
+   matches the keys, the certificate holds under the generation public
+   key and the signature under the author key, and acknowledges it
+   (`0x61`). The post is placed at the second acknowledgement. A keeper
+   that does not answer — §11.3a — gives way to the next on the list. A
+   member that may not post holds no certified author key and cannot
+   deposit.
+3. **Nudge.** The same encrypted post, without the entries of its inline
+   objects, goes to every member that has shown the capability (below)
+   as one nudge (`0x68`) — the pair's code of the day (§8.1), 16 random
+   bytes `n` and the post sealed under `HKDF(K_AB, "channel/nudge" ‖ n)` —
+   so that a forwarder serving two members never sees the same bytes
+   twice, over ladder
+   steps 1 and 3 (§7.1, §8.1) and never into a post box. The nudge is not
+   acknowledged (§9.2) and not sent again at an edge (§9.3); a nudge that
+   does not arrive is not a failure — the member collects the post.
+   Nudges do not wait on each other (§16.2).
+4. **Collection.** At start, on a network change and when the user opens
+   the group or channel — never on a clock (§5.4) — a member asks the
+   first keeper on its newest list that answers (`0x62`): the channel
+   values of the days it still lacks (today's and those of the last 7
+   days not yet closed), its state root over the hashes of the entries it
+   holds or has refused under those values (the formula of §16.0), both
+   public keys and a signature with the collect secret key over the
+   question and the keeper's address. If the roots agree the answer is
+   one packet, "same" (`0x63`); otherwise the keeper lists the hashes of
+   its entries under those values, each with the kind byte of its header
+   (`0x64`), the member fetches what it
+   lacks (`0x65`) — the entry of an inline image only as §9.4 "Loading
+   images in a group or channel" allows —, and the keeper hands each out
+   (`0x66`) under the flow of §11.3 and closes the pass with the number
+   handed out (`0x67`). A day is closed for the member once a question
+   after that day's end was answered "same". A keeper that does not
+   answer — §11.3a — gives way to the next.
+5. **Check.** A member decrypts, checks the signature against the
+   author's key and the author's right to post (§16.2.2), and takes the
+   post once by its identifier. An entry that fails is refused, enters
+   the state root and is never fetched again.
+
+**Keepers.** A keeper is an always-on desktop installation with
+evidenced reachability (§11.8a) that has shown the capability; a
+retention-bounded node never keeps. The owner chooses them in this
+order: desktops of the owner and the admins; desktops of the other
+members; the owner's fixed neighbours (§5.2). The list names up to five
+keepers in order; every post and every generation delivery carries it,
+and a member uses the newest list it has read. When a keeper refuses at
+the owner's deposit or its address fails (§11.3a), the owner's next post
+carries a list without it. A
+keeper holds each entry for 7 days and deletes nothing on collection; it
+takes at most 100 entries per author key and 1,000 per channel value and
+refuses further ones (`0x61`); its holding is counted within the post
+box (§21.2). It cannot read an entry unless it is
+itself a member.
+
+**Delivery state** is the state of the placing (§16.2.3). A post that is
+not placed rests and is deposited again at the edges of §8.2 (§9.3); its
+nudges left with the first sending and are not sent again.
+
+**Edits, deletions, reactions and votes** are posts of their own under
+the same construction and name the post they concern by its post
+identifier (§16.2). In a channel, and from members that may not post in
+a group in announcement mode, a reaction travels as a 1:1 delivery to
+the owner, which deposits the totals as §16.2.4 provides, and a vote to
+the poll's creator, which deposits the tally (§18.3.3).
+Members send no read marks.
+
+**Transfer of ownership** (§16.2.2). The previous owner hands the new
+owner the complete member list, `W_g` and, in a channel, the reaction
+bookkeeping (§16.2.4). In a channel, for every subscriber that holds no
+pair with the new owner it draws `s_AB` (§4.3) and sends it to that
+subscriber and to the new owner in the transfer, one 1:1 delivery per
+member. Where the previous owner leaves, the new owner draws the next
+generation after the transfer — the one leaving never learns it.
+
+**Size changes** (§16.2.1). When a group or channel on pairwise legs
+reaches 17 members, the owner draws generation 1 and gives it to every
+member that has shown the capability, one 1:1 delivery each; from the
+next post on those members are served this way. When it shrinks to 12 or
+fewer, the owner tells every such member, one 1:1 delivery each, that it
+returns to pairwise legs, and posts go pairwise from the next one; the
+keys are deleted when their 7 days have passed. Only the owner switches,
+and the state of the group or channel names the construction.
+
+**Mixed operation within 4.2** (§1.2). A version that builds this
+section says so in a **capability notice** — an ordinary 1:1 delivery
+naming the capabilities it builds (the member list of §16.2.2, the
+change of name, description and image of §16.2.2, and this section,
+each a bit) and the device class (desktop or phone) — sent
+with the acceptance of an invitation, once to each owner and admin of
+every group and channel the identity belongs to, and once to every
+contact whose fixed neighbour the node is (§8.1). Authors serve members
+that have shown it on the shared key and every other member on pairwise
+legs, with the same post identifier, so that reactions and quotes name
+the same post on both sides. A member takes a post of an author in
+either construction. A member that has not shown the capability holds
+no keys, receives posts on pairwise legs and posts, where it may, on
+pairwise legs. An owner whose version does not build this section keeps
+the group or channel on pairwise legs at any size.
+
+**Catching up and restoring.** A member that was off for more than 7
+days asks as §9.5 provides: every author sends its own posts under the
+pair's seal, and the owner's answer carries the current keys for that
+member, as at a joining. The same holds after a restore (§13); own
+devices receive the key state with Type 6 or Type 22 (§14.7).
+
+**What it costs** — computed, not measured: §5.6 and §16.2.1.
+
+**What it reveals.** A keeper sees a channel value that changes every day
+and with every generation, when entries are deposited and how many under
+each author key, and how many devices from which addresses collect under
+it; it sees no content, no group or channel identifier and no member
+identity, unless it is a member (RL-3). A forwarder sees a nudge as it
+sees any packet handed on by code. A subscriber learns the owner and the
+admins and no other subscriber. Whoever obtains the keys from a member
+reads what the keepers hold until the next generation; removing that
+member ends it.
 
 ### 16.3 Public channels as an object space
 
@@ -6577,6 +7281,9 @@ registrierung = { pseudonym_pubkey, sprache(n),
                   erstannahme_quittungen[k] }
 ```
 
+The report pseudonym of §16.7 is **not** a role pseudonym: it is never registered, carries no age, never enters a
+draw and cannot vote; the two are derived from different labels, so a report and a juror cannot be linked by key.
+
 There is **no** self-asserted registration date; age is the day of the
 earliest acknowledgment. The over-18 flag is a **self-declaration** in
 the registration object; it is not externally verifiable, and this is
@@ -6802,35 +7509,98 @@ table above.
 
 ### 16.7 System Channels
 
-Bug Log and Feature Requests are ordinary public objects without an
-owner: structured reports as posts, crash-fingerprint dedup and vote
-accumulation as durable objects (§16.0), moderation via the procedure
-from §16.4. The following applies:
+Bug Log and Feature Requests are public channels without an owner, built on the durable-object class (§16.0):
+structured reports as objects, crash-fingerprint dedup and +1 entries as objects of the same class. Moderation via
+the procedure of §16.4 follows when that procedure is restated (Appendix C).
 
-- **Crash reports** only after an opt-in popup with a preview of the
-  exact publication; dedup via crash fingerprint with a +1 counter
-  instead of a duplicate post. No free-text input in the Bug Log, only
-  structured reports.
-- **Contact issue reports** (failed contact exchange) with a **dual
-  path**: file export is always available — a node whose first contact
-  attempt fails may not have any network yet and cannot reach the Bug
-  Log channel (chicken-and-egg problem); the post to the Bug Log is
-  only an option if peers exist.
-- **Manual Log Report** with a preview dialog (exact report content,
-  privacy notice) and explicit consent before publication.
-- **Feature Requests** with an automatically attached yes/no/don't-care
-  poll (every post gets one; sorted by net votes, locally).
-- **Limits:** a 25 MB storage limit per system channel; rate limits
-  (crash/log reports 3 per hour, 10 per day; Feature Requests 3 per day,
-  enforced on the receiver side).
+- **Crash reports** only after an opt-in popup with a preview of the exact publication. No free-text input in the
+  Bug Log, only structured reports.
+- **Contact issue reports** (failed contact exchange) with a **dual path**: file export is always available, on every
+  platform — a node whose first contact fails may have no network yet (chicken-and-egg problem); the deposit is only
+  an option once holders are known.
+- **Manual Log Report** with a preview dialog (exact report content, privacy notice) and explicit consent before
+  publication.
+- **Feature Requests** with an automatically attached yes/no/don't-care poll (every post gets one; sorted by net
+  votes, locally). Every device reads them, phones included: a phone fetches what it lacks when the user opens the
+  channel, and what it learns at the edges of §16.0 it marks as new without fetching it. A **vote** is an object of
+  the same class as a +1 entry (≈ 300 B), signed by the report pseudonym and deposited like a report; one vote per
+  pseudonym and request counts, and a newer vote of the same pseudonym replaces the older. The net is counted over
+  distinct pseudonyms, as a mood indicator like the +1 count.
 
-The distribution of system-channel records runs via the anti-entropy of
-the durable-object class (§16.0). RETRACT is an author tombstone object:
-only the author can retract their own post (at any time, consistent with
-the unbounded deletion model), the tombstone survives anti-entropy (no
-resurrection by latecomers), and the fingerprint-dedup counter outlives
-the retraction, so that a reappearing original does not increment the
-+1 counter again.
+**Who the author is.** Every report, +1 entry and retraction is signed by the **report pseudonym** of the identity
+that sends it: an Ed25519 key derived from the master seed under its own label and the identity's index (§4.5.1), one
+per identity, never rotated, the same on the identity's own devices. A report carries neither the UserID nor any
+other key of the identity; **the link between a report and the main identity is published nowhere**. Because the
+pseudonym never rotates, a report carries no rotation chain, and the author can retract it from any of its devices.
+**Beta builds only:** a report additionally names the UserID of its author, as stated by the author and not
+signed, so that the developers of the beta network can ask back. Which field a report carries is
+decided by the network channel the build was compiled for (`NETWORK_CHANNEL`, the same constant that keys the link
+layer, so a beta and a live node never exchange a packet); a live build never sets it, and a live holder rejects a
+report that names a UserID (§16.0, rejected set).
+
+**How a report leaves the device.** The author's device deposits the signed object (`0x90`) with **three holders**
+chosen as in §9.4 lane 3 — evidenced reachability, desktops first — **devices of non-contacts first; devices of contacts
+only fill up to three**, and when a contact's device is among them the preview before sending says so in one line.
+A holder that accepts answers `0x91` and names the identifier in its cover stream (§5.5); every other holder then
+fetches it (§16.0). A holder that refuses it — signature, proof or a limit — answers `0x94`, and the author's device
+takes the next holder. The
+author's device keeps the report until two holders have acknowledged it. A phone deposits like a desktop; it never
+feeds a report into its cover stream. The application shows four states and no other:
+
+| State | Meaning |
+|---|---|
+| saved | on the own device, not yet deposited |
+| deposited (n) | n holders acknowledged, n < 2 |
+| published | two holders acknowledged |
+| failed | 14 days without two acknowledgements, with the reason; checked only when it would be deposited again |
+
+Without a known holder the report rests and is deposited again at every edge of §16.0, like a message without a way
+(§9.3). "Published" is never shown before two acknowledgements.
+
+**Dedup and +1.** Reports with the same crash fingerprint (exception type and stack) are grouped: the group keeps the
+**oldest valid** report as its head and attaches every later variant — none is discarded, because a fingerprint is
+chosen by its sender and "first wins" would let anyone suppress a real report with a forged twin. A further reporter
+adds a **+1 entry** (its own signed object, ≈ 300 B); the count is the number of distinct pseudonyms and is shown as
+a **mood indicator** ("n others saw this too"), never as proof — pseudonyms are free. The count outlives a
+retraction, so a reappearing original does not count again.
+
+**Before a deposit the device asks.** The author's device asks the holder it chose whether it knows the crash
+fingerprint (`0x97`); a holder that knows it answers with the head of the group (`0x98`), otherwise "unknown". The
+preview then shows the existing report and offers "+1" or "send my report as a variant"; the device never decides
+this alone, so a forged twin cannot silence a real report. A device that reads the channel checks its own read cache
+first and asks only when it finds nothing.
+
+**Retraction.** RETRACT is a tombstone object of the author, valid only under the pseudonym that signed the original,
+at any time. A holder that accepts it drops the original and puts its identifier into the rejected set (§16.0); the
+tombstone is kept at least as long as the original would have been and is never evicted before it.
+
+**Limits, enforced by every receiver.** Per channel and holder: **25 MB on a desktop**; a phone holds nothing and
+keeps at most **5 MB** per channel of what its user has read (§21.3.1). Per pseudonym: crash and log reports 3 per
+hour and 10 per day, Feature Requests 3 per day, and at most **2 %** of the channel's budget. Per neighbour
+that hands out new objects: at most **250** new objects per day. An object over a limit is rejected (§16.0).
+When the budget is full the oldest object goes first — never one the user of this device has already seen (own
+data, §21.1) and never a tombstone before its original.
+
+**Declared limits.** The per-pseudonym rates keep careless senders out — a crash loop — not an attacker: pseudonyms
+are free (§16.8). Proof of work (`D_box`, §8.2) costs under a second per object, so a determined attacker can fill
+25 MB in about ten minutes of computing and **empty the channel for readers who do not read it continuously**; the
+reader's own seen reports survive, and the maintainer's desktop, which fetches every new identifier as it arrives,
+loses only what it had not yet fetched. The channel is sized for a beta network of up to some thousand nodes; at
+about 1,000 new reports a day 25 MB last less than three days, and a share rule — each holder keeps a fixed part by
+identifier hash — becomes necessary (Appendix C).
+
+**Volume per node and day** (wire bytes, fetch in and hand-out out together; r = reports per node and day, the
+rate is not measured):
+
+| Nodes | r = 0.01 | r = 0.1 |
+|---|---|---|
+| 10 | holder ≈ 3 KB | holder ≈ 32 KB |
+| 1,000 | holder ≈ 0.32 MB | holder ≈ 3.2 MB |
+| 100,000 | holder ≈ 32 MB | over the channel's capacity — share rule needed |
+
+The author pays ≈ 50 KB per report (three deposits); a reader pays per opening one question and, for what it lacks,
+≈ 16 KB per report; the cover stream carries the identifiers without one additional byte (§5.5). In idle — no new
+report anywhere — the volume is zero.
 
 ### 16.8 Further Normative Provisions of the User Level
 
@@ -6844,7 +7614,10 @@ sphere.
   reports from the same pseudonym are publicly recognizable and are
   deduplicated — every observer counts the same quantity. A rate limit
   at the identity level would accomplish nothing: fresh identities are
-  free, only aged registrations are scarce.
+  free, only aged registrations are scarce. This limit concerns moderation
+  reports. The rates of the system channels (§16.7) bind to the
+  unregistered report pseudonym and, for the same reason — fresh
+  identities are free —, protect against careless senders only.
 - **Sorting signal instead of subscriber count.** The directory index
   maintains no subscriber count and no popularity sorting. The sorting
   signal of search is the **post frequency of the last 14 days** from the
@@ -6883,8 +7656,10 @@ in §17.5.)*
 
 **Principle.** Plane D is the only place in the system where two
 devices disclose their addresses to each other — consented, per
-contact ("allow calls = disclose IP", revocable), for the duration of
-the session. Everything asynchronous stays on the delivery layer. The
+contact ("allow calls = disclose IP", on unless switched off, revocable),
+for the duration of the session. Two participants that are not contacts
+with that consent never disclose their addresses to each other, in a
+group call neither (§17.7). Everything asynchronous stays on the delivery layer. The
 Plane D API is narrow and explicit; call code does not access transport
 internals. The media, once connected, is real-time and IP-tolerant
 ("two talk again" is visible to an observer, who they are is not) —
@@ -6961,7 +7736,10 @@ wasteful either way. Plane D has its own, minimal frame format:
 
 A fourth `kind` on Plane D carries what a group call needs to organize
 itself: speech level, readiness, presentation role, layout size, spanning
-tree updates, and RTT probes. It is **not** a media frame — it carries no
+tree updates, broker requests, RTT probes, and loss reports — a receiver
+tells the participant it receives from how many frames of a second went
+missing, sent only in a second with loss, and a broker that loses frames
+to several receivers has shown its limit (§17.7). It is **not** a media frame — it carries no
 media and is never handed to a codec.
 
 **Same class, same key, same padding.** A control frame is an AES-256-GCM
@@ -6990,8 +7768,10 @@ same order as the speaker changes themselves, and the media tree is
 deliberately **not** rebuilt on a speaker change anyway (§17.7) — only the
 selection of forwarded streams follows it.
 
-**The control plane is fully meshed to 25 participants and has no topology
-of its own.** Every participant talks to every other directly. Three
+**The control plane is meshed to 25 participants over the media pairs of
+§17.7 and has no topology of its own.** Every participant talks directly to
+every participant with which it holds a media pair, and to no other; the
+speech level of any other it reads from that participant's media. Three
 reasons, and the saving is the weakest of them:
 
 1. **A tree cannot repair itself over itself.** If the media topology were
@@ -6999,9 +7779,10 @@ reasons, and the saving is the weakest of them:
    repair messages from exactly the nodes that need them.
 2. **It is what makes weighting measurable at all.** §17.3 has no routes,
    so `routeCostTo` has nothing to estimate and a spanning tree over it is
-   unweighted. On a fully meshed control plane every node measures every
-   other directly — no relay in between, no delivery latency distorting the
-   value.
+   unweighted. On the control plane every node measures every node it
+   holds a media pair with directly — no relay in between, no delivery
+   latency distorting the value — and only those can be links of the
+   media form.
 3. **No disagreement about state.** Who the loudest speaker is must look
    the same to everyone at the same time. Relayed through a tree, each
    level sees it later, and a layout switch flickers.
@@ -7014,7 +7795,7 @@ three measurements turn at the same place:
 | | mesh at 25 | mesh at 50 | star |
 |---|---|---|---|
 | control traffic per node | 34 kbps | 69 kbps | 1.4 kbps at a leaf, (N-1) x 1.4 kbps at the root |
-| address pairs to establish | 300 | 1225 | N-1 |
+| address pairs to establish, at most | 300 | 1225 | N-1 |
 | call setup at 2 s per punch, 20 in parallel | 30 s | 122 s | 2–5 s |
 
 *At 1 Hz the control-traffic row carries less of the argument than it did
@@ -7055,7 +7836,10 @@ sent to the counterpart's identifier like a message, with one difference:
 **a call signal is never left in a post box.** It takes ladder steps 1
 and 3 (§7.1), both at once, and nothing else. On step 3 a forwarder sees
 a code and opaque bytes (§8.1); it cannot tell a call signal from a
-message.
+message. To a fellow member who is not a contact, the signals of a call
+in their group go over the group pair (§4.3, §16.2.2) on the same two
+steps; every member may start a call in its group, and there is no
+group setting for it.
 
 - **A call rings within 10 seconds or not at all.** A call is worth
   something only now. The post box reaches a device when it returns
@@ -7063,8 +7847,9 @@ message.
   therefore has no step 4: no proof of work, no holder, no redundancy
   (§8.3). Either a direct step carries it, or the call does not take
   place and the callee learns of it by a message (below).
-- **Sent once.** Each of the two steps sends a call signal once. It is
-  not sent again at the edges of §8.2 (§9.3): it ends with its
+- **Not sent again at an edge.** Each of the two steps sends a call
+  signal; without its acknowledgement it is repeated while the call rings
+  (§11.3a). It is not sent again at the edges of §8.2 (§9.3): it ends with its
   acknowledgement (§9.2) or with its call, whichever comes first. It has
   no delivery display (§12.2); what the user sees is the state of the
   call.
@@ -7090,9 +7875,12 @@ message.
   the call, counted by the caller on its own clock; the delivery layer
   holds no clock for them (§9.3).
 - **Missed call.** Whenever a call ends without having been answered —
-  no `RING_ACK` within 10 s, the caller hanging up before an answer, or
-  60 s of ringing without an `ANSWER` — the caller sends the missed-call
-  message. It is an ordinary message, not a call signal: steps 1, 3 and
+  no `RING_ACK` within 10 s, the caller hanging up before an answer,
+  60 s of ringing without an `ANSWER`, or the callee's device answering
+  busy — the caller sends the missed-call message; in a group call the
+  initiator sends it to each member whose invitation ended so, as a group
+  message shown in the group's conversation. It is an ordinary message,
+  not a call signal: steps 1, 3 and
   4, acknowledged, shown and mirrored like any message (§7.1, §9, §14.2).
   It waits in the post box for a callee
   who is off — offline is not an error (§1.2). It carries the `callId`
@@ -7155,23 +7943,13 @@ message.
 
 ### 17.3 Address Candidates and Punch Windows
 
-- **"Observed address" instead of STUN:** the link handshake (§4.3)
-  gets a closing field in which the sync partner mirrors back the
-  sender address it observed. Every node thus learns its external
-  address from the sync that is already running anyway — without a
-  STUN server, without additional infrastructure.
-
-  **The field goes in flight 2.** Flight 1 has no
-  room for it: §11 puts its free budget at **36 B** (1124 B
-  plaintext minus the 1088 B ML-KEM ciphertext), and
-  that budget is already spent in full on caller authentication (§11). Flight 2
-  is also the honest place for it — the mirror can only be written by
-  the side that has already *seen* the sender's datagram, which is the
-  responder. Since §11 fixes the handshake at two datagrams of 1200 B
-  and one round trip, this is an addition to flight 2's format and not a
-  third datagram; the byte layout is still to be written.
-- **Candidates in signaling:** INVITE and ANSWER carry the address
-  candidates of both sides — local addresses, the **mapped address** of an
+- **Observed address instead of STUN:** the node's own public address is
+  the one a neighbour reports from what it saw (§7.3) — without a STUN
+  server, without additional infrastructure.
+- **Candidates in signaling:** INVITE and ANSWER — in a group call also
+  the sender key (`CALL_GROUP_SENDER_KEY`, §17.5) — carry the address
+  candidates of both sides, and only between contacts with call consent
+  (§17 principle): local addresses, the **mapped address** of an
   active port mapping (§25.9), and observed addresses, both families kept
   separate (a narrow ICE without TURN). *Including the mapped address
   matters concretely: §25.9 lists port mapping as the
@@ -7237,7 +8015,15 @@ connect outbound to a volunteer — media has no punch dependency at all.
   capture — no permission, no device, a capture that delivers nothing —
   it sends encoded silence in the same size class. The rule therefore
   needs no exception, and a silent call looks on the wire like a speaking
-  one (§17.1).
+  one (§17.1). In a group call the rule holds per media pair and counts
+  every valid frame of the session: a participant that sends no voice —
+  muted, or unable to capture — sends one control frame per second on
+  each of its media pairs (§17.1.1) instead of silence, and 10 s without
+  a valid frame end that media pair, not the call — an occasion of §17.7.
+  Whoever sees a group call's frame rate therefore sees who is muted, not
+  when anyone speaks (D-74). A device sends this control frame once when
+  a media pair starts; toward a participant that never sent one — a
+  v4.2.3 device — the rule does not apply.
 
 ### 17.5 Media Processing above the Plane D API
 
@@ -7291,9 +8077,13 @@ silently.
 **In-call encryption semantics.** As in §17.1: AES-256-GCM under the
 `call_key`, no ML-DSA signature per frame, no zstd attempt. In the 1:1
 case, the `call_key` is a two-party secret and thereby authenticates the
-other side. For groups, **a separate `send_key` per sender** is needed,
-because a shared group key cannot provide sender authenticity (any
-holder could forge as any other); the group-call topology is open (below).
+other side. For groups, **a separate `send_key` per sender**, handed to
+every participant end to end (§17.2): it keeps a sender's media sealed
+over every forwarding hop — the pairwise `call_key` of a hop ends at the
+forwarder — and a departure renews it. It does not prove the sender to a
+fellow participant, who holds the same key; a receiver therefore takes a
+sender's frames only over its media pair with that sender, from that
+pair's broker, or over its tree link towards that sender (§17.7).
 
 **In-call collaboration (planned).** During a call: a shared multi-page
 whiteboard, file and clipboard exchange, call chat, screen sharing via
@@ -7305,9 +8095,9 @@ explicitly saved), runs under the same call key as audio and video,
 and has lower priority than audio.
 
 **Still open:** FREE_BUSY signaling. The group-call topology is **settled
-in §17.7** (K31-3); the objection that an overlay tree
-presupposes mutual addressability is answered there and by the pairwise
-hop key of the paragraph above.
+in §17.7** (K31-3); it presupposes addressability only between
+participants that hold a media pair, and each hop carries a pairwise
+`call_key`.
 
 ### 17.6 The relayed media stream — Plane D for file transfer
 
@@ -7322,13 +8112,13 @@ outbound connects replace them.
 
 **Finding the volunteer.** No directory, no fixed point, no designated
 role: every inbound-reachable always-on node serves as a volunteer —
-there is no switch (§12.7) —, drawn from two rings — the sender's current
-sync partners (the ask rides the live link and adds no metadata; a sync
-partner sees the sender's address anyway, RL-1), then entry-cascade
-nodes, whose addresses are public by construction (RL-13). Dual-stack
+there is no switch (§12.7) —, drawn from two rings — the sender's fixed
+neighbours (§5.2; the ask adds nothing a fixed neighbour does not
+already see), then every other neighbour; in both rings only neighbours
+whose reachability under their address is evidenced (§11.8a). Dual-stack
 candidates are preferred; the ask names the transfer size and a cookie,
-no identity. Admission at the volunteer is **capped, not negotiated**
-(D-1): a volunteer accepts transfers up to the protocol-wide size cap
+no identity. Admission at the volunteer is **capped, not negotiated**:
+a volunteer accepts transfers up to the protocol-wide size cap
 `C` (§9.4) without any dialog; transfers above `C` never ask a
 volunteer and take the bulk lane, both parties online or not. The
 volunteer's price is thereby bounded and declared in RL-7 — no unbounded
@@ -7350,10 +8140,18 @@ lane-neutral, so received progress is never lost.
 **Frames.** One Reed-Solomon fragment of §9.4 per D-frame, padded to a
 **1200 B size class** — byte-uniform with the cell size. No ML-DSA per
 frame, no zstd (§17.1 rationale). A stripe decodes from any 7 of its 11
-fragments. Loss repair follows §11.3: after the last frame and 300 ms
-without a new one, the recipient sends one request listing the missing
-fragments of every stripe it cannot decode, for at most 3 rounds;
-stripes still undecodable after the third round take the bulk lane.
+fragments. Loss repair follows §11.3: the sender closes every pass with an end
+mark (`0x5A`, pass number and frames sent; the volunteer forwards it), and
+after that end mark and 300 ms without a new frame the recipient sends one
+request listing the missing fragments of every stripe it cannot decode,
+repeated as §11.3a says — a pause in the middle of a pass is no round. An
+end mark without an answer is repeated 1 s apart (§11.3a); a repeated end
+mark gets the same list again. Stripes still undecodable when the request
+and its repeats bring nothing take the bulk lane. A sender or volunteer of an older 4.2 version sends or
+forwards no end mark: until the first end mark arrives, the recipient
+takes a quiet of 1.1 s after the last frame as the end of the pass (§11.3:
+300 ms and the answer deadline of 800 ms) and numbers the round as such a
+sender expects.
 There is no per-frame acknowledgement and no special fragment. The rate
 is adaptive (§17.5 pattern). This stream carries stored media — files,
 photos, recorded voice and video — whose value is the complete object.
@@ -7367,7 +8165,10 @@ recipient directly, rungs 1–3 of the delivery ladder / 20 min when it
 was delivered via the mailbox, rung 4) → ask up to
 three candidates (10 s) → `STREAM_OFFER`, connect window 30 s → stream.
 Any failure at any step, including mid-stream after the retry, falls to
-the bulk lane for the remainder. A failed stream attempt costs less than
+the bulk lane for the remainder. The remainder is what the recipient
+named when it gave up: the sender places only those stripes, and the
+recipient keeps what it opened. Where the recipient named nothing (the
+volunteer was lost), the whole object is placed. A failed stream attempt costs less than
 10 KB and about a minute; no payload byte is sent before the session
 stands. **The stream is pairwise (1:1) only:** a group transfer would
 multiply the volunteer's forwarding by the member count, so group media
@@ -7398,9 +8199,51 @@ special cases** of this — a star is the crystal whose root can carry
 everyone, a uniform tree is the crystal on uniform links. There is no
 separate topology to select.
 
+**Direct between contacts; a broker only where there is none.** A media
+pair — an address pair of §17.3 — exists only between two participants
+that are contacts with call consent (§17 principle, RL-7), and two
+participants that hold one always use it: in the mesh their media never
+pass through a third, the caller included. Only for a pair without one —
+not contacts, or contacts whose address pair does not carry — a
+participant that holds a media pair with both, the pair's *broker*,
+forwards between them: one broker per pair, both directions, one hop, and
+only what it received from the pair's members themselves. Both members ask
+their media pairs in the call which of them hold a media pair with the
+other and how much they can still take; the member with the smaller
+identifier binds the one with the most free capacity under `f_i`, ties
+by the ranking below, and the broker confirms to both. A broker checks
+its capacity when it is bound and refuses when full, so that the pairs
+spread over the brokers there are. Until its line has shown a limit, a
+broker's free capacity is unbounded and the one carrying fewer forwarded
+streams has more of it. A binding that carries is not moved,
+and a pair that gains a media pair of its own drops its broker. A broker
+fills its capacity with its own voice, then forwarded voice, then its
+own video, then forwarded video; a pair whose video it cannot carry keeps
+its voice, and both members are shown that video is not possible, not
+through whom. A pair with no broker, or none that can still carry its
+voice, is not joined: both members are shown "No common contact in the
+call", or that no forwarding is free, and no volunteer outside the call
+is asked. Joining, leaving, the end of a media pair (§17.4) and a
+broker's limit are the only edges at which this is decided again.
+
+**The crystal, from 7 participants on, is built over media pairs only.**
+Its root is the participant highest by the ranking below and its free
+capacity under `f_i`, not the one that started the call; every node takes
+as its parent the media pair nearest the root that still has room under
+its `f_i`, the one with the most free capacity among equals, so that the
+load spreads over several forwarders; as for a broker, a node's room is
+unbounded until its line has shown a limit, and a place that carries is
+not moved for room alone. Each node finds its own place from what its
+media pairs tell it of the root and their way to it. A node forwards a frame over every
+tree link except the one it came by. Two participants with no common
+contact are joined through any chain of media pairs the tree runs along;
+one that no tree link reaches is shown "No common contact in the call".
+
 Why this matters in numbers: with a uniform fan-out of 3 the per-node load
-is **independent of group size** (336 kbps of voice at 8 participants and
-at 50 alike), while a single relay carrying everyone needs 5.5 Mbps of
+is **independent of group size** — a node with three children and a parent
+forwards up to `K` streams over each of its four links, 448 kbps of codec
+rate (1.1 Mbps in the 176-B class) at 8 participants and at 50 alike —,
+while a single relay carrying everyone needs 5.5 Mbps of
 upload at 50 — and 98 Mbps if it forwards video. The price of the tree is
 depth: roughly 15–25 ms per hop, so 60–100 ms at 50 participants. **The
 crystal buys bandwidth with latency; the star does the reverse.** Which
@@ -7456,7 +8299,9 @@ control frames share the voice size class (§17.1.1) instead of having one
 of their own.
 
 **Size limits of a group call.** Voice is offered up to the crystal
-ceiling of 30 participants. Video is offered up to a participant count
+ceiling of 30 participants. Until the star control plane of §17.1.1 is
+built, voice is offered up to 25 participants, the largest count that
+presupposes no unbuilt plane. Video is offered up to a participant count
 set by measurement (Appendix C); until that count is set, video is
 offered up to the mesh ceiling of 6. Voice and video carry separate
 limits for the same reason they do not share a tree.
@@ -7517,7 +8362,7 @@ that are not the recipient (§8.2). Normative:
 
 | MessageType | Transport |
 |---|---|
-| `CALENDAR_INVITE` | **Contact event:** one cell delivered under `tag(K_AB)` (§9). **Group event:** N pairwise legs (§16.2) — one ordinary 1:1 cell per member |
+| `CALENDAR_INVITE` | **Contact event:** one message to the contact (§7.1, §9). **Group event:** N pairwise legs (§16.2) — one ordinary 1:1 message per member |
 | `CALENDAR_RSVP` | likewise N pairwise legs |
 | `CALENDAR_UPDATE` | likewise |
 | `CALENDAR_DELETE` | likewise |
@@ -7580,7 +8425,7 @@ from the same sender can become visible in any order.
    is buffered, not discarded — the same pattern used for buffering chat
    configuration changes that arrive before the corresponding group
    invitation. When the invite arrives later, the buffered changes are
-   applied. Buffer limit: the same TTL bound.
+   applied. Buffer limit: none by count; the event's own deletion rules apply once it is known.
 
 **Rationale for point 3.** A timestamp comparison is not enough here,
 because cancellation and change do not commute semantically: a
@@ -7623,8 +8468,9 @@ distinction matters:
 - Free/Busy is explicitly limited to **contacts**: whoever is not a
   contact cannot even ask — the KEX Gate silently drops messages from
   unknown senders.
-- Between contacts, `K_AB` exists (§4.3). The tag can be formed, the cell
-  can be placed, the recipient receives it. **The channel exists.**
+- Between contacts the way exists: the sender knows the recipient's
+  addresses and post box (§7.1, §8.2), and the recipient receives the
+  message. **The channel exists.**
 - What is structurally missing is something else: the addressability of
   **non**-contacts — that affects channel votes (§18.3.3) and
   moderation reports (§16), not Free/Busy.
@@ -7660,10 +8506,9 @@ on which everyone is free. Four points fail to carry this:
    only point at which the recipient knows the sender. The cost of
    receiving it accrues regardless of the rate limit, but the egress
    cost of the response is reliably capped by it.
-4. **Egress quota.** A relay's per-recipient quota (§9, §16.4) governs
-   how many cells it holds for a given destination. Whether automatic
-   response cells are paid from it, and what happens on exhaustion, is
-   not regulated.
+4. **Holder cap.** A holder keeps at most 100 packets per day value
+   (§8.2). Whether automatic responses count against it, and what happens
+   when it binds, is not regulated.
 
 **What the feature guarantees beyond that.** The auto-responder — the
 response is generated automatically by the requested party's daemon
@@ -7690,7 +8535,8 @@ is not a reason to disclose the IP address via consent (§17). The
 metadata cost is out of proportion.
 
 **OPEN (CAL-4).** Independent of the CAL-3 decision, it must be decided
-from which egress quota a relay's auto-response cells are paid (§9) and
+whether automatic responses count against a holder's cap of 100 packets
+per day value (§8.2) and
 whether the response may be held for less than the 7 days of the post
 box (§8.2). A response older than the scheduling process has no value —
 call signals (§17.2) are no model for it, they take no post box at all,
@@ -7720,9 +8566,11 @@ RSVP status changes as small system messages.
 
 **The "Call" button at event start is bound to the full-mesh ceiling.**
 As designed: with `hasCall: true`, the button appears at the start time,
-a click starts a group call with everyone who accepted. The topology
+a click starts a group call with everyone who accepted; those of them
+that hold no media pair hear each other through a broker, or are told
+that nobody connects them (§17.7). The topology
 itself is no longer the obstacle — §17.7 settles it (K31-3), and §17.5 gives each hop a pairwise `call_key`, so up to
-the full-mesh ceiling every pair holds real material. What is still
+the full-mesh ceiling every pair of contacts holds real material. What is still
 missing above that ceiling is the relay path of the crystal.
 
 Normative: the event card offers a group-call start **only up to the
@@ -7735,9 +8583,9 @@ carried, withholding the button is the same error mirrored.
 
 #### 18.1.8 Storage and multi-device
 
-Calendar events reside per identity in the encrypted profile
-(`lib/core/calendar/calendar_manager.dart`, persistence
-`calendar_events.json.enc`) — details in §21.
+Calendar events reside per identity in the identity's store
+(`messages.db`, areas `calendar_events` and `calendar_settings`;
+`lib/core/calendar/calendar_manager.dart`) — details in §21.4.
 
 Multi-device: calendar changes between the devices of **one** user run
 as twin sync (§14.7) and therefore over the same pairwise legs as
@@ -7877,18 +8725,12 @@ tag families. **The poll tag families (channel polls and the
 publicly or within a group", and a channel vote is therefore just as
 protected against flooding as a report.
 
-**OPEN (POLL-4) — `onlyMembersCanVote` has no denominator.**
-`PollSettings.onlyMembersCanVote` distinguishes in channels between
-members and mere subscribers (only members may vote). Public channels have
-**no subscriber list**: §16.8 explicitly holds that they have
-no membership structure, that there is no `subscriberCount`, and that
-no one knows who is reading. The publisher therefore cannot enforce the
-setting. Two options: (a) the field is removed, anyone who can read the
-channel may vote; (b) the field stays and means "only registered role
-pseudonyms with a registration age ≥ 7 days" (§16.5) — checkable, but it
-forces voters into a public registration, which §16.3 just ruled out
-for the mere act of subscribing. Recommendation: (a), with an honest
-removal in the settings UI.
+**No "only members may vote".** Public channels have no subscriber list
+(§16.8): nobody knows who is reading, so a setting that lets only members
+vote cannot be enforced. There is no such setting; anyone who can read the
+channel may vote. The former field `only_members_can_vote` is reserved in
+the poll message, and a poll that still carries it is read with the field
+ignored.
 
 #### 18.3.4 Deadline, TTL, and convergence (normative)
 
@@ -8017,7 +8859,7 @@ Three options:
 | Option | Construction | Cost |
 |---|---|---|
 | **A — Withdraw the commitment** | "Anonymous in the result, not toward fellow voters." The UI says this explicitly. The ring signature stays for tally, persistence, snapshots, and export | Honest and immediately implementable: the UI only promises anonymity in the result. Cost: the feature is worthless for the main use case (a sensitive vote in a group) |
-| **B — Dedicated poll tag family for anonymous votes** | Anonymous votes run **not** over pairwise legs, but under a tag family derived from `pollId`: `tag_vote = HKDF(pollId, "vote" ‖ n)` — exactly the pattern that §16.3 already uses for channel votes and §16.4 for jury votes. The tag carries no pair information; the ring signature carries the authorization, the key image the duplicate detection. `pollId` is distributed within the group and not derivable by outsiders | The construction already exists twice in the draft and is therefore not a new building block. Cost, honestly: (1) the tag on which `tag_vote` sits must be **subscribed to** by all group members — an anonymous poll occupies one additional subscription for its runtime, while groups otherwise hold **no** subscription. The sync partner sees this subscription. (2) the tag falls under the same eviction question as the poll-tag-family quota (§18.3.3). (3) the list of exceptions to the single-use-tag invariant is extended by the family |
+| **B — Dedicated poll tag family for anonymous votes** | Anonymous votes run **not** over pairwise legs, but under a tag family derived from `pollId`: `tag_vote = HKDF(pollId, "vote" ‖ n)` — exactly the pattern that §16.3 already uses for channel votes and §16.4 for jury votes. The tag carries no pair information; the ring signature carries the authorization, the key image the duplicate detection. `pollId` is distributed within the group and not derivable by outsiders | The construction already exists twice in the draft and is therefore not a new building block. Cost, honestly: (1) the tag on which `tag_vote` sits must be **subscribed to** by all group members — an anonymous poll occupies one additional subscription for its runtime, while groups otherwise hold **no** subscription. (2) the tag falls under the same eviction question as the poll-tag-family quota (§18.3.3). (3) the list of exceptions to the single-use-tag invariant is extended by the family |
 | **C — Vote only to the creator** (channel pattern, also for groups) | As in §18.3.3: vote sealed against the creator pubkey, creator publishes `POLL_SNAPSHOT` | No additional subscription. Cost: the creator becomes the tallier, and §16.1 rejects exactly that ("hiding them would only be possible with a trustworthy tallier, which does not exist"). Possibly acceptable for a group of acquaintances, not for the use case "anonymous vote because you don't trust the creator" |
 
 **Decided: B is normative.** The finding is classified as a
@@ -8053,7 +8895,7 @@ contradicts the purpose (whoever wants to vote anonymously should not
 first have to register publicly). (b) remains conceivable as a later
 extension, but is not part of the current design.
 
-Anonymous polls in **groups and private channels up to N ≤ 16**
+Anonymous polls in **groups and private channels on pairwise legs**
 (§16.2.1) are not affected
 by this — there, distribution runs over pairwise legs (§16.2) with a
 known roster, and §18.4.2 applies.
@@ -8113,8 +8955,6 @@ known set of voters. Both are quantum-independent.
 |---|---|---|
 | **CAL-3** | Free/Busy: state model for the round trip. The channel exists (contacts share `K_AB`), the **round trip** does not. Options A (asynchronous partial grid with `expiresAt`) / B (push instead of pull, opt-in per contact) / C (replace with DATE_POLL). Plane D rejected | open (§18.1.5) |
 | **CAL-4** | Free/Busy auto-responder: egress-quota assignment; possibly a shorter post-box retention for the response — that would be a change to §8.2 | open (§18.1.5) |
-| **CAL-7** | Group-call start from the event card stays locked while group calls are deferred (§30.7) | bound to §30.7 |
-| **POLL-4** | `onlyMembersCanVote` has no checkable denominator. Recommendation: remove outright | open (§18.3.3) |
 | **Editorial** | §5 needs a caveat for opt-in services (external calendar sync, media archive), otherwise the cover-uniformity commitment is false as an assurance | change outside this chapter (§18.2) |
 
 ---
@@ -8129,18 +8969,9 @@ known set of voters. Both are quantum-independent.
   D (§17, including the media stream §17.6) and the bulk lane (§9.4) are
   declared demand-driven classes; their occurrence *is* information, and
   B-10 / B-29 price exactly that.
-- **Foreground:** a standing streaming harvest subscription (§8).
-- **Background:** burst harvest according to the platform's cadence
-  (§8).
-- **Network change:** every neighbour counts as not answering; remembered
-  addresses are re-attempted once and the neighbour call is repeated once
-  (§11.8). The node discards its observed public address, so no invitation
-  issued afterwards carries a stale one. A message already acknowledged
-  or placed is not sent again because of this edge; one that is neither
-  is sent once more under its identifier (§9.3). The node registers its
-  codes again with its fixed neighbour (§8.1); contacts learn a new fixed
-  neighbour only from the node itself, sealed (§8.1). A device address
-  alone is announced to nobody.
+- **Network change:** the edge of §11.8.2. A message neither acknowledged
+  nor placed is sent once more under its identifier (§9.3); one that is
+  acknowledged or placed is not.
 - **Platform specifics:** the Android foreground service carries the
   sync (Arbeitsregel #8); iOS uses the background-refresh window fully
   for one burst (§31).
@@ -8168,7 +8999,7 @@ declared limit and a declared behaviour when it is reached.
 | outgoing parts awaiting re-request (§11.3) | one transmission of two or more parts at a time per recipient — the next hop it is handed to; it ends with the recipient's end mark, or 1.1 s after its last part with no request | the caller is blocked, not the socket: its transmission waits in one of the next two rows |
 | the node's own transmissions waiting for their next hop (§11.3) | what the node has accepted for sending (R-1) | none is evicted; they wait in order, and the other steps of the ladder carry meanwhile (§7.1) |
 | others' transmissions waiting for their next hop — forwarding (§8.1), a holder handing out (§8.2) | per target [OPEN: measured, not yet set] | the forwarder answers `0x21`, the holder hands out later: an open refusal, never a silent loss |
-| packets waiting for a link (§11.6) | what the flow of §11.3 lets through, only while the handshake runs (two answer deadlines at most) | none is evicted; when the neighbour does not answer, all waiting packets drop and their transmissions are told the neighbour is unreachable |
+| packets waiting for a link (§11.6) | what the flow of §11.3 lets through, only while the handshake runs (its repeats as §11.3a, at most) | none is evicted; when the neighbour does not answer, all waiting packets drop and their transmissions are told the neighbour is unreachable |
 | socket receive buffer (§11.1) | emptied at every read event | does not fill from the node's own slowness; what the network lost is re-requested (§11.3) |
 | incoming reassembly (§11.3) | 30 s per transmission | oldest incomplete transmission discarded |
 | post box per day value (§8.2) | 100 packets | oldest discarded |
@@ -8176,7 +9007,9 @@ declared limit and a declared behaviour when it is reached.
 | post box, size of one packet (§8.2) | [OPEN: measured, not yet set] | refused |
 | forwarder loop memory (§8.1) | 60 s | oldest discarded |
 | request buffer (§15.4) | 20 shown, 100 held | oldest evicted, never blocked |
-| neighbours (§11.7) | 32 | longest silent dropped |
+| neighbours (§11.8) | 32 | the one whose newest stamp is oldest gives way; fixed places excepted |
+| links (§11.8.7) | 64 | the one used longest ago gives way |
+| identities on one device | 16 | the 17th is refused when it is created, and the interface says so; cover (§5.1) and keep-alive (§8.1) run once per device whatever the number |
 | reconciliation source, packets under one device value (§14.6.3) | 80 | it fills again only on the recipient's progress report |
 | reconciliation, open fetches on the new device (§14.6.3) | 1 per source | a new request replaces the open one |
 | reconciliation packet (§14.6.3) | 32 768 B including the seal | split into further packets |
@@ -8185,7 +9018,7 @@ declared limit and a declared behaviour when it is reached.
 | reconciliations a source serves (§14.6.3) | 1 per own device | the second replaces the first |
 | catching up, packets per round (§9.5) | 4, never more than 80 under one day value | the next round only on the requester's progress report |
 | catching up, open requests on the returning device (§9.5) | 1 per party | a new one replaces the open one and keeps the earlier moment |
-| catching up, answers a party gives (§9.5) | 1 per party and named moment | a repeated or backdated request is discarded and named |
+| catching up, answers a party gives (§9.5) | 1 per party and named moment | a backdated request is discarded and named; the same moment under a new request is answered again as long as the earlier answer has not been reported complete — otherwise a lost answer would never arrive |
 | identifiers of received deliveries, and of deleted messages and calendar events, kept against a second copy (§7.1, §9.5, §21.5.2, §18.1.3) | none — kept as long as the identity exists | nothing is evicted; the list grows only with what the device itself receives and deletes, as its messages do (§21.4.2); a second copy of a delivery is refused and still acknowledged (§9.2), a copy of something deleted is not shown |
 
 The one list without a bound in this table is not a queue: it holds
@@ -8229,7 +9062,7 @@ A partition is not a distinct state and needs no detection.
 |---|---|
 | no neighbour answers | ladder steps 1–3 fail, step 4 places in the post box (§8.2) |
 | no neighbour at all | the message stays `in transit`; the sender is told nothing is reachable |
-| network returns | remembered addresses are re-attempted once, the neighbour call is repeated once (§11.8) |
+| network returns | remembered addresses are attempted again, the neighbour call goes out again (§11.8) |
 | recipient returns | collects from the post box (§8.2) |
 
 Nothing is retried on a timer, and no state needs repair. A node that
@@ -8278,70 +9111,79 @@ The storage order has four tiers:
 |---|---|---|
 | **1** | **Own chats, media, calendar, polls, contacts, metadata.** The user's personal data | **never automatic** — except via rules the user has set themselves (per-chat expiry §21.5.3, media archive §21.6, voice retention §21.7) |
 | **2** | **What the node holds for others in its post box** (§8.2): sealed packets under day values | the collector's acknowledgement, expiry after **7 days**, **or** — above 100 packets per day value — the oldest gives way (§8.2, §20.2) |
-| **3** | **Durable-object class** (§16.0): anti-entropy replicated objects | Type rules per object (table in §16.0); on sub-budget overflow, trimming **within** the sub-budget, newest-first by first-acceptance day |
-| **4** | **Operational state:** tag-line subscription list, liveness records, sync-partner statistics | discardable and re-acquirable at any time |
+| **3** | **Durable-object class** (§16.0): objects fetched by identifier from the node that named them, compared by state root at an edge | Type rules per object (table in §16.0); on sub-budget overflow, trimming **within** the sub-budget, newest-first by first-acceptance day |
+| **4** | **Operational state:** the remembered neighbours and their addresses (§11.8; device database, area `node`) | discardable and re-acquirable at any time |
 
 **The invariant.** The local data store on the device is the **only**
 place priority-1 data resides. Any network-side persistence is incidental
 and volume-bounded; the local profile is the sole authoritative source.
-The delivery-layer share is ciphertext with no key reference (§5), not
-a store from which anything could be reconstructed.
+What a node holds for others is ciphertext with no key reference (§8.2,
+§9.4), not a store from which anything could be reconstructed.
 
 ---
 
-### 21.2 Network storage classes: delivery layer, durable objects, bulk cache
+### 21.2 Network storage classes: post box, durable objects, system channels, bulk cache
 
-There are three network storage classes: the **delivery layer**
-(§9), the **durable objects** (§16.0), and the **bulk cache** (§9.4,
-§21.3.3) — the capped, lowest-priority class that holds the Reed-Solomon
-pieces of the bulk lane and the fountain blocks of the binary distribution on always-on nodes.
-Everything a node holds for others falls into one of these three classes.
-The stream lane (§17.6) stores nothing and appears in no storage class.
+There are four network storage classes: the **post box** (§8.2), the
+**durable objects** (§16.0), the **system channels** (§16.7), and the
+**bulk cache** (§9.4, §21.3.3) — the capped, lowest-priority class that
+holds the fragments of lane 3 and the fountain blocks of the in-network
+update (§26.6.1). Everything a node holds for others falls into one of
+these four classes. A forwarder on step 3 (§8.1) passes a packet on and
+keeps nothing; the stream lane (§17.6) stores nothing; neither appears
+in a storage class.
 
-**Delivery layer (§9).** Third-party cells of the subscribed tag lines —
-one tag-line budget, eviction only within the quota (§20), one
-network-wide uniform procedure, one format for all content. Bulk fragments
-travel as media packets (§9.4, §11.5) and are **not**
-delivery-layer cells: they live in their own budget class (E-53), are
-evicted first under pressure, and are held per holder
-(§9.4), not replicated at the delivery layer's redundancy factor (§9). Cells carry no attributable sender; an eviction cap "per
-source" is therefore structurally impossible and is not needed either.
+**Post box (§8.2).** Sealed packets left with the node under a day
+value: at most 100 per day value, above that the oldest gives way;
+deleted on the collector's acknowledgement or after 7 days; a deposit
+without a valid proof of work is discarded. One format for all content
+— a holder sees a day value and opaque bytes, never a person or an
+identifier. On desktops the keeper holdings of groups and channels on
+the shared key (§16.2.5) count within this class (§21.3.1). Lane-3
+fragments are **not** post-box packets: they live in the bulk cache, are
+placed once per holder (§9.4) and are evicted first under pressure. A
+post-box packet names no sender; an eviction cap "per source" is
+therefore structurally impossible and is not needed either.
 
-**Durable objects (§16.0).** Anti-entropy replicated objects across
-relays, with type rules per object and fixed sub-budgets. The directory
-entry of public channels lives in this class (§16.0/§16.3), not on the
-delivery layer.
+**Durable objects (§16.0).** Objects fetched by identifier from the node that named them, with type
+rules per object and fixed sub-budgets. The directory entry of public
+channels lives in this class (§16.0/§16.3), not in the post box.
 
-**No addressable storage location per recipient.** There is no mailbox
-derivable from a pubkey, no special store for first-contact requests
-(first contact runs over the invitation tag family, §15), and no
-network-held auth manifests: no XOR metric, no replicator role, no
-pollable state about a third-party identity. §4.3 / §8 list this as a
-core property (liveness is pairwise-replicated, not a pollable
-third-party state).
+**System channels (§16.7).** Held by every always-on desktop as a class
+of its own beside the durable objects; a phone holds none (§16.7).
 
-**Local outbox.** A node's own cells stay in local storage until sending
-is confirmed, as described in §9 — no timer retry, no route state, no
-persistent send queue.
+**No storage location derivable from a public key.** A day value is
+the hash of a day public key that only the identity's contacts receive
+(§8.2); first-contact requests are left under the invitation values with
+the invitation neighbour (§8.2, §15.1). There are no network-held auth
+manifests, no replicator role and no pollable state about a third-party
+identity (§10.1).
+
+**Local outbox.** A node's own messages stay in its message store
+(§4.5.3) until the recipient acknowledges them (§9.2); a recipient back
+after more than 7 days asks for what it missed (§9.5). No timer retry,
+no route state.
 
 ---
 
-### 21.3 Budgets — decided
+### 21.3 Budgets
 
-The storage budgets are fixed, as the document's last
-implementation-blocking point. This section presents the fixed values
-first, then the derivation, then the decision itself.
+Every class a node holds for others has its own bound, and no class
+draws on another (§21.3.3). This section gives the bounds, then states
+where a bound is still missing, then the rule.
 
 #### 21.3.1 Fixed values
 
 | Item | Value | Kind |
 |---|---|---|
-| Delivery-layer storage, **desktop** (Linux/Windows/macOS), full TTL | **~160 MB** | Storage |
-| Delivery-layer storage, **mobile** (Android, iOS) | **48 h retention + 32 MB hard cap** — whichever binds first applies | Storage |
-| Durable-object class per node, target size | **≤ 10 MB**, split fixed **6 / 2 / 2 MB** (directory+registrations / verdict and deadline-bound types / rolling) | Storage |
-| **Bulk cache** | **desktop 1 GB, mobile 100 MB default**, user-overridable in tiers following the §21.6 pattern | Storage, third-party data, lowest priority |
-| Cover + harvest traffic, **mobile** | **~10–21 MB/day** cover (§5, M7) + `1.15+0.23·S` MB/day liveness (§8) — for iOS an upper bound, not an expectation | **Traffic, not storage** |
-| Cover + harvest traffic, **desktop** | cover + liveness + bulk relay throughput | **Traffic, not storage** |
+| **Post box** — what a node holds for others as a holder (§8.2), on every platform | **7 days**; at most **100 packets per day value**, the oldest gives way; no total bound per platform yet (§21.3.2) | Storage, third-party data |
+| **Keeper holdings of groups and channels on the shared key** (§16.2.5) | desktop only, counted within the post box (§21.2); 7 days; at most 100 entries per author key and 1,000 per channel value; a phone holds none | Storage, third-party data |
+| Durable-object class per node, target size | **≤ 10 MB**, split fixed **6 / 2 / 2 MB** (directory+registrations / verdict and deadline-bound types / rolling) — applies with the restatement of public channels and moderation (Appendix C) | Storage |
+| **System channels** (§16.7), own class beside the durable-object class above | **desktop 25 MB per channel** (Bug Log and Feature Requests, 50 MB together); **mobile holds none**, read cache **≤ 5 MB per channel** of what the user has read | Storage, third-party data; the read cache is own data |
+| **Bulk cache** (lane 3, §9.4) | **desktop 1 GB, phone 100 MB default** (D-32), user-overridable in the tiers 100 MB, 250 MB, 500 MB, 1 GB, 2 GB on every platform (the range of the media budget, §21.3.1); pieces held for `TTL_media` = 7 days | Storage, third-party data, lowest priority |
+| **Objects of the in-network update** (§26.6.1) | desktop only: the complete binaries and deltas of the current manifest, as files; a phone holds none | Storage, own copy served to others |
+| Cover and keep-alive traffic, **mobile** | the volume of §5.6 (metered mobile data: cover 1.73 MB/day; behind carrier-grade translation ≈ 6.9 MB/day with keep-alive) | **Traffic, not storage** |
+| Cover and keep-alive traffic, **desktop** | the volume of §5.6 (W/LAN: cover 12.96 MB/day) plus bulk-lane throughput | **Traffic, not storage** |
 | Media-archive budget on the device | **100 MB (mobile) to 2 GB (desktop)**, freely settable; the archive's **four** storage tiers (§21.6) are a separate dial | Storage, **local, own data** |
 
 The archive has
@@ -8354,75 +9196,53 @@ free numeric field. The tier count and the storage-budget size are two
 independent dials, not to be conflated.
 
 The risk of confusion is real and is explicitly cleared up here:
-**~10–21 MB/day is not a storage value.** §5/§8 describe cover and
-liveness *traffic*; how much a mobile node **holds** is given in the row
+**The figures of §5.6 are not storage values.** §5 and §8.1 describe cover
+and keep-alive *traffic*; how much a node **holds** is given in the rows
 above.
 
-#### 21.3.2 Derivation of the mobile values
+#### 21.3.2 The post box
 
-The **48 h retention is normative**.
-
-The order of magnitude can be derived from two documented figures:
-~160 MB for **14 days** of full retention, i.e. **~11.4 MB/day** of
-delivery-layer inflow for the base subscription set; 48 h correspond to
-roughly a seventh, **~23 MB**. Add to that the observation that eases
-the decision: **the traffic quota binds before the storage does.** At
-~10–21 MB/day cover + liveness in the background (the cover share
-dominates by design, §5), a mobile node cannot receive the 11.4 MB/day
-of its subscription set at all — a pure background node accumulates real
-single-digit MB per 48 h. Only in the foreground (streaming harvest,
-§8) does it approach the full 48-h window. The **32 MB cap** is
-therefore not a pressure point in normal operation but a device
-safeguard: ~23 MB expected value for the full window plus ~40 %
-headroom against volume growth.
-
-Rejected alternatives: *retention only, normative* (if the
-delivery-layer volume per tag line doubles, the mobile footprint grows
-without bound — violating device-limit robustness); *storage value
-only, normative* (with shrinking volume the node would hold arbitrarily
-old cells, the eviction semantics would stay implicit, and the
-retention rule would stay open).
+A holder is bounded per day value and in time (§8.2), not in total: a
+node that is the fixed neighbour of many takes every deposit that carries
+a valid proof of work. The total bound per platform, and what gives way
+when it binds, is open (Appendix C); until it is set, the proof of work
+per deposit (§8.2) and the 7-day expiry are what limit a holder's
+storage.
 
 #### 21.3.3 The decision (normative)
 
-1. **Mobile double rule.** Retention **48 h** normative (older is
-   evicted) **and** hard storage cap **32 MB** — whichever binds first
-   applies. If the cap binds before the 48 h expire, eviction follows
-   the per-tag-line quota rule (§20): near-expiry/oldest first, within
-   the quota. Both values are configurable constants.
-2. **Additivity with a hard ceiling per class.** Delivery layer, durable
-   objects, media archive, and bulk stand side by side; no class draws on
+1. **The post box has one rule on every platform** (§8.2): 7 days, at
+   most 100 packets per day value, the oldest first out. A phone that is
+   somebody's fixed neighbour holds post like a desktop.
+2. **Additivity with a hard ceiling per class.** Post box, durable
+   objects, system channels, media archive, and bulk stand side by side; no class draws on
    another. This is the only way that structurally guarantees the side
    condition: **third-party data (priority 2) never evicts own data
    (priority 1)** (§21.1). A shared quota would have to buy that
    guarantee through extra machinery and would remain error-prone —
    rejected.
-3. **Bulk as its own, fourth capped class.** **Desktop 1 GB default,
-   mobile 100 MB default.** With data-saving mode on (§24.4.2) a mobile
-   node neither accepts nor hands out bulk pieces over a metered
-   connection. User-overridable in
-   tiers analogous to the media budget (§21.6 pattern), no automatic
-   growth with disk size. **Lowest priority:** under disk pressure, bulk
-   is trimmed first (ahead of the delivery layer), with eviction within
-   the class by the §20 rule. Explicitly **not** decided alongside
-   this: the fountain parameters of the binary distribution (L-3), the desktop share of the
-   relay set — that remains a measurement task.
+3. **Bulk as its own capped class.** **Desktop 1 GB default, phone
+   100 MB default** (D-32). With data-saving mode on (§24.4.2) a phone
+   neither accepts nor hands out bulk pieces over a metered connection.
+   User-overridable in the tiers of §21.3.1; a smaller tier frees the
+   space at once by the rule below; no automatic growth with disk size. **Lowest priority:**
+   under disk pressure, bulk is trimmed first (ahead of the post box);
+   within the class the oldest pieces of the oldest transfer give way.
+   Explicitly **not** decided alongside this: the fountain parameters of
+   the binary distribution (L-3) — that remains a measurement task.
 4. **Visibility.** §16.0 already requires it for the durable-object
-   sub-budgets; the same rule applies normatively to the delivery layer
-   and bulk: a node that evicts under budget pressure shows this visibly
-   in the network statistics (§25). A silently shrinking delivery layer
-   is the storage variant of the failure mode §1.2 rules out for
-   delivery (no state asserts delivery without substantiating it).
-5. **Remaining headroom not allocated.** Redundancy m and decoy count d
-   are set per the measurements (§9, M7); the base subscription count
-   also applies to mobile.
+   sub-budgets; the same rule applies normatively to the post box and
+   bulk: a node that evicts under budget pressure shows this visibly in
+   the network statistics (§25). A silently shrinking post box is the
+   storage variant of the failure mode §1.2 rules out for delivery (no
+   state asserts delivery without substantiating it).
 
-**Total footprint (worst case, all caps full):**
+**Footprint (bounded classes, all caps full):**
 
-| Platform | Delivery layer | Durable objects | Media (priority 1, user) | Bulk | Total third-party / overall |
+| Platform | Post box | Durable objects | System channels | Media (priority 1, user) | Bulk |
 |---|---|---|---|---|---|
-| Desktop | ~160 MB | 10 MB | up to 2 GB (tiers, §21.6) | 1 GB default | ~1.2 GB third-party / ~3.2 GB |
-| Mobile | ≤ 32 MB | on-demand partial cache (§16.0, does not hold the class in full) | 100 MB default | 100 MB default | ~132 MB third-party / ~235 MB |
+| Desktop | no total bound yet (§21.3.2) | 10 MB | 25 MB per channel (50 MB for Bug Log and Feature Requests together) | up to 2 GB (tiers, §21.6) | 1 GB default |
+| Phone | no total bound yet (§21.3.2) | on-demand partial cache (§16.0) | none; read cache ≤ 5 MB per channel | 100 MB default | 100 MB default |
 
 The larger desktop footprint deliberately falls on the platform class
 that can carry it (§31 ranking).
@@ -8439,11 +9259,13 @@ that can carry it (§31 ranking).
 (`lib/core/crypto/file_encryption.dart:12`). Writes are atomic
 (`.tmp` → `rename`).
 
-**Persistence form.** Configuration state runs through encrypted JSON
-envelopes (`FileEncryption` + `lib/core/storage/atomic_json_writer.dart`),
-one file per subsystem (`calendar_events.json.enc`, `chat_policies.json`,
-`calendar_sync_config.json.enc`, …), compressed per §4.5.3. Messages and
-conversations do not — they live in the message store described next.
+**Persistence form.** Configuration state of an identity lives in the
+state table of its store — one area per collection (`contacts`, `polls`,
+`calendar_events`, `calendar_sync_config`, …), one row per entry, so that
+a change writes one row (`lib/core/storage/encrypted_store.dart`); state
+of the device lives in the device database (§21.4.1). Encrypted files
+remain for the delivery layer (§4.5.2), sealed as above and compressed
+per §4.5.3.
 
 #### 21.4.1 The message store
 
@@ -8552,32 +9374,19 @@ gate with an inverse probe
 compiled without a key must fail, or the gate would be measuring
 something other than the claim.
 
-**Normative: the harvestable-tag set needs protection.** The node
-maintains a set of tags it matches incoming cells against (mechanism:
-§6) — for 200 contacts, roughly **24,000 entries**, a few hundred
-KB of raw 16-B tags. This set is the central correlation target:
-whoever captures it in plaintext can match it against an archived
-delivery-layer recording and identify all of the user's cells — without
-decrypting them, but with a complete communication pattern. It
-therefore lies **mandatorily under the DB key**, together with
-`inbox_key`, the prekey pool (§4.6) **and the receiver's daily ML-KEM
-secrets (§4.3), retained no longer than the identity KEM rotation
-interval (7 days)**. The **tag-line subscription list
-of the delivery-layer storage** (real and decoy tag lines are
-indistinguishable without the list) is likewise mandatorily encrypted —
-but it is device-bound, not identity-bound, and therefore lies under a
-device-derived index key (§4.5, device-key derivation), not under the DB
-key. A "cache directory" for tag prefixes outside encryption is
-explicitly impermissible.
+**Normative: what the delivery layer keeps for an identity lies under
+that identity's key.** The memory — the own post box with its day keys,
+each contact's delivery state with the pair secret, the issued
+invitations — and the group pairs, first contact and parked cells lie as
+sealed files under `<profile>/mycelium/` (§4.5.2). The frame of every own
+message still open and the identifiers against a second copy lie in the
+identity's store (area `delivery_history`); the identity's keys, its KEM
+generations included, lie in the store's area `keys`. A cache of any of
+these outside this encryption is impermissible.
 
-**The delivery-layer storage itself needs no additional encryption
-layer.** Third-party cells are already ciphertext with no key reference
-(§5). They may sit unencrypted on disk; that saves the
-decryption/encryption on every cell reconciliation, and the confiscator
-table (§21.8) presupposes exactly this property: "third-party cells:
-ciphertext with no key reference." Only the **tag-line index** carries
-an envelope (FileEncryption under the device-derived index key) — it is
-the only thing in the relay holdings that would reveal anything.
+**What the node holds for others** lies under the device-wide key and is
+described in §4.5.3: post-box packets in the device database, media
+pieces as sealed files under `mycelium/bulk/`.
 
 **Where the profile lies.** All identity data sits in one directory,
 `.cleona`, below a per-platform home:
@@ -8619,6 +9428,11 @@ The following applies:
   one.
 - **No edit history.** Only the current version exists (data
   minimization).
+- **One reaction per person per message.** A new reaction from a person
+  replaces that person's previous one on the message, at every receiver;
+  choosing the same reaction again, or tapping one's own, removes it.
+  This holds in direct conversations, groups and channels and on the own
+  other devices (§14.2).
 
 **On the 60-minute tolerance.** Without transport ordering, the gap
 between original and edit on the receiver side is not determined by a
@@ -8626,7 +9440,10 @@ send delay but by arrival order (§7, §8); an edit can arrive before the
 original. The receiver therefore evaluates only the **timestamps in the
 content**, never the arrival order — the same rule as for the calendar
 (§18.1.3) —, and an edit to a still-unknown message is buffered instead
-of discarded. Precisely for this reason, the receiver-side tolerance is
+of discarded — without a count limit and without a clock: it leaves when
+its message is held, where it is checked and applied or dropped and the
+message's own deletion rules apply from then on, or with its conversation
+(§20.2). Precisely for this reason, the receiver-side tolerance is
 set wide, at 60 minutes.
 
 #### 21.5.2 What deletion means on the delivery layer — an honest declaration
@@ -8780,7 +9597,8 @@ confirmation step; the role check happens on both sides (sender and
 recipient).
 
 **Download directory.** Configurable per identity profile, stored in
-`chat_policies.json`. Desktop (Linux/Windows/macOS): the default is the
+the identity's database (`messages.db`, §4.5.3), shown in that identity's
+tab. Desktop (Linux/Windows/macOS): the default is the
 system's standard download folder (`~/Downloads`). Mobile
 (Android/iOS): the default is an app-internal download directory; if the
 user switches to an external directory, the storage permission is
@@ -8822,6 +9640,13 @@ is **withhold**, not *disclose*: a missing field reads as "show"; the
 reversed encoding would silently turn every delivery-receipt cell
 without the field into a suppression. Mirrored locally in
 `ContactInfo.withholdDeliveryStatus` / `GroupInfo.withholdDeliveryStatus`.
+
+**Withholding covers the read receipt.** While a conversation withholds
+its delivery status, no read receipt leaves it, and the read-receipt
+switch shows "off" and cannot be changed. A message read while the
+delivery status is withheld, or while read receipts are off, is never
+confirmed later; only what is read after switching back on is — otherwise
+the later receipt would reveal what was concealed (§16.2.3).
 
 **The delivery state does not hinge on how the receipt travels.** The
 state is `in transit` until the receipt (§9.2) arrives, regardless of
@@ -8936,17 +9761,16 @@ Properties:
 
 Three touch points are worth noting:
 
-1. **The budget stands beside the delivery-layer budget** (§21.3.3,
-   point 2). It is priority-1 storage and must not be evicted by the
-   delivery layer.
+1. **The budget stands beside the classes held for others** (§21.3.3,
+   point 2). It is priority-1 storage and must not be evicted by them.
 2. **Archive traffic breaks the cover-uniformity commitment from §5**
    — SMB or SFTP traffic to the NAS is clearly recognizable from
    outside. As with external calendar sync (§18.2), that is a user
    decision, not an architectural weakness, but it must appear in §5 as
    a caveat.
-3. **There is no relationship to the file transfer tiers.** The transfer
-   tiers (inline ≤ ~1 MB, delivery-layer packet up to ~100 MB, relay
-   swarm, direct transfer) concern the **transfer**. The archive picks
+3. **There is no relationship to the file transfer tiers.** The three
+   lanes of §9.4 (inline below 256 KB, streamed, bulk) concern the
+   **transfer**. The archive picks
    up afterward, on the fully received file; archive placeholders fetch
    from the **share**, never from the network.
 
@@ -8956,7 +9780,7 @@ Three touch points are worth noting:
 
 whisper.cpp on-device (`lib/core/archive/whisper_ffi.dart`),
 source-side transcription at the sender with receiver fallback,
-tiny/base/small models (~40 / 75 / 250 MB, selectable per identity),
+tiny/base/small models (~78 / 148 / 488 MB, selectable per identity),
 beam search `beam_size = 5`, language setting per identity (default
 auto-detect), two-stage lifecycle: stage 1 audio + text in parallel,
 stage 2 text only, once the configurable audio retention period has
@@ -8972,9 +9796,39 @@ announce frame has an empty payload and whose follow-up stage carries
 pure file bytes. The transcript belongs in the **descriptor**, so it
 can be shown before the download completes.
 
-**Model and library files** (~40/75/250 MB under `~/.cleona/models/`)
+**Model and library files** (~78/148/488 MB under `~/.cleona/models/`)
 are program data, not user storage, and count toward none of the
-budgets from §21.3.
+budgets from §21.3. A model is fetched only on the user's click and
+checked against a SHA-256 fixed in the program before it is used
+(§23.8).
+
+---
+
+### 21.7a Message translation — decided, not built
+
+Incoming messages can be translated on the device: by a button at the
+message, and, if the user switches it on, automatically per chat. What
+the user writes is never translated (D-64).
+
+- **Engine:** Mozilla's Bergamot translator — the engine of the
+  translation built into Firefox — with Mozilla's models, both under
+  MPL-2.0, on all five platforms, bound through FFI as whisper.cpp is
+  (§21.7). All 34 languages of §24 are covered in both directions,
+  through English where no direct model exists.
+- **Fully local.** Translating sends nothing anywhere. The translation
+  is kept only in the identity's store beside the message (§21.4.2),
+  never as a file; logs carry no content.
+- **Models** are fetched on the user's click, one language direction at
+  a time, directly from Mozilla's distribution — about 21–37 MB per
+  direction, 50–70 MB for Chinese, Japanese and Korean — and each file
+  is checked against a SHA-256 fixed in the program before it is used; a
+  file that does not match is deleted and never used (§23.8). They are
+  program data like the transcription models, count toward none of the
+  budgets of §21.3, and are not distributed over the network.
+- **Before the build** (Appendix C): a feasibility probe has built the
+  engine for Linux and Android; the time on a real ARM phone, the build
+  for iOS and the oldest supported Android version are still to be
+  shown. The build follows the release.
 
 ---
 
@@ -8985,11 +9839,11 @@ analysis in §5:
 
 | Location | Content | Protection |
 |---|---|---|
-| Local profile | Chats, media, calendar, polls, contacts, **harvestable-tag set, `inbox_key`, prekey pool** | XSalsa20-Poly1305 under the seed-derived DB key (§21.4) |
-| Delivery-layer share on disk | third-party cells of the subscribed tag lines | Ciphertext with no key reference; no additional layer needed. The **tag-line index** (which tag lines, real vs. decoy) lies under the device-derived index key (§4.5) — without it, the cell heaps cannot be classified |
+| Local profile | Chats, calendar, polls, contacts, the identity's keys, the delivery layer's memory and history | the identity's store under `deriveFileEncKey` — ChaCha20-Poly1305 page encryption (§21.4.1); the delivery layer's files and the attachments (`.cmenc`) under the same key (§4.5.2, §4.5.3) |
+| What the node holds for others | post-box packets (device database, area `node`) and media pieces (`mycelium/bulk/`) | sealed by their senders, with no key reference; at rest under the device-wide key, piece files named by a hash of the identifier (§4.5.3) |
 | Durable-object class | Directory, registrations, cases, verdicts, badges | public by construction — no secret to protect |
 | Media archive on the share | originals, decrypted | deliberately unencrypted (§21.6, security rule "no encryption on the share"); the share is on the user's home network |
-| Own, not-yet-placed cells (outbox) | own messages including recipient | under the DB key |
+| Own messages not yet acknowledged | the frame of every own message still open, including its recipient | in the identity's store, area `delivery_history` (§21.4.2) |
 | Plaintext in transit (`transient/` in the profile, §23.10) | a file a foreign program needs for the length of one operation — a recording, a pasted picture, a transfer to the share | none while the operation runs; deleted when it ends, emptied at the next start after a crash |
 | What the user let out (§21.4.2) | attachments at destination 3, shared and saved files, the application's own screenshots, mirrored calendar entries | none — outside the application |
 
@@ -9004,7 +9858,6 @@ device's own operator.
 
 | # | Topic | Status |
 |---|---|---|
-| **STO-4** | Interaction between delivery-status withholding ↔ read receipt. Options: couple the `read` upgrade to the same flag, or make the dependency visible in the UI | open (§21.5.5) |
 | **Editorial** | §5 needs the same caveat as in §18.2 — media-archive traffic (SMB/SFTP to the NAS) is recognizable from outside and breaks the cover-uniformity commitment for the affected user | change outside this chapter (§21.6) |
 
 ---
@@ -9052,7 +9905,11 @@ are independent of the delivery model:
   derive one key per direction from the secret and both values; the
   secret itself never travels. From then on every request, response and
   event is sealed, and a side that cannot open the first sealed line
-  closes the connection. There is no unencrypted mode, in no build;
+  closes the connection. The daemon's first sealed line names its app
+  version. Daemon and GUI are one program and run one version: a GUI that
+  reaches a daemon of another version does not work against it — if the
+  daemon is newer, the GUI restarts from disk; otherwise the daemon is
+  replaced from the GUI's bundle. There is no unencrypted mode, in no build;
   tools and tests connect through the same exchange. The 24 words are
   not served over the connection.
 - **Single-instance guard, machine-global:** exactly one Cleona daemon
@@ -9106,12 +9963,8 @@ are independent of the delivery model:
   and the durable-object class (§16.0).
 - **Crypto:** KEM, signatures, key storage. The beta/live network-channel
   separation runs via `kNetworkChannel` in the link KDF (§11); there is
-  **no packet HMAC and no network-side admission** (§20). A **network
-  secret does exist and is cryptographically live**, but only on the
-  binary-distribution path (§26.6): it keys the lookup tag, the encryption
-  of the rendezvous records and the Nostr publishing key, and it is
-  carried across a rotation with a two-generation window. It admits
-  nobody to the delivery layer.
+  **no packet HMAC, no network-side admission and no network secret**
+  (§20, §26.7).
 - **Persistent database:** conversations, contacts, calendar, polls.
 - **IPC server** with the fields per §22.7 and §25.
 
@@ -9143,10 +9996,10 @@ are independent of the delivery model:
 │ Layer 3: Delivery layer (§5–§9, §11)             │
 │   • Durable-object class (§16.0)                 │
 ├─────────────────────────────────────────────────┤
-│ Layer 2: Link layer                              │
-│   • outbound sync connections                    │
+│ Layer 2: Shell                                   │
+│   • one pairwise shell per neighbour             │
 │   • Elligator2-X25519 outside, ML-KEM-768 inside │
-│   • cells, fixed 1200 B                          │
+│   • packets, fixed 1200 B                        │
 ├─────────────────────────────────────────────────┤
 │ Layer 1: OS network stack (UDP/TCP)              │
 └─────────────────────────────────────────────────┘
@@ -9168,60 +10021,50 @@ seam, no second path through the delivery layer (§17).
 
 ### 22.4 Module Inventory
 
-The module tree under `lib/core/` is organized as follows. Naming
-avoids vocabulary that encodes a specific storage model where a
-mechanism-neutral name says the same thing (`delivery/`);
-names that are already mechanism-neutral (`link/`, `tags/`, `sync/`,
-`durable/`) are kept as they stand.
+The application's modules lie under `lib/core/`; the delivery layer is
+the package `mycelium/` beside it, with a `pubspec.yaml` of its own
+(§22.4.1). A directory name says what a module carries, never a storage
+model or a layer boundary it does not have (§22.4.2).
 
 #### 22.4.1 Network-Layer Modules
 
-Six modules carry the network layer. The cut follows the sections of
-the network architecture, so that chapter and directory stay mappable
-onto each other.
+The network layer is the package `mycelium/`. It imports a few
+primitives from `lib/core/` and nothing from above the seam (§22.5).
 
 | Module | Carries | Normative Source |
 |---|---|---|
-| `lib/core/link/` | Outbound sync connections; Elligator2-X25519 shell outside, ML-KEM-768 inside, `link_key = KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)`; cell frame fixed at 1200 B; beta/live network-channel separation; transport-parameterized connect and listen paths; per-address transport escalation own-port/UDP → own-port/TCP → 443 → ICMP, 443 bound via kernel redirect; `drawDataPort` excludes `discoveryPort` and `10080` | §4.3, §11 |
-| `lib/core/delivery/` | Cell storage and eviction, as described in §9 and §20 | §5, §9, §20 |
-| `delivery/` — in the tree the package `mycelium/` | The delivery layer of §7–§9 and §11: wire, parts, envelope, ladder; the readiness state machine (§22.7); **interface precedence — wired, Wi-Fi and VPN before cellular, cellular as the last choice** (§10, §22.6, §23.1), and with it the choice of which own address invitation data and an address record carry (§11.1, §11.9, §15.2) | §5, §6, §8, §9, §10, §11.1, §22.7, §23.1 |
-| `lib/core/tags/` | Tag derivation and matching, as described in §4.3–§6 | §4.3, §5, §6 |
-| `lib/core/sync/` | Delivery-layer reconciliation, as described in §5, §6, §9 and §11; budget classes as **platform tiers** (§22.6); data-saver mode; entry cascade; entry-record type — one type, used by ContactSeed hints and the sync exchange alike (E-60) | §5, §6, §9, §11, §22.6 |
-| `lib/core/durable/` | **Durable-object class (§16.0):** public verifiable moderation objects (directory, registrations, cases, verdicts, badges) as anti-entropy replicated objects across relays with per-class state root; proof verification before replication; eviction by type rules; the backdating anchor reuses the cross-partition relay-attestation primitive (§13.4.2); sub-budgets per §21.3 | §16.0, §13.4.2, §21.3 |
+| `mycelium/` | The delivery layer: one UDP socket per family on the data port, drawn in 20000–60000 at first start (`wire.dart`, `host_memory.dart`); the shell — Elligator2-X25519 outside, ML-KEM-768 inside, every packet 1200 B (`shell.dart`, `shell_start.dart`); parts and re-requests (`split*.dart`); envelope and ladder; neighbours, board, open set and fixed neighbours (`neighbour*.dart`, `board*.dart`); forwarding and codes (`forward*.dart`, `code_*.dart`); the post box (`post_box*.dart`); the cover stream (`cover_stream*.dart`); external address records (`outside_*.dart`); media lanes 2 and 3 (`stream_*.dart`, `bulk_*.dart`); the in-network update (`update*.dart`); first contact, invitation, group pairs, the recovery bundle on the post box; the readiness state machine (§22.7); **interface precedence — wired, Wi-Fi and VPN before cellular, cellular as the last choice** (§10, §22.6, §23.1), and with it the choice of which own address invitation data and an address record carry (§11.1, §11.9, §15.2) | §5–§11, §15.2, §22.7, §23.1 |
+| `lib/core/link/` | Primitives the shell uses: the Elligator2 binding (`elligator_ffi.dart`) and the link key `link_key = KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)` (`link_kdf.dart`); the data port draw (`data_port.dart`). Its other files belong to the superseded V4.1 link layer | §4.2, §11 |
+| `lib/core/link_io/` | The Plane D socket and frame (`d_socket.dart`, `d_frame.dart`, §17); router mappings — UPnP IGD, NAT-PMP, IPv6 pinhole (`port_mapper.dart`, `upnp_igd.dart`, `nat_pmp.dart`, `ipv6_pinhole.dart`, §7.3); the native send shim (§22.4.4). Its other files belong to the superseded V4.1 link layer | §7.3, §17, §22.4.4 |
+| `lib/core/config/` | Beta/live network-channel separation (`network_channel.dart`); the built-in relay list for external address records (`rendezvous_relays.dart`) | §11.9 |
+| `lib/core/sync/`, `lib/core/rendezvous/`, `lib/core/field/` | The rest of the superseded V4.1 layer: reconciliation, entry records, Nostr entry source, tag derivation. No new delivery code goes here; what the calls and the service still read from `sync/` (`entry_record.dart`, `cover_stream.dart`) is named at its user | — |
 
-**Why `tags/` and `sync/` are separate.** The set a node matches
-incoming cells against is an **application**-level quantity: it grows
-with contacts, groups, channels, and subscriptions, and is filled by
-Layer 4 (§4.3, §6). Reconciliation itself is a **transport**-level
-quantity (Poisson-timed, §5.2) that must know nothing of that set —
-otherwise the number of contacts would become visible on the wire
-profile (a core cover-uniformity property, §5). The separation is the
-structural safeguard for this commitment, not a matter of taste.
+The durable-object class (§16.0) has no module yet (Appendix C).
 
-**Why `durable/` is its own module and does not live in `delivery/`.**
-The durable-object class has the opposite eviction rule from the
-delivery layer: delivery-layer cells are evicted by TTL + per-tag-line
-quota (§20); durable objects are evicted by type rules with carried
-proof (§16.0). Two storage classes with opposite eviction rules in the
-same module are the kind of mixing that budget errors come from.
+**Why the durable-object class will not live in the post box.** The two
+have opposite eviction rules: a post-box packet goes at its collector's
+acknowledgement or after 7 days (§8.2); a durable object goes by the
+rules of its type, with carried proof (§16.0). Two storage classes with
+opposite eviction rules in one module are the kind of mixing that budget
+errors come from; when the class is built it gets a module of its own.
 
 #### 22.4.2 Device Identity
 
-Everything that assigns and attests devices to an identity lives in its
-own module:
+Everything that assigns and attests devices to an identity lives in two
+places: the device set and the rotation chain in `lib/core/identity/`,
+the device key pair, its KEM key and its signature in `lib/core/crypto/`:
 
 | File | Carries | Normative Source |
 |---|---|---|
 | `rotation_co_auth.dart` | Device set and device quorum for emergency rotation, `max(2, ceil(N/2))` | §14.4, §14.5 |
-| `rotation_chain.dart` | Hybrid rotation chain of the identity signing keys, wire form and check | §4.5.4, D-33 |
+| `rotation_chain.dart` | Hybrid rotation chain of the identity signing keys, wire form and check | §4.5.4 |
 | `lib/core/crypto/device_keys_store.dart` | The device key pair and its storage | §4.4.2, §14.1 |
 
-**Normative:** the module carries a neutral, device-related name. A
-directory name must not feign a layer boundary it does not have — in
-particular, it must not suggest a network-side resolution of identities:
-the device quorum check is receiver-side, there is neither a published
-manifest record nor a resolver nor a liveness record. The directory
-name is **OPEN** (§22-O-5), proposal `lib/core/device_identity/`.
+**Normative:** names in this area stay neutral and device-related. A
+name must not feign a layer boundary it does not have — in particular,
+it must not suggest a network-side resolution of identities: the device
+quorum check is receiver-side, there is neither a published manifest
+record nor a resolver nor a liveness record.
 
 #### 22.4.3 Codec Modules
 
@@ -9236,8 +10079,7 @@ assembly without a compression step would only surface at runtime.
 
 #### 22.4.4 LAN Discovery and Native Send Shims
 
-- **LAN discovery** carries step 2 of the entry cascade, as described in
-  §11. The
+- **LAN discovery** carries source 2 of §11.8.3, the local segment. The
   implementation is the neighbour call of §7.2 with a frame
   and a port of its own (§11.1); it does not reuse a generic
   LAN-discovery module — a shared frame would carry a node-ID format and
@@ -9253,9 +10095,10 @@ assembly without a compression step would only surface at runtime.
   one. This is a property of the Dart VM, not of the Cleona network
   layer. See §27.
 
-*(E-60 decides §22-O-4 in favor of (b): the entry record is **one** type
-in **one** module, used by the ContactSeed hints and the sync exchange
-alike — §11.)*
+*(E-60 decides §22-O-4 in favor of (b): addresses that travel between
+nodes have **one** format in **one** module — the address entries of
+cover and board (`mycelium/lib/address_entries.dart`, §5.5, §11.8a),
+which write every address with the codec of the card (§15.2).)*
 
 #### 22.4.5 Application and Cross-Cutting Modules
 
@@ -9264,7 +10107,8 @@ Above the seam (§22.5) sit:
 `lib/core/calendar/`, `lib/core/ipc/`, `lib/core/i18n/`,
 `lib/core/archive/`, `lib/core/moderation/`, `lib/core/platform/`,
 `lib/core/media/`, `lib/core/identity/`, `lib/core/tray/`,
-`lib/core/polls/`, `lib/core/services/`, `lib/core/storage/`.
+`lib/core/polls/`, `lib/core/services/`, `lib/core/storage/`,
+`lib/core/contact/`, `lib/core/recovery/`, `lib/core/stats/`.
 
 In addition, four modules with their own normative source:
 
@@ -9275,12 +10119,13 @@ In addition, four modules with their own normative source:
 | `lib/core/channels/` | Object-space semantics of the channels and of moderation | §16 |
 | `lib/core/update/` | Manifest cell and fountain blocks of the binary distribution (`update_manifest.dart`, `binary_seeder.dart`, `binary_update_manager.dart`) | update manifest (§26.6) |
 
-**Cross-cutting files with no transport function** live outside the
-network layer: `clogger.dart` (project-wide logging, the project's
-most-imported file), `contact_seed.dart` (ContactSeed format, §15),
-`nfc_contact_exchange.dart`, `nfc_platform_bridge.dart`,
-`nfc_android.dart` (contact exchange), and `channel_uri.dart` (channel
-addressing).
+**Cross-cutting modules with no transport function** live outside the
+network layer: `lib/core/log/` (project-wide logging and its
+redaction), `lib/core/util/` (addresses, interfaces, network kind),
+`lib/core/codec/` (Reed-Solomon of the media lanes, §9.4, and the zstd
+wrapper, §22.4.3), and in `lib/core/contact/` the ContactSeed format
+(`contact_seed.dart`, §15), the contact exchange (`nfc_android.dart`,
+`nfc_platform_bridge.dart`) and channel addressing (`channel_uri.dart`).
 
 #### 22.4.6 Service Layer
 
@@ -9381,8 +10226,8 @@ themselves.
 Delivery is address-free at the seam, by construction of the ladder
 described in §7 and §8. It follows that:
 
-- **Reachability** is determined by oneself (the relays and neighbours
-  one has verified, §7, §8), not queried of a central authority;
+- **Reachability** is determined by oneself (the neighbours one has
+  confirmed, §11.8.4), not queried of a central authority;
   liveness is pair-wise established (§6).
 - **Direct paths** between two devices run exclusively through the
   **Plane D API** (§17); live-call frames are the only direct,
@@ -9477,8 +10322,8 @@ Per platform: topology, packaging, and the **retention tier** —
 always-on full retention vs. retention-bounded. This is a **platform
 property**, not a role a message declares or a sender selects.
 
-**Linux Desktop.** Always-on full retention (§8), automatic
-relay-cache contribution. Daemon
+**Linux Desktop.** Always-on full retention (§8), a bulk cache for
+others (§9.4, §21.3.1). Daemon
 `cleona-daemon` (standalone binary built by `scripts/build-daemon.sh`
 through `dart build cli`, so that the build hooks bundle the
 message-store library; `dart compile exe` produces a daemon without it),
@@ -9497,11 +10342,18 @@ updates run via the in-network update path, not via a new installer
 run). Daemon `cleona-daemon.exe`, GUI `cleona.exe`, IPC via TCP
 127.0.0.1 (§22.1), tray via Win32 FFI, toast notifications, sounds via the
 bundled helper `cleona-play.exe` (one process per sound, like `pw-play`
-under Linux; decoder libogg/libvorbis, output through `PlaySound`). `netsh
-advfirewall` sets up an **inbound UDP rule** on first start: inbound
-reachability is not a condition for one's own delivery (§22.5.2), it is
-the **contribution to others** and the prerequisite for incoming calls.
-The UI text states the rule exactly that way.
+under Linux; decoder libogg/libvorbis, output through `PlaySound`). The
+setup asks once for administrator rights, for one step only: it sets the
+**inbound firewall rule** for `cleona-daemon.exe` (UDP and TCP, all
+network profiles); everything else installs without them. The rule names
+the program path, so updates into the same folder keep it. At every start
+the application checks the rule; when it is missing or a blocking rule
+stands — the setup ran without consent, or the Windows prompt was
+declined — it says so and offers "Allow in firewall", which sets the same
+rule after one consent. Inbound reachability is not a condition for one's
+own delivery (§22.5.2), it is the **contribution to others** and the
+prerequisite for incoming calls. The UI text states the rule exactly
+that way. The daemon runs without a console window.
 
 **macOS.** Always-on full retention (§8). Daemon + GUI analogous to Linux,
 IPC via Unix socket; native libs as `.dylib` in
@@ -9514,7 +10366,7 @@ daemon, no IPC — foreground service plus activity. The foreground
 service (persistent notification, keeps running even with the activity
 closed) is the canonical background path — push-wakeup variants (FCM,
 UnifiedPush, WebPush) have been architecturally reviewed and rejected
-(Appendix D, D-18) — and it keeps the delivery layer's cadence alive
+(§23.2) — and it keeps the delivery layer's cadence alive
 (§5, §8). With multiple
 local identities, an arriving cell is matched to the right identity
 before unsealing (mechanism: §6). Add to this the camera pipeline, incoming-call notification
@@ -9522,39 +10374,39 @@ before unsealing (mechanism: §6). Add to this the camera pipeline, incoming-cal
 native libs (jniLibs arm64-v8a + x86_64, `scripts/build-android-libs.sh`)
 — §17, §27.
 
-**Android accepts inbound syncs. Normative, and it is a statement of
-what the code does.** §31.5 K31-4 asked whether it should and pointed at
-this paragraph for the answer; the paragraph was silent, so the question
-looked open. It was not — it was a documentation gap, closed here
-by reading the code rather than by deciding anything:
+**Android accepts inbound packets. Normative, and it is a statement of
+what the code does:**
 
-- The link layer binds a **wildcard socket per address family** on a
-  fixed port and listens unconditionally —
-  `link_io/udp_sockets.dart:141-146` (`RawDatagramSocket.bind`,
-  `readEventsEnabled = true`, `socket.listen(...)`), driven from
-  `link_io/link_host.dart:223`.
-- There is **no platform branch** in that path. Across
-  `delivery/`, `Platform.isAndroid`
-  and `Platform.isIOS` appear exactly twice, both in
-  `link/elligator_ffi.dart:145,154` to pick a library-loading path. No
-  `outboundOnly` switch exists anywhere in the tree.
+- The delivery layer binds a **wildcard socket per address family it
+  has** on the data port and listens unconditionally —
+  `mycelium/lib/wire.dart:107–125` (`Wire.open`, `RawDatagramSocket.bind`
+  on `anyIPv4`; IPv6 only where a usable address exists, `:135–162`),
+  `listen` subscribes both sides (`:229–235`, `_Side.subscribe`
+  `:311–317`); the node opens it at start
+  (`mycelium/lib/node_helpers.dart:232`).
+- There is **no platform branch on receive.** `mycelium/lib` contains
+  no `Platform` check. The one platform branch at the socket is the
+  native send path on Windows (`wire.dart:273–282`,
+  `NativeSendPath.usesNativeSendPath` = `Platform.isWindows`), which
+  sends only; receiving stays on the socket. The platform branches of the
+  seam (`lib/core/service/mycelium_seam.dart:479–509`, `:553`) set the
+  bulk-cache size and class, the metered default and whether the node's
+  own cover carries update pieces — none of them on receive.
 - The foreground service keeps the process — and therefore the bound
-  socket — alive with the activity closed (Appendix D, D-18; this section).
-- The two Android branches in `network/transport.dart:411,2242` are on
-  the **send** side (native `sendto()` for errno visibility) and restrict
-  nothing on receive.
+  socket — alive with the activity closed (§12.6), and a timed wake lock
+  keeps the CPU awake for arriving packets (§23.2).
 
-"Retention-bounded" therefore constrains **how long a node holds** cells
-and how often it checks for new ones in the background (§8) — it never
-meant outbound-only. §31.2's callability row ("inbound within seconds
-(foreground service)") was correct all along; what was missing was this
-paragraph saying so. The remaining Android caveat is not the tier but the
-network: on carrier IPv4 behind CGNAT there is nothing to be reached at,
-which is a NAT property (§11) and not a platform tier.
+"Retention-bounded" therefore constrains **what a node holds for
+others** — no keeper holdings, no system channels, a smaller bulk cache
+(§9.4, §16.2.5, §16.7, §21.3.1) — never whether it receives. §31.2's
+callability row ("inbound within seconds (foreground service)") says the
+same. The remaining Android caveat is not the tier but the network: on
+carrier IPv4 behind CGNAT there is nothing to be reached at, which is a
+property of address translation (§7.3, §8.1), not a platform tier.
 
 **iOS.** Retention-bounded (§8). In-process analogous to Android. Registered
 background modes: `fetch` (`BGAppRefreshTask`) carries the burst check,
-`audio` carries Plane D. The cover-budget figure (~10–21 MB/d, §5.4) is,
+`audio` carries Plane D. The cover volume of §5.6 is,
 for iOS, an **upper bound shaped by what the OS grants, not an
 expectation** — a closed iOS app cannot sustain a cover stream, which
 is (f) physics, not a weakness of the delivery design (§8). Static native libs,
@@ -9578,17 +10430,9 @@ on their data address (§8.2, §11.8).
 
 #### 22.7.1 The readiness state
 
-The readiness state is grounded on **answering neighbours**. A neighbour
-(§11.8) is *answering* when it carries a confirmation stamp from this
-start or network change (§11.8) — it has answered a packet of this node
-that expected an answer — and no later request to that address (§8.2,
-`0x30` or `0x32`) has completed without its answer. A packet that merely
-arrives, cover included, is not a confirmation: `ready` asks whether
-**this** node can leave post with the neighbour, and only the outbound
-direction answers that (§11.8). A neighbour that is only remembered
-from the last run, or only heard calling on the local segment (§7.2 —
-the call arrives from the call port, not the data port), is an
-acquaintance, not evidence.
+The readiness state counts **answering neighbours** (§11.8.1): `ready`
+asks whether **this** node can leave post with a neighbour, and only an
+answer says so (§11.8.4). An acquaintance is not evidence.
 
 | State | Predicate | Meaning |
 |---|---|---|
@@ -9600,12 +10444,11 @@ acquaintance, not evidence.
 the post box needs two acknowledgements. There is no independence
 criterion by network block.
 
-**The state changes only at edges.** Up: a packet from a neighbour's
-data address. Down: a request to that neighbour completes without its
-answer; the neighbour leaves the list of 32 (§11.8); the network changes
-(every neighbour to not-answering, followed by the single re-attempt of
-§11.8). No packet is ever sent to establish readiness; it is read off
-traffic that §8.2 and §11.8 already cause. Before `ready`, the app
+**The state changes only when a neighbour becomes answering or stops
+being answering** (§11.8.1): up with a stamp, down with the removal of its
+last answering address (§11.8.5), its leaving the list of 32 (§11.8.3) or
+a network change (§11.8.2). No packet is sent for readiness itself; it is
+read off traffic that §8.2 and §11.8 already cause. Before `ready`, the app
 reports **progress, not success**.
 
 #### 22.7.2 Functional Gates
@@ -9687,7 +10530,7 @@ in this order, and the first hit suppresses:
   conversation, with defaults per type (direct chats: on, groups: on,
   channels: off); defaults apply to newly created conversations and are
   overridable both per conversation and as a global default per type.
-- **L3 — first harvest** (see below).
+- **L3 — first collection** (see below).
 - **L4 — debounce:** at most one notification every 2 s per conversation
   — protection against group burst storms.
 - **L5 — Android app-resumed gate:** if the app is in the foreground
@@ -9724,16 +10567,16 @@ resting at the sender (§9.3), up to 7 days in a post box (§8.2), and
 later still with the answer to a recipient's catch-up request (§9.5).
 A message's age therefore carries no suppression rule.
 
-**Normative:** L3 is anchored to the **first-harvest event**, not to
-message age. First harvest after a cold start, or after a readiness
+**Normative:** L3 is anchored to the **first-collection event**, not to
+message age. First collection after a cold start, or after a readiness
 transition `searching`/`connecting` → `ready`: a bundled batch
-notification instead of N individual sounds. Every subsequent harvest:
-individual notifications, regardless of the cell's age.
+notification instead of N individual sounds. Every subsequent collection:
+individual notifications, regardless of the message's age.
 
 **OPEN (§22-O-2):** the concrete bundling rule. Options: **(a)** one
-batch notification per first harvest ("N new messages in M
+batch notification per first collection ("N new messages in M
 conversations"); **(b)** individual notifications up to an upper bound,
-bundling above it; **(c)** bundling only when the first harvest lies
+bundling above it; **(c)** bundling only when the first collection lies
 further back than a duration yet to be determined. To be decided based
 on measured behavior in the lab.
 
@@ -9741,7 +10584,13 @@ Ringtones (6 predefined sounds plus a custom file; the same sound pool
 for call ringtone and message sounds), per-conversation settings, global
 defaults, vibration (configurable per notification type), and quiet hours
 (per identity, plus a master mute) belong to the notification model of
-this section.
+this section. Quiet hours are a window of local time stored with the
+identity (`messages.db`); the master mute is a setting of the device
+(`device.db`). Either one silences a message's sound, vibration and
+system notification — checked at the moment of notifying, with no clock
+and no traffic (§5.4); the message, its unread count and every badge
+stay as they are. Calls and calendar reminders are not messages and are
+not silenced.
 
 ---
 
@@ -9798,13 +10647,13 @@ The readiness state is the one statement the surfaces carry:
 | Tray icon | ditto |
 | Statistics badge | Readiness state (§25) |
 
-**OPEN (§22-O-3):** the text of the Android foreground notification.
-Boundary condition: before `ready`, the app reports **progress, not
-success**. Options: **(a)** three fixed texts per state; **(b)** state
-plus the number of answering neighbours; **(c)** state plus
-remaining task ("looking for a second answering neighbour"). Variant (c)
-best carries the progress commitment, but costs i18n effort across
-34 locales.
+**Text of the Android foreground notification.** One of three fixed
+texts for `searching` / `connecting` / `ready`, followed by the
+connection kind — Wi-Fi, mobile data, or mobile data as the fallback
+while Wi-Fi is blocked; without a network it says so instead of a
+readiness state. It carries no neighbour count. Before `ready` the text
+reports progress, never success. The keys (`readiness_*`, `conn_*`)
+exist in all 34 locales (§24).
 
 ---
 
@@ -9812,11 +10661,11 @@ best carries the progress commitment, but costs i18n effort across
 
 | # | Topic | Options |
 |---|---|---|
-| §22-O-1 | Whether a device-addressed send is needed to reach a single device (§22.5.2) | (a) none — Plane D gets its own API, twin sync runs via `sendToUser` to one's own UserID; recommended. (b) a device-addressed variant. No use case for (b) is substantiated |
-| §22-O-2 | Bundling rule for the first-harvest notification (§22.8) | (a) one batch notification; (b) individual notifications up to an upper bound; (c) time-dependent. To be decided based on lab behavior |
-| §22-O-3 | Text of the Android foreground notification (§22.9) | (a) three fixed texts; (b) + partner count; (c) + remaining task |
-| ~~§22-O-4~~ | ~~Whether the entry cascade carries a bundled entry-record format as its own module (§22.4.4)~~ | **Decided by E-60 in favor of (b):** one entry-record type in one module, shared by ContactSeed hints and the sync exchange (§11) |
-| §22-O-5 | Directory name of the device-identity module (§22.4.2) | Proposal `lib/core/device_identity/`. The name must not suggest a network-side identity resolution |
+| ~~§22-O-1~~ | ~~Whether a device-addressed send is needed to reach a single device (§22.5.2)~~ | **Decided: (b), restricted to one's own devices** (§22.5.2): a single own device can be named for per-device payloads (§14.6.1 step 4, Type 16); contacts are never addressed per device (§14.2). The own-device line: §14.7 |
+| §22-O-2 | Bundling rule for the first-collection notification (§22.8) | (a) one batch notification; (b) individual notifications up to an upper bound; (c) time-dependent. To be decided based on lab behavior |
+| ~~§22-O-3~~ | ~~Text of the Android foreground notification (§22.9)~~ | **Decided: (a)** three fixed texts, followed by the connection kind (§22.9) |
+| ~~§22-O-4~~ | ~~Whether the entry cascade carries a bundled entry-record format as its own module (§22.4.4)~~ | **Decided by E-60 in favor of (b):** one format in one module for addresses that travel between nodes — the address entries of cover and board, written with the card's address codec (§5.5, §11.8a, §15.2; §22.4.4) |
+| ~~§22-O-5~~ | ~~Directory name of the device-identity module (§22.4.2)~~ | **Decided:** no module of its own; the files live in `lib/core/identity/` and `lib/core/crypto/` (§22.4.2) |
 | §22-O-6 | Whether `Eingang` carries the roster version (membership version + roster hash) (§22.5.3) | (a) no — the deterministic `K_AB` derivation from the roster pubkeys already answers the membership question (§14); (b) yes, as its own field. Today, five places read it. Decision deferred to open work (Appendix C) |
 
 ---
@@ -9874,14 +10723,14 @@ inbound reachability is not a precondition for receiving (§22.5.2,
 
 | Permission | Type | When requested | Purpose |
 |---|---|---|---|
-| `INTERNET` | normal | always | **outbound** delivery-layer sync connections (§22.5.2) as well as the Plane D media path during calls (§17). An inbound-reachable port is never assumed anywhere (§31.1) |
+| `INTERNET` | normal | always | the delivery layer's packets on the data port (§11.1) as well as the Plane D media path during calls (§17). An inbound-reachable port is never assumed anywhere (§31.1) |
 | `ACCESS_NETWORK_STATE` | normal | always | network-change detection; additionally **connection-type detection** for the precedence rule Wi-Fi/Ethernet/VPN before cellular (§22.6) |
 | `FOREGROUND_SERVICE` | normal | always | keeps the cover tick alive |
 | `FOREGROUND_SERVICE_SPECIAL_USE` | normal | always | FGS type for Android 14+, subtype `persistent_p2p_messaging_daemon`; falls back to `DATA_SYNC` before API 34 |
 | `FOREGROUND_SERVICE_DATA_SYNC` | normal | always | boot type before API 34 and idle type between calls |
 | `FOREGROUND_SERVICE_MICROPHONE` | normal | always | runtime upgrade of the FGS during a call |
-| `WAKE_LOCK` | normal | always | **burst-harvest window** (~5 min, §22.6) or a foreground streaming subscription (§6). The window serves this node's **own outbound** reconciliation, not the processing of inbound packets — retention-bounded devices accept nothing inbound |
-| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | special | first start | shortens **harvest latency** in Deep Doze; the effect is latency, not deliverability (see below) |
+| `WAKE_LOCK` | normal | always | a timed partial wake lock of 30 s, taken when the foreground service starts and renewed every 5 s while the process runs, so the CPU stays awake for arriving packets; it lapses 30 s after the renewals stop (§22.6) |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | special | first start | shortens **collection latency** in Deep Doze; the effect is latency, not deliverability (see below) |
 | `POST_NOTIFICATIONS` | dangerous (13+) | first inbound message | message and call notifications |
 | `CAMERA` | dangerous | first capture or QR scan | media capture, video calls, contact verification |
 | `RECORD_AUDIO` | dangerous | first voice message or first call | voice recording, audio calls |
@@ -9916,7 +10765,7 @@ channel runs at `IMPORTANCE_LOW` (no sound, no vibration, no badge); the
 text is updated on every state change via the `updateServiceNotification`
 MethodChannel, with dedup against redundant updates. Every push variant
 (FCM, UnifiedPush, WebPush, per-peer rotation) has been architecturally
-reviewed and rejected (Appendix D, D-18).
+reviewed and rejected.
 
 **Lifecycle invariants** (Android lifecycle, not transport):
 
@@ -9947,21 +10796,18 @@ reviewed and rejected (Appendix D, D-18).
 
 **Text of the persistent notification.** The persistent notification
 carries the **readiness state** `searching` / `connecting` / `ready` as
-its leading statement (§22.7); partner counts appear at most as a
-secondary detail, and then **split by inbound and outbound**. A peer
-counter is not a readiness measure ("the counter counts acquaintances;
-readiness counts evidence"). The exact wording is open (§22-O-3,
-tracked in §23.9 K23-1) and must be created in all 34 locales at the
-same time (§24).
+its leading statement (§22.7), followed by the connection kind; the
+wording is fixed in §22.9. A peer counter is not a readiness measure
+("the counter counts acquaintances; readiness counts evidence"), and
+the notification carries none.
 
 **Doze and the battery exemption.** A packet for an absent recipient
 waits in the post box for up to 7 days (§8.2); delivery does not
 depend on continuous reachability — **Doze costs latency, not
 messages.** The battery exemption shortens collection latency; that is its
 only rationale, and the user-facing explanation says exactly that.
-Whether the dialog for it is shown at first start is **OPEN**
-(§23.9 K23-3): it would be the only permission dialog Cleona shows
-unprompted at first start.
+The dialog is shown once, at first start — the only permission dialog
+Cleona shows unprompted —, and never again, whatever the answer.
 
 ### 23.3 iOS
 
@@ -9974,7 +10820,7 @@ Usage-description strings from `ios/Runner/Info.plist`:
 | `NSPhotoLibraryUsageDescription` | first gallery selection | sending images and videos |
 | `NSPhotoLibraryAddUsageDescription` | first time saving an image | saving received images to the photo library |
 | `NFCReaderUsageDescription` | first NFC contact exchange | contact exchange via NFC |
-| `NSLocalNetworkUsageDescription` | first LAN discovery attempt | finding nodes on the local network (§11, entry cascade step 2). Important because LAN discovery is one of the cold-start steps |
+| `NSLocalNetworkUsageDescription` | first LAN discovery attempt | finding neighbours on the local network with the neighbour call (§7.2, §11.8 source 2). Important because the local segment is one of the sources a node starts from |
 | `NSLocationWhenInUseUsageDescription` | forced by the QR library | **not used by Cleona** — the text says so explicitly: "Cleona does not use your location. This permission is required by a third-party library used for QR code scanning." Discussed in §23.5 |
 
 **Background execution.** No foreground-service equivalent;
@@ -10026,7 +10872,7 @@ accordingly: contribution and callability, not receiving.
 | Background location | Not needed; network-change detection runs via `connectivity_plus`, not via GPS. |
 | SMS / MMS | No SMS verification. Identity is cryptographic. |
 | Bluetooth / BLE | Not part of the architecture: presence leak and eclipse attack. Close-range contact exchange runs via NFC. |
-| Push services (FCM, APNs, UnifiedPush, WebPush) | Architecturally reviewed and rejected (Appendix D, D-18); no forced Google Play Services, no iCloud tie-in. |
+| Push services (FCM, APNs, UnifiedPush, WebPush) | Architecturally reviewed and rejected (§23.2); no forced Google Play Services, no iCloud tie-in. |
 
 **On the location permission — the exact commitment (important).** A
 blanket formula like "location is never requested" would be inaccurate
@@ -10045,12 +10891,11 @@ OPEN K23-2).
 
 | Observer | Sees |
 |---|---|
-| ISP / global passive attacker | Poisson-timed packets of one size (§5.2) to changing peers. The observable graph is the **sync graph**, decoupled from the social graph |
-| Network insider | Nothing pollable **about persons** — no liveness record, no state on a third party's identity, no search quantity derivable from a pubkey. **Exception, honestly:** the public object space (§16) is enumerable — role registrations, directory entries, cases, verdicts, CSAM consumption objects (the durable-object class, §16.0). It counts **pseudonyms, not persons**, and contains no addresses; the link to the main identity is published nowhere (§16.7) |
-| Sync partner | Tag-line subscriptions (diluted by decoys), cell counts, possibly a live-session signal. Not: authorship, recipiency, relationships. **Two documented exceptions.** (1) Membership in **large private channels** (N > 16, §16.2.1) is mitigated against subscription-list correlation only statistically (decoys, epoch rotation), not structurally eliminated. Groups and small private channels are free of this (pairwise legs). (2) For **public channels**, the tag secret is published, making the target space enumerable — decoy dilution here works only as a factor, **not** as an anonymity set; the partner sees the candidate set of channel subscriptions |
-| Malicious contact | The epoch's inbox tag line — but the KEX-Gate (§4, §10.1) means only the pair partners can compute it, and a contact *is* a pair partner; `inbox_key` is rotatable (§14.4, §15.9) |
-| Delivery-layer relay | Tag (single-use, meaningless), TTL, ciphertext — no PoW field (the lever against delivery failure is redundancy, not proof-of-work) |
-| Relay-cache contributor | "some node is fetching encrypted blocks" — pseudonymous |
+| ISP / global passive attacker | Poisson-timed packets of one size (§5.2) to the node's neighbours, and on ladder steps 1 and 2 to the recipient itself (§7). The first hop of every packet is visible, beyond it not to whom (§3.5). The open set holds up to three contacts' devices (§5.2), so the observable graph contains part of the social graph |
+| Network insider | Nothing pollable **about persons** — no liveness record, no state on a third party's identity, no search quantity derivable from a pubkey. **Exception, honestly:** the public object space (§16) is enumerable — role registrations, directory entries, cases, verdicts, CSAM consumption objects (the durable-object class, §16.0). It counts **pseudonyms, not persons**, and contains no addresses; the link to the main identity is published nowhere — system-channel reports are signed by a report pseudonym and carry no identity key; in beta builds only, a report also names its author's UserID (§16.7) |
+| Neighbour (§11.8) | The packets of its own shell link with the node — cover and real alike, 1200 B each — with their times and number; as forwarder on step 3 a code and opaque bytes (§8.1); as holder the sealed deposits under day values, the address that leaves each and the address that collects it — a collector asks for up to seven day values in one question, so the holder links those values to one collector (§8.2); as bulk holder the fragments of a transfer and the addresses that place and collect them, both ends of that transfer (§9.4, B-29). A **fixed neighbour** — a contact's device (§5.2) — thereby learns when and how much the node sends and receives. Not: content, authorship, the recipient behind a code |
+| Keeper of a group or channel on the shared key (§16.2.5) | a channel value that changes every day and with every generation, the times of its deposits and their number per author key, and the number and addresses of the devices that collect under it (RL-3). Not: content, the group or channel, who is a member — unless the keeper is a member itself, which then also sees the addresses of the other readers |
+| Malicious contact | What every contact holds: the node's addresses from its invitation data (§7.1), its current fixed neighbours (§9.2), and its day public keys for the next 31 days (§8.2) — it can leave post under the node's day values, not collect or delete it. Leaving costs a proof of work, and at most 100 packets per day value are held (§8.2, §20.2). The day keys derive from the current signing key, so an Emergency Key Rotation takes them away (§4.5.4, §8.2) |
 | Confiscator | What the device holds for others: sealed packets with no key reference — post-box packets not yet collected and media fragments, none older than 7 days (§8.2, §9.4, §21.8) |
 
 **Plane D (calls/direct transfer).** Consented direct connections carry
@@ -10060,13 +10905,15 @@ their own, honestly declared metadata price:
 |---|---|
 | ISP / passive attacker | a consented constant flow of uniform frames between two IPs for the duration of the call |
 | The called/calling contact | IP address + local address candidates of the other party — "what he has, he has"; consent is revocable, an already-seen address is not |
-| Media relay volunteer (opt-in) | both IPs and the call duration — the labeled price of the relay (§17.3) |
+| A fellow participant in a group call who is not such a contact | no address of the other; its media come through a broker or the tree (§17.7), and it learns from whose link they arrive, or that no participant connects the two |
+| A broker or forwarder in a group call | nothing it does not hold as a contact of both and hear as a participant; a broker learns that the two it joins hold no media pair, and it could hold back what it forwards |
+| Media relay volunteer (opt-in) | both IPs and the call duration — the labeled price of the relay (§17.3); never in a group call |
 | Delivery-layer observer | nothing new — a call signal is a sealed envelope on ladder steps 1 and 3 (§17.2); a forwarder sees a code and opaque bytes, and no holder ever sees one |
 | Confiscator | nothing after the fact: `call_key`s are ephemeral, recorded Plane D traffic cannot be decrypted retroactively |
 
 **Small-network honesty:** the anonymity set is the user base; in a
 tiny network, no design protects against traffic analysis. The insider
-properties (rows 2–6), however, hold from node 1 onward — only GPA
+properties (rows 2–5), however, hold from node 1 onward — only GPA
 resistance grows with network size.
 
 ### 23.7 Residual leaks — what the design does not hide
@@ -10078,24 +10925,25 @@ device can read is not a leak of the design and is stated in §23.10.
 
 | # | Leak | Against whom | Why it remains | Mitigation |
 |---|---|---|---|---|
-| RL-1 | **Sync graph** — who exchanges cells with whom, when, and how much | ISP, global passive observer | Without an observable channel there would be no network | **Decoupled** from the social graph (§23.6 row 1): sync partners are chosen randomly, not contacts |
-| RL-2 | **Public object space is enumerable** — role registrations, directory entries, cases, verdicts, CSAM consumption objects (durable-object class, §16.0) | every network participant | Moderation without enumerable evidence cannot be audited | Counts **pseudonyms, not persons**; no addresses; the link to the main identity is published nowhere (§16.7) |
-| RL-3 | **Subscription correlation in large private channels** (N > 16, §16.2.1) | sync partner | A shared channel tag needs a shared tag line | Mitigated only **statistically** (decoys, epoch rotation), not structurally eliminated. Groups and small private channels are free of this (pairwise legs) |
-| RL-4 | **Candidate set in public channels** — the tag secret is published, making the target space enumerable | sync partner | Public means public | Decoys here work only as a **factor**, not as an anonymity set |
-| RL-5 | **First contact** — the invitation tag family narrows down, for the issuer, which node the requester is on (§15); the invitation family reveals to every URI holder "this invitation is open" and, for as long as the acknowledgment survives, the **issuer's reachability** | invitation issuer, or any URI holder | First contact with no shared secret at all cannot be established anonymously | Subscription asymmetric and time-limited (only the scanner subscribes, only until the answer); tag derived **per invitation**, not per issuer |
-| RL-6 | **Restore-Beacon** — the one-time self-publication in the recovery case (§13 stage 2) | every network participant | Without a beacon there would be no way back if every device is gone | One-time moment, not a durable state; stage 1 (own bundle) does not need it at all |
-| RL-7 | **Plane D discloses IPs** — per call to the other party, and to the volunteer on relay opt-in (§23.6 second table); **for media streams (§17.6) only to the volunteer, never to the other party**. The volunteer sees both addresses, the transfer's duration and its approximate size — bounded per transfer by the relay size cap `C` (D-1) | call partner, relay volunteer | Real time without a direct connection does not exist | Calls: consented, per-contact togglable, revocable, labeled in the UI. Media streams: every always-on node volunteers without a switch (§17.6); the sender's consent per file (§24.4.5) names it. **Honestly:** revocation does not take back an already-seen address |
-| RL-8 | **Data-saving mode makes the node distinguishable** — a reduced cover share is visible from outside (§24.4.2, §5.4) | ISP, sync partner | Whoever sends less looks different | Never automatic, only user-chosen, as a **visible state** with a named consequence. **Locked while it would weaken protection a chat relies on** (§24.4.2): the cover stream is node-wide, not per chat |
-| RL-9 | **A malicious contact knows the epoch's inbox tag line** | accepted contacts | The contact must know where their cells are placed; the KEX-Gate means only the pair can compute the tag, and the contact is a pair partner | `inbox_key` is rotatable (§14.4, §15.9); the cover stream, not a prefix-shard, is the anonymity set |
-| RL-10 | **Sync-graph volume is locally observable** — a node sees how many sync partners it has and the cover-stream volume; a global network-size oracle derivable from a prefix metric is retired (no prefix sharding) | every network participant | The sync graph must be observable to function | Aggregate quantity with no link to persons |
+| RL-1 | **Neighbour graph** — who exchanges packets with whom, when, and how much | ISP, global passive observer | Without an observable channel there would be no network | Cover makes real and filler packets inseparable (§5.2); beyond the first hop it is not visible to whom a packet goes (§3.5). **Honestly:** up to three of the four places of the open set are contacts' devices (§5.2) — a contact's device cannot be bought with servers (§10.2), and the price is that the link to it is part of the observable graph |
+| RL-2 | **Public object space is enumerable** — role registrations, directory entries, cases, verdicts, CSAM consumption objects, system-channel reports and their +1 entries (durable-object class, §16.0, §16.7) | every network participant | Moderation without enumerable evidence cannot be audited | Counts **pseudonyms, not persons**; no addresses; the link to the main identity is published nowhere (§16.7) |
+| RL-3 | **Readership of a group or channel on the shared key at its keepers** (§16.2.5) | the keepers | Members that were off must find the posts somewhere, and there is no server | The value changes every day and with every generation; keepers are taken from the desktops of owner and admins first, then of other members, then the owner's fixed neighbours, so a group or channel stays with its own members where it can; a keeper sees no content and no identity. **Honestly:** a keeper counts the readers and sees their addresses; a keeper that is a member also knows which group or channel it is. Groups and private channels on pairwise legs are free of this |
+| RL-4 | *withdrawn with the tag layer; public channels are not restated (Appendix C)* | | | |
+| RL-5 | **First contact** — the invitation data name the issuer's addresses, an invitation neighbour and relays (§15.2), so whoever holds an invitation knows where the issuer was reachable when it was issued; a request is left under the invitation's own value (§15.1) | any holder of the invitation | First contact with no shared secret at all cannot be established anonymously | Every invitation has its own key pair (§15.2); validity at most 90 days, revocation (§15) |
+| RL-6 | *not built with stage 2 of recovery (§13.4, Appendix C)* | | | |
+| RL-7 | **Plane D discloses IPs** — per call to the other party, in a group call only to participants that are contacts with call consent and never to one that is not (§17.7), and to the volunteer on relay opt-in (§23.6 second table); **for media streams (§17.6) only to the volunteer, never to the other party**. The volunteer sees both addresses, the transfer's duration and its approximate size — bounded per transfer by the relay size cap `C` (§9.4) | call partner, relay volunteer, group-call broker (learns that two participants hold no media pair) | Real time without a direct connection does not exist | Calls: consented, per-contact togglable (on unless switched off), revocable, labeled in the UI. Two participants of a group call that are not contacts with call consent hear each other only through a broker or the tree, or are told that nobody connects them. Media streams: every always-on node volunteers without a switch (§17.6); the sender's consent per file (§24.4.5) names it. **Honestly:** revocation does not take back an already-seen address |
+| RL-8 | **Data-saving mode makes the node distinguishable** — a reduced cover share is visible from outside (§24.4.2, §5.4) | ISP, neighbours | Whoever sends less looks different | Never automatic, only user-chosen, as a **visible state** with a named consequence. **Locked while it would weaken protection a chat relies on** (§24.4.2): the cover stream is node-wide, not per chat |
+| RL-9 | **A malicious contact knows where the node's post lies** — its day public keys for the next 31 days and its current fixed neighbours (§8.2, §9.2) | accepted contacts | A contact must be able to leave post for an absent node, and to know with whom | It can leave post, not collect or delete it (§8.2); a deposit costs a proof of work and at most 100 packets per day value are held (§20.2); an Emergency Key Rotation takes the day keys away (§4.5.4) |
+| RL-10 | **Neighbourhood size is locally observable** — a node sees how many neighbours answer it (at most 32, §11.8) and the cover volume it receives | every network participant | A node must know its neighbours to reach anyone | Aggregate quantity with no link to persons; the cap of 32 makes it no measure of network size |
 | RL-11 | **Cleona traffic classifies as "structureless" traffic** — uniformly distributed bytes, fixed cell size 1,200 B (§4.3), constant rate, no plaintext header that ties it to a known protocol | ISP, censor with an allowlist policy | Cover uniformity (§5) makes all Cleona nodes look alike **to each other**; resemblance to **someone else's** traffic is a different goal and conflicts with it | Open — the blending options are tracked as **K23-6** (§23.9). **Honestly:** indistinguishability from randomness is not protection against an allowlist policy — it is the very trait that policy flags |
 | RL-12 | **An active probe confirms a node** | anyone who can reach the data port | On UDP the shell handshake is anonymous (§4.2), and two unreadable packets make a node start one itself (§11.6) | The data port is random in 20000–60000: a blind scan of one address costs two 1200-B packets on each of 40,001 ports, 96 MB; with address and port known, 2400 B. The probe learns that a node listens there, not who it is. On TCP the same port answers HTTP unauthenticated (§26.6.5), so a scan learns there, too, that *something* listens |
-| RL-13 | **Entry nodes are enumerable** — whoever publishes itself in the entry cascade is readable, address included, by anyone who has the app (§11); the same holds for the entry records circulating in the sync exchange. A record is signed and self-certifying (§9.1, §11.1), so it is not merely readable but verifiably attributable to a node key — see B-18 | anyone who has the app — including a censor | A cold start with no discoverable entry point is impossible | Affects the **inbound-reachable** subset, not the delivery layer: outbound-only nodes issue no record. The entry cascade hands the list out on request, the entry records only to someone who syncs — a difference in cost, not in category. **Decided by E-63:** a reachable node may withhold its record and become a **private door** (§11); its address then travels only in a ContactSeed. Publishing stays the default |
-| RL-14 | **Target-port allowlist** — a node listens on a random port 10000–64999 (`drawDataPort`); a network that permits only 80/443 outbound blocks sync **and** onboarding, before any form disguise applies | corporate, hotel, guest networks with a port allowlist | A full answer would need a well-known port — hence a fixed point, excluded by the no-fixed-point property (no well-known port, no designated relay). Uniformly-blocked-outbound is declared out of scope (§31.1); per-host-only-outbound would be a designated relay, likewise excluded | Mitigated, not closed (E-64): transport escalation to TCP/443 and, as a last resort, ICMP (§11); 443 doors are a property, not a role (§23.9.3) |
-| RL-15 | **Escalation stage `tcpOwnPort` is visible as a deviation** — a node that falls back to TCP on its own port (§11, E-65) carries a wire profile Cleona does not control: TCP connection setup, ACK cadence, window development, retransmissions. The constant rate of equally sized cells (§5), which cover uniformity is meant to produce, then has a second pattern laid over it that does not come from Cleona's design. **Stage 3 (ICMP) carries the same class of deviation, more strongly:** a node that keeps its cell stream alive over echo/reply pairs produces an ICMP volume no ordinary client produces, and it stands out against pure background ping traffic rather than blending into it | ISP, on-path observer | Without the stage, networks that block UDP outbound but permit arbitrary TCP ports have no path at all unless the counterpart operates a 443 door (§11) | The stage is a **fallback, not a default** (§4.3): the deviation exists only where the bare UDP path already fails, i.e. exactly where the alternative is no connection rather than an inconspicuous one. It is not mitigated beyond that, and it is not claimed to be |
+| RL-13 | **Reachable nodes are enumerable** — a node with a reachable address publishes its address record on public relays (§11.9), and a board hands out the neighbours it has confirmed (§11.8a); both are readable, address included, by anyone who has the app. A record is signed with the node's record key (§11.9) | anyone who has the app — including a censor | A cold start with no discoverable entry point is impossible | Affects the reachable subset only: a node without a reachable address publishes nothing and keeps no board (§11.8a, §11.9). Publishing follows reachability, not need (§11.9) |
+| RL-14 | **Target-port allowlist** — a node listens on a port drawn in 20000–60000 at first start (§11.1); a network that permits only 80/443 outbound blocks delivery **and** onboarding, before any form disguise applies | corporate, hotel, guest networks with a port allowlist | A full answer would need a well-known port — hence a fixed point, excluded by the no-fixed-point property (no well-known port, no designated relay). Uniformly-blocked-outbound is declared out of scope (§31.1); per-host-only-outbound would be a designated relay, likewise excluded | Not mitigated in 4.2: the delivery layer speaks UDP on the data port only and builds no 443 door (§11.1, §23.9.3) |
+| RL-15 | *withdrawn: the delivery layer has no TCP or ICMP stage (§11.1)* | | | |
 | RL-16 | **Captive portal — no way out at all until a human logs in.** Before the portal conditions are satisfied, the enforcement device of a hotel, airport, or guest network discards everything except traffic to the portal (RFC 8952). Every stage of §11 fails, and no port, transport or disguise changes it; the node has no outbound path even though the platform reports a connected network | operator of a guest network — not necessarily an adversary; this is the ordinary case | Cleona cannot satisfy the portal conditions: they require a human at a browser. An automated login would be credential handling for a third party's network | Not solvable, but **nameable**: `searching` carries the reason (§22.7), worded as a possibility rather than a diagnosis, because the signal cannot distinguish captivity from a hard block. Detection uses **no external contact** — an external probe URL is rejected (no-fixed-point property, and it would disclose that this device is online). RFC 8910 (portal URL via DHCP/RA) is the clean refinement and is left open |
 | RL-17 | **The update fetch reveals the installed version** — a node that still lacks pieces asks an always-on holder for one object (a delta from V-1, one from V-2, or the full binary), so the holder learns how many releases behind it is (§26.6.1) | the holder asked | The fetch path may not depend on cover (§3.1), and a request that names nothing cannot be answered | Only while an update is incomplete; the holder sees the requester's address as any neighbour does, and a version lag, nothing more |
-| RL-18 | **The search call names the identity sought** — the identifier travels in the clear on the local segment, and the answer tells every listener at which address that identity runs (§7.2) | every listener on the local segment | A call that finds an identity on the segment must say which one it looks for | Sent only when a send has no way (§7.2), three calls, then silence; the neighbour call carries no identity identifier and a node identifier drawn anew at every start, so ordinary neighbour finding discloses no identity |
+| RL-18 | **The search call names the identity sought** — the identifier travels in the clear on the local segment, and the answer tells every listener at which address that identity runs (§7.2) | every listener on the local segment | A call that finds an identity on the segment must say which one it looks for | Sent only when a send has no way (§7.2), with the repeats of §11.3a, then silence; the neighbour call carries no identity identifier and a node identifier drawn anew at every start, so ordinary neighbour finding discloses no identity |
+| RL-19 | **A deposit and a fetch reveal who sends and who reads a system channel** — the holder a report is deposited with learns from which address it came and reads it (it is public); a node that names an identifier learns from the fetch that the fetching node holds or reads that channel; an observer of the line sees the fetch as a burst of packets outside the Poisson stream (§16.0, §16.7) | the holder, the naming neighbour, an on-path observer | A report nobody can be given cannot be published; an object nobody asks for cannot be read | The report is signed by a pseudonym, not the identity (§16.7); holders are non-contacts first and contacts only fill up, and the preview names a contact in one line; the fetch names a channel and an object, never a person, as the update fetch names a version (RL-17); in idle nothing is fetched |
 
 **The KEX gate is a structural property:** whoever cannot compute a tag
 never reaches the recipient (§4, §10.1, §15). There is no protocol level
@@ -10131,26 +10979,35 @@ commitment is backed by the passage that supports it.
 
 | Item | Form | Who sees what |
 |---|---|---|
-| Cells (messages, acknowledgments, signaling, prekey refills) | tag, TTL, ciphertext — nothing else (§4.3) | every delivery-layer relay sees the three fields, no one sees the content or the parties involved |
+| Packets (messages, acknowledgements, signalling) | a sealed envelope (§4.3), split into parts of 1,200 B (§11.2), behind a code on step 3 (§8.1), a day value on step 4 (§8.2), or nothing on step 1 (§7.1) | a forwarder sees two codes exchange packets, a holder sees a day value and opaque bytes for up to 7 days; no one sees the content, and beyond the first hop no one sees to whom (§3.5, §8.1, §8.2) |
 | Cells of the cover stream, including cover cells | 1,200 B at Poisson-distributed times (§5.2), sealed pairwise — empty, or carrying one piece of the signed public update (§5.5); indistinguishable at the egress | neighbours and the ISP see volume, not a tick and not meaning |
 | Public objects (§16) | Ed25519-signed under a **pseudonym** | everyone — that is their purpose (RL-2) |
 | Plane D frames during calls | AES-256-GCM under `call_key`, uniform header, size classes (§17.1) | the other party knows the IP (RL-7); the ISP sees a constant flow |
-| Invitations (ContactSeed) | `K_inv(i)`, `exp`, entry hints (§15) — no KEM material in the compact profile, additionally the **public** ML-KEM key `mk` in the extended profile | whoever has the URI (RL-5) |
-| Restore-Beacon in the recovery case | one cell under a tag derivable from the seed (§13) | everyone, once (RL-6) |
+| Invitations (§15) | the invitation data: the invitation's letter key, addresses, a neighbour, relays and validity (§15.2); the out-of-band form additionally the bundle with the public identity keys (§15.6) | whoever has the invitation (RL-5) |
+| Recovery bundle (§13.3) | sealed under a key from the seed, left with three holders under a day value only the seed can compute (`value_R`, §13.3.1) | the holders see a day value and opaque bytes; only the seed can collect it (§8.2) |
 | Update check and update pieces | a post-box query for the manifest (§26.5.4); while an update is incomplete, a request for the pieces of one object to an always-on holder (§26.6.1). Manifest hybrid-signed, assembled binary checked against its hash | the holder learns which object is requested and thereby the installed version (RL-17); no server, no fetch from a provider |
+| Language models, only on the user's click | an HTTPS download directly from the source: the transcription models (§21.7) from huggingface.co, the translation models from Mozilla (§21.7a, D-64). Each file is checked against a SHA-256 fixed in the program before it is used; a file that does not match is deleted and never used | the source learns the IP address, the time and which model is fetched, and thereby that transcription or translation into that language is in use; never content — no message, no audio, no text leaves with it |
 
 **Metadata — the four sentences that hold:**
 
-1. **There is no flow.** Sender and recipient never form an observable
-   network relationship at any point (the no-observable-flow property).
-   The observable graph is the sync graph, and it is decoupled from the
-   social graph (§23.6).
+1. **Beyond the first hop, nobody sees to whom.** Messages leave by
+   ladder steps 1, 3 and 4 (§7.1). On step 1 the sender writes to the
+   recipient's address in its own segment, and the segment sees both
+   ends. On the open net a message is never sent to a public address
+   (§7.1): it goes to a neighbour, and beyond that first hop it is not
+   visible to whom it goes (§3.5). The observable graph is the neighbour
+   graph; the contacts' devices among the fixed neighbours are part of it
+   (§5.2, RL-1). A forwarder sees that two codes exchange packets, not
+   who they are, and a neighbour that is the only one two users share sees
+   both ends (§1.4, §8.1). Calls are the declared exception: Plane D is a
+   consented direct flow between two addresses (§23.6, RL-7).
 2. **There is nothing queryable about persons.** No liveness record, no
    directory entry, no search quantity derivable from a public key (§4,
    §10.1). What is enumerable are **objects under pseudonyms** (RL-2).
-3. **Time is coarse.** A cell carries no timestamp beyond the placement
-   epoch (§4.3), and the placement epoch is **24 h** (E-J) — a stored
-   cell dates to a calendar day, no finer.
+3. **A holder sees when, not who.** A post box holds a packet under a day
+   value for up to 7 days (§8.2); the holder sees when it was left and when
+   it was collected, a day value and opaque bytes — not the content and not
+   the parties (§8.2). On steps 1 and 3 nothing is held (§7.1, §8.1).
 4. **What we do not hide, we say.** §23.7 is the exhaustive list; the
    "small-network honesty" from §23.6 additionally applies to every one
    of these commitments.
@@ -10162,9 +11019,12 @@ commitment is backed by the passage that supports it.
   the structured Bug Log channel (§16.7); there is no free-text input
   there.
 - **No cloud dependency.** Google Play Services are not needed, iCloud is
-  not tied in. The only external dependency is the cold-start entry
-  cascade (§11) — it sits **before** joining the network and is built as
-  a jettisonable booster rocket.
+  not tied in. The only external dependency of the network is the public
+  relay network of the fourth neighbour source (§11.8.3, §11.9): it holds
+  signed address records and no content, a node reads it only while it has
+  too few neighbours, and the user can switch it off (§12.7). Outside the
+  network, the optional language models are fetched from their source on
+  the user's click and checked against a fixed SHA-256 (list above).
 - **The sender fetches link previews**, embedded and encrypted. The
   recipient makes **zero** network requests. SSRF hardening: DNS
   resolution is checked against private, reserved, and loopback ranges;
@@ -10208,21 +11068,19 @@ decision log, the ruling recorded at the respective paragraph.
 
 | # | Point | Options |
 |---|---|---|
-| K23-1 | **Wording of the Android persistent notification** for `searching` / `connecting` / `ready` (= §22-O-3). The connection indicator shows the readiness state and carries the notification, tray, and badge (§22.7, §22.9) | Define the wording and create it in all 34 locales at the same time (§24) |
 | K23-2 | **iOS location key forced by a third-party library.** `NSLocationWhenInUseUsageDescription` conflicts with the user commitment, even though the description text defuses it | (a) find and replace the QR library with one that lacks this key; (b) keep the key and refine the commitment as worded in §23.5 — **minimum measure, already normative**; (c) a custom QR decoder |
-| K23-3 | **Placement of the battery-exemption dialog at first start** (§23.2) | (a) no dialog — Doze costs only latency; (b) move the dialog from first start into settings, with the latency rationale; (c) show the dialog at first start |
-| K23-4 | **Cover traffic in the store description.** A cover rate independent of usage (12.96 MB/day, §5.6) is a cost factor under metered plans and needs explaining | (a) explain during onboarding with a reference to the data-saving mode; (b) only in settings; (c) both. The data-saving mode itself is decided, its **discoverability** is not |
-| K23-6 | **Blending against an allowlist censorship policy** (RL-11, RL-13) | **Decided (E-62): (b) transport disguise.** The link layer carries a **transport selector**, so that a disguised transport can stand *alongside* the bare one — cells wrapped in a QUIC- or DTLS-shaped frame, optionally on TCP/443 with a genuine TLS 1.3 handshake (bound via the kernel redirect of §11, not a privileged process — the port dimension itself is K23-8/E-64). See §23.9.1 for the reasoning, the residual open questions, and what (b) deliberately does **not** cover |
-| K23-7 | **Enumerability of the reachable set** (RL-13), split off from K23-6 because (b) does not touch it. Anyone holding the app can ask the entry cascade for the current entry addresses; the same set circulates as entry records in the sync exchange, at the cost of participating. A censor can block the enumerated set — which closes off cold start and re-entry after an address change, not the delivery layer itself | **Decided (E-63): private doors.** Accepting inbound syncs and issuing an entry record become two decisions (§11): a node may be reachable and withhold its record, its address then travelling only in a ContactSeed. Publishing stays the default. Reasoning, the two corrected intuitions, and the named goal conflict with the stable-entry-subset threshold: §23.9.2. **Rejected:** (a) accept and state it; (b) raise the query cost — cost, not category; (c) name the ContactSeed path — it points at the *same* addresses (§22.4.4: one record type for hints and exchange alike). **Not an option:** gating the lookup behind a secret — the channel constant ships in the app, and channel separation is expressly operational, not a security boundary (§11) |
-| K23-8 | **Target-port allowlist** (RL-14) — a second, independent censorship type surfaced while deciding E-62: not blocking by *form* (that is K23-6) but by *port*. A network that permits only 80/443 outbound blocks the random listen port before any disguise applies. Not previously tracked | **Decided (E-64): mitigate, do not solve.** Transport escalation per address to TCP/443 (via kernel redirect, no privileged process) and, as a last resort, ICMP echo for the door-connect (§11); 443 doors are a property, not a role; the entry-record format is untouched. Reasoning and what E-64 deliberately leaves out: §23.9.3. **Rejected:** A-3 (no doors); B-2 (transport field in the entry record — would tell a censor which nodes are 443-capable); C-2/C-3 (ICMP as signal / dropping ICMP); D-1 (a LAN-uplink node subscribing on behalf of others — a designated relay, excluded by the no-fixed-point property, standing in place of the earlier "bridge" rejection). **Out of scope:** uniformly-blocked-outbound (§31.1: Cleona then unusable by definition); per-host-only-outbound (a designated relay) |
+| K23-6 | **Blending against an allowlist censorship policy** (RL-11, RL-13) | **Not built in 4.2.** The delivery layer speaks one packet format on one UDP socket per family (§11.1); there is no transport selector and no disguise. Direction, should one be built (E-62): (b) a transport disguise as an **additional** transport beside the bare one, never a replacement, introduced like every format change within 4.2.x (principle 8, §1.2), imitating the shape, not the cryptography (§23.9.1). The port dimension is K23-8. See §23.9.1 for the reasoning, the open questions, and what (b) deliberately does **not** cover |
+| K23-7 | **Enumerability of the reachable set** (RL-13), split off from K23-6 because (b) does not touch it. Every node with a reachable address publishes its record on public relays (§11.9), and every node with evidenced reachability hands its board to anyone who knows it (§11.8a). A censor can collect both and block the addresses | **Settled by §11.9:** publishing follows reachability, not need; while the external records are on, a reachable node publishes. The one lever is the user's switch (§11.9, §12.7): switched off, the node withdraws its record and neither reads nor publishes; its board and its invitation data are unaffected. Reasoning and the goal conflict: §23.9.2. **Not an option:** gating the lookup behind a secret — the record format and the relay list ship in the app |
+| K23-8 | **Target-port allowlist** (RL-14) — a censorship type independent of K23-6: not blocking by *form* but by *port*. A network that permits only 80/443 outbound blocks the data port before any disguise applies | **Not mitigated in 4.2:** the delivery layer speaks UDP on its data port only (§11.1); there is no escalation to TCP/443 or ICMP and no 443 door. A full answer needs a well-known port, hence a fixed point (§23.9.3). **Out of scope:** uniformly-blocked-outbound (§31.1: Cleona then unusable by definition); per-host-only-outbound (a designated relay, excluded by the no-fixed-point property) |
 
 #### 23.9.1 K23-6 — reasoning for (b), and its limits (E-62)
 
 **The problem follows from a strength.** Cover uniformity — *uniformity
 instead of obfuscation* (§5) — makes every node look identical to every
 other: Poisson timing at one mean rate, fixed 1,200-B cells, uniformly distributed bytes, no
-plaintext header. That is what decouples the observable sync graph from
-the social graph (§23.6). Against an allowlist policy — *drop everything
+plaintext header. That is what keeps an observer from telling cover from
+real packets and, beyond the first hop, from seeing to whom a packet
+goes (§3.5, §23.6). Against an allowlist policy — *drop everything
 that cannot be matched to a known protocol* — the very same property is
 the giveaway. RL-11 states it without varnish: indistinguishability from
 randomness is not protection against such a policy, it is the trait the
@@ -10238,11 +11096,13 @@ anonymity price is borne only where it buys reachability. This mirrors
 the pattern already decided for the data-saving mode (§24.4.2): never
 automatic, visible state, the consequence named.
 
-**What is fixed now, and what is not.** Only the **transport selector**
-is deadline-bound: the link layer freeze, and a place to put a second
-transport cannot be retrofitted without a second wire format and a mixed
-net. The disguise itself is not deadline-bound and is deliberately **not**
-specified here. A disguised transport that is not maintained is worse
+**What 4.2 has, and what it does not.** 4.2 has no transport selector:
+one UDP socket per family carries every packet (§11.1), and no second
+transport is specified. Nothing has to be reserved for one: a second
+transport is a format change within 4.2.x and comes, like every other,
+with the capability rule of principle 8 (§1.2) — a node uses it only
+towards a peer that has shown it reads it. The disguise itself is
+deliberately **not** specified here. A disguised transport that is not maintained is worse
 than none — it promises protection it does not hold once DPI rules move.
 Whoever implements it commits to maintaining it.
 
@@ -10253,39 +11113,34 @@ Whoever implements it commits to maintaining it.
    handshake needs a certificate, a certificate needs a name, and a name
    is a fixed point (no-fixed-point property). A self-signed certificate
    buys almost nothing, since a DPI that inspects certificates flags it
-   at once; a real CA certificate per door would not be a *network* fixed
-   point — each operator has their own — but it binds a volunteer's door
-   to a registered identity, which is too high a price to ask. **The
+   at once; a real CA certificate per node would not be a *network* fixed
+   point — each operator has their own — but it binds a node to a
+   registered identity, which is too high a price to ask. **The
    disguise therefore imitates the shape, not the cryptography.** What
-   that gives up is already declared out of scope in §23.9.3: networks
-   that inspect 443 and pass only genuine TLS. Paying twice for the same
+   that gives up — networks that pass only genuine TLS on 443 — lies
+   beyond the boundary of K23-8 (§23.9.3): 4.2 builds nothing on 443.
+   Paying twice for the same
    boundary buys nothing.
 2. ~~Is imitating QUIC or DTLS realistic without pulling in a library?~~
    **Answered (E-75): yes, by hand, and a library would be worse than the
    effort it saves.** Only the visible header shape is rebuilt — no real
    QUIC. Beyond binary size and foreign attack surface, a library **owns
-   the connection ID**, and that is exactly the field E-69 needs: the
-   condition there is that `MAC_hdr` (E-90) sits at a fixed offset and is
-   verified before anything else is interpreted, and RFC 9000 §7.2 makes
-   the Destination Connection ID the natural place for it. A library
-   would take that away — it would undo E-69 rather than implement it.
+   the connection ID**, and a disguise needs that field for a check value
+   of its own that is verified before anything else is interpreted; RFC
+   9000 §7.2 makes the Destination Connection ID the natural place for it
+   (E-69).
 3. Which side selects the transport, and from what signal — a failure
    counter reproduces an escalation-ladder approach already tried and
    discarded.
-   **The structural half of this is settled: the transport-parameterized
-   link layer (§11) is what must not be foreclosed. Narrowed since: E-64
-   forecloses both record-bearing candidates (§11 — the entry record
-   gains no transport field), so the mechanism is local state on the
-   connecting side plus a receiver-side demultiplex that checks both MAC
-   families unconditionally (E-95) — the first byte is a hint there, not a
-   decision. What its L4-protocol scope is settled too (E-69): not by
-   picking a side but by a **condition** — a disguise may run on UDP if
-   and only if a MAC under the key already established in that direction
-   (E-91) sits at a fixed offset in the disguised header and is verified
-   before anything else is interpreted; otherwise it stays on TCP.
-   Checked against RFC 9000 §7.2, a QUIC-shaped disguise meets this. What
-   remains open under question 3 is therefore nothing about the
-   selector, only the disguise itself — questions 1 and 2 above.**
+   **Settled in part:** neither an address record (§11.9) nor an address
+   entry (§5.5) carries a transport field, so the choice is local state on
+   the connecting side, and the receiving side recognises both forms on
+   every packet — the first byte is a hint there, not a decision. A
+   disguise may run on UDP only if a check value under the key already
+   shared with that peer (§11.8.7) sits at a fixed offset in the disguised
+   header and is verified before anything else is interpreted; otherwise
+   it stays on TCP (E-69). What remains open is the disguise itself —
+   questions 1 and 2 above.
 
 **What (b) does not cover.** Option (c) — polymorphism, size and timing
 variation — was **not** adopted, because it does not answer the question
@@ -10293,113 +11148,95 @@ asked: varying shape does not turn traffic into a *known protocol*. It
 addresses traffic analysis, a different adversary, and remains available
 as a separate proposal.
 
-**RL-13 is not covered either.** Even with a perfect disguise the entry
-nodes stay enumerable: the entry cascade hands its list to anyone holding
-the app (§11). What is blockable there is the **enumerability**, not the
-recognizability. That is a different problem from (b) and is decided
-separately as **K23-7** (§23.9.2).
+**RL-13 is not covered either.** Even with a perfect disguise the
+reachable nodes stay enumerable: their records are on public relays and
+their boards answer anyone who knows one of them (§11.8a, §11.9). What
+is blockable there is the **enumerability**, not the recognizability.
+That is a different problem from (b) and is treated as **K23-7**
+(§23.9.2).
 
-#### 23.9.2 K23-7 — private doors (E-63)
+#### 23.9.2 K23-7 — enumerability of the reachable set
 
-**Two intuitions had to be corrected before this decision held.**
+**What is enumerable.** A node with a reachable address — a global
+IPv6, a public IPv4, or a mapping its router granted — publishes its
+address record on 2–3 public relays, at start and at every network
+change (§11.9). A node whose reachability is evidenced keeps a board and
+hands it, once per edge, to any node that knows it (§11.8a). Records and
+boards together list the reachable part of the network, address
+included, to anyone who reads the relays or walks the boards. A node
+without a reachable address publishes nothing and keeps no board: a
+phone on carrier IPv4 behind CGNAT without a mapping, iOS with the app
+closed (§11.9, §31). Android binds and listens like any other platform
+(§22.6); an Android phone on Wi-Fi with a global address is on the list.
 
-*First:* an invitation does not route around a block. The entry record
-is **one type**, shared by ContactSeed hints and the sync exchange
-(§22.4.4). A ContactSeed therefore points at nodes that, being
-inbound-reachable, publish themselves anyway. The invitation avoids
-having to *ask* the entry cascade; it does not avoid the blocked
-addresses. Nor is there a time window between issuing and redeeming an
-invitation: the block sits on addresses, permanently, and does not care
+**An invitation does not route around a block.** Its invitation data
+name the issuer's own addresses or its neighbour's (§15.2), and the
+neighbour a node behind translation names is on the list precisely
+because it is reachable. The block sits on addresses and does not care
 when an invitation was written.
 
-*Second:* a large, daily-changing set does not protect. **The censor does
-not chase a moving target — he subscribes to the same feed.** The entry
-cascade publishes the current list to anyone with the app; every change
-reaches him at the same moment it reaches a legitimate node. The set is
-also smaller than intuition suggests: an entry record is only issued by a
-node that is actually reachable, which excludes every device behind
-carrier NAT and every device whose process the OS suspends. *Retention-bounded does not mean
-outbound-only — Android binds and listens like any other
-platform (§22.6, with citations). The set is bounded by **reachability**,
-not by tier: iOS with the app closed and phones on CGNAT IPv4 fall out of
-it; an Android phone on Wi-Fi with a global address does not.*
+**A large, changing set does not protect.** The censor reads the same
+relays and asks the same boards as every other node; a change reaches
+him at the moment it reaches a legitimate node. What breadth buys is
+collateral damage: reachable nodes on ordinary residential lines mean
+that blocking them hits residential ranges. That raises the
+**political** price, not the technical one; it protects the population,
+not a particular person.
 
-**What breadth *does* buy** is collateral damage, not evasion: entry
-nodes on ordinary residential lines mean that blocking them hits
-residential ranges, behind CGNAT whole customer blocks. That raises the
-**political** price, not the technical one. It is a real effect and
-worth having — but it protects the population, not any particular person.
+**What a block costs.** A blocked address is blocked for every way
+through it: finding neighbours, forwarding on step 3 and the post box
+on step 4 (§8.1, §8.2). A node behind translation whose reachable
+neighbours are all blocked has no indirect way left.
 
-**Decision (E-63): private doors.** Accepting inbound syncs and issuing an
-entry record become two decisions (§11). A node may be reachable and
-withhold its record; its address then travels only in a ContactSeed. It
-is the only mechanism that gives **one named person** a way in that no
-enumeration has ever seen.
+**Publishing follows reachability (§11.9).** A network in which
+reachable nodes withheld their records could not cold-start, and if
+only stranded nodes published, the relays would fill with the addresses
+that help least. The one lever is the user's: the external records can
+be switched off (§11.9, §12.7). A node with them switched off withdraws
+its record, neither reads nor publishes, and finds neighbours by sources
+1–3 and boards alone. Its board and its invitation data stay as they
+are, so it is not hidden from anyone who knows a node next to it. This
+is a deliberate act for the censored case, not a privacy setting to
+recommend broadly: every reachable node that switches off takes one
+address out of what newcomers can find.
 
-**Three normative points.**
-
-1. **Publishing stays the default.** A network in which withholding were
-   the default could not cold-start (entry cascade step 3, §11).
-2. **Withholding costs the withholder nothing.** Readiness hangs on
-   answering neighbours (§22.7.1), delivery runs outbound, and inbound
-   reachability — the precondition for calls (§17) — is unaffected. What
-   is given up is being findable by strangers.
-3. **It is not a privacy setting.** Recommending it broadly would drain
-   the public entry set. It is a deliberate act for the censored case.
-
-**Named goal conflict — new, and not a defect.** The stable-entry-subset
-threshold selects the **stable** subset on purpose: nodes with long
-stable reachability (§11). Stability is exactly right for cold start —
-and exactly what is easiest to block permanently. The two goals pull
-against each other. This document names the conflict rather than
-resolving it; whoever tunes the stable-entry constants should know that
-raising stability lowers the censor's cost.
+**Named goal conflict.** A record shows how long its node has been
+standing (§11.9), and long-standing reachable nodes are both what a
+newcomer most wants to find and what is easiest to block permanently.
+Any rule that prefers standing when choosing neighbours or holders
+lowers the censor's cost.
 
 ---
 
-#### 23.9.3 K23-8 — target-port allowlist (E-64)
+#### 23.9.3 K23-8 — target-port allowlist
 
 **A second censorship type, orthogonal to K23-6.** K23-6/E-62 answers
-blocking by *form* (opaque bytes flagged by a DPI allowlist). While
-deciding it, a second type surfaced that no residual leak tracked:
-blocking by *target port*. The two share the word "allowlist" but demand
-opposite answers. The random listen port (`drawDataPort`, 10000–64999)
-is the **right** answer against a *blocklist* ("block port X") and is
-documented as such in the code; against an *allowlist* ("only 80/443
-out") the same property guarantees the wrong port.
+blocking by *form* (opaque bytes flagged by a DPI allowlist). Blocking
+by *target port* is a different type and demands the opposite answer.
+The data port, drawn at first start in 20000–60000 (§11.1), is the
+right answer against a *blocklist* ("block port X"); against an
+*allowlist* ("only 80/443 out") the same property guarantees the wrong
+port.
 
-**What E-64 fixes, and how far.** Three measured facts frame it (o2
-cellular, one device; a single carrier at a single time): an
-Android app **can** bind 443 despite the unprivileged-port floor;
-outbound ICMP echo **carries arbitrary payload** and returns intact;
-**cold inbound** to a phone dies inside the carrier — a stateful
-firewall, which also explains why established-state inbound v6 works in
-practice (the phone speaks outbound first). E-64 mitigates the port
-allowlist with the transport escalation of §11 (own port → 443 → ICMP)
-and 443 doors as a property. It does **not** claim to solve it: a full
-answer needs a well-known port, hence a fixed point, which the
-no-fixed-point property forbids.
+**What 4.2 does.** The delivery layer speaks UDP on its data port and
+nothing else (§11.1). It builds no escalation to TCP/443 or ICMP and no
+443 door. A network that permits only 80/443 outbound therefore blocks
+delivery and onboarding (RL-14). A full answer would need a well-known
+port, hence a fixed point, which the no-fixed-point property forbids.
 
-**Why the residual is not a gap but a boundary.** Whenever the
-escalation does not get through, the network is either **uniformly
-blocked outbound** — then no node gets out, a would-be relay least of
-all, and §31.1 already declares Cleona unusable there — or **blocked per
-host** with only sanctioned machines allowed out, which makes the
-sanctioned machine a **designated relay**: the very thing the
-no-fixed-point property excludes and the project rejected as a "bridge".
-There is nothing between uniform and per-host. This is why D-1 (a
-LAN-uplink node subscribing to its neighbours' tag lines) is **rejected**,
-not merely costly: it is a relay by another name, and it fails on its
-own terms in the uniform case. The measured architectural gap behind D-1
-— a node holds only its **own** tag lines, and no "subscribe on behalf
-of others" mechanism exists — is therefore left open **deliberately**,
-as the price of the no-fixed-point property, not as an oversight.
+**Why the residual is a boundary, not a gap.** Where a port allowlist
+holds, the network is either **uniformly blocked outbound** — then no
+node gets out, a would-be relay least of all, and §31.1 already declares
+Cleona unusable there — or **blocked per host**, with only sanctioned
+machines allowed out, which makes the sanctioned machine a **designated
+relay**: the very thing the no-fixed-point property excludes. There is
+nothing between uniform and per-host. A node with an open uplink that
+forwards on behalf of the blocked ones is a relay by another name, and
+it fails on its own terms in the uniform case.
 
-**What E-64 deliberately does not cover.** Networks that inspect 443 and
-pass only genuine TLS: there, opaque bytes on 443 die and only the form
-disguise of E-62 helps — the two decisions are complementary, port
-first, form second. And it changes nothing for a censor who blocks by
-enumeration (RL-13, K23-7) rather than by port or form.
+**Port, form and enumeration are three answers.** A censor who blocks
+by form is K23-6, one who blocks by enumeration is K23-7 (RL-13);
+nothing in this section changes either.
 
 ### 23.10 Device hardening — what the application does against its own device
 
@@ -10429,7 +11266,7 @@ the platform lets no other application set the switch, the live build
 honours it too — on Android it is a system property that only the
 developer connection or root can set. Where the platform draws no line
 between the programs of one user, the switch is honoured only in beta
-builds, like `--ignore-single-instance` (§22.1) — that is Windows.
+builds, like `--ignore-single-instance` (§22.1) — that is Windows and macOS.
 
 **The application's own screenshot.** Where the window is excluded
 from capture, the application offers a screenshot function of its own.
@@ -10453,7 +11290,7 @@ shows nothing, are in §22.8.
 **Backup (Android).** The manifest sets `allowBackup="false"` and
 data-extraction rules that exclude everything: neither cloud backup
 nor device-to-device transfer copies the profile. Nothing is lost by
-it — a further device is set up with the 24 words (D-39), and the
+it — a further device is set up with the 24 words (§14.6.1), and the
 hardware-bound key that seals the seed does not travel with a backup.
 
 **Plaintext in transit.** A foreign program sometimes needs a file —
@@ -10626,9 +11463,8 @@ but a procedural quantity.
 identity and passed through to whisper.cpp; the default is auto-detection
 (`lib/core/archive/`, §21.6).
 
-**ContactSeed.** The ContactSeed carries no language field — contact
-exchange is language-neutral. ContactSeed carries `ki`, `exp`, `cls`,
-and entry hints, but no language field (§15).
+**Invitation data.** The invitation data (§15.2) carry no language field
+— contact exchange is language-neutral.
 
 ### 24.4 Strings for the visible states
 
@@ -10653,8 +11489,10 @@ Strings are needed for:
   success, only progress" (§22.7);
 - the explanatory dialog of the connection icon: the top tier reads, in
   substance, "contributes to the network and is callable" (§22.9);
-- the peer counts split by direction — **outbound** (sync partners
-  reached) and **inbound** (partners that reach this node). Each
+- the neighbour counts split by direction — **outbound** (neighbours
+  that answer this node's requests, §22.7.1) and **inbound** (distinct
+  open-network addresses that reached this node unasked since start or
+  the last network change, §11.8a). Each
   direction carries its own label.
 
 On top of that come the four delivery states of §9.1: `resting`,
@@ -10752,10 +11590,11 @@ Strings needed:
 
 - the class names and their commitment from the normative table in
   §15 — **handed over confidentially** (the symmetric component holds
-  against a relay archivist with a CRQC) and **published** (it does not
+  against an archivist of the line or of a post box with a CRQC) and **published** (it does not
   hold; PQ confidentiality only via the ML-KEM material in the seed);
-- the user-level label **passed on** for a ContactSeed URI sent via a
-  third-party channel (§15);
+- two classes and no third label: a ContactSeed URI sent via a
+  third-party channel is **published**; "passed on" names only the route,
+  never a class (§15);
 - the channel matrix from §15, which "belongs in the UI exactly as is":
   **five** rows, each with one commitment, including the explicitly
   declared row with no PQ commitment (a printed or published QR code).
@@ -10786,10 +11625,10 @@ core, in this order:
 - that the transfer is **an event visible from outside**: it does not
   ride the cover stream, so start, end, rate and approximate size are
   visible at both egresses (B-29);
-- that **one holding relay sees both ends** of the same transfer tag —
+- that **one bulk holder sees both ends** of the same transfer identifier —
   the uploader and the downloader (B-29). This is the linkability §9.4
   requires to be named, and it is *stronger* than an ordinary message's linkability (§7),
-  where no single relay sees both ends;
+  where beyond the first hop no single node sees both ends (§3.5, §8.1);
 - that the object **stays with strangers for up to `TTL_media`** until
   the recipient collects it;
 - in a group, that the holders additionally see **which members
@@ -10813,6 +11652,13 @@ upload share** (owner decision): whether the recipient is online is
 not knowable at send time, so no end-to-end estimate can be honest. The
 figure depends on `R_bulk`, which is unmeasured — see §9.4.
 
+**Loading images in a group or channel (§9.4).** The setting "always
+load images" is named per group and channel in its settings and says
+what it does: while it is on, every image is collected as it arrives;
+while it is off, an image is shown as not loaded and is loaded by a tap
+on it. The setting concerns collecting, not sending: the consent above
+stays per transfer.
+
 A translation that omits the consequence is a defect, not a stylistic
 choice, exactly as in §24.4.2.
 
@@ -10828,8 +11674,6 @@ transition period and no EN preliminary stage.
 
 | # | Point | Options |
 |---|---|---|
-| I-1 | The notification and tray text for the three readiness states is marked "text to be defined" in §22.9. The icon question is **decided** (one indicator, the readiness state, carries the notification/tray/badge — §22.9, K23-1). | Open is the **key set for the translation**: create texts for `searching`/`connecting`/`ready` (= §22-O-3) in 34 locales at the same time (§24) |
-| I-2 | Three labels for invitation channels stand side by side: §15 normatively knows two classes (**handed over confidentially** / **published**); the user-level table in §15 names three (**confidential** / **passed on** / **published**). | (a) three UI labels, where "passed on" is a subform of "published" with the same commitment; (b) two UI labels, with "passed on" only as a description of the route. The number of classes determines how many commitment texts per locale are needed |
 | I-3 | Whether a channel's language choice under §24.3 can be changed after the fact. It is set at creation and is, via the registrations, the reference denominator for the report and CSAM quorums (§16.4, §16.7). | (a) immutable after creation — quorum denominator stable; (b) changeable with recalculation — the directory entry is a durable object and thus updatable (§16.0). §16 makes no statement on this |
 
 ---
@@ -10856,7 +11700,7 @@ come from the host of `mycelium/` (§22.4.1).
 > **Plane note.** Metrics on the **delivery layer** are anonymous:
 > readiness, neighbours, packets, holdings. They **never** name a
 > contact — also not where a fixed neighbour is a contact's device
-> (§5.2, D-26). Metrics on **Plane D** (calls,
+> (§5.2). Metrics on **Plane D** (calls,
 > direct transfer, §17) are IP-based and relationship-bearing; they exist
 > only during a consented session and are kept **separate and labeled**
 > in the dashboard (§25.9).
@@ -10894,7 +11738,9 @@ Two measurement definitions apply to the whole dashboard and are not
 reset at any individual display point:
 
 - **Profile data on disk.** The "Profile data on disk" field measures the
-  sum of the `.enc` and `.json` files in the profile directory.
+  identity's store (`messages.db` with its journals) and the delivery
+  layer's files under the profile (`mycelium/`); attachments are not
+  counted.
 - **Holdings chart.** Its capacity comes from the bounds of §8.2 and
   §21.3, not from a display constant.
 
@@ -10924,7 +11770,7 @@ deliverable, and how does the delivery layer around it stand?
 | **Settling time, installation → `ready`** | §22.7 | "the only settling time the system has; it is to be measured and reported" |
 | **Time in current readiness state** | State machine | makes getting stuck in `connecting` immediately visible |
 | **Delivery latency** | §9 | `in transit` → `delivered`, measured on the node's own sends. §7 and §8 give the expected values |
-| **Neighbours** | §11.8, §5.2 | answering neighbours against the optimum of 32, fixed neighbours (at most three contacts' devices, D-26), open set of 4. **No global network-size estimate** (RL-10) |
+| **Neighbours** | §11.8, §5.2 | answering neighbours against the optimum of 32, fixed neighbours (at most three contacts' devices, §5.2), open set of 4. **No global network-size estimate** (RL-10) |
 | **Connection type** | §22.6, §11 | WLAN / Ethernet / VPN / cellular. Cellular as the last choice is normative; the user should see which link is currently carrying traffic |
 | **Data-saving mode** | §22.6, §5.4 | active/inactive. §22.6 demands **visible state**, not a hidden setting, along with a named consequence |
 | Uptime, status | Daemon | time since daemon start; whether the daemon is running |
@@ -10955,7 +11801,7 @@ payload and cover share, and set against the platform tier's quota.
 | Bytes sent / received (today) | daily volume at the link layer |
 | **Cover share** | the share of cover cells in the sent cell stream. §5: *"The cover share dominates by design — that is the protection, not waste."* The dashboard must therefore label it **as a protection measure**, not as overhead |
 | **Payload share** | the counterpart; together 100 % of the cell stream |
-| **Cover rate** | the current rate — `R_cover` or `R_metered` (§5.2, §5.3) — and whether empty packets are reduced (D-7) |
+| **Cover rate** | the current rate — `R_cover` or `R_metered` (§5.2, §5.3) — and whether empty packets are reduced (§12.7) |
 | **Quota utilization** | consumed daily volume against the platform tier's upper bound (§22.6). *"Quotas are upper bounds, not targets"* — the display must not suggest a fill bar meant to be filled up |
 | **Transmissions sent / received** | one logical sending, however many parts it becomes (§11.2) |
 | **Packets sent / received** | wire level; every packet on the data port is 1200 B (§4.2, §11.1) |
@@ -10976,12 +11822,12 @@ forwarding are shown apart: only the first is storage.
 
 | Metric | Description |
 |---|---|
-| **Post-box packets held** | packets this node holds for others (§8.2), against the bound per day value (D-6) |
-| **Bulk cache** | pieces of lane 3 (§9.4) and fountain blocks of the binary distribution (§26.6.1), against 1 GB desktop / 100 MB phone (D-32) |
+| **Post-box packets held** | packets this node holds for others (§8.2), against the bound per day value |
+| **Bulk cache** | pieces of lane 3 (§9.4) and fountain blocks of the binary distribution (§26.6.1), against 1 GB desktop / 100 MB phone (§21.3) |
 | **Forwarded** | transmissions forwarded under step 3 (§8.1) — a local diagnostic, not storage |
-| **Refused** | holds and forwards refused at a stated bound (D-41) — a capacity signal |
-| **Evictions** | bulk-cache pieces evicted oldest first (D-30) and post-box packets expired after 7 days (D-6) — two numbers; the first is a capacity signal, the second normal operation |
-| Profile data on disk | the sum of the `.enc` and `.json` files in the profile directory (§25.3) |
+| **Refused** | holds and forwards refused at a stated bound (§20.2) — a capacity signal |
+| **Evictions** | bulk-cache pieces evicted oldest first (§21.3.3) and post-box packets expired after 7 days (§8.2) — two numbers; the first is a capacity signal, the second normal operation |
+| Profile data on disk | the identity's store with its journals and the delivery layer's files (§25.3) |
 
 ---
 
@@ -11000,18 +11846,18 @@ Last confirmed:  8 s ago         (stale after 1 day, §11.8)
 
 **What this row deliberately omits and must not be added:** no address,
 no node identifier (drawn anew at every start, §7.2), no contact name —
-also not for a fixed neighbour that is a contact's device (D-26).
+also not for a fixed neighbour that is a contact's device (§5.2).
 
 **Aggregates of the section:** answering neighbours against the optimum
-of 32, fixed neighbours (at most three), the open set (4, §5.2), whether
+of 32, fixed neighbours (at most four, §11.8.8), the open set (4, §5.2), whether
 the node keeps a board (§11.8a), and whether the external records are
 switched on and the own record is published (§11.9).
 
 **Connection sheet.** A sheet can be opened from this section. It shows
 the readiness state and the answering neighbours (§22.7.1) and offers
 one action, "reconnect": it triggers the edge of a network change
-(§11.8) — the remembered addresses are re-attempted once and the
-neighbour call is repeated once. The sheet takes no address and no
+(§11.8) — the remembered addresses are attempted again and the
+neighbour call goes out again. The sheet takes no address and no
 bundle by hand: the sources of §11.8 are the only ones.
 
 ---
@@ -11097,7 +11943,7 @@ retrieves them via the IPC command `get_network_stats`. The sources:
 | Delivery latency (`in transit` → `delivered`) | latency measurement of the node's own send path (§9) |
 | Readiness state, answering and fixed neighbours | host of `mycelium/` (§11.8, §22.7) |
 | Holdings: post box, bulk cache; durable-object class | `mycelium/` (§8.2, §21.3) and durable-object storage (§16.0) |
-| Class state (per-class state root) and verification state | `durable/` (§16.0) |
+| Class state (per-class state root) and verification state | durable-object storage (§16.0; not built, Appendix C) |
 
 **Counter persistence** across daemon restarts: the counters are written
 to disk periodically.
@@ -11278,8 +12124,7 @@ checkmark); without a valid signature, there is no displayable address.
 
 There is no network-side barrier: there is no packet HMAC and no
 admission filter, every build can take part in the delivery layer (§20,
-§10). A network secret exists, but it admits no one — it keys the
-binary-distribution path only (§26.6). Legally, the license (§26.1) and
+§10). There is no network secret. Legally, the license (§26.1) and
 the trademark (§26.3) carry the load.
 
 **Residual risk:** Anyone shipping their own build can swap out the
@@ -11402,7 +12247,8 @@ same question, so the question distinguishes no one.
 **Accepted cost:** a node that runs for weeks without a restart, a network
 change, an opened application or a new neighbour learns of an update late.
 No time commitment is given for that case or for the worst-case
-network-split window — **OPEN L-2**.
+network-split window; the latency that follows from these moments is
+measured in the lab (§28), not promised.
 
 **No return path for the user.** Cleona does not offer a downgrade to an
 older version, for three reasons: (1) database migrations run only
@@ -11412,9 +12258,14 @@ binary would silently drop messages from peers that are already updated;
 (3) the monotonic sequence number in the signed manifest (§26.6.1)
 prevents downgrade attacks, and a user rollback would have to get around
 that gate. Instead of a rollback, a critical bug gets a hotfix version
-through the same path. The internal `.bak` backup on desktop (automatic
-recovery if the app crashes within 30 s of an update) is a safety net,
-not a user feature.
+through the same path. The internal `.bak` backup on desktop (Linux,
+Windows) is a safety net, not a user feature: if the app crashes within
+30 s of an update, it is restored automatically. "The app" is both of its
+processes. The daemon and the window each record their first start of the
+new version and report healthy after 30 s. A start that finds its own
+earlier record without a healthy report rolls back. The backup goes once
+both are healthy, or once the daemon is healthy and no window has started.
+A window that is closed in order within its 30 s has not crashed.
 
 ### 26.6 Censorship-resistant software distribution
 
@@ -11450,21 +12301,21 @@ after the interactively approved push (step 3, §26.2).
 #### 26.6.1 In-network updates via the bulk cache (E-40)
 
 **Decided (E-40):** The manifest is hybrid-signed (§4), the binaries
-travel as fountain blocks over the bulk cache (§9, AP-7
-fountain for files/updates), and the manifest is harvested rather than
-queried.
+travel as fountain blocks encoded by the nodes that hold them (§9.4), and
+the manifest is held in the post box under a public value and asked for
+there (§26.5.4).
 
 Procedure:
 
 1. The maintainer signs the manifest with a hybrid signature (§26.5.2).
-2. The binary is encoded per platform into fountain blocks (block size =
-   one cell payload, ≈ 1.1 KB) and placed into the delivery layer. **Any**
-   ~k·(1+ε) distinct blocks reconstruct the whole; no block is special,
-   and no coordination is needed (§9).
+2. The binary is a set of objects per platform (the full binary and the
+   deltas, §26.6.2). Every node that holds an object encodes fountain
+   blocks from it, one block per packet and fresh for each request;
+   **any** ~k·(1+ε) distinct blocks reconstruct the whole, no block is
+   special, and nothing is placed in advance.
 3. The carrier is the **always-on tier** (§22.6): desktop installations
-   acting as an automatic cache class with their own bulk
-   cache. A cache sees only "interest in blob hash X" — not who is
-   downloading (§9).
+   hold the complete objects of the current manifest; a phone holds none.
+   A holder learns which object is asked for (RL-17).
 4. The node learns of the manifest via the fetch path (§26.5.4) and
    starts collecting what it needs — the delta matching its
    installed version, or the full binary (§26.6.2) — automatically, from
@@ -11485,10 +12336,10 @@ version is never offered.
 
 **Decisions about the fetch path:**
 
-- One tag per platform; the blocks sit as cells in the bulk
-  cache (§9).
-- **The fetch path.** Always-on nodes hold the pieces of every current
-  object in their bulk cache (§21.2). A node that still lacks pieces asks
+- One object per platform and per delta, named by its SHA-256; the
+  manifest fields `dhtBin`/`deltaBin` only mark that one exists (§26.6.8).
+- **The fetch path.** Always-on nodes hold every current object
+  (§21.3.1). A node that still lacks pieces asks
   a holder for pieces of its object at the moments of §26.5.4. Within one
   such moment the next request follows the arrival of the previous answer;
   after three answers without a new piece the node turns to the next
@@ -11500,17 +12351,14 @@ version is never offered.
 - **Data-saving mode** suspends the fetch path over metered connections;
   pieces arriving by cover fill are still kept (§24.4.2).
 - Rateless: no fixed block count, no index allocation (§9).
-- Storage budgets follow the platform tiers from §22.6: retention-bounded
-  (Android/iOS) versus always-on (desktop, "automatic bulk
-  cache").
-- Old blocks clear themselves via the cells' TTL plus per-tag-line
-  quota eviction (§20, §21), once no one is holding them anymore. (There
-  is no PoW-weighted eviction `pow/(byte × remaining TTL)` —
-  there is no PoW at all, §10/§20; eviction is TTL + quota.)
+- Only the always-on tier holds objects for others (§22.6, §21.3.1); a
+  retention-bounded node collects only its own.
+- Nothing is stored as blocks: a holder encodes fresh blocks per request
+  from the objects of the newest manifest it has checked.
 - The bootstrap node is a jump start (Principle 5 in §26.6) and has no
   special role in the protocol.
 
-**Push over cover fill (in addition to the harvest).** The same blocks also travel
+**Push over cover fill (in addition to the fetch path).** The same blocks also travel
 as **cover fill** (§5.5): a node with blocks on hand puts one into a cover packet
 the Poisson clock has already drawn, to whichever neighbour that draw selects. This
 costs nothing — the packet is emitted either way — and it **pre-warms** the
@@ -11530,16 +12378,14 @@ fall with 1/N (§9).
 |---|---|
 | Manifest signature (maintainer key) | Without a valid signature every node ignores the manifest — development builds do not trigger an update |
 | Monotonic sequence number `minMonotoneSeq` | Every release increases the number; nodes reject manifests whose number is equal to or lower than the highest one already seen. Prevents downgrade via replayed old but validly signed manifests |
-| Beta/live network-channel separation | Different link keys and different tag derivation — beta updates do not reach the live network (§4) |
+| Beta/live network-channel separation | Different shell keys (`kNetworkChannel` in the shell KDF, §4.2, §11.6) — a beta node opens no live packet, so beta updates do not reach the live network |
 | Windows code-integrity gate | Before the build on the Windows machine: `git fetch --tags`, a hard checkout of the release tag, comparing `git rev-parse HEAD` against the tag SHA — on mismatch, a hard abort, no continuing with just a warning |
 | Self-healing on failed verification | On a hash or signature error, the entire version state (all blocks plus the reconstructed binary) is discarded and re-fetched, so a poisoned block cannot permanently block the update; transient errors (too few blocks available) delete nothing, the partial state stays in place for resumption |
 | Pipeline approval gate | Manifest signing and seeding run as steps of `release-build.sh`, which starts only after the interactive approval |
 
-**No numbers are fixed here.** The fountain calculation in §9 works
-with a 150 MB example (≈ 135,000 blocks; at 10,000 nodes and a redundancy
-of 5, each holds ~80 KB). That is an example, not a fixed operating
-point — block count, redundancy, and cache budget depend on actual
-operation and are to be measured, not set (**OPEN L-3**).
+**No numbers are fixed here.** Block count per object, the share of
+always-on nodes that hold an object and the number of holders a collector
+needs are to be measured, not set (**OPEN L-3**).
 
 macOS and iOS are exempt from in-network distribution (DMG via GitHub
 Release, TestFlight); `shouldUseInNetworkUpdate()` returns `false`
@@ -11548,9 +12394,11 @@ there.
 #### 26.6.2 Delta updates
 
 Full binaries are expensive over cellular, a delta transfers only the
-change. Mechanism: bsdiff/bspatch, two generations (V-1 → V and V-2 → V),
+change. Mechanism: the bsdiff/bspatch algorithm, two generations (V-1 → V and V-2 → V),
 fallback to the full binary when no matching path exists (say, because a
-node was offline for more than two releases). The expected savings are
+node was offline for more than two releases). The patch container is
+Cleona's own (zstd frames, sizes and SHA-256 of base and result), not the
+bzip2 container of classic bsdiff. The expected savings are
 above 90 % — typically a few MB instead of several dozen MB.
 
 The manifest names every delta together with its **content hash and
@@ -11600,7 +12448,7 @@ high-threat situations, the physical path (§26.6.6).
 Normative:
 
 - `z=` carries the platform-specific binary sizes from the signed
-  manifest, so the browser assembler trims the block padding correctly; a
+  manifest (assemblers of earlier 4.2 versions trim block padding with it); a
   manipulated size leads to a SHA-256 failure and thus rejection. The
   parameter is optional when evaluating — links without it still work.
 - **Demand-driven foreign-platform fetch**: a node keeps only its own
@@ -11630,43 +12478,46 @@ Normative:
 
 **Address question of the link.** The link must name its source without
 presupposing a fixed address: reachability is a transient property and
-not a role (§11), and the ContactSeed carries entry hints instead of
-fixed addresses (§15). How the link represents this is yet to be decided
+not a role (§11), and the invitation data carry the addresses the inviter
+had when it issued them and a neighbour (§15.2). How the link represents this is yet to be decided
 — **OPEN L-4**.
 
-#### 26.6.4 Binary rendezvous via the entry cascade
+#### 26.6.4 Binary rendezvous via the invitation data
 
 Node addresses change (typically daily) and an invitation link cannot
 carry a fixed IP. This design does **not** use an external rendezvous service
-*for this* — the entry cascade (§11) is the mechanism that resolves a
-ContactSeed's entry hints to live, directly-reachable nodes. *This
-section decides how an invitation resolves, not
-how a cold node enters the network — the cold start keeps an external
-source as one of four (§11.8); the two are separate questions.* A publishing
-node that holds a complete binary set is reachable through the same entry
-cascade the inviter's `s=` ContactSeed encodes; the browser assembler
-(§26.6.5) walks the entry hints, contacting directly-reachable nodes in
-turn until one serves the matching platform.
+*for this*: the invitation data (§15.2) name the inviter's addresses and a
+neighbour, and those are what an invitation resolves to. *This section
+decides how an invitation resolves, not how a cold node enters the
+network — the cold start keeps an external source as one of four
+(§11.8.3); the two are separate questions.* A publishing node that holds a
+complete binary set is reachable under the addresses the inviter's `s=`
+invitation data name; the browser assembler (§26.6.5) tries them in turn
+until one serves the matching platform.
 
 **Who holds binaries:** only directly reachable nodes — a public IPv4
 address (directly or through port forwarding) and global IPv6, yes; nodes with no inbound
 reachability, no, because a fetch from them would never come together.
-LAN nodes are found via LAN discovery, not via the entry cascade.
+LAN nodes are found via the neighbour call (§11.8.3 source 2), not via the invitation data.
 
 > **This design uses no external rendezvous channel such as Nostr
-> here.** The entry cascade (§11) is the mechanism instead
-> — consistent with the removal of Nostr from entry-node enumeration
-> (RL-13, §23.7). The binary-rendezvous design therefore has no external
+> here.** The addresses of the invitation data (§15.2) are the mechanism
+> instead; the public relays of §11.9 serve a node looking for neighbours,
+> not a browser looking for a binary. The binary-rendezvous design therefore has no external
 > service at all; the only external touchpoint that remains is the
 > invitation link itself, which is carried out-of-band by the inviter.
 
-**OPEN L-5 — invitation-related entry records.** Whether there is,
-alongside the platform-related availability, an invitation-related
-record category is undecided. Such a record would need its decryption
-key delivered to it, and the invitation link (§26.6.3), with
-`s`/`h`/`m`/`v`/`f`, carries no key field. A publish that nobody reads
-violates Work Rule 5 (no unnecessary network traffic): the category must
-therefore either be fully specified or dropped.
+**A foreign platform for a visitor** (§26.6.3) is collected the same way:
+the node asks its holders for the object the manifest names for that
+platform, with a partial state of its own beside its update target, and
+checks it against hash and maintainer signature. No relay is asked, and
+nothing is announced.
+
+**No invitation-related records.** Alongside the platform-related
+availability there is no invitation-related record category. Such a
+record would need its decryption key delivered to it, the invitation
+link (§26.6.3), with `s`/`h`/`m`/`v`/`f`, carries no key field, and a
+publish that nobody reads violates Work Rule 5.
 
 #### 26.6.5 Embedded HTTP server and browser assembler
 
@@ -11676,18 +12527,19 @@ data — with no external hosting. It answers exclusively GET on fixed
 paths under `/cleona`; no dynamic processing, no upload, no directory
 listing, no server identifiers, and a generic 404 for everything else.
 This is not camouflage — a determined censor can recognize the protocol —
-but it keeps automatic scanners away. The model is protocol detection at
-the first byte of a TCP connection (`GET`/`HEAD` → HTTP, `0x16 0x03` →
-TLS) and the shared port number for UDP and TCP. This same first-byte
-demultiplexing is where a TCP/443 door (§11, E-64) and, later, the form
-disguise (§23.9.1, E-62) attach — no new wire format is introduced.
+but it keeps automatic scanners away. The server listens on TCP under the
+same port number as the node's UDP socket (§11.1), one listener per
+address family, and every connection goes to it: there is no protocol
+switch on the first byte and no TLS. A connection that has not delivered
+its request header within 5 s is closed (E-83). No door on TCP/443
+attaches here — 4.2 builds none (§23.9.3) — and no new wire format is
+introduced.
 
 **Browser-blocked ports (E-64).** Two constraints, and the second is the
 one that matters.
 
-*The draw.* `drawDataPort` excludes **10080** — the only browser-blocked
-port inside 10000–64999. The exclusion costs one value out of 55,000,
-exactly like the existing `discoveryPort` exclusion.
+*The draw.* The port is drawn in 20000–60000 (§11.1). No browser-blocked
+port lies in that range, so the draw excludes nothing.
 
 *The link.* The invitation link does **not** carry the drawn port. It
 carries `publicPort`: either a port the router chose when mapping via
@@ -11708,17 +12560,18 @@ the browser refuses to open.
 Chromium additionally 0 — 83 values together. A link has to open in the
 recipient's browser, whichever that is, so the union binds. 10080 is the
 Amanda backup port, blocked by both since 2021, and the only member at or
-above 10000 — which is why the draw needs one value and the link needs
-all 83.
+above 10000 — the draw range of §11.1 begins above it, so the draw needs
+no exclusion and the link needs all 83.
 
 The flow in the browser: the visitor opens the invitation link, receives
 the web app from the node, which reads the parameters out of the hash
-fragment, detects the visitor's platform, walks the entry hints from the
-ContactSeed to further nodes with the matching binary, downloads, checks
+fragment, detects the visitor's platform, tries the further addresses of
+the invitation data (§15.2) for a node with the matching binary, downloads, checks
 the SHA-256 against the hash from the link, checks the maintainer
-signature (libsodium.js), and only then offers the file for saving.
-Fallback chain: complete binary from the originating node → further nodes
-from the entry cascade → external fallback via `f=`.
+signature (Ed25519 in plain JavaScript, checked against libsodium vectors
+at page load), and only then offers the file for saving.
+Fallback chain: complete binary from the originating node → further
+addresses of the invitation data → external fallback via `f=`.
 
 **Trust model, honestly separated.** *Binary integrity* is strong: the
 hash and the signature travel over a different channel than the binary
@@ -11747,9 +12600,9 @@ confirm, or use the download address with `wget`/`curl`; verification is
 independent of the transport path. And iOS cannot install a downloaded
 app; the web app detects iOS and points to the App Store.
 
-**The browser assembler checks fountain decoding and the hybrid manifest
-signature.** Whether serving whole binaries suffices for this path — in
-which case the browser needs no decoder — is part of **OPEN L-4**.
+**The browser assembler downloads the complete binary and checks its
+SHA-256 against the hash from the link and the maintainer signature over
+that hash (`m=`, §26.6.3); it has no decoder.**
 
 #### 26.6.6 Physical handover
 
@@ -11786,9 +12639,9 @@ verifies it themselves — otherwise no one does.
 |---|---|---|---|
 | 1 | Google Play / App Store | Apple or Google alone | First installation, convenient |
 | 2 | GitHub Releases | Microsoft / DMCA | First installation, sideload |
-| 3 | Invitation link + entry cascade + HTTP download from a node | only if **all** directly reachable nodes are blocked | First installation, decentralized |
+| 3 | Invitation link + addresses of the invitation data + HTTP download from a node | only if **all** directly reachable nodes are blocked | First installation, decentralized |
 | 4 | physical (USB / share sheet / Bluetooth / LAN WLAN) | not censorable except by seizure | First installation, last-resort fallback |
-| 5 | In-network update via the **bulk cache** | not censorable as long as a sync partner is reachable | Updates for existing users |
+| 5 | In-network update via the **bulk cache** | not censorable as long as one neighbour is reachable (update pieces ride in cover, §5.5) | Updates for existing users |
 | 6 | In-network delta update | not censorable | Updates, bandwidth-saving |
 
 In stages 5 and 6, the delivery layer carries the load; the condition
@@ -11805,13 +12658,15 @@ The distribution path consists of these building blocks:
 
 | Building block | Role |
 |---|---|
-| `UpdateManifest` (`lib/core/update/update_manifest.dart`), `UpdateChecker`, `scripts/sign-update-manifest.sh` | signed version manifest with a hybrid signature (§26.5.2); the fields `dhtBinaryTag`/`deltaBinaryTag` name the tags of the full binary and the delta, plus `minMonotoneSeq`, `binaryHashes`, `binarySignatures`, `binarySizes` |
-| `BinaryUpdateManager`, `DeltaUpdateManager` (`lib/core/update/`) | state machine of the update fetch: check, download, assemble, verify, clean up, or find and apply the delta path (bsdiff/bspatch, fallback to the full binary) |
+| `UpdateManifest` (`lib/core/update/update_manifest.dart`), `UpdateChecker`, `scripts/sign-update-manifest.sh` | signed version manifest with a hybrid signature (§26.5.2); the fields `dhtBin`/`deltaBin` (Dart `binaryTag`/`deltaBinaryTag`) only mark per platform that an in-network distribution exists — no reader evaluates their value —, plus `minMonotoneSeq`, `binaryHashes`, `binarySignatures`, `binarySizes` |
+| `BinaryUpdateManager` (`lib/core/update/`) | checks the manifest, verifies the collected binary against it, cleans up |
+| `updateTargetFor`, `updateBinaryFromObject` (`lib/core/update/update_target.dart`); `bsdiff`, `bspatch`, `delta_format` (`lib/core/update/delta/`) | chooses which object the node collects, full binary or delta (§26.6.2), and turns a collected delta into the full binary, falling back to the full binary if the delta fails |
+| `update_assembler.dart`, `update_partial.dart` (`mycelium/lib/`) | collects the object from the network and keeps the partial state on disk |
 | Fountain content layer | encoding and fetching of the binary blocks via the bulk cache (§9) |
-| `BinaryFetchClient`, `BinaryHttpServer`, `BootstrapWebApp` (`lib/core/update/`) | HTTP path for first installation and foreign-platform fetch; the assembler decodes fountain blocks (§26.6.5) |
+| `BinaryHttpServer`, `BootstrapWebApp` (`lib/core/update/`) | HTTP path for first installation; the assembler downloads the complete binary (§26.6.5) |
 | `InviteLink`, `InviteLinkService`, `InstallSourceDetector` (`lib/core/update/`) | generate and evaluate the invitation link, choose the update path by installation source; link format open (§26.6.3, OPEN L-4) |
 | `PhysicalTransferHelper` (`lib/core/update/physical_transfer_helper.dart`) | export/import and verification for physical handover (§26.6.6) |
-| `BinaryRendezvousManager`, entry-cascade resolver (`lib/core/network/`) | binary rendezvous via the entry cascade (§11, §26.6.4) — resolves ContactSeed entry hints to live reachable nodes |
+| `ForeignBinaryAcquirer` (`lib/core/update/foreign_binary_acquirer.dart`), `Update.foreign` (`mycelium/lib/update.dart`) | foreign-platform fetch for a visitor (§26.6.3): collected from the holders like the update target, own partial state, checked against the manifest |
 | `CleonaService` (`lib/core/service/cleona_service.dart`) | orchestration: trigger the update, provide its own binary, build the availability record |
 
 ### 26.7 The maintainer key
@@ -11827,19 +12682,17 @@ signatures, and they sit on two separate key pairs:
 The separation of roles limits any compromise to a single capability, and
 fits the threshold roadmap (below).
 
-The network secret of the binary-distribution path **does** rotate, and
-both generations are carried at once so that a rotation never tears the
-network into two collection sets (§26.6). What does not exist is a
+What does not exist is a
 rotation **cascade**: the key alone determines what counts as an official
 update — a compromised key can sign malicious updates, but it cannot lock
 anyone out.
 
 **What the key cannot do.** It does not control *who* takes part in the
 network: there is no packet HMAC (§20, §10) and **no network-side
-membership filter at all**. The network secret that does exist keys the
-lookup tag, the record encryption and the Nostr publishing key of the
-binary distribution (§26.6) — it makes the update path findable and
-readable, and grants no admission to the delivery layer. The lever against abuse
+membership filter at all**. There is no network secret (removed with the
+relay route of the binary distribution, owner decision 08.10.2026);
+official updates are recognised by the maintainer signature alone
+(§26.5). The lever against abuse
 is the **KEX-Gate and gated reputation** (§10), not network admission —
 there is no PoW-economics admission filter (PoW is dead,
 §10/§20). This means there is neither an enforceable network split, nor a
@@ -11864,10 +12717,8 @@ sits at the relevant paragraph.
 
 | # | Point | Options |
 |---|---|---|
-| L-2 | There is no time commitment for the freshness of the update manifest: the manifest is learned at the moments named in §26.5.4, and its latency follows from how often those moments occur. This also leaves the worst-case network-split window unnumbered for rolling back a hard-block manifest. | (a) give no time commitment, but instead tie freshness to the readiness state and the platform tier (§22.6, §8/§9) and measure the value in the lab (§28/§29); (b) introduce a separate, shorter TTL class for manifest cells — this costs delivery-layer budget and has to be weighed against §20. No numeric value is set here |
-| L-3 | Fountain parameters for binaries: block count, redundancy factor, and the share an always-on node contributes to the bulk cache. §26.6.1 works with a 150 MB example. The budget question has been decided since E-53: variant (a), a **separate bulk quota** (its own class, default 1 GB, desktop only, lowest priority — §22.6/§21); the retention-bounded field values are likewise fixed (48 h / ≤ 32 MB) | The fountain parameters themselves remain a **measurement task**: to be measured, not set |
-| L-4 | The invitation link must name the fetch path without presupposing the inviter's direct reachability: there is no per-block addressing (§7/§9), and the ContactSeed carries entry hints (§15). | (a) the link carries entry hints like the seed does, and the browser downloads from the first reachable node the entry cascade resolves; (b) the link stays address-bearing and is declared exclusively as a LAN/near-field path; (c) a split — entry-cascade discovery for the address, the link only for hash, signature, and size. This also affects whether the browser assembler needs a fountain decoder (§26.6.5) |
-| L-5 | Whether there are invitation-related entry records (§26.6.4). Such a record needs a decryption key, and the invitation link carries no key field — a publish with no reader violates Work Rule 5. | (a) fully specify the path — the key travels along in the link, which makes any derivation question moot; (b) do not publish invitation-related records — the link already carries the source and an external fallback, and the entry cascade only covers the case "the address changed before the click happened" |
+| L-3 | Fountain parameters for binaries: block count, redundancy factor, and the share of always-on nodes that hold an object (§26.6.1). The budget question is decided: a **separate bulk quota**, its own class, desktop 1 GB, phone 100 MB, lowest priority (§21.3.3, D-32) | The fountain parameters themselves remain a **measurement task**: to be measured, not set |
+| L-4 | The invitation link must name the fetch path without presupposing the inviter's direct reachability: there is no per-block addressing (§7/§9), and the invitation data carry addresses, not a fixed source (§15.2). | (a) the link carries the addresses of the invitation data, and the browser downloads from the first of them that serves; (b) the link stays address-bearing and is declared exclusively as a LAN/near-field path; (c) a split — the address from the invitation data, the link only for hash, signature, and size. |
 
 ---
 
@@ -11897,20 +12748,18 @@ the files named in the text.
    Play Services, no Firebase, no external APIs, no third-party push wake
    services (FCM, APNs, UnifiedPush, WebPush — architecturally reviewed
    and rejected, §23, §31). **The one external dependency is the
-   rendezvous of the fourth neighbour source** (§11.9, Nostr) — it is not a
-   booster that gets retired but a permanent part of the cascade.
+   public relay network of the fourth neighbour source** (§11.8.3,
+   §11.9, Nostr). It holds address records and no content, and it is a
+   start aid (§11.9): once stable nodes of our own travel in the
+   invitation data, it may be read in parallel or not at all.
 
-   **It is channel-dependent, and that is the whole point.** On the
-   **beta** channel it is indispensable and stays indispensable: the
-   participants there have no stable addresses — at present the bootstrap
-   node is the only externally reachable one, and even its address
-   changes. Source B's gate (≥ 50 nodes with 30 days of observed stable
-   reachability) can therefore not be met on beta by construction. On the
-   **live** channel the dependency *may* fall away once the network is
-   large and stable enough that sources B and C carry the cold start
-   alone; that is a later measurement against B's gate, not a plan. Entry
-   itself remains the cascade of §11, of which two of three sources are
-   in-network.
+   **It is channel-dependent.** On the **beta** channel it is
+   indispensable: the participants there have no stable addresses — at
+   present the bootstrap node is the only externally reachable one, and
+   even its address changes. On the **live** channel it may become
+   dispensable once stable nodes of our own travel in the invitation data
+   (§11.7); that is a later measurement, not a plan. Finding neighbours
+   remains §11.8.3, of whose four sources three are in-network.
 2. **FFI for performance-critical code.** Cryptography, compression,
    audio/video codecs, and speech recognition run through native C/C++
    libraries via Dart FFI.
@@ -11927,7 +12776,7 @@ the files named in the text.
 | Framework | Flutter (Dart) | `pubspec.yaml`: `sdk: ^3.12.0` | one Dart codebase for five platforms (§27.8) |
 | State management | Provider | `^6.1.0` | state management for the Flutter UI |
 | Serialization | Protocol Buffers | `^4.0.0` | format of the application content before zstd, **inside** the sealing. On the wire, only 1200-B cells exist (§4.3) |
-| Persistence | three forms (§4.5.3): messages in an encrypted SQLite database per identity; configuration in encrypted files; media as `.cmenc` | SQLite3 Multiple Ciphers, vendored (`native/cleona_store/`, §21.4.1) | `lib/core/storage/message_store.dart`; `lib/core/crypto/file_encryption.dart` + `lib/core/storage/atomic_json_writer.dart`; `lib/core/crypto/media_cipher.dart` |
+| Persistence | three forms (§4.5.3): an encrypted SQLite database per identity (messages and the identity's configuration) and one for the device; the delivery layer's state in encrypted files; media as `.cmenc` | SQLite3 Multiple Ciphers, vendored (`native/cleona_store/`, §21.4.1) | `lib/core/storage/message_store.dart`, `encrypted_store.dart`, `device_store.dart`; `lib/core/crypto/file_encryption.dart`; `lib/core/crypto/media_cipher.dart` |
 | Erasure coding | Reed-Solomon in pure Dart, no native erasure library | — | `lib/core/codec/reed_solomon.dart` (§9.4) |
 | UUID | uuid | `^4.0.0` | generation of local object identifiers |
 
@@ -11937,13 +12786,13 @@ the files named in the text.
 
 | Library | Dart binding | Provides | Role |
 |---|---|---|---|
-| **libsodium** | `crypto/sodium_ffi.dart` | Ed25519, X25519, AES-256-GCM, XSalsa20-Poly1305, SHA-256, HMAC-SHA256, HKDF, Argon2id, BLAKE2b | Foundation of classical cryptography. HKDF carries the tag derivation (§4, §6, KEX-Gate) and the link key `KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss [‖ static_ss])` (§4, §11). SHA-256 additionally carries `L_node = SHA-256("cleona/lnode/v1" ‖ E_node ‖ n_x25519 ‖ n_mlkem)` (§9.1), Ed25519 the entry-record signature (§11.1), and SHA-256 the per-class state root (§27.4.3) |
+| **libsodium** | `crypto/sodium_ffi.dart` | Ed25519, X25519, AES-256-GCM, XSalsa20-Poly1305, SHA-256, HMAC-SHA256, HKDF, Argon2id, BLAKE2b | Foundation of classical cryptography. HKDF carries the key derivations of §4 and the shell key `KDF(kNetworkChannel ‖ x25519_ss ‖ mlkem_ss)` (§4.2, §11.6); SHA-256 additionally carries the post-box values (§8.2), the proofs of work (§8.2, §15.5.1) and the state root of §16.0; Ed25519 the signatures of §4.4.3. The address records of §11.9 are signed with secp256k1 Schnorr, not Ed25519 (§4.2) |
 | **liboqs** | `crypto/oqs_ffi.dart` | ML-KEM-768, ML-DSA-65 | ML-KEM-768 per message (sealing) **and** per link handshake (§4). ML-DSA-65 signs long-lived, verifiable artifacts; it is not used in the message path (E-15) or in the public object space (E-30). Pinned at `0.15.0` (`scripts/build-android-libs.sh:142`). Built from source (not from the distribution repos), `OQS_init()` before first use |
 | **libzstd** | `codec/compression.dart` (FFI) | Zstandard | compression of the application content — §4.3 keeps zstd in the cell assembly |
 | **libwhisper** (+ GGML) | `archive/whisper_ffi.dart` | on-device speech recognition | voice transcription; no network relevance. Pinned at `v1.8.4` (`build-android-libs.sh:55`) |
 | **libopus** | `calls/opus_ffi.dart` | Opus audio codec | audio codec for calls (§17). Caller: `lib/core/calls/voice_codec.dart`. `build_libopus()` sits in `scripts/build-android-libs.sh` and places `libopus.so` into the jniLibs; `scripts/preflight.sh` requires `libopus.so` in **both** Android ABI lists. Pinned at `1.5.2` |
 | **cleona_net** | `link_io/native_send_path.dart` | direct syscall UDP send path IPv4/IPv6 (`sendto` on POSIX, `WSASendTo` on Windows) | the link layer (§4/§11) relies on UDP sockets. **The reason for the shim is a crash, not a throughput loss.** Under Windows, Dart's IOCP `RawDatagramSocket.send()` **crashes the Dart VM** (`GetStackPointerForStackBounds failed`) when sending to an IPv6 destination with no valid route, and the crash occurs **below any Dart-level try/catch** — no application-side handling can survive it. This is the regular case: the punch window (§17.3) deliberately sends to foreign candidates whose route is unknown. The load-bound loss that first motivated the shim — **87.9 %** of send calls dropped under sustained sending, measured at up to 500 pps — no longer carries the decision on its own, because the data port sends at a constant cell rate far below that rate. Whoever knows only the throughput reason will later remove the shim as obsolete. On the **data port**, the native sender is used **only on Windows** (on Linux, a second `SO_REUSEADDR` socket on the same port would siphon off incoming datagrams and starve reception, which is not caution but a measured regression: no PONG → no peer ever confirmed → dead mesh) |
-| **cleona_pow** | `crypto/proof_of_work.dart` | SHA-256 iteration loop in C | **not used.** Proof-of-work plays no role in the design (§10/§20): the cell frame `tag | ttl | sealed_payload` has **no `pow` field** (§4.3), and the lever against abuse is redundancy m = 3 plus the KEX-Gate and gated reputation (§10), not proof-of-work. The shim has **no protocol consumer**; it stays in the tree unused. (If a Dart fallback or the symbol is missing, the loop simply does not run — there is nothing to compute.) |
+| **cleona_pow** | `crypto/proof_of_work.dart` | SHA-256 iteration loop in C | **not used.** The proofs of work of 4.2 — a deposit in the post box (§8.2) and a contact request (§15.5.1) — run in Dart over libsodium's SHA-256 (`mycelium/lib/proof_of_work.dart`). The shim has **no protocol consumer**; it stays in the tree unused. |
 | **cleona_voice** | Kotlin/AudioToolbox backends per platform | native OS voice session (AEC/NS/AGC) | voice sessions for calls; no network relevance (§17) |
 | **cleona_video** | `native/cleona_video/` + platform backends | platform hardware video codecs | video codecs for calls; no network relevance (§17) |
 
@@ -12047,8 +12896,8 @@ measured before the figures in §9 count as a commitment.
 #### 27.4.3 Per-class state root — **not a procurement item**
 
 §16.0 requires a **per-class state root** for the durable-object class,
-anti-entropy replicated across relays, carried along in every
-reconciliation that happens anyway (32 B). A single global index over
+compared when a node asks a neighbour for the identifiers of a channel
+at an edge (32 B, §16.0). A single global index over
 the whole durable-object class was considered and rejected: the §13
 design review ruled it out as a correlation surface and an
 over-commitment; the durable-object class uses **per-class** state
@@ -12072,7 +12921,7 @@ The following existing building blocks are used:
 | Building block | Where | Role |
 |---|---|---|
 | **Linkable ring signatures** (MLSAG-style on Ed25519, key image) | `lib/core/crypto/linkable_ring_signature.dart` | in production for anonymous poll voting (§18). The moderation jury vote needs **exactly this** construction (§16: "valid ring signature against the case's draw + a unique key image"). This is the largest already-paid-for item of the crypto needs |
-| **HKDF / BLAKE2b / SHA-256** | `crypto/sodium_ffi.dart` | tag derivation (§4/§6), link KDF (§4), per-class state root (§16.0) |
+| **HKDF / BLAKE2b / SHA-256** | `crypto/sodium_ffi.dart` | key derivations (§4), shell KDF (§4.2, §11.6), post-box values (§8.2), state root (§16.0) |
 | **secp256k1 Schnorr** | `crypto/secp256k1_schnorr.dart` | **Active consumer.** It signs the Nostr events of the external entry source, which is the fourth source for finding neighbours (§11.8, §11.9). A phone has entered the network **without LAN**, purely over records from the external rendezvous, several relays answering — this primitive carries that path. Named and bounded in §4.2. |
 | ~~**PoW loop**~~ | ~~`native/cleona_pow`, `crypto/proof_of_work.dart`~~ | **No consumer** (PoW plays no role, §10/§20; see §27.3). The shim stays in the tree unused rather than being pulled out of the build outright; see §27-O-7 |
 
@@ -12212,10 +13061,7 @@ build scripts without comparable special cases.
 **Reproducibility.** Every build from the published source code is
 comparable and eligible to participate without any special case — there
 is **no packet HMAC and no placeholder** that separates public builds
-from the official network (§20). The network secret that does exist is
-compiled into every build from the same published source and gates
-nothing at the delivery layer; it only makes the binary-distribution path
-findable and readable (§26.6). The flip side belongs in the document
+from the official network (§20). The flip side belongs in the document
 just as much: this means there is no first-order fork protection
 (§26.5.1); what is effective is the Ed25519 signature check of the update
 manifests, trademark, and license (§26).
@@ -12229,7 +13075,7 @@ Decided numbers of this chapter are recorded at the respective paragraph.
 | # | Topic | Options | Blocks |
 |---|---|---|---|
 | §27-O-3 | target ε of the fountain coding for the binary distribution (§27.4.2, §26.6.1) | The fountain overhead depends on object size (measured 2026-08-30: 1.021 at 200 MiB, 1.367 at 64 KiB). What remains open is throughput on the weakest target platform and the duplicate share of blocks collected in real use. Bar (E-42): ε + throughput on the weakest target platform | §26.6.1 figures |
-| §27-O-7 | whether `cleona_pow` should be dropped from the native build | `cleona_pow` has no protocol consumer — PoW plays no role in the design (§10/§20) — so dropping it from the build chain is a packaging cleanup, not an architecture decision. `secp256k1_schnorr.dart` is a separate question, named and bounded in §4.2, not a removal question — it has an active consumer (§27.4.4) | — |
+| §27-O-7 | whether `cleona_pow` should be dropped from the native build | `cleona_pow` has no protocol consumer — the proofs of work of §8.2 and §15.5.1 run in Dart — so dropping it from the build chain is a packaging cleanup, not an architecture decision. `secp256k1_schnorr.dart` is a separate question, named and bounded in §4.2, not a removal question — it has an active consumer (§27.4.4) | — |
 
 ---
 
@@ -12273,8 +13119,8 @@ were decided (E-49): two-stage (→ §28.9.3).
 - **The pre-E2E gate** (`scripts/pre-e2e-gate.sh`): 10 mechanical checks
   before every E2E run, of which gates 1–7 are hard failures (VM bridge
   uplink, SSH reachability of the nodes, fresh profiles, binary-size
-  check against wrong-architecture deploys, entry-cascade entry
-  reachable (§11), Windows VM state, Android emulator state) and gates
+  check against wrong-architecture deploys, the lab's first-contact node
+  reachable (§11.7), Windows VM state, Android emulator state) and gates
   8–10 are warnings that switch off optional test surfaces (archive SFTP,
   CalDAV fixture server, jury-swarm status). §28.7 defines the
   network-related gate contents.
@@ -12282,9 +13128,9 @@ were decided (E-49): two-stage (→ §28.9.3).
   temp directories inside `finally`, `exit()` after the `finally`,
   `CLEONA_KEEP_TMP=1` as an opt-out, and above all **`AppPaths.setHome(<tmp>)`
   before every `CleonaNode`/`IdentityContext`/`CleonaService` construction**.
-  The last rule is strict: the DeviceID is daemon-global (§4), and an
-  overwritten `device_keys.bin.enc` is not a test artifact but the device's
-  identity on the network.
+  The last rule is strict: the DeviceID is daemon-global (§4), and
+  overwritten device keys (device database, area `device_keys`) are not a
+  test artifact but the device's identity on the network.
 - **Structured logging and log retention.** Log entries are buffered per
   profile directory and written to disk in batches every two seconds (the
   two-second buffer; without it, two daemons on one VM brought the system
@@ -12411,11 +13257,11 @@ evidence.
 
 | # | Commitment | Evidence | L | S | F | What exactly is measured |
 |---|---|---|---|---|---|---|
-| Z-1 | **Delivery acknowledgement** (§9.2): sealed and signed, addressed to the original sender only | §9.2 | **L** | | | Lab: a forged or unsealed acknowledgement is rejected; an acknowledgement from a party other than the addressee is discarded and reported; a duplicate is ignored; an acknowledgement for an unknown identifier is not raised as an error. The negative tests are the important ones: they are the direct reversal of field finding B-2 |
+| Z-1 | **Delivery acknowledgement** (§9.2): sealed and authenticated (pair tag, §4.4.3), addressed to the original sender only | §9.2 | **L** | | | Lab: a forged or unsealed acknowledgement is rejected; an acknowledgement from a party other than the addressee is discarded and reported; a duplicate is ignored; an acknowledgement for an unknown identifier is not raised as an error. The negative tests are the important ones: they are the direct reversal of field finding B-2 |
 | Z-2 | **Readiness** `searching` / `connecting` / `ready`, `ready` = ≥ 2 answering neighbours (§22.7.1) | §22.7 | **L** | S | F | Lab: state transitions in both directions, including fallback on network change (§19). Field: time from installation to `ready` — §22.7 calls it "the only settling time the system knows; it is to be measured and reported" |
 | Z-4 | **A recipient who is offline is not an error** | §9.1 | **L** | S | | Lab: the recipient is stopped, a message is sent, the state stays `in transit` while the packet waits in a post box; the recipient starts, collects, and the state becomes `delivered`. The test guards against a premature `failed` and against a permanent `in transit` after collection |
-| Z-5 | **Durable-object convergence**, anti-entropy without its own tick | §16.0 | L | **S** | F | Lab: anti-entropy between 3–5 nodes converges; type rules (missing proof → no replication) apply. Simulation: convergence of the **per-class state root** across hundreds of nodes with partition and reunion. §16.0 states explicitly: "convergence of the roots is **not proven**" (O-25) |
-| Z-8 | **Quotas / platform tiers:** retention-bounded 2–5 MB/day, always-on ~40–50 MB/day, field ~160 MB | §22.6 | L | **S** | **F** | Lab: the quota is met (counter). Simulation: storage per node over 14 d of simulated time at 10k / 1M nodes. Field: real data volume and battery drain on Android and iOS — §22.6 says the iOS figure is "unsubstantiated … an upper bound, not an expectation" |
+| Z-5 | **Durable-object convergence**, the state-root question at an edge without its own tick | §16.0 | L | **S** | F | Lab: the question at an edge between 3–5 nodes converges; type rules (missing proof → no replication) apply. Simulation: convergence of the **per-class state root** across hundreds of nodes with partition and reunion. §16.0 states explicitly: "convergence of the roots is **not proven**" (O-25) |
+| Z-8 | **Quotas / platform tiers:** traffic per §5.6; storage per class within the bounds of §21.3.1 | §22.6 | L | **S** | **F** | Lab: the quota is met (counter). Simulation: storage per node over 14 d of simulated time at 10k / 1M nodes. Field: real data volume and battery drain on Android and iOS — §22.6 says the iOS figure is "unsubstantiated … an upper bound, not an expectation" |
 | Z-9 | **Cover traffic:** Poisson timing, constant size, sealed content | §5, §5.5 | **L** | S | F | Lab: wire profile with an empty outbox indistinguishable from one with a full one, **and identical send-time and neighbour sequence with and without update pieces pending** — the positive control for rules 1 and 2 of §5.5 — **and, with cover off, a pending update still completes** (§3.1). Field: whether a real observer can infer anything — and whether **data-saver mode** (§22.6, E-40) makes the node distinguishable, as the architecture claims |
 | Z-10 | **Family diffusion:** v4-only ↔ v6-only via dual-stack | §11 | **L** | S | F | Lab: three nodes (v4-only, dual, v6-only), cell diffuses. Simulation: diversity thresholds set since E-55 (25 % / target value 2, Monte Carlo pre-measurement) — re-check here under inbound limits, latency bias, and churn |
 | Z-11 | **Beta/live network-channel separation:** handshake fails before a cell flows | §4 | **L** | | | Lab, two nodes with different `kNetworkChannel`: no link key, no handshake |
@@ -12427,7 +13273,7 @@ evidence.
 | Z-17 | **Anonymity sets** (how large is the set a sender disappears into) | §23, §4 | | S | **F** | Simulation delivers an upper bound under model assumptions; only the field measurement is load-bearing. Until then, this commitment is carried as **modeled** |
 | Z-18 | **First-contact/invite life cycle:** `exp`, revocation, multi-use with attribution, evicting request buffer | §15, E-28 | **L** | | F | The lab covers the whole cycle; the parameters are fully fixed by E-50/E-51/E-52 (`B₀` = 4 final, request factor) |
 | Z-19 | **Moderation procedure end-to-end** (report → case → jury → verdict → consequence), ≥ 5 jurors, multiple nodes | §16 | **L** | S | | The evidentiary obligation is open — see §28.8 |
-| Z-22 | **Entry records** (§11, E-60) | §11 | **L** | | F | Lab: a node that found neighbours by sources 1–3 issues **no** record; a node that found none issues its own record under an address through which it is reachable and issues a new one only when that address changes (§11.9); expired records are not handed on; no more than a quarter of the cache comes from one partner; a record whose signature or `expiry` fails is discarded. Field: partner acquisition after a network change with no entry-cascade entry reachable |
+| Z-22 | **Address records** (§11.9) | §11 | **L** | | F | Lab: a node publishes its record by reachability, not by need — under an address through which it is reachable, whether or not it found neighbours by sources 1–3 — and publishes a new one only when that address changes or the record nears expiry (§11.9); a record whose signature or validity fails is discarded. Field: finding neighbours after a network change with none of the remembered neighbours reachable |
 
 **What is deliberately missing from this table:** a row "delivery
 works." It would be the summary of the individual rows above and exactly
@@ -12444,7 +13290,6 @@ The following suites are to be built with AP-5:
 | New | Level | Subject |
 |---|---|---|
 | `smoke_cell.dart` | L | cell codec, sizes against §4 — **both classes**: signature-free (1:1, group leg) and signed (`K_C`, object space); packing multiple cells into one wire cell |
-| `smoke_tag_derivation.dart` | L | `HKDF` tag derivation (§4), `kNetworkChannel` as KDF input, group/channel tags (§16) |
 | `smoke_delivery_ack.dart` | L | Z-1 in full, including the negative cases |
 | `smoke_readiness.dart` | L | Z-2, all transitions, independence and family criterion |
 | `smoke_dauerobjekt.dart` | L | type system, proof check, protection rule §16.0 ("an object that describes a third party is unconstructible by the type system" — a **negative test against constructibility**), sub-budgets 6/2/2 MB |
@@ -12455,12 +13300,13 @@ The following suites are to be built with AP-5:
 | `gui-67-delivery-status.spec.ts` | L | the four states of §9.1 as icons in the bubble; an offline recipient shown as `in transit`, not as an error; retry by click |
 | `gui-68-datensparmodus.spec.ts` | L | data-saver mode as a **visible state** with a named consequence (§22.6); never automatically active |
 | `gui-69-no-delivery-mode-control.spec.ts` | L | negative test: no per-chat delivery-mode toggle anywhere in the interface (§12.1) — one path, nothing to switch |
+| `smoke_large_channel.dart` | L | §16.2.5 for a group in discussion and in announcement mode and for a channel: the key chain derives forward only, a new member reads from its joining on, a removed member reads nothing of the next generation; deposit and collection with the state root after being off; only a member that may post can deposit, and a keeper holds at most 100 entries per author key; a nudge is neither acknowledged nor sent again; an inline image is collected only as "always load images" allows; mixed operation with a member that has not shown the capability (pairwise legs, same post identifier); the switch at 17 and back at 12, none at 13–16; a subscriber receives only owner and admins (§16.2.2) |
 | `sim/*` | S | see §28.9 |
 
 > **Not built.** `smoke_pow_price.dart` (price curve quadratic in TTL,
-> eviction rank) is not built: proof-of-work plays no role in the design
-> (§10/§20), and the cell frame `tag | ttl | sealed_payload` has no `pow`
-> field (§4.3) — its subject does not exist.
+> eviction rank) is not built: proof of work has a fixed difficulty per
+> deposit and per request (§8.2, §15.5.1), with no price curve and no
+> eviction rank — its subject does not exist.
 
 ---
 
@@ -12487,7 +13333,7 @@ Rule for wait conditions, in this order:
 **Gates outside the specs:**
 
 - **`scripts/pre-e2e-gate.sh`**: gates 1–7 (bridge, SSH, fresh profiles,
-  binary size, entry-cascade entry reachable (§11), Windows VM, Android
+  binary size, the lab's first-contact node reachable (§11.7), Windows VM, Android
   emulator), plus a gate "all test nodes reach `ready` within N seconds" —
   a running daemon is not a delivery-capable daemon.
 - **`test/e2e/lib/global-setup.ts`**: building the contact mesh waits on
@@ -12647,9 +13493,9 @@ paragraph.
 | # | Point | Options / status |
 |---|---|---|
 | **T-2** | **Tolerance bands of the simulation metrics** | Without a band, a metrics run cannot be decided red/green. Proposal: measure first, then set the band — but before its first use as a gate |
-| **T-3** | **Test surface for the identity registry** | The decision has been made (§13.7, E-39 point 4, D-35, D-40: HD derivation, one own bundle per identity with index, name and `active`, found by the ascending run — not a network object). **The test surface for the §13 mechanism (derivation, per-identity bundles, the ascending run) still needs to be built** — a pure work item, not an open decision |
+| **T-3** | **Test surface for the identity registry** | The decision has been made (§13.7, E-39 point 4, §13.0, §13.3: HD derivation, one own bundle per identity with index, name and `active`, found by the ascending run — not a network object). **The test surface for the §13 mechanism (derivation, per-identity bundles, the ascending run) still needs to be built** — a pure work item, not an open decision |
 | **T-5** | **Test preset for Z-19** | `ModerationConfig.lab()` sets `identityMinAge=0` for fresh VMs and thereby disables the age rule that the gated-reputation eligibility (§10) makes **central**. Z-19 runs against a preset with **simulated registry aging**, built before the Z-19 lab run. A pure work item |
-| **T-6** | **Golden tests under skin/state extension** | The reference PNGs cover components × skin/mode combinations. If new state icons for `message_bubble` and the status bar come with Z-2/§22.7, the references grow accordingly. No conflict, just effort — noted here so it does not come as a surprise |
+| **T-6** | **Golden tests under skin/state extension** | The reference PNGs cover components × skin/mode combinations, and the message bubble × the four delivery states of §9.1 in every skin. A new state icon adds its references to that row |
 | **T-7** | **Field measurement plan** | §22.7 requires measuring and reporting the time to `ready`, §22.6 calls the iOS figure unsubstantiated, Z-17 is a pure field matter. There is **no** measurement plan for the beta network (What is collected? How does it reach the developer without violating §23?). That is the largest unwritten area of this chapter |
 
 ---
@@ -12921,7 +13767,7 @@ cheaper.
 
 | Content | Prerequisite | Verification |
 |---|---|---|
-| Keys, HD derivation, seed phrase, identity determinism (Z-10); per-message KEM (X25519 + ML-KEM-768 hybrid); Ed25519 + ML-DSA-65 hybrid sig; **link handshake** (Elligator2 `cleona_link`, §27.4.1, E-42); pairwise secrets and tag derivation (§4, §6); FS re-derivation; prekey pool + multi-device coupling; beta/live network-channel separation (Z-11) | WP-2 (seam) | Smoke: `smoke_per_message_kem`, `smoke_mldsa_derand`, `smoke_key_rotation`, `smoke_seed_phrase_validation`, `smoke_link_handshake`, `smoke_tag_derivation` green; Z-10 byte-identical |
+| Keys, HD derivation, seed phrase, identity determinism (Z-10); per-message KEM (X25519 + ML-KEM-768 hybrid); Ed25519 + ML-DSA-65 hybrid sig; **link handshake** (Elligator2 `cleona_link`, §27.4.1, E-42); pairwise secrets (§4, §6); FS re-derivation; prekey pool + multi-device coupling; beta/live network-channel separation (Z-11) | WP-2 (seam) | Smoke: `smoke_per_message_kem`, `smoke_mldsa_derand`, `smoke_key_rotation`, `smoke_seed_phrase_validation`, `smoke_link_handshake` green; Z-10 byte-identical |
 
 #### WP-5 — Cover system, reachability, delivery ways, delivery states
 
@@ -12932,19 +13778,19 @@ cheaper.
 | **Delivery ways** (§7, §8): the ladder tried in parallel, first acknowledgement wins; the post box | WP-4, cover system | `smoke_ladder` green; Z-3 the ladder in parallel; Z-4 the post box |
 | **Delivery states** (§9): the four states and the single acknowledgement type; large-payload lanes; **readiness** `searching`/`connecting`/`ready` (§22.7) | WP-4, delivery ways | `smoke_delivery_ack`, `smoke_readiness` green; Z-1 acknowledgement; Z-2 the four states |
 
-#### WP-6 — Sybil & censorship, durable objects, entry cascade
+#### WP-6 — Sybil & censorship, durable objects, neighbour sources
 
 | Content | Prerequisite | Verification |
 |---|---|---|
 | **Sybil resistance and gated reputation** (§10) | WP-4, WP-5 | `smoke_*` moderation + anti-Sybil; Z-19 moderation end-to-end |
-| **Durable-object class** (§16.0): per-class state root, anti-entropy across relays, type system (missing proof → no replication), sub-budgets 6/2/2 MB; **backdating anchor** reuses the cross-partition relay-attestation primitive (§13.4.2) | WP-5 | `smoke_dauerobjekt` green; Z-5 anti-entropy convergence |
-| **Entry cascade** (§11): cached entry addresses → LAN discovery → external rendezvous (Nostr), permanently, not as a booster (§11.3). On **beta** it is indispensable — the participants there have no stable addresses, so source B's gate cannot be met by construction; on **live** it may fall away once B and C carry the cold start alone | WP-4 | Z-22 entry records |
+| **Durable-object class** (§16.0): per-class state root compared at an edge (§16.0), type system (missing proof → no replication), sub-budgets 6/2/2 MB; **backdating anchor** reuses the cross-partition relay-attestation primitive (§13.4.2) | WP-5 | `smoke_dauerobjekt` green; Z-5 convergence |
+| **Neighbour sources** (§11.8.3): remembered neighbours, the local segment, the invitation data, and the external address records (§11.9), with the board (§11.8a). On **beta** the external records are indispensable — the participants there have no stable addresses; the relay network stays a start aid until stable nodes of our own travel in the invitation data (§11.7, §11.9) | WP-4 | Z-22 address records |
 
 #### WP-7 — Content layer, simulator, bring-up, release
 
 | Content | Prerequisite | Verification |
 |---|---|---|
-| AP-7: **bulk cache** — media lanes (§9.4, Reed-Solomon) and in-network updates (§26.6.1, fountain); manifest hybrid-signed, browser assembler on fountain (§26.6.5) | WP-5 | Transfer E2E; update delivery |
+| AP-7: **bulk cache** — media lanes (§9.4, Reed-Solomon) and in-network updates (§26.6.1, fountain); manifest hybrid-signed, browser assembler downloads the complete binary (§26.6.5) | WP-5 | Transfer E2E; update delivery |
 | Build the **network simulator** (stage 1/2, §28.9.3) and answer the scale-dependent measurement questions of §29.5 | WP-1; tool decided (E-49); cost model + hardware decided (E-54) | Metric runs with tolerance bands (T-2) |
 | AP-8: cold start and rendezvous, first-launch profile path (§21), release | all previous | Field test |
 | Satisfy release criteria **G-1…G-5** (§28.10) | AP-8, simulator results | G-1…G-5 green simultaneously |
@@ -12960,9 +13806,9 @@ WP-1  (design consistency gate)
   ├──► WP-2  AP-1a → AP-1b → AP-1 → AP-2
   │          AP-4a (→ WP-5), AP-5a (→ WP-5)        (advance independently)
   ├──► WP-3  external crypto review                 (parallel; optional since E-47)
-  └──► WP-4  identity & crypto core (link handshake, tag derivation)
+  └──► WP-4  identity & crypto core (shell handshake, envelope)
               ├──► WP-5  cover + reachability + delivery ways + delivery states + readiness
-              │          ├──► WP-6  Sybil + durable objects + entry cascade ──┐
+              │          ├──► WP-6  Sybil + durable objects + neighbour sources ┐
               │          └──► WP-7  AP-7 fountain ─────────────────────────────┤
               │                                                               ▼
               └──►                                              WP-7  AP-8 → G-1…G-5
@@ -12981,17 +13827,16 @@ advanced independently, but feed in as prerequisites of WP-5.
 Three items are explicitly **not** pursued — not for effort reasons, but
 because the design makes them moot or solves them differently:
 
-- **No proof-of-work admission filter.** The cell frame
-  `tag | ttl | sealed_payload` has no `pow` field (§4.3); the lever
-  against abuse is redundancy plus gated reputation (§10), not
-  proof-of-work. `cleona_pow` has no protocol consumer (§27.3).
+- **No proof-of-work admission filter.** A node accepts packets without a
+  proof of work (§11.6); work is asked only where a stranger takes space
+  or attention — a deposit (§8.2) and a contact request (§15.5.1).
+  `cleona_pow` has no protocol consumer (§27.3).
 - **No global Merkle index.** The durable-object class uses **per-class
-  state roots**, anti-entropy replicated across relays (§16.0) — a
+  state roots**, compared at an edge (§16.0) — a
   single global index was considered and ruled out by the §13 design
   review as a correlation surface.
-- **External rendezvous is not on this list.** It belongs in §11.9 and
-  §27.1 as a permanent, decided part of the cold-start cascade, not as
-  an item that was tried and dropped.
+- **External rendezvous is not on this list.** It is source 4 of §11.8.3
+  (§11.9, §27.1), not an item that was tried and dropped.
 
 ### 30.7 Deferred — not required for launch
 
@@ -13002,7 +13847,7 @@ production launch:
 |---|---|
 | Kemeleon / uniform ML-KEM encoding (O-2) | optional points |
 | Form-masquerade (benign traffic-profile imitation) — the (b)-hardening, declared boundary D1a (E-D) | §23.9.1, E-62 |
-| Rendezvous phase 2 — metric-gated evolution of the entry cascade (thresholds since E-52: 50 nodes / 8 weeks / diversity floor, reversible) | §11 |
+| Stable nodes of our own in the invitation data, beside or instead of the public relays (§11.7, §11.9) | §11 |
 | Group calls | §17.7 |
 | In-call collaboration (§17.5): remote control and screen-frame transport (PipeWire/MediaProjection) | depends on the Plane D API from WP-2 |
 | Threshold signatures for the update manifest (e.g., 2 of 3) — the update signature is the last remaining centralized capability (§26.7) | §26.7 |
@@ -13042,9 +13887,10 @@ by definition, and no in-network mechanism changes that (a node that
 cannot reach out cannot relay for others either). A network that lets
 **only sanctioned hosts** out is likewise not covered by a Cleona
 mechanism: the sanctioned host would be a designated relay, a fixed
-point excluded by the no-fixed-point rule. What E-64 does cover is the
-common middle — an outbound **port** allowlist (only 80/443) — via the
-transport escalation of §11. Between "uniformly blocked" and
+point excluded by the no-fixed-point rule. An outbound **port** allowlist
+(only 80/443) is not covered either: the delivery layer speaks UDP on its
+drawn port only and builds no escalation to TCP/443 (§11.1, §23.9.3,
+RL-14). Between "uniformly blocked" and
 "per-host sanctioned" there is nothing, which is why no LAN-relay
 mechanism is offered (§23.9.3).
 
@@ -13053,8 +13899,9 @@ not describe delivery quality — that is classless — but **how much a
 device contributes to the network.**
 
 **Inbound reachability has exactly two meanings (E-41):** it says how
-much this node contributes **for others** (it accepts inbound syncs and
-becomes a usable relay / door), and it is a prerequisite for **calls**
+much this node contributes **for others** (it accepts packets it did not
+ask for, keeps a board (§11.8a) and can be a fixed neighbour, forwarder
+and holder for others, §5.2, §8), and it is a prerequisite for **calls**
 (ch. 17). It does **not** mean better reception: delivery runs outbound.
 Partner counts are therefore tracked **separately** by inbound and
 outbound (§22.4).
@@ -13090,13 +13937,14 @@ Unix sockets, the operating system limits neither background execution
 nor network access. **Linux contributes the most.** Specifically:
 
 - **Always-on tier** with a continuous cover stream and a rough
-  guideline of ~40–50 MB/day cover plus bulk (§5).
-- **Automatic bulk cache** for the bulk lane and the binary distribution
-  (§9.4, §26.6.1) — this role is
-  occupied exclusively by desktop installations.
-- **Full retention** (always-on relays, 14 days default).
-- **Accepts inbound syncs**, thus a usable relay / door for nodes that
-  can themselves only go outbound (§22.4), and **callable** (§17.2).
+  the cover volume of §5.6 plus bulk-lane throughput.
+- **Bulk cache of 1 GB** for the bulk lane (§9.4; a phone keeps 100 MB,
+  D-32) and the objects of the binary distribution (§26.6.1), which only
+  desktops hold.
+- **Full retention** (§22.6): keeper holdings, system channels and the
+  full bulk cache (§21.3.1).
+- **Accepts packets it did not ask for**, thus a forwarder and holder for
+  nodes that can themselves only go outbound (§8.1, §8.2), and **callable** (§17.2).
 - Reaches `ready` (§22.7) as soon as two neighbours have answered
   (§22.7.1).
 
@@ -13143,18 +13991,23 @@ background within seconds (always-on cadence of the FGS, §17.2).
 In addition:
 
 - **Tier: retention-bounded** (§22.6) — the cover stream and delivery
-  ladder run mainly within the foreground service window. Guideline
-  2–5 MB/day cover (§22.6).
+  ladder run mainly within the foreground service window. Cover
+  volume per §5.6, at the rate of the current link (§5.3).
 - **No separate daemon** — everything runs in-process. The
   Application's own `FlutterEngine` (created in
   `CleonaApplication.onCreate()`, returned via
   `provideFlutterEngine()`) keeps the Dart isolate alive across
   Activity destruction and Share-Intent restarts.
-- **CGNAT/DS-Lite has no consequence for the delivery layer
+- **CGNAT/DS-Lite: IPv6 carries, carrier IPv4 is the fallback
   (important).** Outbound connections traverse CGNAT and DS-Lite
-  without port forwarding, and there is no relay cascade. CGNAT affects
-  only **Plane D** (calls, §17.3) — there it can mean: no call, messaging
-  unaffected.
+  without port forwarding (§31.1), so the device always sends and
+  collects what was left for it (§8.2). Where the mobile network gives a
+  global IPv6 address, the device is reachable under it and names it in
+  its invitation data and its record (§11.1, §15.2, §11.9); its IPv4
+  keep-alive rests (§8.1). An address behind carrier IPv4 CGNAT is never
+  advertised. Only a device with neither IPv6 nor a mapping is
+  unreachable inbound (§22.6) — it still sends and collects, and in
+  Plane D a call may fail (§17.3).
 - **Doze costs latency, not messages.** Deep Doze suspends network
   access after roughly 30 minutes of screen-off idle time. A message
   left in a post box (§8.2) waits there; Doze delays when the device
@@ -13181,7 +14034,7 @@ gravity here, waking up is an outbound connection plus a check against
 what has arrived (§7, §8) and fits into a background-refresh window.
 There are no keepalives. The delivery *guarantee* is platform-equal; the
 delivery *moment* with the app closed is Apple policy (the APNs
-rejection stands — push wake-up was evaluated and rejected, Appendix D, D-18).
+rejection stands — push wake-up was evaluated and rejected, §23.2).
 **Calls (E-26):** with the app closed, iOS has **no inbound calls** — a
 call must ring within 10 s (§17.2), and a closed app keeps no way open on
 which a call signal could reach it. The caller sees "not reachable"; the
@@ -13199,15 +14052,15 @@ In addition:
   sustainable on iOS. **These windows suffice for the delivery ladder
   and cover exchange** (§7, §8), because no socket needs to stay open
   permanently.
-- **The daily figure of 2–5 MB is an upper bound for iOS, not an
+- **The daily cover figure of §5.6 is an upper bound for iOS, not an
   expectation** — it assumes a burst frequency that is fully determined
   by the platform (§22.6, explicitly marked as unsubstantiated). iOS
   has no sustained background cover stream, so delivery timing with the
   app closed follows Apple's background windows, not the steady-state
   figures of §7/§8; that is platform physics, not a weakness of the
   delivery layer.
-- **Contribution:** the lowest of all five platforms. iOS accepts no
-  inbound syncs and occupies no fountain-cache role. That is not a
+- **Contribution:** the lowest of all five platforms. iOS holds
+  nothing for others and occupies no bulk-cache role. That is not a
   misconfiguration, but the role.
 
 **Four Dart-socket quirks apply on iOS** — they are operating-system
@@ -13241,8 +14094,7 @@ from `send()`. Every `RawDatagramSocket.listen()` call in
 iOS-reachable code MUST have an `onError` handler.
 
 **Recovery after death of the file descriptor.** The procedure is:
-**bind fresh sockets, re-read the descriptor, re-select sync partners**
-(§22.4). Unsent messages sit in the outbox and are offered again on the next
+**bind fresh sockets and re-read the descriptor** (§11.1). Unsent messages sit in the outbox and are offered again on the next
 opportunity (§21.2) — there is no persistent SendQueue and no
 timer-based retry.
 
@@ -13284,7 +14136,7 @@ paragraph.
 
 | # | Point | Options / status |
 |---|---|---|
-| K31-2 | **The iOS daily figure (2–5 MB) is unsubstantiated** and already marked as such in the document (§22.6) | measure once an iOS retention-bounded node runs in the lab; until then, treat it as an upper bound, not an expectation |
+| K31-2 | **The iOS daily cover figure (§5.6) is unsubstantiated for a closed app** and already marked as such in the document (§22.6) | measure once an iOS retention-bounded node runs in the lab; until then, treat it as an upper bound, not an expectation |
 | K31-3 | ~~**Group-call topology** is open across platforms (C-9/C-10/C-11); an overlay multicast tree assumes addressable participants, which the design does not have~~ **CLOSED by §17.7.** The objection held, but not as stated: *inside* a call participants are addressable (address candidates and punch windows, §17.3). What does not scale is the *number* of pairs — 300 at 25 participants, 1225 at 50 — and that is exactly what the threshold in §17.1.1 turns on. Topology is now per plane: control mesh to 25 then star, voice a flat crystal, video a deeper one | §17.7 |
 | K31-5 | **Windows process management.** An always-on node without an inbound port poses its own requirements on scheduled task, PID, and lock files | inventory before WP-5; no known blocker, but unverified |
 
@@ -13333,10 +14185,10 @@ of the whole design:
 | B-10 | **Calls disclose a conversation.** Real time requires a consented direct channel: an observer sees that two parties are talking, without learning which two | metadata | §17 |
 | B-11 | **Public channels are enumerable.** The tag secret is published, so decoys act as a dilution factor, not as an anonymity set | anonymity | §23 |
 | B-12 | **Moderation acts on objects, not persons.** No account-level sanction exists to reach for | product | §16 |
-| B-18 | **A published entry record is a signed membership artefact.** B-6 priced the fingerprint as "a captured public key can be confirmed to be in the network". A published record is more: address, `E_node` and an Ed25519 signature, verifiably tied to a node key and enumerable by anyone holding the app (RL-13). The counter is E-63 — a node may be reachable and withhold its record — but publishing stays the default, because a network in which withholding were the default could not cold-start | membership | §11.1, §23.9.2 |
+| B-18 | **A published address record is a signed membership artefact.** B-6 priced the fingerprint as "a captured public key can be confirmed to be in the network". A published record is more: addresses, node key and a Schnorr signature under the node's stable record key, readable on public relays by anyone (RL-13), and the age of its oldest record says how long the node has stood (§11.9). Publishing follows reachability, not need (§11.9); a user who switches the external records off withdraws the record and publishes nothing | membership | §11.9, §23.9.2 |
 | B-29 | **A media transfer is a visible, linkable event on lanes 2 and 3.** Stream lane: the volunteer sees uploader IP, downloader IP, duration and approximate size of one transfer. Bulk lane: start, end, rate and approximate size are visible at both egresses, and a holder sees uploader and downloader of the same transfer. In a group transfer the holders additionally see which members collect — a correlation that pairwise legs (§16.2) do not have. Content stays post-quantum sealed on both lanes, because `K_T` is drawn per transfer and travels in the announcement (§9.4). The cover system runs on unaffected | anonymity | §9.4, §17.6 |
-| B-30 | **Offline media needs reachable holders; streamed media needs a volunteer.** Holders are desktops and phones whose address the check of §8.1 found open; a phone behind a closed family holds nothing, and iOS holds only while the application is open. A segment without such holders delivers media only while both parties are reachable, the payload is within the relay size cap `C`, and a volunteer accepts (D-1). A sender needs eleven holders — contacts' devices first, desktops before phones among equals — for the bulk lane's failure boundary to hold | availability | §9.4, §17.6, §21.3, §22.6 |
-| B-31 | **A compromised device reads everything.** Software running on the user's device with root or kernel rights reads what the application decrypts, displays and takes as input. It also reads the master seed: at rest the seed is sealed under a key of the device's key store (§4.5.2), but the running application must unseal it, because it computes every key from it and no device key store offers ML-KEM or ML-DSA — and with the seed goes every identity derived from it (§4.5.1). No measure in the application prevents this. §23.10 lists what the application does against software without such rights, and what it deliberately does not do. An Emergency Key Rotation afterwards keeps `K_AB` and the codes on the founding keys (D-33) | confidentiality | §2, §4.5.2, §23.10 |
+| B-30 | **Offline media needs reachable holders; streamed media needs a volunteer.** Holders are desktops and phones whose address the check of §8.1 found open; a phone behind a closed family holds nothing, and iOS holds only while the application is open. A segment without such holders delivers media only while both parties are reachable, the payload is within the relay size cap `C`, and a volunteer accepts. A sender needs eleven holders — contacts' devices first, desktops before phones among equals — for the bulk lane's failure boundary to hold | availability | §9.4, §17.6, §21.3, §22.6 |
+| B-31 | **A compromised device reads everything.** Software running on the user's device with root or kernel rights reads what the application decrypts, displays and takes as input. It also reads the master seed: at rest the seed is sealed under a key of the device's key store (§4.5.2), but the running application must unseal it, because it computes every key from it and no device key store offers ML-KEM or ML-DSA — and with the seed goes every identity derived from it (§4.5.1). No measure in the application prevents this. §23.10 lists what the application does against software without such rights, and what it deliberately does not do. An Emergency Key Rotation afterwards keeps `K_AB` and the codes on the founding keys (§4.3) | confidentiality | §2, §4.5.2, §23.10 |
 
 ## Optional points
 
@@ -13348,7 +14200,7 @@ for the production launch (§30.7), none blocks an implementation.
 | # | Topic | Class |
 |---|---|---|
 | O-2 | Kemeleon / uniform ML-KEM encoding | Improvement, not a prerequisite (§30.7) |
-| O-8 | Retention-bounded-node upload anonymity against the sync partner | Improvement, not a prerequisite (§30.7); tracked against the retention-bounded tier (§22.6) |
+| O-8 | Retention-bounded-node upload anonymity against the neighbours it sends through | Improvement, not a prerequisite (§30.7); tracked against the retention-bounded tier (§22.6) |
 
 ---
 
@@ -13380,105 +14232,62 @@ is measurement and build work:
   run below the minimum juror count is a failure, not a skip.
 - The participant count up to which video is offered in a group call
   (§17.7).
-- The own-device line of the delivery layer (§14.7, D-37) is decided;
+- Message translation (§21.7a) is decided (D-64) and **not built**:
+  before the build, the translation time on a real ARM phone, the build
+  of the engine for iOS and its use on the oldest supported Android
+  version are to be shown; the build follows the release.
+- The star control plane above 25 participants (§17.1.1) — **not
+  built**; until it is, voice in a group call is offered up to 25 (§17.7).
+- The own-device line of the delivery layer (§14.7) is decided;
   enrolling a second device (§14.6) on the post box of §8.2, the
   synchronisation of the routine KEM rotation across own devices, and
   Type 16 with its key packets (§14.7) are still open work. Until
   enrolment is built, a contact stands only on the device on which it
-  came about.
+  came about. §14.1 (the device-scoped tag), §14.4 (harvesting the
+  announcement, relays holding replicated ciphertext), §14.5
+  (authenticity by tag), §14.9.1 ("last harvested Twin-Sync") and §14.10
+  (the tag under `K_own`) are restated with it.
+- The post box has no total bound per platform: §8.2 bounds a holder by
+  7 days and 100 packets per day value, not by the number of day values
+  it holds, and keeper holdings count within it on desktops (§21.2,
+  §21.3.2). A total bound per platform, with what gives way when it
+  binds, is to be stated and measured.
+- Chapter 10 (Sybil and censorship resistance) is stated in terms of the
+  withdrawn layer — placement keyed to a pair secret (§10.1), relays
+  responsible for a placement and passive fleet coverage (§10.2), relay
+  eligibility gated on a node position `L_node` (§10.3); §2
+  ("Targeted-grind", "Passive fleet coverage"), §4.6 and §11.9 lean on
+  it. 4.2 has no placement by position and no relay set. Chapter 10 is to
+  be restated against §5.2, §8 and §11.8; the cost model M6 does not
+  carry over.
 - Stages 2 and 3 of recovery (§13.4 distress call, §13.5 restore
   broadcast) in terms of the post box of §8.2 — not yet restated, and
   **not built**: the V3 restore path is removed and its type numbers 30/31
   are reserved (S398, R-1). The restatement starts from §13.5.2 (manifest
   and pull) and the scope rule of §13.5.4; the recovery bundle (§13.3) is
   the only way back after a total loss until then.
-- The durable-object class (§16.0) and everything that stands on it — the
-  channel directory and public channels (§16.3), moderation
-  (§16.4–§16.6), the system channels (§16.7) — in terms of the nodes,
-  edges and post box of §5–§11: not yet restated, and **not built**; the
-  V3 channel loop is removed (31.08.2026). §16.0 still describes the
-  class on relays, cells and the cover stream of the withdrawn layer; the
-  restatement starts from the invariants that stay — public,
-  self-verifying objects with carried proof, a per-class state root over
-  held **and** permanently rejected identifiers (31.08.2026), eviction by
-  type rules, the sub-budgets of §21.3 — and names what standing traffic
-  the replication costs, which needs its own approval (§1.2, D-9). Until
-  then a channel report is counted locally and leaves the device as
-  nothing (`ChannelReportOutcome.notSent`); the production launch waits
-  on this class (§30.5, Z-19).
+- **Not restated and not built**: the channel directory
+  and public channels (§16.3), moderation (§16.4–§16.6) with the cover
+  feed-in and the backdating anchor of §16.0, and the share rule for system
+  channels beyond about 1,000 new reports a day (§16.7). Until moderation
+  is restated a channel report in the moderation sense is counted locally
+  and leaves the device as nothing (`ChannelReportOutcome.notSent`); the
+  production launch waits on it (§30.5, Z-19).
+- Large groups and channels (§16.2.5) — measurement: the computed figures
+  of §5.6 and §16.2.1 on the wire, the keepers' storage per active group
+  or channel, and the cost of the question at an edge on a phone.
+- Anonymous votes in groups (§18.4.2): option B is stated in terms of the
+  withdrawn tag layer — a tag family all members subscribe to. 4.2 has no
+  subscription; restating B on the post box of §8.2 is open and **not
+  built**. Option A is the transition state (§18.4.2), and the interface
+  says so.
 - The build order (§30) and its release criteria G-1…G-5 (§28.10); a
-  further pass over §8; the test areas at T-3 and T-6 (§28.11); the
+  further pass over §8; the test area at T-3 (§28.11); the
   review items from §30.3 A (optional, E-47); UI/i18n determinations
-  (§15-O-1…O-5, K16-2…K16-4, I-2, I-3, §25-O-1…O-4/O-6, STO-4,
-  CAL-3/CAL-4/CAL-7, POLL-4, L-2/L-4/L-5, R-3 procedural
-  rule); the threat-model document must be kept in step with this
-  chapter.
+  (§22-O-2, §22-O-6, K23-2, I-3, §25-O-2…O-4/O-6,
+  CAL-3/CAL-4, L-4); the threat-model document must be
+  kept in step with this chapter.
 
 **No chapter waits on another chapter.** The measurements above gate
 implementation; nothing in the delivery layer waits on a decision. What
 remains is build work and the observation items named above.
-
----
-
-## Appendix D — Settled decisions
-
-These are decided by the owner. They are **not open questions**. A text
-or a piece of code that contradicts one of them is **drift** and is
-corrected towards the decision — it is reported as drift, never raised
-again as a question. A settled decision is reopened only by the owner,
-through a proposal with before, after and rationale.
-
-| # | Decision | Decided | Normative text |
-|---|---|---|---|
-| D-1 | Delivery works on its own; concealment runs beside it and carries nothing a delivery depends on | owner, 13.09.2026 (S383, full reset of the delivery layer) | §3.1 |
-| D-2 | One way to send — no fast or private mode, no per-chat setting; the V4.1 two-mode design is withdrawn | owner, 13.09.2026 (S383) | §3.3, §12.1 |
-| D-3 | All applicable ladder steps start together; the first acknowledgement wins; sequential escalation is prohibited | normative since 4.2 | §3.4, §7.1 |
-| D-4 | Messages never go to a public address (step 2); step 2 serves the own address and calls | owner, 17.09.2026 (D1 = a) | §7.1, §7.3 |
-| D-5 | Step 3 by codes per pair, direction and UTC day; `K_AB` hybrid with `s_AB` | owner, 17.09.2026 (proposal M, D2 = a) | §4.3, §8.1 |
-| D-6 | Post box: three neighbours, two acknowledgements, 7 days, at most 100 packets **per day value**, proof of work `D_box` = 18 bit | owner, 15.09.2026 (`D_box`) and 17.09.2026 (day values) | §8.2 |
-| D-7 | The cover stream always runs and is not a setting; 1 packet / 60 s on metered links; empty packets may be reduced only on unmetered W/LAN (switch, default off) | owner, 17.09.2026 (W2 = b for the metered rate) | §5.1, §5.3, §12.7 |
-| D-8 | Keep-alive behind translation or a firewall: interval measured per network, IPv6 60 s and IPv4 30 s until measured, IPv4 rests where IPv6 carries | owner, 17.09.2026 (E1), changed 24.09.2026 (see also D-27) | §8.1 |
-| D-9 | Nothing periodic in idle; the post box and the neighbourhood are asked only at edges | normative since 4.2 | §1.2, §5.4, §8.2, §11.8 |
-| D-10 | Stateless per-message KEM (X25519 + ML-KEM-768); no Double Ratchet | normative | §4.2, §4.3 |
-| D-11 | The identifier is free of secrets; network entry is bound to no maintainer key — that key signs updates only | owner, 15.09.2026 (identifier = A) | §4.1, §26.7 |
-| D-12 | No address, port, host or environment variable pointing at an entry node is built into the application or its configuration; the bootstrap is a node like any other; external records are start help only | owner (§11.7, §26.6 principle 5) | §11.7, §11.9 |
-| D-13 | Four delivery states, not extensible; a recipient who is offline is not an error | normative | §9.1 |
-| D-14 | Relay limit `C` = 25 MB — not to be renegotiated; media pieces Reed-Solomon `K` = 7, `d` = 4 | owner, 14.09.2026 | §9.4 |
-| D-15 | Groups: N ordinary pairwise deliveries up to N ≤ 16; above, a private channel under `K_C` | owner, 16.09.2026 | §16.2 |
-| D-16 | A contact exists only by explicit acceptance; automatic acceptance only for an in-person hand-over (QR shown to the present person, NFC); the medium decides, there is no choice of hand-over class | owner (§12.5); medium rule 24.09.2026 | §12.5, §15.5 |
-| D-17 | No social recovery: no guardians, no split secret; the 24 words and surviving devices are the only ways back | owner | §13.8 |
-| D-18 | Android: the foreground service with its persistent notification is the canonical background path. Every push variant (FCM, APNs, UnifiedPush, WebPush, per-peer rotation) is rejected. The battery-optimisation **switch in the settings** is removed; the **exemption request at first start** exists since 22.07.2026 as the fix for Doze cutting the network — only the placement of that dialog is open (§23.9 K23-3) | owner, 26.04.2026 (push rejected, switch removed); 22.07.2026 (first-start request) | §12.6, §23.2 |
-| D-19 | One daemon, one data port for all identities of a device; all identities are active at once | owner, 14.09.2026 (S385) | §4.5.1, §11.1 |
-| D-20 | The DHT-based anti-Sybil reachability check is removed; reputation is gated, not weighted | removed S368 (05.09.2026); E-B = B1 | §10.3 |
-| D-21 | 4.2 is fully separate from V3: no migration, no old profiles, no V3 wire format, no field "for older peers"; V3.2.2 is frozen as the fallback | owner, 15.09.2026 | `docs/FALLBACK_V322.md` |
-| D-22 | Persistence in three forms; messages in an encrypted SQLite database per identity (SQLite3 Multiple Ciphers, no plaintext temp); the "decrypted temp file, flush every 60 s" design is rejected | owner | §4.5.3, §21.4.1 |
-| D-23 | Update: collected and assembled automatically, offered only when complete and verified, "Install" starts without a second question; no downgrade; an update comes only from a hand-signed manifest | owner, 14.09.2026 | §26.5.4, §26.6 |
-| D-24 | Interface precedence: wired, Wi-Fi and VPN before cellular | owner, 16.09.2026 (S390) | §22.4.1, §23.1 |
-| D-25 | The invitation data carry up to four own addresses; they are classified by the reader, not by the issuer; the neighbour address only when verified | owner, 16.09.2026 (S390) | §15.2 |
-| D-26 | Fixed neighbours come from contacts: up to three currently reachable contacts' devices, replaced at edges, fixed rather than redrawn; the invitation data never name a contact; one `0x22` fans out to up to three, only for registered devices; the list rides in acknowledgements and messages; a contact can be excluded | owner, 24.09.2026 (proposal "contacts as fixed neighbours", version 3) | §5.2, §8.1, §9.2, §15.2, §15.10 |
-| D-27 | Keep-alive only where a check shows it is needed: a family found open from outside needs none; IPv4 to at most one neighbour; IPv6 to each fixed contact neighbour, all in one radio wake | owner, 24.09.2026 (version 3) | §8.1 |
-| D-28 | First contact works with neither side on at the same time, for the out-of-band invitation: it carries the bundle and the invitation box key; request, answer and receipt take the post box; the request's proof names its window and holds for 7 days; QR and NFC keep the round trip; the issuer's acceptance question stays (D-16); the other devices of either side learn of the contact through `CONTACT_ADDED`; the line's KEM keys are the invitation's own random key pair, not the identity's rotating ones (R-b); the line binds them with the issuer's Ed25519 signature, classical on purpose (T-a, §4.4.3) | owner, 28.09.2026 (proposal E: E1-b, E2, E3, E4-a, O1; R-b; T-a) | §15.1, §15.5.1, §15.6, §8.2, §14.7 |
-| D-29 | Media lanes: pieces sealed under a transfer key drawn per transfer and carried in the announcement; lane 1 is one message; a media message is `delivered` on the acknowledgement of its announcement, sent once the object decodes; consent per file only before lanes 2 and 3; one stream per volunteer | owner, 14.09.2026 (proposal "media lanes", H2/Q1/Z1/N1/V-b) and 28.09.2026 | §9.4, §17.6, §24.4.5 |
-| D-30 | Lane 3: each fragment placed once, the eleven of a stripe with eleven distinct holders — desktops and phones found reachable — contacts' devices first, desktops before phones among equals; proof of work once per transfer and holder; fragments live in the bulk cache and are evicted oldest first; the announcement names the holders | owner, 28.09.2026 (E1 = A) | §9.4, §21.2, §21.3.3 |
-| D-31 | Every inbound-reachable always-on node is a media volunteer; there is no switch for it | owner, 28.09.2026 (E2 = B) | §17.6, §12.7, RL-7 |
-| D-32 | Phones keep a bulk cache of 100 MB (desktop 1 GB); they hold and hand out on any network, except over metered connections while data-saving mode is on | owner, 28.09.2026 | §21.3, §9.4 |
-| D-33 | An Emergency Key Rotation keeps the identity: UserID, delivery identifier and the fingerprint of the invitation data stay the founding identifier; `K_AB` and the codes stay on the founding keys (price named: whoever holds old keys and `s_AB` computes codes). The new signing keys are bound by the hybrid rotation chain, which travels inside the seal with the announcement and every envelope until acknowledged, and in the bundle and the out-of-band line; superseded keys and forks are refused, a fork is shown. Day keys follow the current keys and are sent again, the previous ones collected for 7 days; invitation box keys are random; standing invitations are revoked at the rotation; renewal after a block is such a rotation; the words alone do not restore after a rotation, the recovery bundle does | owner, 28.09.2026 (proposal A with the extensions; replaces the interim decision of 14.09.2026 "new signing keys = new identifier") | §4.1, §4.3, §4.5.4, §8.2, §15.1, §15.2, §15.6, §15.8, §15.9, §15.10, §15.11 |
-| D-34 | A file is never sent again: a failed transfer is `failed` with its reason at both ends; an interrupted transfer places the rest on lane 3; a later message to the same contact waits until the file is in the network, and finding the file incomplete makes it `failed` | owner, 29.09.2026 (proposal A) | §9.3, §9.4, §12.2 |
-| D-35 | Recovery bundle on the post box: values per UTC day from the seed, own fixed neighbours first as holders, 7 days, renewed at post-box edges when 3 days old, one deposit; content without Shared Key and `inbox_key`, with `s_AB`, fixed neighbours and time; found by the holders a device reaches, including by reading a contact's invitation; restored contacts re-anchor on their first envelope proving the UserID | owner, 29.09.2026 (proposal B-1) | §13.0, §13.1.2, §13.2.1, §13.3 |
-| D-36 | Co-members who are not contacts are **group pairs**: the inviter draws their `s_AB` and carries it with each member's self-signed address in the invitation; joining is explicit; a group pair carries only group types, gets day keys, never a fixed seat, and ends with the last shared group; the send seam has no key overrides | owner, 29.09.2026 (proposal B-3, G2) | §4.3, §8.2, §15.7, §16.2.2, §18.1.2, §22.5.1 |
-| D-37 | Own-device line: one post-box deposit per other own device under `HKDF(K_own,"device"‖deviceId‖d)`, deleted by its collector; `K_own` from the current identity signing key until the shared key is built; post box only, except the initial reconciliation also directly to a LAN address of the other device while both are present (§14.6.1 step 4, §14.6.3) and the mirror of a call signal on steps 1 and 3 under the own-device code (D-46); no receipt; deliveries from contacts and replies written meanwhile reach the other own devices by mirroring (Type 18, `MESSAGE_SENT`); §22-O-1 = (b) for own devices only; the routine KEM rotation reaches the own devices before two devices run one identity | owner, 29.09.2026 (proposal B-4: E1, E5 mirroring, E7) | §8.2, §9.2, §14.2, §14.7, §22.5.1, §22.5.2 |
-| D-38 | Link keys live in memory only; a link is not renewed while sending continues, and cover and keep-alive never renew it; a restarted node lets its peers back in after two unreadable packets, and a single-packet sending after more than 2 s of silence carries one empty companion packet | owner, 29.09.2026 (proposal OP-28/OP-29: E1–E4) | §11.6, §5.6 |
-| D-39 | An additional device is set up with the 24 words; an existing device opens a 24-hour enrolment window that travels in the recovery bundle; a fresh install that finds the window asks to be added under a seed-derived value that only a device with an open window asks, and is handed over only after approval in the Requests tab; a bundle without a window leads to the question whether the previous device still exists, no bundle to recovery; no shared-key rotation, no delegation certificate. Where two co-members share several groups, the `s_AB` of the smallest group identifier applies | owner, 29.09.2026 (proposal B-4b revised: E-1 A; §4.3 sentence from B-3) | §4.3, §13.0, §13.3.2, §13.3.4, §14.6.1, §14.6.2 |
-| D-40 | A fresh install that entered the words searches for the bundle only and collects no post before the bundle is found or the user chooses recovery; "no bundle" is never concluded automatically. With more than one device, only the device with the smallest DeviceID (or any, once the generation is 14 days old) performs the routine KEM rotation and places Type 19 `KEM_ROTATED` to the other own devices before announcing to contacts; a cell that cannot be opened is parked up to 7 days / 100 cells and counted visibly if it expires | owner, 29.09.2026 (B-4b finding A; E7 = b1 + c) | §4.5.4, §13.0, §14.7 |
-| D-41 | Flow control per next hop, as §20.2 states it: the splitter sends one transmission of two or more parts at a time to each next hop and starts the next when the recipient's end mark — an empty re-request — arrives, or 1.1 s after the last part with no request; single-part packets do not wait; the node's own transmissions wait in order and are never evicted; others' transmissions (forwarding, a holder handing out) have a stated bound per target, above which the forwarder answers `0x21`; the shell holds during a handshake what the flow lets through, without eviction, and when the neighbour does not answer the waiting transmissions are told it is unreachable | owner, 29.09.2026 (OP-33 variant B; variant A, displacement by transmission, rejected; eviction withdrawn with the draft delivery path A→B) | §1.2, §3.1, §8.1, §11.3, §20.2, §20.3 |
-| D-42 | Initial reconciliation of own devices as twin-sync Type 20 `RECONCILE` on the own-device line, directly on the LAN while both devices are present; automatically the header (conversation list with per-chat configuration, counts, sizes) and the newest 10 messages of each conversation; the full history and the attachments of a conversation only on the user's request, attachments per conversation as one transfer with one consent; the source serves only its own set, at most 80 packets under one device value, refilled on progress; one collection edge after taking over a handover | owner, 29.09.2026 (proposal Erstabgleich: E-1 b, E-2 b, E-3 b, A-1…A-9) | §8.2, §13.5.2, §13.5.3, §14.6.3, §14.7, §20.2, §24.4.5 |
-| D-43 | A re-request round counts against the limit only if it brought no new part; a transmission fails after three rounds in a row without progress or after 30 s; the test of the largest lane-1 transmission checks completeness within three rounds without progress and no loss in the shell, not the absence of re-requests. Re-sending is the last resort: a receiver drains its socket at every read event (§11.1) | owner, 29.09.2026 (proposal R3, option B) | §11.1, §11.3 |
-| D-44 | The delivery path runs on events, not clocks: steps 1 and 3 leave at once and step 4 when its proof of work is ready; no step is paused, resumed or repeated, only the acknowledgement ends a sending; the acknowledgement takes the way the message came and goes to a post box only for post collected from one; code registration is a packet of its own (`0x24`, acknowledged by `0x25`) to each fixed neighbour at the edges of §8.1, one second attempt; placing ends at two `0x31` or when every holder transmission has ended, a collection when each holder has handed out the number it announced or one request for what is missing (§8.2) has brought nothing, and deletion goes to every holder asked; at the edges of §8.2 only what is neither acknowledged nor placed is sent again, under the same identifier; a node reads its socket until empty at every read event | owner, 29.09.2026 (draft delivery path A→B, S398) | §3.4, §5.5, §5.6, §7.1, §8.1, §8.2, §9.2, §9.3, §11.1, §11.8, §20.2 |
-| D-45 | Call signals are never left in a post box: they take ladder steps 1 and 3 only, are sent once and are not sent again at an edge. A call rings within 10 s or not at all: without a `RING_ACK` within 10 s the caller shows "not reachable", and the callee receives "missed call" as an ordinary message, shown with the callee's own arrival time. The 10 s are a limit of the call on the caller's clock, not a clock of the delivery path (D-44). The device a call signal reaches mirrors it to the other own devices on the same two steps (D-46) | owner, 30.09.2026 | §7.1, §8.1, §8.2, §9.3, §17.2 |
-| D-46 | An incoming call rings on every reachable device of the callee: the device a call signal reaches mirrors it at once to each other own device on steps 1 and 3 only, under the own-device code `HKDF(K_own, "ring" ‖ deviceId_A ‖ deviceId_B ‖ d)` registered with the fixed neighbours like a contact's code; the mirror is not acknowledged to the caller; a mirrored device answers the caller directly; the first device keeps mirroring the caller's signals of that `callId` until the call ends; own-line deposits carry the depositing device's fixed neighbours and segment addresses. Contacts still send one delivery; the neighbour still holds one device per code; nothing is left in a post box. A device whose ringing `CANCEL_OTHERS` ended shows no missed call | owner, 01.10.2026 (proposal S400 multi-device ringing, K1) | §8.1, §14.2, §14.7, §17.2 |
-| D-47 | A message without a way rests in the sender's history and leaves again at every edge; after 14 days of resting the application closes it as `failed` with its reason, checked only when it would be sent again, never on a clock; 14 and not the 7 days of the post box, because it occupies the sender's own storage, not a holder's | owner, 14.09.2026 ("C with 14 days", S384) | §9.1, §9.3, §12.2 |
-| D-48 | A message lies with holders for at most 7 days and is never placed a second time (the one exception: §9.3); it stays `in transit`. A device whose last collection lies more than 7 days back asks every contact and group pair for what it missed, naming the moment of that collection; each sends its own messages since then, through the reconciliation of §14.6.3 carried between the pair. An edge, not a clock | owner, 02.10.2026 (decision 11; form: proposal S403) | §8.2, §9.1, §9.3, §9.5, §14.6.3, §20.2, §21.5.3 |
-| D-49 | The compromised device is a declared limit: against software with root or kernel rights the application protects no content; the seed is sealed by the device's key store at rest and readable in the running process. Below that it hardens — capture exclusion on Android, Windows and macOS, also in the beta build, with a switch only the test run sets, honoured in the live build only where no other application can set it; the application's own screenshot, into the picture collection, refused with a notice where forwarding is not allowed; accessibility marking on Android; cover while recording on iOS; on Linux nothing but the Wayland advice; no keyboard learning in the message field; a notification without content as a setting, off by default, on every platform; no Android backup; plaintext in transit only inside the profile; crash logs in the profile; no secret in a process argument; one notice per function where content leaves; `PR_SET_DUMPABLE` in the Linux live build only | owner, 02.10.2026 (S402 list, nos. 1–7, 9–14, 16, 20, 22) | §2, §21.4.2, §21.5.4, §22.8, §23.10, B-31 |
-| D-50 | Not built: locked memory for the seed — it lies in ordinary process memory; an application lock; removing or marking the copy button of the 24 words; a default expiry for new chats; root or jailbreak detection | owner, 02.10.2026 (S402 list, nos. 8, 17, 18, 19, 21) | §4.5.2, §23.10 |
-| D-51 | State of the device lives in a device database of the same build as the identity's, under `deriveSharedFileEncKey(master_seed)`; the master seed lies in the OS keyring. It holds the identities, the device keys, device-wide settings, the secret of the daemon–GUI connection and the node's own state (port and neighbours, post box, address-record key); the pieces held for others stay files. Daemon and GUI both open it | owner, 02.10.2026 | §4.5.2, §4.5.3, §21.4.1 |
-| D-52 | The connection between daemon and GUI is authenticated in both directions and encrypted on Linux, Windows and macOS, under a secret drawn once and kept in the device database; no unencrypted mode in any build; the 24 words are not served over it. Replaces the "no" to no. 15 of the S402 list | owner, 02.10.2026 | §22.1, §23.10 |

@@ -2,13 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:meta/meta.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_channel.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/link/data_port.dart';
-import 'package:cleona/core/service/multi_interface_mode.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart'
     show kDataSaverOk;
@@ -19,7 +19,6 @@ import 'package:cleona/core/contact/invite_issue_refusal.dart';
 import 'package:cleona/core/service/invitation_card_types.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/archive_config.dart';
-import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/archive/archive_types.dart'
     show ArchiveRetrievalStart;
 import 'package:cleona/core/calendar/sync/sync_types.dart';
@@ -28,6 +27,8 @@ import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/tray/tray_status.dart' show isTrayLanguage;
 import 'package:cleona/core/media/link_preview_fetcher.dart' show LinkPreviewSettings;
+import 'package:cleona/core/channels/system_channel_hub.dart' show SystemChannelHub;
+import 'package:cleona/core/channels/system_channel_json.dart' show systemChannelServe;
 
 /// Per-client state tracking active identity.
 class _ClientState {
@@ -50,6 +51,10 @@ class _ClientState {
   bool visible = false;
   /// The service this client reported an open conversation to, if any.
   CleonaService? activeConversationService;
+  /// Request id -> command of requests not answered yet, so that a refusal
+  /// can be logged with the command it refuses (S407-E2E-ZUSTELLFAELLE §3:
+  /// `send_text`/`leave_group` were refused without any trace).
+  final Map<int, String> pendingCommands = {};
 
   _ClientState(
       {required this.socket,
@@ -156,6 +161,14 @@ class IpcServer {
   Future<Map<String, dynamic>> Function()? onCalDAVServerRegenerateToken;
   Future<Map<String, dynamic>> Function(int port)? onCalDAVServerSetPort;
 
+  /// Windows: the state of the daemon's inbound firewall rule (v4_2 §22.x
+  /// "Windows Desktop") — `{state, exe}`, wired by the daemon. Without
+  /// [recheck] it answers what the start-up check found (waiting for it
+  /// while it runs); with it, it checks again (after the GUI ran "Allow in
+  /// firewall").
+  Future<Map<String, dynamic>> Function({required bool recheck})?
+      onWindowsFirewall;
+
   /// The secret of the connection (§22.1), read from the device database —
   /// asked once per connection (`IpcDaemonSession`).
   final Uint8List Function() _connectionSecret;
@@ -237,6 +250,9 @@ class IpcServer {
     }
   }
 
+  /// The system-channel hubs whose changes are already broadcast.
+  final Set<SystemChannelHub> _hookedHubs = {};
+
   /// Add a service at runtime (new identity created).
   void addService(String identityId, CleonaService service) {
     _services[identityId] = service;
@@ -253,6 +269,14 @@ class IpcServer {
     // Behind this server it is in front exactly when a client says so.
     service.setAppResumed(_clients.any((c) => c.inForeground),
         triggerNodeHarvest: false);
+    // §16.7 (S407 SK-4): the system channels are device-wide (one hub for
+    // every identity) — one event per change, without an identity, so the
+    // client takes it whichever identity it shows.
+    final hub = service.systemChannelHub;
+    if (_hookedHubs.add(hub)) {
+      hub.changes.listen(
+          (_) => _broadcastEvent(IpcEvent(event: 'system_channels_changed')));
+    }
     final originalOnStateChanged = service.onStateChanged;
     service.onStateChanged = () {
       originalOnStateChanged?.call();
@@ -288,6 +312,9 @@ class IpcServer {
           'coverReduceEnabled': service.coverReduceEnabled,
           'coverReduceActive': service.coverReduceActive,
           'portMappingEnabled': service.portMappingEnabled,
+          // §21.3.3 item 3 (S407-MASSENCACHE): the bulk-cache size — the
+          // same reasoning.
+          'bulkCacheMb': service.bulkCacheMb,
           'peerCount': service.peerCount,
           'confirmedPeerCount': service.confirmedPeerCount,
           'reachablePeerCount': service.reachablePeerCount,
@@ -990,6 +1017,12 @@ class IpcServer {
 
   Future<void> _dispatchCommand(_ClientState client, IpcRequest req) async {
     onCommandDispatched?.call(req.command);
+    // Bounded: a command that is never answered must not grow the map
+    // for the lifetime of a long-lived GUI connection.
+    if (client.pendingCommands.length >= 256) {
+      client.pendingCommands.remove(client.pendingCommands.keys.first);
+    }
+    client.pendingCommands[req.id] = req.command;
     try {
       switch (req.command) {
         // ── Identity management commands ─────────────────────────────
@@ -1450,6 +1483,31 @@ class IpcServer {
           ));
           break;
 
+        case 'update_group_profile':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final profileConvId = req.params['conversationId'] as String?;
+          if (profileConvId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId'));
+            break;
+          }
+          final profileResult = await service.updateGroupProfile(
+            profileConvId,
+            name: req.params['name'] as String?,
+            description: req.params['description'] as String?,
+            setPicture: req.params['setPicture'] as bool? ?? false,
+            pictureBase64: req.params['pictureBase64'] as String?,
+          );
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: profileResult,
+            error: profileResult ? null : 'Group profile update failed',
+          ));
+          break;
+
         case 'update_conversation_notifications':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1573,24 +1631,6 @@ class IpcServer {
           ));
           break;
 
-        case 'publish_contact_issue_report':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final pubNodeIdHex = req.params['nodeIdHex'] as String?;
-          if (pubNodeIdHex == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
-            break;
-          }
-          final pubOk = await service.publishContactIssueReport(pubNodeIdHex);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: pubOk,
-          ));
-          break;
-
         case 'build_log_report':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1602,19 +1642,6 @@ class IpcServer {
             id: req.id,
             success: true,
             data: {'report': logReport.toJson()},
-          ));
-          break;
-
-        case 'publish_log_report':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final logPubOk = await service.publishLogReport();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: logPubOk,
           ));
           break;
 
@@ -1657,6 +1684,27 @@ class IpcServer {
               error: neverOk ? null : 'Contact not found'));
           break;
 
+        // §17 principle, RL-7, D-69: "allow calls = disclose IP" — a local
+        // mark on the contact; the call paths read it.
+        case 'contact_set_calls_allowed':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final callsContactHex = req.params['nodeIdHex'] as String?;
+          final callsValue = req.params['allowed'] as bool?;
+          if (callsContactHex == null || callsValue == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Missing param: nodeIdHex or allowed'));
+            break;
+          }
+          final callsOk =
+              service.setContactCallsAllowed(callsContactHex, callsValue);
+          _sendResponse(client, IpcResponse(id: req.id, success: callsOk,
+              error: callsOk ? null : 'Contact not found'));
+          break;
+
         // §14.7.4: unilateral, receiver-side. Deliberately NOT routed through
         // the CHAT_CONFIG_UPDATE consent flow (§14.7.1) — a partner must not
         // be able to veto this node's own visibility.
@@ -1677,6 +1725,25 @@ class IpcServer {
           final withholdOk =
               service.setWithholdDeliveryStatus(withholdEntityId, withholdValue);
           _sendResponse(client, IpcResponse(id: req.id, success: withholdOk));
+          break;
+
+        // §9.4 "Loading images in a group or channel": local, at any time.
+        case 'set_always_load_images':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final loadEntityId = req.params['entityIdHex'] as String?;
+          final loadOn = req.params['on'] as bool?;
+          if (loadEntityId == null || loadOn == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false,
+                error: 'Missing param: entityIdHex or on'));
+            break;
+          }
+          _sendResponse(client, IpcResponse(
+              id: req.id, success: service.setAlwaysLoadImages(loadEntityId, loadOn)));
           break;
 
         // NO VERB FOR A SEND MODE (S389). Here stood `set_secure_mode`.
@@ -1778,6 +1845,26 @@ class IpcServer {
               data: {'enabled': service.portMappingEnabled}));
           break;
 
+        // §21.3.3 item 3 (S407-MASSENCACHE): the size of the bulk cache, one
+        // of `kBulkCacheTiersMb`. The answer carries the size now in force.
+        case 'set_bulk_cache':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final bulkMb = req.params['mb'];
+          if (bulkMb is! int) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: mb'));
+            break;
+          }
+          final bulkOk = await service.setBulkCacheMb(bulkMb);
+          _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: bulkOk,
+              data: {'mb': service.bulkCacheMb}));
+          break;
+
         case 'accept_name_change':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1857,6 +1944,29 @@ class IpcServer {
           ));
           break;
 
+        case 'resend_failed_legs':
+          // S410 "B": "retry" for a group or channel post — only the failed
+          // legs, nothing erased (`CleonaService.resendFailedMessage`).
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final resendConv = req.params['conversationId'] as String?;
+          final resendMsg = req.params['messageId'] as String?;
+          if (resendConv == null || resendMsg == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId or messageId'));
+            break;
+          }
+          final resent = await service.resendFailedMessage(resendConv, resendMsg);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: resent != null,
+            data: resent != null ? {'messageId': resent.id} : {},
+            error: resent == null ? 'Nothing sent again' : null,
+          ));
+          break;
+
         case 'leave_group':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1870,6 +1980,25 @@ class IpcServer {
           }
           final leaveResult = await service.leaveGroup(leaveGroupId);
           _sendResponse(client, IpcResponse(id: req.id, success: leaveResult));
+          break;
+
+        case 'answer_group_alone_question': // §16.2.2: asked once
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final aloneGroupId = req.params['groupIdHex'] as String?;
+          final aloneDelete = req.params['delete'] as bool?;
+          if (aloneGroupId == null || aloneDelete == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false,
+                error: 'Missing param: groupIdHex or delete'));
+            break;
+          }
+          final aloneOk = await service.answerGroupAloneQuestion(aloneGroupId,
+              delete: aloneDelete);
+          _sendResponse(client, IpcResponse(id: req.id, success: aloneOk));
           break;
 
         case 'join_group': // B-3 (§16.2.2): the explicit join
@@ -1988,73 +2117,23 @@ class IpcServer {
           ));
           break;
 
-        // ── Feature requests (§16.7 system channels, S398-W4) ─────────
+        // ── System channels (§16.7, S407 SK-4) ─────────────────────────
         //
-        // `ipc_client.dart` sent all three since the feature-request card
-        // exists, and the service implements all three
-        // (`CleonaService.submitFeatureRequest`/`voteFeatureRequest`/
-        // `featureRequestTally`). The dispatcher knew none of them and
-        // answered "Unknown command" — on Linux, Windows and macOS a
-        // submitted wish, a vote and the tally went nowhere, silently.
-        // The client-side half of the guard
-        // (`scripts/check_ipc_dispatch_reachable.dart`) now compares every
-        // `_sendRequest('…')` against the routed labels.
-        case 'submit_feature_request':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final frTitle = req.params['title'] as String? ?? '';
-          final frBody = req.params['body'] as String? ?? '';
-          final frMsg = await service.submitFeatureRequest(frTitle, frBody);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: frMsg != null,
-            data: frMsg == null
-                ? {}
-                : {
-                    'messageId': frMsg.id,
-                    'channelIdHex': frMsg.conversationId,
-                    'text': frMsg.text,
-                  },
-            error: frMsg == null ? 'Feature request not published' : null,
-          ));
-          break;
-
-        case 'vote_feature_request':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final frVoteId = req.params['recordIdHex'] as String?;
-          final frOption = (req.params['option'] as num?)?.toInt();
-          if (frVoteId == null || frOption == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex/option'));
-            break;
-          }
-          final frVoted = await service.voteFeatureRequest(frVoteId, frOption);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: frVoted,
-            error: frVoted ? null : 'Vote not published',
-          ));
-          break;
-
-        case 'feature_request_tally':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final frTallyId = req.params['recordIdHex'] as String?;
-          if (frTallyId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex'));
-            break;
-          }
-          final frTally = await service.featureRequestTally(frTallyId);
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: frTally));
+        // The ten methods of `SystemChannelApi`; the old commands
+        // (`submit_feature_request`, `vote_feature_request`,
+        // `feature_request_tally`, `publish_log_report`,
+        // `publish_contact_issue_report`) are gone with the record store.
+        case 'syschan_bug_log':
+        case 'syschan_feature_requests':
+        case 'syschan_channel_opened':
+        case 'syschan_mark_seen':
+        case 'syschan_prepare':
+        case 'syschan_send':
+        case 'syschan_discard':
+        case 'syschan_vote':
+        case 'syschan_retract':
+        case 'syschan_holders_known':
+          await _handleSystemChannels(client, req);
           break;
 
         // S398-W4 (finding B11): the client sends the new link-preview
@@ -2425,15 +2504,25 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
-        case 'set_multi_interface_mode':
-          final miService = _resolveService(client, req);
-          if (miService == null) {
+        case 'set_master_mute':
+          final mService = _resolveService(client, req);
+          if (mService == null) {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final mode = MultiInterfaceMode.modeFromString(req.params['mode'] as String?);
-          await miService.setMultiInterfaceMode(mode);
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          final muted = await mService.setMasterMute(req.params['on'] == true);
+          _sendResponse(client, IpcResponse(id: req.id, success: muted));
+          break;
+
+        case 'set_gui_device_setting':
+          final gService = _resolveService(client, req);
+          if (gService == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final stored = await gService.setGuiDeviceSetting(
+              req.params['field'] as String? ?? '', req.params['value']);
+          _sendResponse(client, IpcResponse(id: req.id, success: stored));
           break;
 
         case 'set_app_resumed':
@@ -2556,13 +2645,12 @@ class IpcServer {
               break;
             }
             _lastManualReconnect = now;
-            // Trigger the full §12.3 recovery sequence via onNetworkChanged(force:true).
-            unawaited(service.onNetworkChanged(force: true));
-            final peerCount = service.peerCount;
-            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-              'debounced': false,
-              'peersFound': peerCount,
-            }));
+            // v4_2 §25.7: "reconnect" is the edge "network change" of
+            // §11.8.2, through its one entry — for the whole host, with the
+            // router mapping (S407-LB-P12, finding A-3). The answer keeps
+            // its fields: an older GUI of the same installation reads them.
+            _sendResponse(client, IpcResponse(id: req.id, success: true,
+                data: await service.reconnect()));
           }
           break;
 
@@ -2674,6 +2762,57 @@ class IpcServer {
           }
           break;
 
+        // ── The archive setting (§21.6, S410 E10) ─────────────────────
+        //
+        // The settings screen of Linux/Windows reads and writes the
+        // identity's archive setting only through these two. The answer of
+        // `archive_settings_get` is `ArchiveSettingsView`: no password, no
+        // pin. `archive_settings_set` takes the password only when the user
+        // typed one (key `password` present: '' removes it); nothing of it
+        // goes into the log or into the answer.
+        case 'archive_settings_get':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final view = await service.getArchiveSettings();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: view != null,
+            data: view?.toJson() ?? const {},
+            error: view == null ? 'Archive setting not readable' : null,
+          ));
+          break;
+
+        case 'archive_settings_set':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final asConfig = req.params['config'];
+          final asSecret = req.params['password'];
+          if (asConfig is! Map || (asSecret != null && asSecret is! String)) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: config'));
+            break;
+          }
+          final ArchiveConfig asParsed;
+          try {
+            asParsed = ArchiveConfig.fromJson(Map<String, dynamic>.from(asConfig));
+          } catch (e) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Invalid archive config'));
+            break;
+          }
+          final asStored = await service.setArchiveSettings(asParsed,
+              password: asSecret as String?);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: asStored,
+            error: asStored ? null : 'Archive setting not stored',
+          ));
+          break;
+
         case 'archive_test_connection':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -2689,7 +2828,8 @@ class IpcServer {
             // from there into an environment variable of the helper process;
             // the answer below carries `reachable`, `protocol` and `host`
             // — not a word of it. That is intent and not carelessness: the
-            // archive password does not cross the IPC boundary.
+            // archive password does not cross the IPC boundary back to the
+            // surface (S410: the surface's "test connection" comes here).
             final config = ArchiveConfig.readFrom(service.store);
             if (config == null) {
               _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No archive config'));
@@ -2700,9 +2840,12 @@ class IpcServer {
               break;
             }
             // S394: a pinned share is identified before it is tested
-            // (§21.6) — see `testArchiveConnection`.
-            final r = await testArchiveConnection(config,
-                profileDir: service.profileDir);
+            // (§21.6) — the same test as in-process (`testArchiveShare`).
+            final r = await service.testArchiveShare();
+            if (r == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No host configured'));
+              break;
+            }
             final ok = r.reachable;
             _sendResponse(client, IpcResponse(id: req.id, success: ok, data: {
               'reachable': ok,
@@ -2791,6 +2934,27 @@ class IpcServer {
             'messageId': retrieveId,
             'started': !retrieveRunning,
             'alreadyRunning': retrieveRunning,
+          }));
+          break;
+
+        // The tier-2 preview (§21.6, S407-VORSCHAU), asked by the tile when
+        // it draws. Local only: read from the archive index, no share, no
+        // network. `preview` absent = this medium shows no preview.
+        case 'archive_preview':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final previewId = req.params['messageId'] as String?;
+          if (previewId == null || previewId.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: messageId'));
+            break;
+          }
+          final preview = await service.getArchivePreview(previewId);
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'messageId': previewId,
+            if (preview != null) 'preview': base64Encode(preview),
           }));
           break;
 
@@ -3096,6 +3260,20 @@ class IpcServer {
           await _handleCalendar(client, req);
           break;
 
+        // ── Windows: inbound firewall rule of the daemon (v4_2 §22.x) ──
+        case 'windows_firewall_state':
+        case 'windows_firewall_recheck':
+          final fw = onWindowsFirewall;
+          if (fw == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Windows firewall check not wired'));
+            break;
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true,
+              data: await fw(
+                  recheck: req.command == 'windows_firewall_recheck')));
+          break;
+
         // ── Polls (§24) ──────────────────────────────────────
         case 'poll_create':
         case 'poll_vote':
@@ -3128,11 +3306,10 @@ class IpcServer {
         // takes exactly this path at start. So only the public entry with a
         // freely named file was missing — that has been restored.
         //
-        // THE WAY OUT IS ALIVE TOO. The announcement runs via
-        // `BinaryRendezvousManager` (`cleona_service_update.dart:562`) and
-        // thus via Nostr, the explicit exception of the CUT decision. What
-        // AP-7 will replace in future is the fountain path for the contents
-        // themselves, not this command.
+        // The announcement over Nostr that followed (`BinaryRendezvousManager`)
+        // fell with V9 A1 (owner, 08.10.2026; v4_2 §26.6.4): a seeded node
+        // holds its objects for others through the update carrier, it
+        // announces nothing.
         //
         // `export_binary` stands next to it and was NEVER a CUT decision: it
         // disappeared on 08.07.2026 in `1d8e29de` during the move of this
@@ -3279,11 +3456,14 @@ class IpcServer {
             break;
           }
           final isAdultVal = req.params['value'] as bool? ?? false;
-          IdentityManager().setIsAdult(identityId, isAdultVal);
-          // Propagate to runtime IdentityContext
+          // §14.7 Type 8 (D-72): the service stores it (identity record and
+          // running context) and tells the other own devices.
           final adultService = _resolveService(client, req);
           if (adultService != null) {
-            adultService.identity.isAdult = isAdultVal;
+            adultService.setIsAdult(isAdultVal);
+          } else {
+            IdentityManager().setIsAdult(identityId, isAdultVal);
+            if (!isAdultVal) IdentityManager().setReviewEnabled(identityId, false);
           }
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
@@ -3295,7 +3475,12 @@ class IpcServer {
             break;
           }
           final reviewVal = req.params['value'] as bool? ?? true;
-          IdentityManager().setReviewEnabled(identityId, reviewVal);
+          final reviewService = _resolveService(client, req);
+          if (reviewService != null) {
+            reviewService.setReviewEnabled(reviewVal);
+          } else {
+            IdentityManager().setReviewEnabled(identityId, reviewVal);
+          }
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
@@ -3458,7 +3643,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final reason = req.params['reason'] as String? ?? 'busy';
+          final reason = req.params['reason'] as String? ?? 'declined';
           await service.rejectCall(reason: reason);
           _sendResponse(client, IpcResponse(
             id: req.id,
@@ -3557,7 +3742,12 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing groupIdHex'));
             break;
           }
-          final gcInfo = await service.startGroupCall(gcGroupId);
+          // §18.1.7: the event card rings only those who accepted.
+          final gcInvitees = (req.params['invitees'] as List?)
+              ?.whereType<String>()
+              .toSet();
+          final gcInfo =
+              await service.startGroupCall(gcGroupId, invitees: gcInvitees);
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: gcInfo != null,
@@ -3582,7 +3772,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final gcRejectReason = req.params['reason'] as String? ?? 'busy';
+          final gcRejectReason = req.params['reason'] as String? ?? 'declined';
           await service.rejectGroupCall(reason: gcRejectReason);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
@@ -4231,6 +4421,34 @@ class IpcServer {
   }
 
 
+  /// §16.7 (S407 SK-4): the system channels of the addressed identity.
+  Future<void> _handleSystemChannels(_ClientState client, IpcRequest req) async {
+    final service = _resolveService(client, req);
+    if (service == null) {
+      _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+      return;
+    }
+    switch (req.command) {
+      case 'syschan_bug_log':
+      case 'syschan_feature_requests':
+      case 'syschan_channel_opened':
+      case 'syschan_mark_seen':
+      case 'syschan_prepare':
+      case 'syschan_send':
+      case 'syschan_discard':
+      case 'syschan_vote':
+      case 'syschan_retract':
+      case 'syschan_holders_known':
+        try {
+          final data = await systemChannelServe(
+              service.systemChannelApi, req.command, req.params);
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: data));
+        } on ArgumentError catch (e) {
+          _sendResponse(client, IpcResponse(id: req.id, success: false, error: '${e.message}'));
+        }
+    }
+  }
+
   Future<void> _handlePolls(_ClientState client, IpcRequest req) async {
     switch (req.command) {
         // ── Polls (§24) ────────────────────────────────────────────────
@@ -4424,8 +4642,7 @@ class IpcServer {
           break;
 
         // §19.6 — In-network update IPC commands
-        // Binary-update subsystem lives on the primary identity's service
-        // only (first service to start gets node.binaryRendezvousManager).
+        // Binary-update subsystem lives on the primary identity's service.
         // Always resolve to primary, never to the client's active identity.
         //
         // `seed_binary` and `export_binary` are back since 02.09.2026.
@@ -4453,16 +4670,11 @@ class IpcServer {
                   error: 'Missing platform/version/filePath'));
               break;
             }
-            // `maxFragments` is optional; if it is missing, the service's
-            // default applies (50, §19.6.2 "bootstrap=all"). An unusable
-            // value (<= 0) is NOT passed through as 0 — that would silently
-            // have stored nothing and still reported success.
-            final rawMax = req.params['maxFragments'];
-            final maxFragments = rawMax is int && rawMax > 0 ? rawMax : null;
-            final result = maxFragments == null
-                ? await service.seedBinaryFromFile(platform, version, filePath)
-                : await service.seedBinaryFromFile(platform, version, filePath,
-                    maxFragments: maxFragments);
+            // `maxFragments` (how many Reed-Solomon fragments to store) fell
+            // with S407-UPDATEFRAGMENTE: only the complete object is stored.
+            // A caller that still sends it is not refused; it has no effect.
+            final result =
+                await service.seedBinaryFromFile(platform, version, filePath);
             final hasError = result.containsKey('error');
             _sendResponse(client, IpcResponse(
                 id: req.id, success: !hasError, data: result,
@@ -4471,7 +4683,7 @@ class IpcServer {
           break;
 
         // `export_binary` writes a binary that is COMPLETELY present in the
-        // fragment store onto the disk (§19.6.7, physical transfer via
+        // update store onto the disk (§19.6.7, physical transfer via
         // USB/NFC). The carrier is `PhysicalTransferHelper.exportBinary`
         // (`lib/core/update/physical_transfer_helper.dart:32`) and is built
         // continuously (`cleona_service_update.dart:498`) — since the
@@ -4508,7 +4720,10 @@ class IpcServer {
               break;
             }
             final exportedHash = await helper.exportBinary(
-                platform: platform, version: version, outputPath: outputPath);
+                platform: platform,
+                version: version,
+                outputPath: outputPath,
+                installedPath: service.installedBinaryPathFor(platform, version));
             _sendResponse(client, IpcResponse(
                 id: req.id,
                 success: exportedHash != null,
@@ -4892,6 +5107,11 @@ class IpcServer {
   }
 
   void _sendResponse(_ClientState client, IpcResponse response) {
+    final command = client.pendingCommands.remove(response.id);
+    if (!response.success) {
+      _log.info('IPC ${command ?? '(unknown command, id ${response.id})'} '
+          'refused: ${response.error ?? '(no reason given)'}');
+    }
     if (client.removed) return;
     try {
       _writeSealed(client, response.toJsonLine());
@@ -4911,6 +5131,20 @@ class IpcServer {
         _log.debug('Failed to broadcast to client: $e');
         _removeClient(client);
       }
+    }
+  }
+
+  /// Breaks every client connection from the server side while the server
+  /// keeps listening — the break a client meets when the daemon side drops
+  /// it, after which the client reconnects by itself. Since E7 (S407) the
+  /// client's own `disconnect()` is a deliberate close without reconnect,
+  /// so tests that need a break use this.
+  @visibleForTesting
+  void dropClientsForTesting() {
+    for (final client in List.of(_clients)) {
+      try {
+        client.socket.destroy();
+      } catch (_) {}
     }
   }
 

@@ -9,11 +9,14 @@
 // - Security rule: Never delete without confirmed archival
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_network.dart';
+import 'package:cleona/core/archive/archive_thumbnail.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/archive/share_identity.dart';
 import 'package:cleona/core/archive/archive_types.dart';
@@ -69,7 +72,23 @@ class ArchiveManager {
   ArchiveConfig _config;
   ArchiveConfig get config => _config;
 
-  final ArchiveTransport transport;
+  /// The way to the share. Not `final` since S410: a changed setting that
+  /// names another share brings its own transport ([applySetting]); it
+  /// takes over only between runs and retrievals, never inside one.
+  ArchiveTransport _transport;
+  ArchiveTransport get transport => _transport;
+
+  /// A changed setting for ANOTHER share that waits until no run and no
+  /// retrieval is in flight ([applySetting], [_applyPendingIfIdle]).
+  ({ArchiveConfig config, ArchiveTransport transport})? _pending;
+
+  /// Where the scheduler gets the conversations from — kept so that a
+  /// changed interval can restart the tick ([applySetting]).
+  ArchiveConversationSource? _source;
+
+  /// The archive is switched off ([suspend]): no run starts, a running run
+  /// ends at the next medium.
+  bool _suspended = false;
   final String profileDir;
 
   /// The encrypted store of the identity (§21.4).
@@ -138,7 +157,7 @@ class ArchiveManager {
   // did not take effect anyway.
   ArchiveManager({
     required this._config,
-    required this.transport,
+    required this._transport,
     required this.profileDir,
     // ignore: library_private_types_in_public_api
     this._store,
@@ -166,12 +185,93 @@ class ArchiveManager {
   }) async {
     if (_running) return;
     _running = true;
-    await _loadEntries();
+    _suspended = false;
+    _source = conversationSource;
+    // A manager switched on again ([suspend]) keeps the index it holds.
+    if (!_loaded) await _loadEntries();
 
     _scheduler = Timer.periodic(
       Duration(minutes: config.archiveCheckIntervalMinutes),
       (_) => _runScheduled(conversationSource),
     );
+  }
+
+  // -- A changed setting (S410 follow-up, owner 29.10.2026 "A") -----------
+  //
+  // The setting takes effect when it is stored, not at the next start of
+  // the service. Everything a run reads from the setting it reads from
+  // [config] while it runs (ages, budget, tiers, narrowing) — that changes
+  // at once, as "only in this network" already did ([setAllowedNetworks]).
+  // The interval restarts the tick. ANOTHER share (protocol, host, path,
+  // user, password, port) needs another transport: it takes over between
+  // runs and retrievals, so that no run uploads to one share and records
+  // the address of another; a running run ends at the next medium.
+
+  /// Takes [setting] over. [transport]: the share changed — the transport
+  /// for the new one (already connected); `null`: the same share.
+  void applySetting(ArchiveConfig setting, {ArchiveTransport? transport}) {
+    if (transport != null) {
+      _pending = (config: setting, transport: transport);
+      _log.info('Archive setting names another share — it takes over '
+          '${_checkInFlight || _retrievals.isNotEmpty ? 'when the running '
+              'run or retrieval has ended' : 'now'}');
+      _applyPendingIfIdle();
+      return;
+    }
+    // The same share as now: a change for another one that still waited
+    // is superseded.
+    final superseded = _pending;
+    _pending = null;
+    if (superseded != null) {
+      unawaited(superseded.transport.disconnect().catchError((_) {}));
+    }
+    final interval = _config.archiveCheckIntervalMinutes;
+    _config = setting;
+    _rescheduleIf(interval);
+  }
+
+  /// Is a setting for another share waiting to take over?
+  bool get settingPending => _pending != null;
+
+  /// Does the tick run?
+  bool get scheduled => _scheduler != null;
+
+  void _applyPendingIfIdle() {
+    final p = _pending;
+    if (p == null || _checkInFlight || _retrievals.isNotEmpty) return;
+    _pending = null;
+    final interval = _config.archiveCheckIntervalMinutes;
+    _config = p.config;
+    final old = _transport;
+    _transport = p.transport;
+    // The pin belongs to the share asked last; the next run or retrieval
+    // identifies the new one first (§21.6).
+    _identityState = null;
+    _identityDetail = '';
+    unawaited(old.disconnect().catchError((_) {}));
+    _rescheduleIf(interval);
+    _log.info('Archive setting for ${_config.shareTarget} taken over');
+  }
+
+  void _rescheduleIf(int oldInterval) {
+    final source = _source;
+    if (_scheduler == null ||
+        source == null ||
+        _config.archiveCheckIntervalMinutes == oldInterval) {
+      return;
+    }
+    _scheduler!.cancel();
+    _scheduler = Timer.periodic(
+      Duration(minutes: _config.archiveCheckIntervalMinutes),
+      (_) => _runScheduled(source),
+    );
+  }
+
+  /// The archive was switched off: no tick, no new run, and a running run
+  /// ends at the next medium. [startScheduler] switches it on again.
+  Future<void> suspend() async {
+    _suspended = true;
+    await stopScheduler();
   }
 
   /// A run started by the scheduler.
@@ -238,14 +338,25 @@ class ArchiveManager {
       return ArchiveCheckResult()
         ..skippedReason = 'another archive check is still running';
     }
+    final stop = _stopReason();
+    if (stop != null) return ArchiveCheckResult()..skippedReason = stop;
     _checkInFlight = true;
     try {
       return await _runCheck(
           currentSSID: currentSSID, conversations: conversations);
     } finally {
       _checkInFlight = false;
+      _applyPendingIfIdle();
     }
   }
+
+  /// Why a run must not start or go on (S410 follow-up): the archive was
+  /// switched off, or a setting for another share waits to take over.
+  String? _stopReason() => _suspended
+      ? 'the archive is switched off'
+      : _pending != null
+          ? 'the setting changed to another share — the next run uses it'
+          : null;
 
   Future<ArchiveCheckResult> _runCheck({
     String? currentSSID,
@@ -296,6 +407,9 @@ class ArchiveManager {
         for (final msg in conv.messages) {
           if (!msg.isMedia) continue;
           if (!ArchiveConfig.isMediaArchivable(msg.mimeType)) continue;
+          // The setting changed meanwhile: the run ends at this medium.
+          final stop = _stopReason();
+          if (stop != null) return result..skippedReason = stop;
 
           final age = DateTime.now().difference(msg.timestamp);
           if (!config.shouldArchive(age, pinned: isPinned(msg.id))) continue;
@@ -320,7 +434,9 @@ class ArchiveManager {
     }
 
     // Budget-Enforcement
-    final evicted = await _enforceStorageBudget();
+    final stop = _stopReason();
+    if (stop != null) return result..skippedReason = stop;
+    final evicted = await _enforceStorageBudget(conversations);
     result.evicted = evicted;
 
     // No more full-state writing at the end of the run: each of the four
@@ -521,14 +637,23 @@ class ArchiveManager {
       );
 
       // Create entry.
+      //
+      // S407-VORSCHAU — the tier is `original`, whatever the age: the file
+      // IS still on the device, and the tier says where the medium lives,
+      // not how old it is. The previous line wrote `tierForAge(age)` here —
+      // `thumbnail` for every medium, because nothing younger than the
+      // first deadline gets here (`shouldArchive`). [_checkTierTransition]
+      // then found "target <= tier" and left the original where it was
+      // until the NEXT deadline: tier 2 with the original gone was never
+      // reached on the deadline path, and the step that produces the
+      // preview ([_releaseOriginal]) never ran for it. The step down
+      // happens in [_checkTierTransition], with the share asked afresh.
       final entry = ArchiveEntry(
         messageId: msg.id,
         conversationId: msg.conversationId,
         shareUrl: shareUrl,
         archivedAt: DateTime.now(),
-        tier: isPinned(msg.id)
-            ? config.archivedTierForPinned()
-            : config.tierForAge(DateTime.now().difference(msg.timestamp)),
+        tier: ArchiveTier.original,
         contentHash: contentHashHex,
         pinned: isPinned(msg.id),
         fileSizeBytes: data.length,
@@ -568,9 +693,18 @@ class ArchiveManager {
     // retrieval (S392-15). Without this the run after a retrieval computed
     // the tier from the message age again and deleted the file within the
     // hour.
-    final targetTier = config.tierForAge(
+    final computed = config.tierForAge(
         entry.tierAge(age, DateTime.now()), pinned: entry.pinned);
-    if (targetTier.index <= entry.tier.index) return; // No downgrade needed
+    // Stock written before S407-VORSCHAU carries the tier for the age at
+    // upload time while the original is still on the device (see
+    // [_archiveMessage]). It is released at the tier it already names —
+    // the same evidence, the same step, and it gets its images.
+    final staleStock = entry.tier != ArchiveTier.original &&
+        filePath != null &&
+        MediaStore.instance.existsEitherWay(filePath);
+    if (computed.index <= entry.tier.index && !staleStock) return;
+    final targetTier =
+        computed.index > entry.tier.index ? computed : entry.tier;
 
     // Security rule: only downgrade if archived
     if (!config.canDeleteLocal(getStatus(messageId))) return;
@@ -585,42 +719,108 @@ class ArchiveManager {
     // here.
     if (entry.pinned) return;
 
+    await _releaseOriginal(entry, filePath, targetTier, reason: 'tier deadline');
+  }
+
+  /// Removes the local original after confirmed archiving and advances the
+  /// tier to [targetTier] — the ONE place where an original leaves the
+  /// device. Used by the tier deadline ([_checkTierTransition]) and by the
+  /// storage budget ([_enforceStorageBudget]); both must pass the same
+  /// evidence (§21.6: "never without confirmed archiving").
+  ///
+  /// The order is NOT arbitrary: first check, then delete, then advance the
+  /// tier (see [_checkTierTransition]). Returns `true` when the original is
+  /// gone (or was already gone) and the tier stands at [targetTier];
+  /// `false` when anything held it back — then file AND tier stay.
+  ///
+  /// The tier advances through [ArchiveEntry.copyWith]: the preview images
+  /// on the record must survive the step (S407-P3). The record built field
+  /// by field before dropped them on every transition.
+  ///
+  /// **The images (§21.6 tiers 2 and 3, S407-VORSCHAU).** This is the last
+  /// moment the original's bytes exist on the device, so this is where the
+  /// preview and the mini are made — from the bytes [_shareHoldsFile] has
+  /// just verified, BEFORE the file is deleted, by [ArchiveThumbnails].
+  /// They go into the index record (the identity's encrypted store, §21.4.1;
+  /// see [ArchiveEntry.previewBytes]) — no file is written for them. Each
+  /// tier keeps what it shows: tier 2 preview and mini, tier 3 the mini,
+  /// tier 4 nothing. A medium that is no still image (video: no frame grab)
+  /// gets no images and is shown with date, size and type icon.
+  Future<bool> _releaseOriginal(
+      ArchiveEntry entry, String? filePath, ArchiveTier targetTier,
+      {required String reason}) async {
+    final messageId = entry.messageId;
+    if (!config.canDeleteLocal(getStatus(messageId))) return false;
+    if (entry.pinned) return false;
+
     // The original only goes away if the share still holds it NOW.
     // If that fails, both stay: file and tier.
+    ArchiveThumbnailResult? images;
     if (filePath != null && MediaStore.instance.existsEitherWay(filePath)) {
-      final released = await _shareHoldsFile(entry, filePath);
-      if (!released) return; // begruendet in `_shareHoldsFile`
+      final verified = await _shareHoldsFile(entry, filePath);
+      if (verified == null) return false; // reason logged in `_shareHoldsFile`
+
+      images = await _imagesFor(entry, verified, targetTier);
 
       if (!MediaStore.instance.deleteEitherWay(filePath)) {
         _log.warn('Tier transition for $messageId held back: the local '
             'original resisted deletion ($filePath). The share copy is '
             'confirmed, but advancing the tier now would show a placeholder '
             'for a file that is still on the device.');
-        return;
+        return false;
       }
-      _log.info('Local original removed after confirmed archiving: '
-          '$messageId -> ${entry.tier.name}>${targetTier.name} '
+      _log.info('Local original removed after confirmed archiving '
+          '($reason): $messageId -> ${entry.tier.name}>${targetTier.name} '
           '(${entry.fileSizeBytes} B freed)');
     }
 
-    // Create new entry with updated tier
-    _entries[messageId] = ArchiveEntry(
-      messageId: entry.messageId,
-      conversationId: entry.conversationId,
-      shareUrl: entry.shareUrl,
-      archivedAt: entry.archivedAt,
-      tier: targetTier,
-      contentHash: entry.contentHash,
-      pinned: entry.pinned,
-      fileSizeBytes: entry.fileSizeBytes,
-      mimeType: entry.mimeType,
-      originalFilename: entry.originalFilename,
-      retrievedAt: entry.retrievedAt,
-    );
-    _persistMessage(messageId);
+    final madeImages = images != null && images.ok;
+    if (targetTier.index > entry.tier.index || madeImages) {
+      _entries[messageId] = entry.copyWith(
+        tier: targetTier,
+        previewBytes: madeImages ? images.preview : null,
+        miniBytes: madeImages ? images.mini : null,
+        thumbnailMimeType: madeImages ? images.mimeType : null,
+        dropPreview: targetTier.index >= ArchiveTier.mini.index,
+        dropMini: targetTier == ArchiveTier.metadataOnly,
+      );
+      _persistMessage(messageId);
+    }
+    return true;
+  }
+
+  /// Preview and mini for [targetTier], or `null` when the tier shows no
+  /// image (tier 4) or the medium is no still image.
+  ///
+  /// In a separate isolate: decoding a 12 MP photo takes a few hundred
+  /// milliseconds and up to ~290 MB (`ArchiveThumbnails.maxSourcePixels`),
+  /// and the archive run shares its isolate with the delivery layer (the
+  /// daemon, and the app process on Android/iOS, §22.6). Never throws.
+  Future<ArchiveThumbnailResult?> _imagesFor(
+      ArchiveEntry entry, Uint8List bytes, ArchiveTier targetTier) async {
+    if (targetTier != ArchiveTier.thumbnail && targetTier != ArchiveTier.mini) {
+      return null;
+    }
+    final mime = entry.mimeType;
+    if (mime != null && !mime.toLowerCase().startsWith('image/')) return null;
+    try {
+      final r = await Isolate.run(
+          () => ArchiveThumbnails.fromBytes(bytes, mimeType: mime));
+      if (!r.ok) {
+        _log.info('No archive preview for ${entry.messageId}: '
+            '${r.refusal.name}');
+      }
+      return r;
+    } catch (e) {
+      _log.warn('Archive preview for ${entry.messageId} failed: $e');
+      return null;
+    }
   }
 
   /// Does the share hold the file RIGHT NOW and with EXACTLY THIS content?
+  /// Returns the local bytes it verified, or `null` for "no" — the caller
+  /// makes the preview images from exactly these bytes (S407-VORSCHAU), so
+  /// the original is read once, not twice.
   ///
   /// S392/B2 — the only evidence that justifies a deletion. What
   /// explicitly does NOT count as evidence here:
@@ -655,7 +855,8 @@ class ArchiveManager {
   /// aborted upload that leaves behind a too-short file with the right name
   /// would pass here. `_archiveMessage` checks directly
   /// after the upload, therefore the window is narrow, but it is there.
-  Future<bool> _shareHoldsFile(ArchiveEntry entry, String filePath) async {
+  Future<Uint8List?> _shareHoldsFile(
+      ArchiveEntry entry, String filePath) async {
     // (1) Are they still the same bytes?
     final Uint8List? local;
     try {
@@ -663,12 +864,12 @@ class ArchiveManager {
     } catch (e) {
       _log.warn('Refusing to delete ${entry.messageId}: local original '
           'could not be read for verification: $e');
-      return false;
+      return null;
     }
     if (local == null) {
       _log.warn('Refusing to delete ${entry.messageId}: local original '
           'unreadable (no key registered, or file vanished mid-check).');
-      return false;
+      return null;
     }
     final hash = _computeSimpleHash(local);
     if (hash != entry.contentHash) {
@@ -676,7 +877,7 @@ class ArchiveManager {
           'hashes to $hash, the archive entry was written for '
           '${entry.contentHash}. The share holds a different version of '
           'this attachment.');
-      return false;
+      return null;
     }
 
     // (2) Does it lie there — asked now, not remembered?
@@ -686,58 +887,81 @@ class ArchiveManager {
     } catch (e) {
       _log.warn('Refusing to delete ${entry.messageId}: share URL '
           '"${entry.shareUrl}" is not a usable path: $e');
-      return false;
+      return null;
     }
     try {
       final there = await transport.fileExists(remotePath);
       if (!there) {
         _log.warn('Refusing to delete ${entry.messageId}: the share does '
             'NOT hold $remotePath any more. Original stays on the device.');
-        return false;
+        return null;
       }
     } catch (e) {
       _log.warn('Refusing to delete ${entry.messageId}: the share did not '
           'answer for $remotePath ($e). Original stays on the device.');
-      return false;
+      return null;
     }
-    return true;
+    return local;
   }
 
-  /// Budget enforcement: evict oldest unpinned media.
-  Future<int> _enforceStorageBudget() async {
-    final usedMB = await getUsedStorageMB();
-    if (!config.needsEviction(usedMB: usedMB)) return 0;
+  /// Storage budget (§21.6): "once it is exhausted, the oldest unpinned
+  /// medium is archived first, independent of the tier configuration".
+  ///
+  /// S395-8 / S407-P3 — until here this only lowered the tier in the index
+  /// record and deleted NO file. The used space (`getUsedStorageMB`, the
+  /// files under `media/`) therefore never fell, the loop ran through every
+  /// archived entry on every run, and within three runs each of them stood
+  /// at `metadataOnly` while its original was still on the device — the
+  /// chat showed a placeholder for a file that was there, and the budget
+  /// was never met. It also sorted by `archivedAt` (when the upload
+  /// happened), not by the medium's age, and never archived a medium that
+  /// was not yet old enough for the first deadline.
+  ///
+  /// Now, oldest medium first (its tier age: from the retrieval if it was
+  /// brought back, §21.6 "a retrieved original counts as new"), unpinned,
+  /// with its original still on the device: archive it if it is not yet,
+  /// then release it through [_releaseOriginal] — the same evidence as the
+  /// tier deadline — at least to tier 2. Stops as soon as the budget holds.
+  /// Without [conversations] there is no file to find: nothing happens.
+  ///
+  /// Returns the number of originals that left the device.
+  Future<int> _enforceStorageBudget(
+      Map<String, Conversation>? conversations) async {
+    if (conversations == null) return 0;
+    if (!config.needsEviction(usedMB: await getUsedStorageMB())) return 0;
 
-    // Sort by archivedAt (oldest first), only unpinned.
-    final evictable = _entries.values
-        .where((e) => config.isEvictableForBudget(pinned: e.pinned))
-        .where((e) => config.evictionAction(e.tier) == EvictionAction.downgrade)
-        .toList()
-      ..sort((a, b) => a.archivedAt.compareTo(b.archivedAt));
+    final now = DateTime.now();
+    final candidates = <({UiMessage msg, Conversation conv, Duration age})>[];
+    for (final conv in conversations.values) {
+      if (!ArchiveConfig.isConversationEligible(conv)) continue;
+      for (final msg in conv.messages) {
+        if (!msg.isMedia || msg.filePath == null) continue;
+        if (!ArchiveConfig.isMediaArchivable(msg.mimeType)) continue;
+        if (!config.isEvictableForBudget(pinned: isPinned(msg.id))) continue;
+        if (!MediaStore.instance.existsEitherWay(msg.filePath!)) continue;
+        final messageAge = now.difference(msg.timestamp);
+        final age = _entries[msg.id]?.tierAge(messageAge, now) ?? messageAge;
+        candidates.add((msg: msg, conv: conv, age: age));
+      }
+    }
+    candidates.sort((a, b) => b.age.compareTo(a.age)); // oldest first
 
     var evicted = 0;
-    for (final entry in evictable) {
+    for (final c in candidates) {
       if (!config.needsEviction(usedMB: await getUsedStorageMB())) break;
-
-      // Downgrade to next tier.
-      final nextTier = ArchiveTier.values[entry.tier.index + 1];
-      _entries[entry.messageId] = ArchiveEntry(
-        messageId: entry.messageId,
-        conversationId: entry.conversationId,
-        shareUrl: entry.shareUrl,
-        archivedAt: entry.archivedAt,
-        tier: nextTier,
-        contentHash: entry.contentHash,
-        pinned: entry.pinned,
-        fileSizeBytes: entry.fileSizeBytes,
-        mimeType: entry.mimeType,
-        originalFilename: entry.originalFilename,
-        retrievedAt: entry.retrievedAt,
-      );
-      _persistMessage(entry.messageId);
-      evicted++;
+      if (!_entries.containsKey(c.msg.id)) {
+        if (!await _archiveMessage(c.msg, c.conv)) continue;
+      }
+      final entry = _entries[c.msg.id];
+      if (entry == null || entry.pinned) continue;
+      final target = entry.tier.index >= ArchiveTier.thumbnail.index
+          ? entry.tier
+          : ArchiveTier.thumbnail;
+      if (await _releaseOriginal(entry, c.msg.filePath, target,
+          reason: 'storage budget')) {
+        evicted++;
+      }
     }
-
     return evicted;
   }
 
@@ -772,12 +996,26 @@ class ArchiveManager {
       m.archiveTier = e.tier.name;
       m.archiveShareUrl = e.shareUrl;
       m.archivedAt = e.archivedAt;
-      // `archiveMiniBase64` stays UNTOUCHED. The mini bytes are produced by
-      // S392/B1 (`archive_thumbnail.dart`) and stored in the index record;
-      // as long as [ArchiveEntry] does not carry them, there is nothing to
-      // stamp here — and writing `null` where B1 later has something
-      // would be the line one then overlooks.
+      // The mini (~2-5 KB) travels with every message on tiers 2 and 3; the
+      // preview (up to 50 KB) does not — a snapshot carries every loaded
+      // message, and the preview is fetched when a tile shows it
+      // ([previewOf]). Tier 4 shows no image, whatever the record holds.
+      final mini = e.miniBytes;
+      m.archiveMiniBase64 = mini != null &&
+              (e.tier == ArchiveTier.thumbnail || e.tier == ArchiveTier.mini)
+          ? base64Encode(mini)
+          : null;
     }
+  }
+
+  /// The preview of tier 2 (§21.6) for [messageId], or `null` when the
+  /// medium is on another tier or has none (video, undecodable). The UI
+  /// asks for it when it draws the tile; it does not travel in snapshots.
+  ({Uint8List bytes, String? mimeType})? previewOf(String messageId) {
+    final e = _entries[messageId];
+    final p = e?.previewBytes;
+    if (e == null || p == null || e.tier != ArchiveTier.thumbnail) return null;
+    return (bytes: p, mimeType: e.thumbnailMimeType);
   }
 
   // -- Pin management ------------------------------------------------------
@@ -793,18 +1031,11 @@ class ArchiveManager {
     _pinned[messageId] = pinned;
     final entry = _entries[messageId];
     if (entry != null) {
-      _entries[messageId] = ArchiveEntry(
-        messageId: entry.messageId,
-        conversationId: entry.conversationId,
-        shareUrl: entry.shareUrl,
-        archivedAt: entry.archivedAt,
+      // Through `copyWith`: the record built field by field dropped the
+      // preview images on every pin (S407-VORSCHAU).
+      _entries[messageId] = entry.copyWith(
         tier: pinned ? ArchiveTier.original : entry.tier,
-        contentHash: entry.contentHash,
         pinned: pinned,
-        fileSizeBytes: entry.fileSizeBytes,
-        mimeType: entry.mimeType,
-        originalFilename: entry.originalFilename,
-        retrievedAt: entry.retrievedAt,
       );
     }
     _persistMessage(messageId);
@@ -974,6 +1205,8 @@ class ArchiveManager {
       if (identical(_retrievals[messageId], run)) {
         _retrievals.remove(messageId);
       }
+      // A setting for another share waited for this retrieval.
+      _applyPendingIfIdle();
     });
     _retrievals[messageId] = run;
     return run;

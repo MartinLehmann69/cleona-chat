@@ -2,18 +2,21 @@
 ///
 /// Loads libwhisper as a shared library and provides functions
 /// for model loading, audio transcription and resource cleanup.
-/// Supports model sizes tiny (~40MB), base (~75MB), small (~250MB).
+/// Supports model sizes tiny (~78 MB), base (~148 MB), small (~488 MB).
 library;
 
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 import 'package:cleona/core/archive/voice_transcription_config.dart';
+import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/util/hex.dart';
 
 // ── whisper.cpp Native Function Types ────────────────────────────────────
 
@@ -543,14 +546,133 @@ class WhisperFFI {
   }
 
   /// Hugging Face download URL for a model.
-  static String modelUrl(WhisperModelSize size) {
-    final modelName = switch (size) {
-      WhisperModelSize.tiny => 'ggml-tiny.bin',
-      WhisperModelSize.base => 'ggml-base.bin',
-      WhisperModelSize.small => 'ggml-small.bin',
-    };
-    return 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$modelName';
+  static String modelUrl(WhisperModelSize size) => modelSource(size).url;
+
+  /// Where a model comes from and what it must be (owner decision D-64,
+  /// 20.10.2026: downloaded directly from the source, checked against a
+  /// SHA-256 fixed in the program before it is used).
+  static WhisperModelSource modelSource(WhisperModelSize size) =>
+      sourceForTesting?.call(size) ?? _builtInSources[size]!;
+
+  /// Test hook ONLY: replaces source, digest and length of a model so a
+  /// smoke can serve a file from a local HTTP server. Never set in the app.
+  static WhisperModelSource Function(WhisperModelSize size)? sourceForTesting;
+
+  /// The three models, fixed.
+  ///
+  /// SOURCE of every digest and length (checked 20.10.2026, S407):
+  /// - the LFS object id (= SHA-256 of the file) and size listed by
+  ///   https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/main
+  ///   and shown as "SHA256:" on
+  ///   `https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-<size>.bin`,
+  ///   repository revision `5359861c739e955e79d9a303bcbc70fb988958b1`
+  ///   (lastModified 2024-10-29T18:25:17Z; header `x-repo-commit` of the
+  ///   download URL below on 20.10.2026);
+  /// - recomputed the same day with `sha256sum` over the files downloaded
+  ///   from `resolve/main/…` AND from the pinned URLs below
+  ///   (`resolve/<revision>/…`, answer header `x-repo-commit` = revision) —
+  ///   all identical.
+  /// The URL names the REVISION, not `main`: a file replaced under `main`
+  /// would make the fixed digest wrong for good and the model could never
+  /// be loaded again. Under a revision the bytes cannot change; a new model
+  /// comes with an app update carrying revision and digest (D-64).
+  static const Map<WhisperModelSize, WhisperModelSource> _builtInSources = {
+    WhisperModelSize.tiny: WhisperModelSource(
+      fileName: 'ggml-tiny.bin',
+      url: '$_hfBase/ggml-tiny.bin',
+      sha256Hex:
+          'be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21',
+      bytes: 77691713,
+    ),
+    WhisperModelSize.base: WhisperModelSource(
+      fileName: 'ggml-base.bin',
+      url: '$_hfBase/ggml-base.bin',
+      sha256Hex:
+          '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe',
+      bytes: 147951465,
+    ),
+    WhisperModelSize.small: WhisperModelSource(
+      fileName: 'ggml-small.bin',
+      url: '$_hfBase/ggml-small.bin',
+      sha256Hex:
+          '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b',
+      bytes: 487601967,
+    ),
+  };
+
+  /// Whether the file at [path] is exactly [source]: same length first
+  /// (cheap), then the SHA-256 over the whole file, computed in a worker
+  /// isolate so the hash of up to ~490 MB never stalls the event loop.
+  static Future<bool> fileMatches(String path, WhisperModelSource source) async {
+    final file = File(path);
+    if (!file.existsSync() || file.lengthSync() != source.bytes) return false;
+    fileHashRuns++;
+    final digest = await Isolate.run(() => sha256OfFile(path));
+    return bytesToHex(digest) == source.sha256Hex.toLowerCase();
   }
+
+  /// How many SHA-256 runs over a model file this process made — read by
+  /// the smoke that holds "a checked model is never hashed again".
+  static int fileHashRuns = 0;
+
+  // ── The "checked" mark (owner decision 20.10.2026) ──────────────────
+  //
+  // A model is hashed when it is downloaded and never again. What says
+  // "checked" afterwards is a mark NEXT TO the model file,
+  // `<model>.checked`, holding the digest and length it was checked
+  // against. Why a file beside the model and not a row in the device
+  // database (`device.db`): the models are program data of the whole
+  // installation under `<dataDir>/models/` (§21.7), shared by every
+  // identity and read by the window process without any key; the device
+  // database lives per profile and opens only under a key from the master
+  // seed. The mark lies, is replaced and is deleted together with the file
+  // it speaks for, and it holds no secret (the digest is public).
+  //
+  // Old and new: a model downloaded before this mark existed has none; it
+  // is hashed ONCE and gets one (`ensureModelChecked`). A program without
+  // the mark (older 4.2.x) ignores the extra file. A mark whose digest is
+  // not the one this program fixes (another model version) counts as no
+  // mark, so that model is checked once against the digest of today.
+
+  static String checkedMarkPath(WhisperModelSize size) =>
+      '${modelPath(size)}.checked';
+
+  static String _markText(WhisperModelSource s) =>
+      '${s.sha256Hex.toLowerCase()} ${s.bytes}\n';
+
+  /// Whether the model of [size] carries a valid mark: the mark names the
+  /// digest and length this program fixes, and the file has that length.
+  /// Reads the mark and the file's length — never hashes.
+  static bool hasCheckedMark(WhisperModelSize size) {
+    try {
+      final mark = File(checkedMarkPath(size));
+      final model = File(modelPath(size));
+      if (!mark.existsSync() || !model.existsSync()) return false;
+      final source = modelSource(size);
+      return mark.readAsStringSync() == _markText(source) &&
+          model.lengthSync() == source.bytes;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Writes the mark (temporary file, then rename — never half a mark).
+  static void writeCheckedMark(WhisperModelSize size) {
+    final path = checkedMarkPath(size);
+    final tmp = File('$path.tmp')..writeAsStringSync(_markText(modelSource(size)));
+    tmp.renameSync(path);
+  }
+
+  static void removeCheckedMark(WhisperModelSize size) {
+    try {
+      final f = File(checkedMarkPath(size));
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  static const String _hfRevision = '5359861c739e955e79d9a303bcbc70fb988958b1';
+  static const String _hfBase =
+      'https://huggingface.co/ggerganov/whisper.cpp/resolve/$_hfRevision';
 
   // REMOVED ON 09.09.2026 (S378): no caller in lib/ or test/.
 
@@ -558,6 +680,25 @@ class WhisperFFI {
   static bool isModelDownloaded(WhisperModelSize size) {
     return File(modelPath(size)).existsSync();
   }
+}
+
+/// Source of one whisper model and the bytes it must have.
+class WhisperModelSource {
+  final String fileName;
+  final String url;
+
+  /// SHA-256 of the whole file, lower-case hex.
+  final String sha256Hex;
+
+  /// Exact file length in bytes.
+  final int bytes;
+
+  const WhisperModelSource({
+    required this.fileName,
+    required this.url,
+    required this.sha256Hex,
+    required this.bytes,
+  });
 }
 
 /// Result of a transcription.

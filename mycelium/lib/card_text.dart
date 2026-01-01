@@ -10,6 +10,8 @@
 ///    With it a requester needs no bundle round trip (packets (0)/(1)) and
 ///    can leave its request in the issuer's invitation post box while the
 ///    issuer is off. QR and NFC keep carrying only the packed card.
+///  * either line may carry the card neighbour's record key behind a `.`
+///    (`card_text_key.dart`, S407) — a 4.2.3 reader stops at the `.`.
 ///
 /// **The signature (T-a).** The line's sealing keys are the invitation's own
 /// (R-b) and not covered by the fingerprint; whoever alters the line in
@@ -25,13 +27,10 @@
 /// [outInvitationText] is TOLERANT: line breaks in the middle of the text,
 /// embedding in other text, quotation marks/brackets around it,
 /// invisible characters, missing prefix. Errors: [CardTextError], five
-/// kinds. LENGTH BEFORE CHECKSUM: the size of a complete card
-/// follows unambiguously from version byte, address count byte including type bytes,
+/// kinds. LENGTH BEFORE CHECKSUM: a complete card's size follows from version byte, address count byte including type bytes,
 /// neighbour flag, publisher-key flag and the count and length bytes of the relay
-/// list (91 B without address, key and relays up to 413 B, V4.2 §15.2, §15.6, each
-/// + 2 B CRC) — without
-/// parsing the card; a `cleona:2:` line adds [kLineKeysLength], the chain's
-/// count byte and 5357 B per link, the count read at its fixed offset. If the
+/// list (91 to 413 B, §15.2, §15.6, each + 2 B CRC) — without parsing the card;
+/// `cleona:2:` adds [kLineKeysLength] + the chain (count byte at its offset). If the
 /// length does not fit: [truncated] (too short or too long). If the length fits
 /// but not the checksum: [tampered] — the text is complete, but
 /// changed. Two causes, two pieces of advice ("copy more" vs.
@@ -44,6 +43,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/identity/rotation_chain.dart'
     show kChainLinkWireLength, kRotationChainMaxLinks;
 import 'package:mycelium/card.dart';
+import 'package:mycelium/card_text_key.dart';
 
 /// The distinguishable error causes when reading an invitation text.
 enum CardTextErrorKind {
@@ -139,7 +139,7 @@ Uint8List lineSignedData(Card k, Uint8List pkInv, Uint8List bundle) =>
 
 /// Creates the invitation as one line of text in the card-only form
 /// `cleona:1:` — still read everywhere; the issuer hands out [asInvitationLine].
-String asInvitationText(Card k) => _line(1, k.pack());
+String asInvitationText(Card k) => withNeighbourKey(_line(1, k.pack()), k, _crc16);
 
 /// Creates the `cleona:2:` line: card ‖ [pkInv] ‖ [bundle] ‖ [signature] ‖
 /// [chain] (proposal E, T-a, A); [signature] over [lineSignedData], [chain]
@@ -157,13 +157,13 @@ String asInvitationLine(
         '/ signature ${signature.length} B, expected $kLineInvitationKeyLength '
         '/ $kLineBundleLength / $kLineSignatureLength');
   }
-  return _line(2, (BytesBuilder()
+  return withNeighbourKey(_line(2, (BytesBuilder()
         ..add(k.pack())
         ..add(pkInv)
         ..add(bundle)
         ..add(signature)
         ..add(c))
-      .toBytes());
+      .toBytes()), k, _crc16);
 }
 
 String _line(int version, Uint8List payload) {
@@ -258,7 +258,8 @@ CardLine outInvitationLine(String input,
       two ? Uint8List.sublistView(payload, 0, cardLength) : payload;
   final CardLine line;
   try {
-    final card = Card.unpack(cardBytes, expectedChannel: expectedChannel);
+    final card = neighbourKeyRead(purged, purged.indexOf(candidate) + candidate.length,
+        Card.unpack(cardBytes, expectedChannel: expectedChannel), _crc16);
     if (!two) {
       return (card: card, pkInv: null, bundle: null, signature: null, chain: null);
     }

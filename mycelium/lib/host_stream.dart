@@ -25,6 +25,7 @@ import 'package:mycelium/host_media.dart'
     show bulkFamilyOpen, reachableEvidenced;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
+import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/stream_receive.dart';
 import 'package:mycelium/stream_send.dart';
 import 'package:mycelium/stream_volunteer.dart';
@@ -48,9 +49,10 @@ class HostStream {
 
   late final StreamVolunteer volunteerSide = StreamVolunteer(
       send: _out, allowed: () => volunteer && reachable(), report: node.report);
-  late final StreamSender sender = StreamSender(send: _out, report: node.report);
+  late final StreamSender sender =
+      StreamSender(send: _out, report: node.report, silence: node.silence);
   late final StreamReceiver receiver =
-      StreamReceiver(send: _out, report: node.report);
+      StreamReceiver(send: _out, report: node.report, silence: node.silence);
 
   HostStream._(this.node);
 

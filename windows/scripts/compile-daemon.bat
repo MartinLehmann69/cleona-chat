@@ -40,6 +40,9 @@ echo [%date% %time%] Daemon compile started > %LOG%
 
 call %CLEONA_FLUTTER_BIN%\dart build cli --target bin/cleona_daemon.dart --output %STAGE% >> %LOG% 2>&1
 if errorlevel 1 goto fail
+REM S407: no console window for the daemon — see set-gui-subsystem.ps1.
+powershell -NoProfile -ExecutionPolicy Bypass -File windows\scripts\set-gui-subsystem.ps1 -Path %STAGE%\bundle\bin\cleona_daemon.exe >> %LOG% 2>&1
+if errorlevel 1 goto fail
 
 if not exist %OUTDIR%\bin mkdir %OUTDIR%\bin
 if not exist %OUTDIR%\lib mkdir %OUTDIR%\lib

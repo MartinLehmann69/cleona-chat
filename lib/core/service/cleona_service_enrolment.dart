@@ -394,7 +394,18 @@ extension CleonaServiceEnrolment on CleonaService {
       final bytes = enc.readBinaryFile('${d.directory.path}/$name');
       if (bytes != null) memory[name] = base64Encode(bytes);
     }
-    return {'v': 1, 'areas': areas, 'memory': memory};
+    // §14.6.2 "shared settings" (A-1, D-71, D-72): the values of Type 8 with
+    // the time of each change. A key of its own next to `areas`: the
+    // transcription language shares its record with the model size and the
+    // retention, which stay per device. A v4.2.3 device reads only `v`,
+    // `areas` and `memory` and passes over it
+    // (`398a6e40:lib/core/service/cleona_service_enrolment.dart:620-645`).
+    return {
+      'v': 1,
+      'areas': areas,
+      'memory': memory,
+      'shared': _sharedSnapshot(),
+    };
   }
 
   /// Sends the answer to the new device: directly to its addresses while
@@ -670,6 +681,12 @@ extension CleonaServiceEnrolment on CleonaService {
     _devices.clear();
     _loadDevices();
     _inviteLedgerCached = null;
+    // §14.6.2 "shared settings" — after the contacts, whose "allow calls"
+    // they carry with its time. A v4.2.3 device hands over none.
+    final shared = j['shared'];
+    if (shared is Map) {
+      _sharedApply(shared.cast<String, dynamic>(), from: 'the handover');
+    }
     // 4. an ordinary own device from here on.
     _enrol.wait?.detach();
     _enrol.wait = null;

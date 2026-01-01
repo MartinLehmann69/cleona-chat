@@ -30,12 +30,18 @@
 /// those edges: one timer per day (`UtcDayEdge`).
 library;
 
+import 'package:mycelium/code_registration_former.dart';
+import 'package:mycelium/mailbox_recovery_pairs.dart';
 import 'package:mycelium/node_post_box.dart';
 import 'package:mycelium/node_helpers.dart' show hexFrom;
 import 'package:mycelium/mailbox.dart';
 import 'package:mycelium/mailbox_pair.dart';
 import 'package:mycelium/mailbox_group_pair.dart';
+import 'package:mycelium/mailbox_edge.dart';
+import 'package:mycelium/where_are_you_answer.dart' show WhereAreYouAnswer;
 import 'package:mycelium/host.dart';
+import 'package:mycelium/neighbour_keys.dart' show NeighbourKeysContact;
+import 'package:mycelium/own_ring.dart' show ownRingInbound;
 
 extension HostCodes on Host {
   /// The node-wide callbacks of steps 3 and 4. Called from
@@ -44,9 +50,19 @@ extension HostCodes on Host {
   /// renewed wiring (the same construction as `knoten.gruppenEmpfang`).
   void codesWireUp() {
     // §8.1: the codes of this DEVICE are the union over all
-    // registered identities — the neighbour knows no identities.
-    node.codeRoute.inboundCodes =
-        (day) => [for (final p in mailboxes) ...p.inboundCodes(day)];
+    // registered identities — the neighbour knows no identities. With them
+    // the own-device code from each other own device towards this one
+    // (§14.7, D-46: the mirror of a call signal, `own_ring.dart`).
+    node.codeRoute.inboundCodes = (day) => [
+          for (final p in mailboxes) ...[
+            ...p.inboundCodes(day),
+            ...ownRingInbound(p.identity, day),
+          ],
+        ];
+    // §13.2.1 (D-70): what the FORMER fixed neighbours are told after a
+    // recovery — the codes of the restored contacts that still wait.
+    node.codeRoute.waitingCodes =
+        (day) => [for (final p in mailboxes) ...p.recoveryInboundCodes(day)];
     // §8.1/§4.3 (AS-2): `K_AB` depends on BOTH founding keys — on the
     // contact AND on the sending identity. Therefore exactly
     // its mailbox is asked, never "the first one that knows the contact": that delivered
@@ -76,9 +92,12 @@ extension HostCodes on Host {
     // foreign mailbox cannot deliver anything silently wrong here: it
     // does not find the code, and if it found it, the seal would not
     // open (Poly1305).
+    // The days around the code route's clock — the one that formed the
+    // codes `isOwnCode` affirmed (S407-R).
     node.codeRoute.whereAreYouAccept = (code, content) {
+      final now = node.codeRoute.now();
       for (final p in mailboxes) {
-        if (p.whereAreYouAccept(code, content) != null) return true;
+        if (p.whereAreYouAccept(code, content, now: now) != null) return true;
       }
       return false;
     };
@@ -136,8 +155,9 @@ extension HostCodes on Host {
     // message and acknowledgement of this identity, as IT names them (D3),
     // and a contact's arrive the same way.
     p.identity.messages
-      ..ownNeighbours = (() => p.ownNeighbours)
-      ..onNeighbours = p.neighboursHeard;
+      ..ownNeighbours = p.namedFor // keyed only to whom reads it (S407)
+      ..onNeighbours = p.neighboursCame
+      ..onWhereAreYouAnswer = p.whereAreYouAnswered; // §8.1, D-76
     p.dayKeyDistribute(); // §8.2, edge "mailbox registered"
     // EDGE: this mailbox brings codes along (contacts, invitations,
     // open joins). Without it the day cache of
@@ -145,6 +165,20 @@ extension HostCodes on Host {
     // a packet arriving immediately under one of the new codes would be
     // rejected (`node_codes.dart`, throttle `_freshComputed`).
     node.codeRoute.codesChanged();
+  }
+
+  /// EDGE "the user opens the application" (§8.2 "When the recipient
+  /// asks"): what rests goes again — own messages neither acknowledged nor
+  /// placed and the day-key notices still due (§9.3, `mailbox_edge.dart`;
+  /// S403 finding 2, S407-OLAPPW W-2) — then the post box is asked. Called
+  /// by the application's life cycle (`lib/main.dart`) and by the window
+  /// opening at the background service (`lib/service_daemon.dart`). Sends
+  /// nothing again when nothing is due.
+  Future<void> applicationOpened() {
+    for (final p in List.of(mailboxes)) {
+      p.atEdge();
+    }
+    return node.collect();
   }
 
   /// Edge "mailbox deregistered": its codes no longer apply. Called

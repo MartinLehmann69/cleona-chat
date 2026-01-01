@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -10,7 +11,8 @@ import 'package:mycelium/mailbox_group_pair.dart' show MailboxGroupPair;
 import 'package:mycelium/message.dart' show Outbound, DeliveryState;
 import 'package:mycelium/envelope.dart' show Address;
 import 'package:mycelium/history.dart';
-import 'package:mycelium/node_join.dart' show NodeJoin;
+import 'package:mycelium/neighbour_find.dart' show NeighbourFind;
+import 'package:mycelium/publisher_lookup.dart' show joinsAtEdge;
 
 /// The outbound of the mailbox: send, leave resting, re-dispatch — always
 /// AS the identity of this mailbox.
@@ -34,22 +36,14 @@ import 'package:mycelium/node_join.dart' show NodeJoin;
 ///    at which it flips all lie in ongoing operation: an
 ///    accepted contact request, a join, a neighbour found by the call.
 ///
-/// The layer to be replaced made the same distinction in §21.2: what
-/// does not change by waiting is not parked — "promising a
-/// re-dispatch that would always have the same result".
-///
 /// NO TIMER. Re-dispatch happens at an EDGE, not after a
-/// deadline expires. Working rule #5 (no polling) and the reasoning of the
-/// V3 one-shot outbox apply unchanged: a message that goes out again every
+/// deadline expires (working rule #5): a message that goes out again every
 /// minute costs network traffic and changes nothing.
 ///
 /// ── HERE TEXT BECOMES BYTES, AND ONLY HERE ────────────────────────────
-/// [send] takes bytes, because the delivery layer carries bytes and interprets
-/// nothing (see `message.dart`). [sendText] is the one convenient
-/// version over it: it does `utf8.encode` and NOTHING else. It is
-/// no second delivery — it is an encoding, and it stands up here
-/// so that there is exactly one place in the tree where text becomes
-/// bytes.
+/// [send] takes bytes (the delivery layer interprets nothing, `message.dart`);
+/// [sendText] does `utf8.encode` and NOTHING else — the one place in the
+/// tree where text becomes bytes.
 extension MailboxOutbound on Mailbox {
 
   /// Sends [text] as UTF-8 to the contact with [contactIdentifier].
@@ -59,6 +53,15 @@ extension MailboxOutbound on Mailbox {
   /// [send] directly.
   Outbound sendText(String contactIdentifier, String text) =>
       send(contactIdentifier, utf8.encode(text));
+
+  /// Sends [content] only while a way exists (§7.1: one of the three
+  /// addresses); otherwise nothing is sent, nothing rests, `null`. For what
+  /// is worth nothing later — a typing indicator would claim, hours on, that
+  /// someone types now (S408-LEBENSLAUF P18: decided here, not by the app).
+  Outbound? sendIfWay(String contactIdentifier, Uint8List content) =>
+      routesEmpty(routesToContact(contact(contactIdentifier)))
+          ? null
+          : send(contactIdentifier, content);
 
   /// Sends [content] to the contact with [contactIdentifier].
   ///
@@ -199,6 +202,8 @@ extension MailboxOutbound on Mailbox {
     // stopping node ended.
     final now = node.shipmentOf(hex);
     if (now != null && !identical(now, running)) return;
+    // S407 a': the holders were silent — look the neighbours up, else 0x23.
+    if (!running.finished) unawaited(wayLost(to, hex));
     final passed = _edgePassed(this).remove(hex);
     if (now == null || !passed || node.postBoxDeposit.closed) return;
     final entry = history.openOutbounds
@@ -237,8 +242,9 @@ extension MailboxOutbound on Mailbox {
     // acknowledged message is not open any more, whatever the checker's
     // turn (`Mailbox.stateCheck`).
     stateCheck();
-    // S405 F-1 (D-44): an out-of-band request no post box took yet goes too.
-    if (only == null) node.joinsSendAgain(identity);
+    // S405 F-1 (D-44): an out-of-band request no post box took yet goes too;
+    // S407 V2: a line still unanswered looks its issuer up once (§15.2).
+    if (only == null) joinsAtEdge(this);
     final now = DateTime.now();
     final seen = <String>{};
     for (final address in [
@@ -290,10 +296,6 @@ extension MailboxOutbound on Mailbox {
     final who = contactOrNull(identifierFrom(address));
     final destination = who == null ? null : routeTo(who);
     final withoutRoute = who == null || routesEmpty(routesToContact(who));
-    // §8.2 applies here too: without an address the post box carries. Until
-    // S390 the re-dispatch skipped ahead at this place, and a
-    // message without an address stayed resting at EVERY edge (finding B-2).
-    if (who != null && destination == null) node.search(address.identifier);
     // ITS PLACING STILL RUNS: whether it is "neither acknowledged nor
     // placed" is not known yet. It is not sent a second time beside its own
     // deposit — with three edges shortly after one another it would go out
@@ -310,6 +312,10 @@ extension MailboxOutbound on Mailbox {
       _edgePassed(this).add(hex);
       return;
     }
+    // §8.2 applies here too: without an address the post box carries (S390,
+    // finding B-2). The search call only where the message really goes again
+    // (S403 finding 2: not for one whose placing still runs).
+    if (who != null && destination == null) node.search(address.identifier);
     // The sending before this one is superseded: a deposit of it that has
     // not left yet is dropped (§7.1).
     node.shipmentEnd(hex);

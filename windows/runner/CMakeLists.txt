@@ -34,6 +34,8 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+# §23.10 own screenshot: SHGetKnownFolderPath (shell32), CoTaskMemFree (ole32).
+target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib" "ole32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
@@ -146,6 +148,17 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
             $<TARGET_FILE:cleona-play>
             $<TARGET_FILE_DIR:${BINARY_NAME}>
     COMMENT "Copying cleona-play.exe into Windows bundle"
+)
+# === cleona-firewall.cmd (inbound firewall rule of the daemon, S407) ===
+# The one definition of the rule: the setup runs it elevated after install,
+# the uninstaller to remove it, and the app's "Allow in firewall" button
+# (lib/core/platform/windows_firewall.dart) from `<bundleDir>`. Checked by
+# the verification below (-DEXPECTED_PROGRAMS).
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/cleona-firewall.cmd"
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona-firewall.cmd into Windows bundle"
 )
 # The player must decode every sound the bundle ships (decode only, no
 # output device needed) -- see windows/cleona_play/check_sounds.cmake.
@@ -324,7 +337,7 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
           -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll
-          -DEXPECTED_PROGRAMS=cleona-play.exe
+          -DEXPECTED_PROGRAMS=cleona-play.exe,cleona-firewall.cmd
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

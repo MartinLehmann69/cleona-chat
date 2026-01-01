@@ -86,13 +86,16 @@ void ackNoted(DepositRun h, String key) {
 
 /// The final line of a deposit run: per addressed holder when its receipt
 /// came (`acked in N ms`, with `(after placed)` when two nodes had already
-/// acknowledged) or that none came before its transmission ended (`silent`).
+/// acknowledged), that it refused (`0x37`), or that none came to the
+/// `0x30` and its repeats (`silent`, §11.3a).
 /// The result is read from [DepositRun.placed],
 /// never recomputed (S398, OP-22: two computations contradicted each other).
 String depositOutcome(DepositRun h, String valueShort) {
   final parts = [
     for (final n in h.asked)
       switch (h.ackMs[neighbourKey(n)]) {
+        null when h.refused.contains(neighbourKey(n)) =>
+          '${neighbourKey(n)} refused (0x37)',
         null => '${neighbourKey(n)} silent',
         final ms when h.afterPlaced.contains(neighbourKey(n)) =>
           '${neighbourKey(n)} acked in $ms ms (after placed)',

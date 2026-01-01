@@ -367,8 +367,31 @@ class CleonaForegroundService : Service() {
         // re-issues startForeground (Android 14 dismiss restore path).
         @Volatile var cachedTitle: String = "Cleona Chat"
             private set
-        @Volatile var cachedText: String = "Verbinde…"
+        // null until Dart reports a state: then the stored "starting" line
+        // in the app language (NotificationTexts, S410-F).
+        @Volatile var cachedText: String? = null
             private set
+
+        /// The channel of the service notice; called again on every language
+        /// change (MainActivity `setNotificationTexts`) — for an existing
+        /// channel Android updates name and description only. The name is
+        /// the app's name and stays as it is.
+        fun createChannel(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = context.getSystemService(NotificationManager::class.java)
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Cleona Chat",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = NotificationTexts.get(context, "channelServiceDesc")
+                    setShowBadge(false)
+                    setSound(null, null)
+                    enableVibration(false)
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
 
         /// Update the foreground notification text from anywhere.
         fun updateNotification(context: Context, title: String, text: String) {
@@ -531,7 +554,7 @@ class CleonaForegroundService : Service() {
                     updateNotification(
                         applicationContext,
                         "Cleona Chat",
-                        "Pausiert — App öffnen, um fortzusetzen"
+                        NotificationTexts.get(applicationContext, "servicePaused")
                     )
                 }
             } else if (pausedNotificationShown) {
@@ -547,22 +570,7 @@ class CleonaForegroundService : Service() {
         }
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Cleona Chat",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Verbindungsstatus"
-                setShowBadge(false)
-                setSound(null, null)
-                enableVibration(false)
-            }
-            manager.createNotificationChannel(channel)
-        }
-    }
+    private fun createNotificationChannel() = createChannel(this)
 
     private fun createNotification(): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -575,7 +583,7 @@ class CleonaForegroundService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(cachedTitle)
-            .setContentText(cachedText)
+            .setContentText(cachedText ?: NotificationTexts.get(this, "serviceStarting"))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(pendingIntent)

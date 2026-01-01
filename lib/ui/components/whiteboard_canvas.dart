@@ -4,7 +4,7 @@
 // `lib/` importer of this widget). Short version: the send path
 // (`GroupCallManager._sendCollaborationToAll` ->
 // `CallTransport.sendSecuredToParticipant`) is a declared no-op
-// (`lib/core/calls/call_transport_v41.dart:451-468`, `noCarrier`,
+// (`lib/core/calls/plane_d_call_transport.dart:451-468`, `noCarrier`,
 // as long as §17.5's group topology is open, C-9/C-10/C-11). This
 // canvas already captures gestures for real (`_onPanStart`/`_onPanUpdate`/
 // `_onPanEnd`) — only its result does not leave the device.

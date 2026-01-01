@@ -46,9 +46,11 @@ class MyceliumDeviceRecords implements DeviceRecords {
 
   static const String _field = 'b';
 
+  /// The keys only, never the value: the old post box block was one value
+  /// of ~15 MB (S407-BOOTSTRAPSPEICHER).
   @override
   bool holds(String name) =>
-      _store.entry(DeviceStore.areaNode, name) != null;
+      _store.areaKeys(DeviceStore.areaNode).contains(name);
 
   @override
   Uint8List? read(String name) {
@@ -69,6 +71,33 @@ class MyceliumDeviceRecords implements DeviceRecords {
 
   @override
   void remove(String name) => _store.removeEntry(DeviceStore.areaNode, name);
+
+  /// Row by row through a cursor ([EncryptedStore.eachAreaPrefix]); the
+  /// rows are collected first and handed out after the cursor is closed, so
+  /// that the caller may write while it walks them. A row is one held packet
+  /// of a few KB — what is collected is the stock itself, never a copy of it
+  /// as one value (S407-BOOTSTRAPSPEICHER).
+  @override
+  Iterable<(String, Uint8List?)> readPrefix(String prefix) {
+    final out = <(String, Uint8List?)>[];
+    for (final (key, row) in _store.eachAreaPrefix(DeviceStore.areaNode, prefix)) {
+      final text = row?[_field];
+      Uint8List? bytes;
+      if (text is String) {
+        try {
+          bytes = base64Decode(text);
+        } on FormatException {
+          bytes = null;
+        }
+      }
+      out.add((key, bytes));
+    }
+    return out;
+  }
+
+  @override
+  void removePrefix(String prefix) =>
+      _store.removeAreaPrefix(DeviceStore.areaNode, prefix);
 
   @override
   String where(String name) =>

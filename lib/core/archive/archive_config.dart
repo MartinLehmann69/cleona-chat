@@ -5,6 +5,8 @@
 // [ArchiveConfig.production] provides the production values,
 // [ArchiveConfig.test] provides shortened values for automated tests.
 
+import 'dart:io' show Platform;
+
 import 'package:cleona/core/archive/archive_network.dart';
 import 'package:cleona/core/archive/share_identity.dart';
 import 'package:cleona/core/storage/message_store.dart';
@@ -31,6 +33,22 @@ const String kArchiveConfigArea = 'archive_config';
 /// `ipc_server.dart` nor `settings_screen.dart` should include the service library
 /// for it).
 const String kArchiveConfigKey = '_';
+
+/// Default media budget on a phone, in MB (§21.3.1: "Media-archive budget
+/// on the device | 100 MB (mobile) to 2 GB (desktop), freely settable").
+const int kArchiveBudgetMobileMB = 100;
+
+/// Default media budget on a desktop installation, in MB (§21.3.1, 2 GB).
+const int kArchiveBudgetDesktopMB = 2048;
+
+/// The default media budget of this platform (§21.3.1). [mobile] overrides
+/// the platform check (tests); without it Android and iOS count as mobile,
+/// Linux, Windows and macOS as desktop. It is only the default: the user
+/// sets the budget freely in the archive settings, and a stored value wins.
+int archiveStorageBudgetMBForPlatform({bool? mobile}) =>
+    (mobile ?? (Platform.isAndroid || Platform.isIOS))
+        ? kArchiveBudgetMobileMB
+        : kArchiveBudgetDesktopMB;
 
 /// Supported archive protocols.
 enum ArchiveProtocol { smb, sftp, ftps, http }
@@ -106,7 +124,8 @@ class ArchiveConfig {
 
   // -- Storage budget ------------------------------------------------------
 
-  /// Max media storage on the device in MB.
+  /// Max media storage on the device in MB. Default per platform
+  /// ([archiveStorageBudgetMBForPlatform], §21.3.1).
   final int storageBudgetMB;
 
   // -- Network detection ---------------------------------------------------
@@ -136,13 +155,10 @@ class ArchiveConfig {
   /// All supported protocols.
   final List<ArchiveProtocol> supportedProtocols;
 
-  // -- Thumbnails ---------------------------------------------------------
-
-  /// Max thumbnail size in KB (Tier 2).
-  final int thumbnailMaxKB;
-
-  /// Max mini-thumbnail size in KB (Tier 3).
-  final int miniMaxKB;
+  // Thumbnail sizes (§21.6 tiers 2 and 3) are not configuration: their one
+  // source is `ArchiveThumbnails` (archive_thumbnail.dart). A stored setting
+  // written by 4.2.3 still carries `thumbnailMaxKB`/`miniMaxKB`; [fromJson]
+  // passes over them.
 
   // -- Security ------------------------------------------------------------
 
@@ -178,13 +194,13 @@ class ArchiveConfig {
   /// Check interval in minutes (how often archival runs).
   final int archiveCheckIntervalMinutes;
 
-  const ArchiveConfig({
+  ArchiveConfig({
     // Tier boundaries
     this.tier1Boundary = const Duration(days: 30),
     this.tier2Boundary = const Duration(days: 90),
     this.tier3Boundary = const Duration(days: 365),
-    // Budget
-    this.storageBudgetMB = 500,
+    // Budget: per platform when not given (§21.3.1)
+    int? storageBudgetMB,
     // Network
     this.allowedSSIDs = const [],
     this.allowedNetworks = const [],
@@ -198,9 +214,6 @@ class ArchiveConfig {
       ArchiveProtocol.ftps,
       ArchiveProtocol.http,
     ],
-    // Thumbnails
-    this.thumbnailMaxKB = 100,
-    this.miniMaxKB = 10,
     // Security
     this.requireConfirmedArchival = true,
     // Connection
@@ -213,13 +226,14 @@ class ArchiveConfig {
     this.enabledByDefault = false,
     this.batchRetrievalMaxItems = 50,
     this.archiveCheckIntervalMinutes = 60,
-  });
+  }) : storageBudgetMB =
+            storageBudgetMB ?? archiveStorageBudgetMBForPlatform();
 
   /// Production configuration with the values from docs/ARCHIVE.md.
-  factory ArchiveConfig.production() => const ArchiveConfig();
+  factory ArchiveConfig.production() => ArchiveConfig();
 
   /// Test configuration with greatly shortened time periods.
-  factory ArchiveConfig.test() => const ArchiveConfig(
+  factory ArchiveConfig.test() => ArchiveConfig(
         // Tier boundaries: seconds instead of days
         tier1Boundary: Duration(seconds: 30),
         tier2Boundary: Duration(seconds: 60),
@@ -350,10 +364,16 @@ class ArchiveConfig {
   ArchiveConfig withAllowedNetworks(List<ArchiveNetwork> networks) =>
       _copy(allowedNetworks: networks);
 
+  /// The same setting with [password] as the share password (`null`: none).
+  ArchiveConfig withArchivePassword(String? password) =>
+      _copy(setPassword: true, password: password);
+
   ArchiveConfig _copy({
     ShareIdentityPin? shareIdentity,
     bool clearShareIdentity = false,
     List<ArchiveNetwork>? allowedNetworks,
+    bool setPassword = false,
+    String? password,
   }) =>
       ArchiveConfig(
         tier1Boundary: tier1Boundary,
@@ -367,13 +387,11 @@ class ArchiveConfig {
         shareReachabilityTimeoutSec: shareReachabilityTimeoutSec,
         defaultProtocol: defaultProtocol,
         supportedProtocols: supportedProtocols,
-        thumbnailMaxKB: thumbnailMaxKB,
-        miniMaxKB: miniMaxKB,
         requireConfirmedArchival: requireConfirmedArchival,
         archiveHost: archiveHost,
         archivePath: archivePath,
         archiveUsername: archiveUsername,
-        archivePassword: archivePassword,
+        archivePassword: setPassword ? password : archivePassword,
         archivePort: archivePort,
         enabledByDefault: enabledByDefault,
         batchRetrievalMaxItems: batchRetrievalMaxItems,
@@ -425,8 +443,6 @@ class ArchiveConfig {
         if (shareIdentity != null) 'shareIdentity': shareIdentity!.toJson(),
         'shareReachabilityTimeoutSec': shareReachabilityTimeoutSec,
         'defaultProtocol': defaultProtocol.index,
-        'thumbnailMaxKB': thumbnailMaxKB,
-        'miniMaxKB': miniMaxKB,
         'requireConfirmedArchival': requireConfirmedArchival,
         'archiveHost': archiveHost,
         'archivePath': archivePath,
@@ -448,7 +464,7 @@ class ArchiveConfig {
         tier3Boundary: Duration(
             milliseconds: json['tier3BoundaryMs'] as int? ??
                 const Duration(days: 365).inMilliseconds),
-        storageBudgetMB: json['storageBudgetMB'] as int? ?? 500,
+        storageBudgetMB: json['storageBudgetMB'] as int?,
         allowedSSIDs: (json['allowedSSIDs'] as List<dynamic>?)
                 ?.map((e) => e as String)
                 .toList() ??
@@ -464,8 +480,6 @@ class ArchiveConfig {
         defaultProtocol: json['defaultProtocol'] != null
             ? ArchiveProtocol.values[json['defaultProtocol'] as int]
             : ArchiveProtocol.smb,
-        thumbnailMaxKB: json['thumbnailMaxKB'] as int? ?? 100,
-        miniMaxKB: json['miniMaxKB'] as int? ?? 10,
         requireConfirmedArchival: true, // ALWAYS true, regardless of JSON content
         archiveHost: json['archiveHost'] as String? ?? '',
         archivePath: json['archivePath'] as String? ?? '',
@@ -509,4 +523,47 @@ class ArchiveConfig {
   /// midway thus does not leave half the setting behind.
   void writeTo(MessageStore store) => store.replaceArea(
       kArchiveConfigArea, {kArchiveConfigKey: toJson()});
+}
+
+/// The archive setting as the settings screen sees it (§21.6, S410 E10).
+///
+/// The service holds the setting in the identity's store; on Linux and
+/// Windows the screen is another process and reaches it over IPC
+/// (`archive_settings_get`). What the screen gets is the setting WITHOUT
+/// the share password and without the pin (both stay in the service; the
+/// pin is shown shortened through `archive_status`) — plus whether a
+/// password is stored, so that the screen can say so without holding it.
+/// The password goes the other way only: typed by the user, handed to the
+/// service once (`archive_settings_set`), never handed back.
+class ArchiveSettingsView {
+  final ArchiveConfig config;
+  final bool hasPassword;
+
+  const ArchiveSettingsView({required this.config, required this.hasPassword});
+
+  /// The view of the stored setting [stored] (`null`: never configured).
+  factory ArchiveSettingsView.of(ArchiveConfig? stored) {
+    final c = stored ?? ArchiveConfig.production();
+    return ArchiveSettingsView(
+      config: c.withArchivePassword(null).withShareIdentity(null),
+      hasPassword: (c.archivePassword ?? '').isNotEmpty,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'config': config.withArchivePassword(null).withShareIdentity(null)
+            .toJson(),
+        'hasPassword': hasPassword,
+      };
+
+  static ArchiveSettingsView? fromJson(Map<String, dynamic> json) {
+    final c = json['config'];
+    if (c is! Map) return null;
+    return ArchiveSettingsView(
+      config: ArchiveConfig.fromJson(Map<String, dynamic>.from(c))
+          .withArchivePassword(null)
+          .withShareIdentity(null),
+      hasPassword: json['hasPassword'] == true,
+    );
+  }
 }

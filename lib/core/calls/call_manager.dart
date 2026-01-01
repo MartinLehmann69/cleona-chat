@@ -14,8 +14,7 @@ import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/harvest_event.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
-import 'package:cleona/core/sync/delivery_params.dart' show kInteractiveDeliveryTtl;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Represents an active or pending call with crypto state.
 class CallSession {
@@ -76,7 +75,7 @@ class CallSession {
 
   /// Callee side: the audio/video format range that the CALLER named in the
   /// INVITE (§10.3.1/§10.4/§10.6, V1.18, S367). Set in
-  /// `CallManager.handleCallInviteV3`, read in `acceptCall` for
+  /// `CallManager.handleCallInvite`, read in `acceptCall` for
   /// `MediaFormatVersion.negotiate`. `null` only as long as a call never
   /// came through the INVITE receive path (e.g. a session that a test
   /// constructs directly) — `acceptCall` falls back to the
@@ -135,9 +134,9 @@ class CallSession {
   ///
   /// The state lives here and not in [state], because `CallState`
   /// (`service_types.dart`) does not know the value `reaching` and its index
-  /// is part of the IPC contract via `CallInfo.toJson()`. As long as the value is
-  /// missing there, [state] stays `ringing` and this flag carries the
-  /// distinction.
+  /// is part of the IPC contract via `CallInfo.toJson()`. [state] stays
+  /// `ringing` and this flag carries the distinction — to the GUI as
+  /// `CallInfo.reaching` (screen: `callStatusKey`).
   bool reaching = false;
 
   /// Caller side: the device markers from which a RING_ACK was harvested.
@@ -222,6 +221,7 @@ class CallSession {
         videoFramesReceived: videoFramesReceived,
         endReason: endReason,
         captureUnavailable: captureUnavailable,
+        reaching: reaching,
       );
 }
 
@@ -266,44 +266,37 @@ class CallManager {
   /// Ringing timeout in seconds (auto-hangup if not answered).
   static const int ringingTimeoutSec = 60;
 
+  /// REJECT reason a ringing callee sends when its own [ringingTimeoutSec]
+  /// ran out (§17.2 "A ringing device stops by itself after 60 s"). The
+  /// same string since 4.2.3-beta. At the caller it is the only REJECT that
+  /// means "60 s of ringing without an ANSWER" — a missed call.
+  static const String rejectReasonTimeout = 'timeout';
+
+  /// REJECT reason a device sends when an INVITE reaches it while it is in
+  /// another call (§17.2, D-79: "the callee's device answering busy"). At
+  /// the caller it is a missed call. Not "busy": a 4.2.3-beta device sends
+  /// "busy" for a press of "reject" as well, so "busy" stays an ordinary
+  /// rejection; a 4.2.3-beta caller treats this reason as one, too.
+  static const String rejectReasonInAnotherCall = 'in_another_call';
+
+  /// REJECT reason for a press of "reject" (§17.2) — the callee knows.
+  static const String rejectReasonDeclined = 'declined';
+
   /// §17.2: deadline for the state `reaching`, in seconds.
   ///
-  /// According to §17.2 the 60 s answer deadline may only begin with the harvested RING_ACK.
-  /// If none ever comes, the call still needs an end — otherwise
-  /// the caller would stand on "reaching …" indefinitely.
+  /// §17.2: "A call rings within 10 seconds or not at all … When 10 s have
+  /// passed without a `RING_ACK`, the caller shows "not reachable", ends
+  /// the call, sends one `HANGUP` and the missed-call message … Both are
+  /// limits of the call, counted by the caller on its own clock; the
+  /// delivery layer holds no clock for them (§9.3)." (D-45)
   ///
-  /// The value is NOT invented and since S357 no longer stands
-  /// there twice: it is the TTL class "interactive" of the DELIVERY LAYER
-  /// (`kInteractiveDeliveryTtl`, §17.2), and that belongs there, not
-  /// in the call layer. A copy would be exactly the drift that nobody
-  /// notices — `smoke_v41_signaling_ttl.dart` keeps both together.
-  ///
-  /// **CORRECTION OF THE PREVIOUS VERSION (S357).** Here it said: "After 120 s the
-  /// INVITE has expired at the relays and can no longer ring anywhere."
-  /// That is the TARGET state from §17.2 and was claimed as the actual state.
-  /// Measured (S357): `SecureStore.keepEpochs` was preset to `kHarvestEpochs`
-  /// = 3, with `kEpochSeconds = 86400` — a signal cell lay
-  /// at the relays for **three days** back then, as long as any other.
-  ///
-  /// **Two changes since then, both measured.** S358 introduced the
-  /// signal class `kRetentionSignal`: an INVITE cell drops
-  /// after `kSignalKeepBuckets` buckets, i.e. after 121-240 s, no longer
-  /// with the ordinary deadline. S363 (D2) raised the ordinary deadline
-  /// from 3 to `kNormalKeepEpochs` = 14 days — which no longer affects the
-  /// signal cell, precisely because it has its own class.
-  /// The deadline here is thus
-  /// the deadline of the CALLER ("this long I stand on reaching"), not
-  /// that of the cell. The two only coincide once the class is also on
-  /// the wire; see `kInteractiveDeliveryTtl`.
-  static const int reachingTimeoutSec = 120;
-
-  /// Self-test: the deadline above IS the TTL class of the delivery layer.
-  ///
-  /// As an `assert` and not as an initializer, because `reachingTimeoutSec`
-  /// is a `const int` constant of the public interface and
-  /// as such should stay directly readable in `switch` cases and tests.
-  static bool debugTtlMatchesDeliveryClass() =>
-      reachingTimeoutSec == kInteractiveDeliveryTtl.inSeconds;
+  /// Until S407-CALLNORM this stood at 120 s, coupled to the TTL class
+  /// "interactive" of the replaced V4.1 delivery layer
+  /// (`kInteractiveDeliveryTtl`) — a clock of the delivery path, which D-44
+  /// and D-45 removed. A call signal now takes steps 1 and 3 only and is
+  /// never left in a post box (B-6): after 10 s nothing can still bring the
+  /// INVITE to the callee, so a longer wait waits for nothing.
+  static const int reachingTimeoutSec = 10;
 
   Timer? _reachingTimeout;
 
@@ -329,6 +322,16 @@ class CallManager {
   void Function(CallSession call, String reason)? onCallRejected;
   void Function(CallSession call)? onCallEnded;
 
+  /// §17.2 "Missed call": an OUTGOING call ended without having been
+  /// answered — no `RING_ACK` within 10 s, the caller hanging up before an
+  /// answer, or 60 s of ringing without an `ANSWER`. Fired once per call,
+  /// after its `HANGUP`; the consumer (`CleonaService`) sends the
+  /// missed-call message, an ordinary message. Not for a call the callee
+  /// rejected — that ends through [onCallRejected], and the callee knows —
+  /// except the callee's own REJECT [rejectReasonTimeout], which is its
+  /// 60 s of ringing running out and fires this too (after [onCallRejected]).
+  void Function(CallSession call)? onMissedCall;
+
   /// V3 setup-path send callback — wired by `CleonaService` to its
   /// `sendToUser` orchestrator (Architecture §2.6.2 / §10.1). Used for
   /// CALL_INVITE/ANSWER/REJECT/HANGUP. Returns true if at least one
@@ -338,7 +341,7 @@ class CallManager {
   /// INVITE repetition that §17.2 forbids; it goes with it.
   Future<bool> Function(
     Uint8List recipientUserId,
-    proto.MessageTypeV3 type,
+    proto.MessageType type,
     Uint8List payload,
   )? sendViaUser;
 
@@ -451,8 +454,8 @@ class CallManager {
 
     // §17.2: NO ringback tone and NO 60 s answer deadline as long as it is not
     // established that it is really ringing at the callee. Both start
-    // in [handleCallRingAckV3]. Here only the deadline runs after which the
-    // INVITE has expired at the relays anyway.
+    // in [handleCallRingAck]. Here only the 10 s `reaching` deadline runs:
+    // "A call rings within 10 seconds or not at all."
     session.reaching = true;
     _startReachingTimeout();
 
@@ -533,7 +536,7 @@ class CallManager {
     try {
       sent = await sendViaUser?.call(
             recipientId,
-            proto.MessageTypeV3.MTV3_CALL_INVITE,
+            proto.MessageType.MT_CALL_INVITE,
             inviteBytes,
           ) ??
           false;
@@ -544,9 +547,9 @@ class CallManager {
       // `reaching` deadline, like every call that reaches nobody.
       return;
     }
-    _log.info('CALL_INVITE placed once at '
-        '${peerNodeIdHex.substring(0, 8)}: ${sent ? "OK" : "FEHLGESCHLAGEN"} '
-        '(§17.2: no repetition — the redundancy lies in the store)');
+    _log.info('CALL_INVITE handed over once to '
+        '${peerNodeIdHex.substring(0, 8)}: ${sent ? "OK" : "FAILED"} '
+        '(§17.2: steps 1 and 3, no post box; ends with its call)');
   }
 
   /// Accept an incoming call.
@@ -563,7 +566,7 @@ class CallManager {
     // mandatory (every call carries audio); video only with `call.isVideo` —
     // an audio call does not negotiate a video range it never uses.
     // `?? Basisformat` covers the edge case named in `peerAudioFormatRange`'s field comment:
-    // a session that never came through `handleCallInviteV3`.
+    // a session that never came through `handleCallInvite`.
     const baseFormat =
         MediaFormatRange(MediaFormatVersion.kBaselineFormat, MediaFormatVersion.kBaselineFormat);
     final audioDecision = MediaFormatVersion.negotiate(
@@ -678,7 +681,7 @@ class CallManager {
 
     await sendViaUser?.call(
       hexToBytes(call.peerNodeIdHex),
-      proto.MessageTypeV3.MTV3_CALL_ANSWER,
+      proto.MessageType.MT_CALL_ANSWER,
       answer.writeToBuffer(),
     );
     // A-2: the precondition above was checked BEFORE the only `await`, and
@@ -763,7 +766,7 @@ class CallManager {
   ///
   /// Local-first teardown (see [hangup] for rationale). A reject that
   /// throws on the wire must NOT leave the ringing call object active.
-  Future<void> rejectCall({String reason = 'busy'}) async {
+  Future<void> rejectCall({String reason = rejectReasonDeclined}) async {
     final call = _currentCall;
     if (call == null || call.state != CallState.ringing) return;
 
@@ -786,14 +789,14 @@ class CallManager {
         ..reason = reason;
       await sendViaUser?.call(
         hexToBytes(call.peerNodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_REJECT,
+        proto.MessageType.MT_CALL_REJECT,
         reject.writeToBuffer(),
       );
     } catch (e) {
       _log.warn('Reject signal send failed (call already torn down locally): $e');
     }
 
-    // A-3: symmetry with hangup() and handleCallRejectV3 — EVERY teardown path
+    // A-3: symmetry with hangup() and handleCallReject — EVERY teardown path
     // reports the termination to the outside. rejectCall was the only one without
     // a callback; ringtone, voice/video engine and the telecom connection
     // kept running afterwards. Consequential above all because _startRingingTimeout
@@ -834,13 +837,19 @@ class CallManager {
     final call = _currentCall;
     if (call == null) return;
 
+    // §17.2: an outgoing call that ends before an ANSWER bound it — still
+    // `reaching` or ringing — is a missed call for the callee. Read before
+    // the state is overwritten below.
+    final unanswered = call.direction == CallDirection.outgoing &&
+        call.state == CallState.ringing;
+
     _cancelRingingTimeout();
     call.state = CallState.ended;
     call.endReason = reason;
     onCallEnded?.call(call);
     _currentCall = null;
     _unregisterLiveMediaPeer(call);
-    terminatedCalls.record(call.callId);
+    _recordEnded(call);
     _log.info('Call ended (local teardown done)');
 
     // Best-effort signal to the remote side. Failures here do not undo
@@ -850,20 +859,34 @@ class CallManager {
       final hangup = proto.CallHangup()..callId = call.callId;
       await sendViaUser?.call(
         hexToBytes(call.peerNodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_HANGUP,
+        proto.MessageType.MT_CALL_HANGUP,
         hangup.writeToBuffer(),
       );
     } catch (e) {
       _log.warn('Hangup signal send failed (call already torn down locally): $e');
     }
+
+    // §17.2: "sends one `HANGUP` and the missed-call message" — after the
+    // HANGUP, so the callee's ringing has its end before the entry arrives.
+    if (unanswered) _startMissedCall(call);
+  }
+
+  /// Fires [onMissedCall] once for [call]; a throwing consumer does not
+  /// undo the teardown that already happened.
+  void _startMissedCall(CallSession call) {
+    try {
+      onMissedCall?.call(call);
+    } catch (e) {
+      _log.warn('Missed-call message could not be started: $e');
+    }
   }
 
   // ── Incoming message handling (V3 — called from CleonaService) ──
   //
-  // V3 receive-side handlers take an `ApplicationFrameV3` (whose
+  // V3 receive-side handlers take an `ApplicationFrame` (whose
   // `payload` is the already-decrypted + user-sig-verified inner
   // proto-bytes) plus the wire-level `senderDeviceId` from
-  // `NetworkPacketV3`, plus the `SenderIdentitySnapshot` produced by
+  // `NetworkPacket`, plus the `SenderIdentitySnapshot` produced by
   // §2.4 [4] outer-sig-verify.
 
   /// V3: handle inbound CALL_INVITE.
@@ -879,7 +902,7 @@ class CallManager {
   /// is ringing now". Two outcomes disprove that — the repetition
   /// of the same INVITE (the sender repeats every 3 s) and the
   /// busy rejection. In both cases nothing may ring.
-  bool handleCallInviteV3(HarvestEvent event) {
+  bool handleCallInvite(HarvestEvent event) {
     final proto.CallInvite invite;
     try {
       invite = proto.CallInvite.fromBuffer(event.payload);
@@ -910,7 +933,7 @@ class CallManager {
         _log.debug('Duplicate INVITE for current call — ignoring');
         return false;
       }
-      _sendRejectV3(event, 'busy');
+      _sendReject(event, rejectReasonInAnotherCall);
       return false;
     }
 
@@ -1021,7 +1044,7 @@ class CallManager {
         ..deviceMarker = marker;
       await sendViaUser?.call(
         hexToBytes(call.peerNodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_RING_ACK,
+        proto.MessageType.MT_CALL_RING_ACK,
         ack.writeToBuffer(),
       );
       _log.info('RING_ACK to ${call.peerNodeIdHex.substring(0, 8)} — the '
@@ -1048,7 +1071,7 @@ class CallManager {
   ///   3. After binding, ONE CANCEL_OTHERS cell goes to the identity
   ///      of the callee; it reaches all remaining devices at once
   ///      (§14.2 — one delivery, not N).
-  void handleCallAnswerV3(HarvestEvent event) {
+  void handleCallAnswer(HarvestEvent event) {
     final answer = proto.CallAnswer.fromBuffer(event.payload);
     final call = _currentCall;
     if (call == null || !_callIdMatches(call.callId, answer.callId)) return;
@@ -1204,9 +1227,9 @@ class CallManager {
   /// serves all devices." The caller deliberately does not iterate over devices;
   /// it does not know them and need not know them (§14.1).
   ///
-  /// The carrier is the own type `MTV3_CALL_CANCEL_OTHERS` (88) with the
+  /// The carrier is the own type `MT_CALL_CANCEL_OTHERS` (88) with the
   /// payload `CallCancelOthers`. Before, the arbitration piggybacked on
-  /// `MTV3_CALL_REJECT`; why it no longer does so and why the old
+  /// `MT_CALL_REJECT`; why it no longer does so and why the old
   /// piggyback path is nevertheless understood on RECEIPT is stated in
   /// `call_arbitration.dart`.
   Future<void> _sendCancelOthers(CallSession call) async {
@@ -1227,7 +1250,7 @@ class CallManager {
         ..boundAnswerKey = boundKey;
       await sendViaUser?.call(
         hexToBytes(call.peerNodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_CANCEL_OTHERS,
+        proto.MessageType.MT_CALL_CANCEL_OTHERS,
         cancel.writeToBuffer(),
       );
       _log.info('CANCEL_OTHERS sent to '
@@ -1256,7 +1279,7 @@ class CallManager {
   /// Only at the CALLER. A RING_ACK that arrives at a callee
   /// is that of a sibling device harvesting the same tag (§14.2) —
   /// it tells it nothing it does not already know.
-  void handleCallRingAckV3(HarvestEvent event) {
+  void handleCallRingAck(HarvestEvent event) {
     final proto.CallRingAck ack;
     try {
       ack = proto.CallRingAck.fromBuffer(event.payload);
@@ -1265,7 +1288,10 @@ class CallManager {
       return;
     }
     final call = _currentCall;
-    if (call == null || !_callIdMatches(call.callId, ack.callId)) return;
+    if (call == null || !_callIdMatches(call.callId, ack.callId)) {
+      _answerLateRingAck(event, ack);
+      return;
+    }
     if (call.direction != CallDirection.outgoing) {
       _log.debug('CALL_RING_ACK on a call in which we ourselves are the '
           'callee — ignored');
@@ -1301,6 +1327,38 @@ class CallManager {
         '${ringingTimeoutSec}s answer deadline start');
   }
 
+  /// §17.2: "a `RING_ACK` for a call the caller has already ended is
+  /// answered with one `HANGUP`." The callee's device rang after the
+  /// caller gave up (a late INVITE, or a HANGUP lost on the way); without
+  /// this answer it rings until its own 60 s for a caller who is gone.
+  ///
+  /// Only for a call this device ended as the caller, only to the callee
+  /// of that call, and once per ringing device (marker) — like the SIP
+  /// caller that answers a 2xx for a cancelled INVITE with ACK + BYE.
+  /// The HANGUP is a call signal like any other (steps 1 and 3, §17.2);
+  /// no repetition of its own here.
+  void _answerLateRingAck(HarvestEvent event, proto.CallRingAck ack) {
+    final callId = Uint8List.fromList(ack.callId);
+    final callee = terminatedCalls.lateRingAckAnswerTo(
+        callId,
+        bytesToHex(event.senderUserId),
+        ack.deviceMarker.isEmpty
+            ? ''
+            : bytesToHex(Uint8List.fromList(ack.deviceMarker)));
+    if (callee == null) return;
+    _log.info('RING_ACK for the already ended call '
+        '${bytesToHex(callId).substring(0, 8)} — answered with one HANGUP');
+    final hangup = proto.CallHangup()..callId = callId;
+    unawaited(() async {
+      try {
+        await sendViaUser?.call(hexToBytes(callee),
+            proto.MessageType.MT_CALL_HANGUP, hangup.writeToBuffer());
+      } catch (e) {
+        _log.warn('HANGUP for a late RING_ACK could not be sent: $e');
+      }
+    }());
+  }
+
   /// V3: handle inbound CALL_CANCEL_OTHERS (§17.2) — the own type.
   ///
   /// The body does nothing but unpack and check; the arbitration
@@ -1318,7 +1376,7 @@ class CallManager {
   ///     Discarding is the safe direction: in the worst case
   ///     a sibling device keeps ringing until its 60 s time limit, instead of
   ///     a running conversation breaking off.
-  void handleCallCancelOthersV3(HarvestEvent event) {
+  void handleCallCancelOthers(HarvestEvent event) {
     final proto.CallCancelOthers cancel;
     try {
       cancel = proto.CallCancelOthers.fromBuffer(event.payload);
@@ -1340,13 +1398,13 @@ class CallManager {
   /// (§17.2).
   ///
   /// The piggyback path is no longer sent (that is done by
-  /// [handleCallCancelOthersV3]'s counterpart `_sendCancelOthers` via
-  /// `MTV3_CALL_CANCEL_OTHERS`). It is still understood, so that a
+  /// [handleCallCancelOthers]'s counterpart `_sendCancelOthers` via
+  /// `MT_CALL_CANCEL_OTHERS`). It is still understood, so that a
   /// second own device with the old state can still pronounce the arbitration.
   /// [CancelOthers.tryDecode] separates strictly; anything that
   /// does not fit exactly is an ordinary rejection. Rationale:
   /// `call_arbitration.dart`, section "Backward compatibility".
-  void handleCallRejectV3(HarvestEvent event) {
+  void handleCallReject(HarvestEvent event) {
     final reject = proto.CallReject.fromBuffer(event.payload);
     final rejectedCallId = Uint8List.fromList(reject.callId);
 
@@ -1389,9 +1447,21 @@ class CallManager {
       return;
     }
 
+    // §17.2 "Missed call": "60 s of ringing without an `ANSWER`". The
+    // callee's deadline starts when it harvests the INVITE, the caller's
+    // only when it harvests the RING_ACK — so the callee's own REJECT
+    // "timeout" is usually on its way before the caller's deadline fires,
+    // and this, not [hangup], is the end the caller sees. Any other reason
+    // (declined, busy, incompatible media format) is a rejection the
+    // callee knows about — not a missed call. D-79: the device answering
+    // that it is in another call is one. `answerBound` returned above.
+    final missed = call.direction == CallDirection.outgoing &&
+        (reject.reason == rejectReasonTimeout ||
+            reject.reason == rejectReasonInAnotherCall);
+
     _cancelRingingTimeout();
     call.state = CallState.ended;
-    terminatedCalls.record(call.callId);
+    _recordEnded(call);
     onCallRejected?.call(call, reject.reason);
     _currentCall = null;
     _unregisterLiveMediaPeer(call);
@@ -1410,7 +1480,13 @@ class CallManager {
     // Only as the caller. A rejection that arrives at a callee is
     // nothing to which it would be allowed to respond with an abort to the other side.
     if (call.direction == CallDirection.outgoing) {
-      unawaited(_sendHangupToPeer(call, 'Declined by a device'));
+      // §17.2: "sends one `HANGUP` and the missed-call message" — the
+      // message after the HANGUP, as in [hangup].
+      unawaited(_sendHangupToPeer(call,
+              missed ? 'ringing ran out at a device' : 'Declined by a device')
+          .then((_) {
+        if (missed) _startMissedCall(call);
+      }));
     }
   }
 
@@ -1426,7 +1502,7 @@ class CallManager {
       final hangup = proto.CallHangup()..callId = call.callId;
       await sendViaUser?.call(
         hexToBytes(call.peerNodeIdHex),
-        proto.MessageTypeV3.MTV3_CALL_HANGUP,
+        proto.MessageType.MT_CALL_HANGUP,
         hangup.writeToBuffer(),
       );
       _log.info('CALL_HANGUP to ${call.peerNodeIdHex.substring(0, 8)} '
@@ -1487,7 +1563,7 @@ class CallManager {
   }
 
   /// V3: handle inbound CALL_HANGUP.
-  void handleCallHangupV3(HarvestEvent event) {
+  void handleCallHangup(HarvestEvent event) {
     final hangup = proto.CallHangup.fromBuffer(event.payload);
     final call = _currentCall;
     if (call == null || !_callIdMatches(call.callId, hangup.callId)) {
@@ -1501,11 +1577,21 @@ class CallManager {
 
     _cancelRingingTimeout();
     call.state = CallState.ended;
-    terminatedCalls.record(call.callId);
+    _recordEnded(call);
     onCallEnded?.call(call);
     _currentCall = null;
     _unregisterLiveMediaPeer(call);
     _log.info('V3 call hung up by remote');
+  }
+
+  /// Notes [call] as ended (§17.2, 24 h) — for an outgoing call together
+  /// with its callee, so a late RING_ACK can be answered
+  /// ([handleCallRingAck]).
+  void _recordEnded(CallSession call) {
+    terminatedCalls.record(call.callId,
+        calleeHex: call.direction == CallDirection.outgoing
+            ? bytesToHex(hexToBytes(call.peerNodeIdHex))
+            : null);
   }
 
   /// Clear the Plane D session of this call (§17.4).
@@ -1532,7 +1618,7 @@ class CallManager {
   /// device level, `HarvestEvent.senderDeviceId` is always `null` there —
   /// and it fell with the operation. What remains is the path that
   /// §17.2 provides anyway.
-  void _sendRejectV3(HarvestEvent event, String reason) {
+  void _sendReject(HarvestEvent event, String reason) {
     try {
       final invite = proto.CallInvite.fromBuffer(event.payload);
       final senderUserId = Uint8List.fromList(event.senderUserId);
@@ -1550,7 +1636,7 @@ class CallManager {
       transport
           .sendSignal(
             recipientUserId: senderUserId,
-            type: proto.MessageTypeV3.MTV3_CALL_REJECT,
+            type: proto.MessageType.MT_CALL_REJECT,
             payload: reject.writeToBuffer(),
           )
           .catchError((Object e, StackTrace st) {
@@ -1566,20 +1652,19 @@ class CallManager {
 
   /// §17.2: deadline for `reaching` — runs until a RING_ACK has been harvested.
   ///
-  /// If it expires, not a single device of the callee was reached.
-  /// For the caller that is an ended call like every unanswered one;
-  /// §17.2, lines 5431-5434 provides for the follow-up as an ordinary
-  /// cell ("the caller's `reaching` cancellation can be followed up as
-  /// a normal cell (,missed call')") — that lies in the service layer, not
-  /// here.
+  /// If it expires, not a single device of the callee was reached. §17.2:
+  /// "the caller shows "not reachable", ends the call, sends one `HANGUP`
+  /// and the missed-call message" — [hangup] with
+  /// [CallEndReason.notReachable] ends it, sends the one `HANGUP` and,
+  /// through [onMissedCall], the missed-call message.
   void _startReachingTimeout() {
     _cancelReachingTimeout();
     _reachingTimeout = Timer(Duration(seconds: reachingTimeoutSec), () {
       final call = _currentCall;
       if (call == null || !call.reaching) return;
       _log.info('No RING_ACK within ${reachingTimeoutSec}s — no device '
-          'of the callee was reached (§17.2 TTL class), hanging up');
-      hangup();
+          'of the callee was reached (§17.2), not reachable');
+      hangup(reason: CallEndReason.notReachable);
     });
   }
 
@@ -1598,7 +1683,7 @@ class CallManager {
       if (call.direction == CallDirection.outgoing) {
         hangup();
       } else {
-        rejectCall(reason: 'timeout');
+        rejectCall(reason: rejectReasonTimeout);
       }
     });
   }

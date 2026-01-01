@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/calls/call_consent.dart';
 import 'package:cleona/core/channels/system_channels.dart';
+import 'package:cleona/core/channels/system_channel_api.dart';
+import 'package:cleona/core/channels/system_channel_json.dart';
 import 'package:cleona/core/ipc/ipc_channel.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/ipc/ipc_probe.dart' show parseCleonaPortFile;
@@ -12,18 +15,72 @@ import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/contact/contact_seed.dart'
     show ContactSeedBuilder, ContactSeedDataSource, EntrySeedCandidate;
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/core/service/bulk_cache_setting.dart'
+    show bulkCacheDefaultMb;
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/archive/archive_config.dart'
+    show ArchiveConfig, ArchiveSettingsView;
 import 'package:cleona/core/archive/archive_types.dart'
     show ArchiveRetrievalStart;
+import 'package:cleona/core/archive/share_identity.dart'
+    show ShareIdentityState;
 import 'package:cleona/core/stats/network_stats.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
-import 'package:cleona/core/service/multi_interface_mode.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_update_manager.dart' show BinaryUpdateState;
+import 'package:cleona/core/service/app_version.dart' show kAppVersion;
+
+/// What the GUI does when the daemon it reached runs another app version
+/// (S407-E7, §22.1: daemon and GUI are one program in two processes).
+enum IpcVersionAction {
+  /// Same version.
+  none,
+
+  /// The daemon is newer: this GUI process still runs the code from before an
+  /// update (the daemon restarted from the new bundle). The GUI restarts from
+  /// disk, where the new GUI lies.
+  restartGui,
+
+  /// The daemon is older or names no version (a daemon left running while a
+  /// new bundle was installed), or the GUI already restarted once and still
+  /// meets a newer daemon: the GUI's bundle is the installed one, so the
+  /// daemon is replaced from it — the same way a daemon without a display is
+  /// replaced (`_ensureDaemonRunning`).
+  replaceDaemon,
+}
+
+/// The action for a GUI of version [gui] that reached a daemon of version
+/// [daemon] (`''` = the daemon named none). [guiRestarted]: this GUI process
+/// was started by a version restart — a second restart would loop.
+IpcVersionAction ipcVersionAction(
+    {required String gui, required String daemon, required bool guiRestarted}) {
+  if (daemon == gui) return IpcVersionAction.none;
+  if (!guiRestarted && _versionNewer(daemon, gui)) {
+    return IpcVersionAction.restartGui;
+  }
+  return IpcVersionAction.replaceDaemon;
+}
+
+/// Whether version [a] is newer than [b] (major.minor.patch; anything else
+/// is not newer).
+bool _versionNewer(String a, String b) {
+  List<int>? parse(String v) {
+    final m = RegExp(r'^(\d+)\.(\d+)\.(\d+)').firstMatch(v);
+    if (m == null) return null;
+    return [for (var i = 1; i <= 3; i++) int.parse(m.group(i)!)];
+  }
+
+  final pa = parse(a), pb = parse(b);
+  if (pa == null || pb == null) return false;
+  for (var i = 0; i < 3; i++) {
+    if (pa[i] != pb[i]) return pa[i] > pb[i];
+  }
+  return false;
+}
 
 /// IPC client that connects to the cleona-daemon via Unix Domain Socket.
 /// Implements ICleonaService so the GUI can use it transparently.
@@ -56,6 +113,16 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// stall would tear down the GUI even though the daemon will be back in
   /// seconds. Architecturally distinct from `onDaemonDied`.
   void Function()? onIpcStalled;
+
+  /// The app version the daemon named when this client last connected
+  /// (`''`: it named none). See [ipcVersionAction].
+  String daemonAppVersion = '';
+
+  /// Called when a RECONNECT reached a daemon of another version than this
+  /// GUI ([kAppVersion]) — typically the daemon that restarted after an
+  /// update, while this process still runs the old code (S407-E7). Without
+  /// it the fast reconnect would join old GUI and new daemon silently.
+  void Function(String daemonVersion)? onVersionMismatch;
 
   // Active identity for this client connection
   String? activeIdentityId;
@@ -98,7 +165,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   int? _syncPartnersOutbound = 0;
   int? _syncPartnersInbound = 0;
   int _independentSyncPartners = 0;
-  int _reachableResponsibleRelays = 0;
 
   /// §24.4.2 — data saver mode, transmitted by the daemon.
   ///
@@ -124,6 +190,11 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   bool _coverReduceActive = false;
   bool _portMappingEnabled = true;
 
+  /// §21.3.3 item 3 (S407-MASSENCACHE): the bulk-cache size in MB. Initial
+  /// value is the default of D-32 for this platform — the daemon runs on the
+  /// same one; the first state packet overwrites it.
+  int _bulkCacheMb = bulkCacheDefaultMb(mobile: Platform.isAndroid || Platform.isIOS);
+
   /// Reads the switches from a state packet. A missing entry leaves the
   /// previous value standing, so that a partial packet deletes nothing.
   void _readNetworkSwitches(Map<String, dynamic> d) {
@@ -132,13 +203,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _coverReduceActive = d['coverReduceActive'] as bool? ?? _coverReduceActive;
     _portMappingEnabled =
         d['portMappingEnabled'] as bool? ?? _portMappingEnabled;
+    _bulkCacheMb = d['bulkCacheMb'] as int? ?? _bulkCacheMb;
   }
   int _peerCount = 0;
   int _confirmedPeerCount = 0;
   int _reachablePeerCount = 0;
   bool _hasPortMapping = false;
   bool _mobileFallbackActive = false;
-  int _fragmentCount = 0;
   bool _isRunning = false;
   String? _profilePictureBase64;
   String? _profileDescription;
@@ -263,8 +334,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// reported as such, so that the daemon does not take it for the user
   /// opening the application (§8.2; `IpcServer.onUserInterfaceOpened`).
   Future<bool> connect({bool reconnect = false}) async {
+    _stopped = false;
     try {
       _link = await _openLink();
+      daemonAppVersion = _link!.daemonAppVersion;
       _connected = true;
       _attachSocketListener(reconnect: reconnect);
 
@@ -282,6 +355,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         _link = null;
         return false;
       }
+      unawaited(_refreshCalendarMirror());
       return true;
     } catch (e) {
       _connected = false;
@@ -312,8 +386,12 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// connect up to 3 times with a 500 ms / 1 s / 2 s backoff before giving
   /// up and firing [onDaemonDied].
   bool _reconnecting = false;
+
+  /// [stop] closed the link on purpose: no reconnect.
+  bool _stopped = false;
+
   Future<void> _handleDisconnect(String reason) async {
-    if (_reconnecting) return;
+    if (_reconnecting || _stopped) return;
     _reconnecting = true;
     _connected = false;
     try {
@@ -322,11 +400,21 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
             Duration(milliseconds: 500 * (1 << attempt)));
         try {
           _link = await _openLink();
+          daemonAppVersion = _link!.daemonAppVersion;
+          if (daemonAppVersion != kAppVersion && onVersionMismatch != null) {
+            // Not this program any more: no resync against it — the GUI
+            // restores one version first (S407-E7).
+            _connected = true;
+            _attachSocketListener(reconnect: true);
+            onVersionMismatch!(daemonAppVersion);
+            return;
+          }
           _connected = true;
           _attachSocketListener(reconnect: true);
           // Resync state after reconnect so UI doesn't lag behind any
           // changes that landed while the socket was down.
           await refreshState();
+          unawaited(_refreshCalendarMirror());
           return;
         } catch (_) {
           // try next iteration
@@ -453,6 +541,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     }
 
     switch (event.event) {
+      case 'system_channels_changed':
+        _systemChannels?._changed.add(null);
+        return;
       case 'state_changed':
         // Lightweight notification — update basic fields, schedule coalesced refresh
         _readinessState =
@@ -466,9 +557,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         _independentSyncPartners = event.data['independentSyncPartners']
                 as int? ??
             _independentSyncPartners;
-        _reachableResponsibleRelays =
-            event.data['reachableResponsibleRelays'] as int? ??
-                _reachableResponsibleRelays;
         _dataSaverActive =
             event.data['dataSaverActive'] as bool? ?? _dataSaverActive;
         _dataSaverLockedBySecure = event.data['dataSaverLockedBySecure']
@@ -674,22 +762,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final eventId = event.data['eventId'] as String;
         final title = event.data['title'] as String;
         onCalendarInviteReceived?.call(senderHex, eventId, title);
-        fetchCalendarEvents(); // Refresh cache
-        onStateChanged?.call();
+        unawaited(_refreshCalendarMirror());
         break;
       case 'calendar_rsvp':
         final eventId = event.data['eventId'] as String;
         final responderHex = event.data['responderNodeIdHex'] as String;
         final statusIdx = event.data['status'] as int? ?? 0;
         final status = RsvpStatus.values[statusIdx.clamp(0, RsvpStatus.values.length - 1)];
+        // The daemon took the answer into the event; the mirror the event
+        // card reads takes it too, or the card keeps the old count.
+        _calendarManager.setRsvp(eventId, responderHex, status);
         onCalendarRsvpReceived?.call(eventId, responderHex, status);
         onStateChanged?.call();
         break;
       case 'calendar_event_updated':
         final eventId = event.data['eventId'] as String;
         onCalendarEventUpdated?.call(eventId);
-        fetchCalendarEvents(); // Refresh cache
-        onStateChanged?.call();
+        unawaited(_refreshCalendarMirror());
         break;
       case 'calendar_reminder':
         final eventId = event.data['eventId'] as String;
@@ -884,7 +973,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       _nodeStartedAt = DateTime.fromMillisecondsSinceEpoch(startedMs);
     }
     _mobileFallbackActive = state['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
-    _fragmentCount = state['fragmentCount'] as int? ?? _fragmentCount;
     _isRunning = state['isRunning'] as bool? ?? _isRunning;
     final ev = state['enrolment'] as Map<String, dynamic>?;
     if (ev != null) _enrolmentView = EnrolmentView.fromJson(ev);
@@ -903,8 +991,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     if (ms != null) _mediaSettings = MediaSettings.fromJson(ms);
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
-    final mim = state['multiInterfaceMode'] as String?;
-    if (mim != null) _multiInterfaceMode = MultiInterfaceMode.modeFromString(mim);
+    _masterMute = state['masterMute'] as bool? ?? _masterMute;
+    final gds = state['guiDeviceSettings'] as Map?;
+    if (gds != null) _guiDeviceSettings = Map<String, dynamic>.from(gds);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
     if (ns != null) _notificationSoundService.updateSettings(NotificationSettings.fromJson(ns));
 
@@ -1048,6 +1137,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       _removedFromGroups
         ..clear()
         ..addAll(removedFrom.cast<String>());
+    }
+    // §16.2.1 (S407 group list): where no anonymous poll can be built.
+    final noAnonymous = state['anonymousPollsImpossible'] as List<dynamic>?;
+    if (noAnonymous != null) {
+      _anonymousPollsImpossible
+        ..clear()
+        ..addAll(noAnonymous.cast<String>());
     }
 
     // Update channels
@@ -1220,6 +1316,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       identityUnreadCounts.remove(identityId); // Clear badge for now-active identity
       _applyStateSnapshot(resp.data);
       onStateChanged?.call();
+      // The mirror held the previous identity's events.
+      unawaited(_refreshCalendarMirror());
       return true;
     }
     return false;
@@ -1319,12 +1417,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   int get independentSyncPartners => _independentSyncPartners;
 
-  /// §9.2 — the measured responsibility set, from the daemon's
-  /// `state_changed`. Before the first event `0`: "nothing measured yet"
-  /// and "no relays known" are the same state for the display.
-  @override
-  int get reachableResponsibleRelays => _reachableResponsibleRelays;
-
   /// §24.4.2, transmitted — no constant, no local recomputation.
   @override
   bool get dataSaverActive => _dataSaverActive;
@@ -1343,6 +1435,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   bool get portMappingEnabled => _portMappingEnabled;
+
+  @override
+  int get bulkCacheMb => _bulkCacheMb;
 
   @override
   int get peerCount => _peerCount;
@@ -1380,8 +1475,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   DateTime? get nodeStartedAt => _nodeStartedAt;
   bool get mobileFallbackActive => _mobileFallbackActive;
-  @override
-  int get fragmentCount => _fragmentCount;
   @override
   bool get isRunning => _isRunning;
   // B-4b (§14.6.1, D-39, D-40): the enrolment, from the `get_state` snapshot.
@@ -1601,6 +1694,17 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     // A file is never sent again (§9.3, D-34, S398-W1): this path would
     // send its NAME as a text and drop the file's entry.
     if (original.isMedia) return null;
+    // A group or channel post goes again only to the members whose leg
+    // failed, and nothing is erased (owner decision 30.10.2026, S410 "B") —
+    // the daemon knows which legs failed (`UiMessage.legFailedBy`).
+    if (conv.isGroup || conv.isChannel) {
+      final resp = await _sendRequest('resend_failed_legs', params: {
+        'conversationId': conversationId,
+        'messageId': messageId,
+      });
+      onStateChanged?.call();
+      return resp.success ? original : null;
+    }
     // §9.3: the old entry goes out, the new attempt gets a new identifier
     // via sendTextMessage.
     ensureLoaded(conversationId);
@@ -1637,6 +1741,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       // (for DMs: pending proposal, for groups: directly applied)
       onStateChanged?.call();
     }
+    return resp.success;
+  }
+
+  @override
+  Future<bool> updateGroupProfile(String conversationId,
+      {String? name,
+      String? description,
+      bool setPicture = false,
+      String? pictureBase64}) async {
+    final resp = await _sendRequest('update_group_profile', params: {
+      'conversationId': conversationId,
+      'name': ?name,
+      'description': ?description,
+      if (setPicture) 'setPicture': true,
+      'pictureBase64': ?pictureBase64,
+    });
+    if (resp.success) onStateChanged?.call();
     return resp.success;
   }
 
@@ -1828,6 +1949,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   bool isRemovedFromGroup(String conversationId) =>
       _removedFromGroups.contains(conversationId);
 
+  // §16.2.1, §18.4.3 (S407 group list): taken from the state snapshot.
+  final Set<String> _anonymousPollsImpossible = {};
+
+  @override
+  bool anonymousPollPossible(String conversationId) =>
+      !_anonymousPollsImpossible.contains(conversationId);
+
   @override
   Map<String, ChannelInfo> get channels => _channels;
 
@@ -1878,6 +2006,17 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Future<bool> leaveGroup(String groupIdHex) async {
     final resp = await _sendRequest('leave_group', params: {
       'groupIdHex': groupIdHex,
+    });
+    if (resp.success) await refreshState();
+    return resp.success;
+  }
+
+  @override
+  Future<bool> answerGroupAloneQuestion(String groupIdHex,
+      {required bool delete}) async {
+    final resp = await _sendRequest('answer_group_alone_question', params: {
+      'groupIdHex': groupIdHex,
+      'delete': delete,
     });
     if (resp.success) await refreshState();
     return resp.success;
@@ -2009,6 +2148,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     );
   }
 
+  @override
+  Future<Uint8List?> getArchivePreview(String messageId) async {
+    final resp = await _sendRequest('archive_preview', params: {
+      'messageId': messageId,
+    });
+    final b64 = resp.success ? resp.data['preview'] as String? : null;
+    if (b64 == null || b64.isEmpty) return null;
+    try {
+      return base64Decode(b64);
+    } on FormatException {
+      return null;
+    }
+  }
+
   // ── Voice transcription (§21.7, S405 A-6) ──────────────────────────────
 
   @override
@@ -2042,50 +2195,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
-  @override
-  Future<UiMessage?> submitFeatureRequest(String title, String body) async {
-    final resp = await _sendRequest('submit_feature_request', params: {
-      'title': title,
-      'body': body,
-    });
-    if (resp.success) {
-      return UiMessage(
-        id: resp.data['messageId'] as String? ?? '',
-        conversationId: resp.data['channelIdHex'] as String? ?? '',
-        senderNodeIdHex: _nodeIdHex,
-        text: resp.data['text'] as String? ?? '',
-        timestamp: DateTime.now(),
-        type: UiMessageType.channelPost,
-        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
-        // from the success of an IPC round trip, i.e. from an observation
-        // about the own socket connection to the daemon and not about the
-        // network. `sent` has been dropped; the switch does not end at the
-        // IPC boundary. The authoritative value comes anyway with the next
-        // `refreshState()`/`new_message` from the daemon.
-        status: MessageStatus.resting,
-        isOutgoing: true,
-      );
-    }
-    return null;
-  }
-
-  @override
-  Future<bool> voteFeatureRequest(String recordIdHex, int option) async {
-    final resp = await _sendRequest('vote_feature_request', params: {
-      'recordIdHex': recordIdHex,
-      'option': option,
-    });
-    return resp.success;
-  }
-
-  @override
-  Future<Map<String, int>> featureRequestTally(String recordIdHex) async {
-    final resp = await _sendRequest('feature_request_tally', params: {
-      'recordIdHex': recordIdHex,
-    });
-    if (!resp.success) return const {'ja': 0, 'nein': 0, 'egal': 0, 'net': 0, 'own': -1};
-    return (resp.data).map((k, v) => MapEntry(k, (v as num).toInt()));
-  }
 
   @override
   Future<bool> leaveChannel(String channelIdHex) async {
@@ -2500,18 +2609,43 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     onStateChanged?.call();
   }
 
-  // ── Multi-Interface Send (Architecture §23.2) ────────────────────
+  // ── GUI device-wide choices (S407, §4.5.3) ──────────────────────────
 
-  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.auto;
-
-  @override
-  MultiInterfaceMode get multiInterfaceMode => _multiInterfaceMode;
+  bool _masterMute = false;
 
   @override
-  Future<void> setMultiInterfaceMode(MultiInterfaceMode mode) async {
-    _multiInterfaceMode = mode;
-    _sendRequest('set_multi_interface_mode', params: {'mode': MultiInterfaceMode.modeToString(mode)});
-    onStateChanged?.call();
+  bool get masterMute => _masterMute;
+
+  @override
+  Future<bool> setMasterMute(bool on) async {
+    final resp = await _sendRequest('set_master_mute', params: {'on': on});
+    if (resp.success) {
+      _masterMute = on;
+      onStateChanged?.call();
+    }
+    return resp.success;
+  }
+
+  Map<String, dynamic> _guiDeviceSettings = <String, dynamic>{};
+
+  @override
+  Map<String, dynamic> get guiDeviceSettings => _guiDeviceSettings;
+
+  @override
+  Future<bool> setGuiDeviceSetting(String field, Object? value) async {
+    final resp = await _sendRequest('set_gui_device_setting',
+        params: {'field': field, 'value': value});
+    if (resp.success) {
+      final next = Map<String, dynamic>.from(_guiDeviceSettings);
+      if (value == null) {
+        next.remove(field);
+      } else {
+        next[field] = value;
+      }
+      _guiDeviceSettings = next;
+      onStateChanged?.call();
+    }
+    return resp.success;
   }
 
   // ── NFC Contact Exchange (not supported via IPC — NFC runs in-process) ──
@@ -2630,6 +2764,45 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return contact != null;
   }
 
+  @override
+  bool setContactCallsAllowed(String nodeIdHex, bool allowed) {
+    // Cached copy first so the switch follows at once; the daemon holds the
+    // authoritative record and the call paths that read it.
+    final contact = getContact(nodeIdHex);
+    if (contact != null) {
+      contact.callsAllowed = allowed;
+      onStateChanged?.call();
+    }
+    _sendRequest('contact_set_calls_allowed', params: {
+      'nodeIdHex': nodeIdHex,
+      'allowed': allowed,
+    });
+    return contact != null;
+  }
+
+  @override
+  bool setIsAdult(bool adult) {
+    // The daemon stores it in the identity record (which the identity
+    // screen reads) and tells the other own devices (§14.7 Type 8, D-72).
+    _sendRequest('set_is_adult', params: {'value': adult});
+    return true;
+  }
+
+  @override
+  bool setReviewEnabled(bool enabled) {
+    _sendRequest('set_can_review_reports', params: {'value': enabled});
+    return true;
+  }
+
+  @override
+  bool contactCallsAllowed(String nodeIdHex) {
+    // The GUI holds the contacts as lists; the predicate stays the one in
+    // `call_consent.dart`.
+    final contact = getContact(nodeIdHex);
+    return contact != null &&
+        callsAllowedWith({nodeIdHex: contact}, nodeIdHex);
+  }
+
   /// §14.7.4: withhold this node's delivery status from a contact or group.
   /// Mirrors the daemon-side setting into the local cache so the toggle
   /// reflects immediately; the daemon remains authoritative.
@@ -2644,6 +2817,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _sendRequest('set_withhold_delivery_status', params: {
       'entityIdHex': entityIdHex,
       'withhold': withhold,
+    });
+    return true;
+  }
+
+  /// §9.4 "always load images" of a group or channel — the local cache
+  /// follows at once; the daemon is authoritative.
+  @override
+  bool setAlwaysLoadImages(String entityIdHex, bool on) {
+    final group = _groups[entityIdHex];
+    final channel = group == null ? _channels[entityIdHex] : null;
+    if (group == null && channel == null) return false;
+    group?.alwaysLoadImages = on;
+    channel?.alwaysLoadImages = on;
+    onStateChanged?.call();
+    _sendRequest('set_always_load_images', params: {
+      'entityIdHex': entityIdHex,
+      'on': on,
     });
     return true;
   }
@@ -2729,6 +2919,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
+  /// §21.3.3 item 3 (S407-MASSENCACHE). What the daemon answers is shown —
+  /// no anticipation: a smaller size deletes pieces, so the surface says so
+  /// only once it happened.
+  @override
+  Future<bool> setBulkCacheMb(int mb) async {
+    final resp = await _sendRequest('set_bulk_cache', params: {'mb': mb});
+    final now = resp.data['mb'] as int?;
+    if (now != null && now != _bulkCacheMb) {
+      _bulkCacheMb = now;
+      onStateChanged?.call();
+    }
+    return resp.success;
+  }
+
   @override
   void acceptContactNameChange(String nodeIdHex, bool accept) {
     _sendRequest('accept_name_change', params: {
@@ -2769,7 +2973,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<void> rejectCall({String reason = 'busy'}) async {
+  Future<void> rejectCall({String reason = 'declined'}) async {
     await _sendRequest('reject_call', params: {'reason': reason});
     _currentCall = null;
   }
@@ -2794,8 +2998,12 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   void Function(GroupCallInfo info)? onGroupCallEnded;
 
   @override
-  Future<GroupCallInfo?> startGroupCall(String groupIdHex) async {
-    final resp = await _sendRequest('start_group_call', params: {'groupIdHex': groupIdHex});
+  Future<GroupCallInfo?> startGroupCall(String groupIdHex,
+      {Set<String>? invitees}) async {
+    final resp = await _sendRequest('start_group_call', params: {
+      'groupIdHex': groupIdHex,
+      if (invitees != null) 'invitees': invitees.toList(),
+    });
     if (resp.success && resp.data.containsKey('callId')) {
       _currentGroupCall = GroupCallInfo.fromJson(resp.data);
       return _currentGroupCall;
@@ -2809,7 +3017,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<void> rejectGroupCall({String reason = 'busy'}) async {
+  Future<void> rejectGroupCall({String reason = 'declined'}) async {
     await _sendRequest('reject_group_call', params: {'reason': reason});
     _currentGroupCall = null;
   }
@@ -2896,13 +3104,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return null;
   }
 
-  @override
-  Future<bool> publishContactIssueReport(String contactNodeIdHex) async {
-    final resp = await _sendRequest('publish_contact_issue_report',
-        params: {'nodeIdHex': contactNodeIdHex});
-    return resp.success;
-  }
-
   /// S368 — AN EMPTY REPORT STOOD HERE.
   ///
   /// The implementation returned `appVersion: ''`, `platform: ''`,
@@ -2939,11 +3140,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return null;
   }
 
+  /// §16.7 (S407 SK-4): the system channels of the daemon, command by
+  /// command (`ipc_server.dart` `_handleSystemChannels`); a change there
+  /// arrives as the event `system_channels_changed`.
   @override
-  Future<bool> publishLogReport() async {
-    final resp = await _sendRequest('publish_log_report');
-    return resp.success;
-  }
+  SystemChannelApi get systemChannelApi =>
+      _systemChannels ??= _IpcSystemChannels(this);
+  _IpcSystemChannels? _systemChannels;
 
   // ── NAT-Troubleshooting-Wizard (§27.9) — IPC proxy ──────────────────
   @override
@@ -3368,13 +3571,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   Future<void> sendCalendarRsvp(String eventIdHex, RsvpStatus status, {int? proposedStart, int? proposedEnd, String? comment}) async {
-    await _sendRequest('calendar_send_rsvp', params: {
+    final resp = await _sendRequest('calendar_send_rsvp', params: {
       'eventId': eventIdHex,
       'status': status.index,
       'proposedStart': ?proposedStart,
       'proposedEnd': ?proposedEnd,
       'comment': ?comment,
     });
+    if (resp.success) {
+      // The daemon records the own answer in the event (calendar_protocol_
+      // service.dart `sendCalendarRsvp`); the mirror the card reads does
+      // the same, as `createCalendarEvent` does for a new event.
+      _calendarManager.setRsvp(eventIdHex, _nodeIdHex, status);
+      onStateChanged?.call();
+    }
   }
 
   @override
@@ -3415,6 +3625,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       'queryEnd': queryEnd,
     });
     return resp.data['requestId'] as String? ?? '';
+  }
+
+  /// Refills the calendar mirror, THEN tells the surface. The event card in
+  /// the chat (§18.1.7) looks its event up in this mirror while it builds;
+  /// a redraw ordered before the answer came drew "event not available"
+  /// and nothing redrew it once the events were there. Also run when the
+  /// mirror's content is unknown — a new connection (the GUI started after
+  /// the invitation arrived) and a switch of identity.
+  Future<void> _refreshCalendarMirror() async {
+    try {
+      await fetchCalendarEvents();
+    } finally {
+      onStateChanged?.call();
+    }
   }
 
   /// Fetch calendar events from daemon and populate proxy CalendarManager.
@@ -3579,6 +3803,21 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     });
   }
 
+  // ── Windows: the daemon's inbound firewall rule (v4_2 §22.x) ──────────
+
+  /// `{state, exe}` from the daemon: `state` is a [WindowsFirewallState]
+  /// name, `exe` the daemon's own program path — the path the rule must
+  /// name. [recheck] makes the daemon check again (after "Allow in
+  /// firewall"). Empty map when the daemon does not answer it.
+  Future<Map<String, dynamic>> windowsFirewall({bool recheck = false}) async {
+    final resp = await _sendRequest(
+        recheck ? 'windows_firewall_recheck' : 'windows_firewall_state',
+        // The daemon's check runs PowerShell (bounded at 60 s there).
+        timeout: const Duration(seconds: 65));
+    if (!resp.success) return {};
+    return resp.data.cast<String, dynamic>();
+  }
+
   // ── Local CalDAV server (§23.8.7) ─────────────────────────────────
 
   /// Current state of the embedded CalDAV server.
@@ -3704,6 +3943,11 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     };
   }
 
+  /// The daemon runs the edge; the command stays `manual_reconnect`, so a
+  /// GUI and a daemon of different builds of one installation still agree.
+  @override
+  Future<Map<String, dynamic>> reconnect() => manualReconnect();
+
   // ── Media archive: share identity and narrowing (§21.6, S394) ──────────
 
   @override
@@ -3726,6 +3970,42 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Future<bool> clearArchiveNetworks() async =>
       (await _sendRequest('archive_clear_networks')).success;
 
+  // ── Media archive: the setting (§21.6, S410 E10) ───────────────────────
+
+  @override
+  Future<ArchiveSettingsView?> getArchiveSettings() async {
+    final resp = await _sendRequest('archive_settings_get');
+    if (!resp.success) return null;
+    return ArchiveSettingsView.fromJson(Map<String, dynamic>.from(resp.data));
+  }
+
+  @override
+  Future<bool> setArchiveSettings(ArchiveConfig config,
+      {String? password}) async {
+    // The setting goes without its password field; the password only when
+    // the user typed one (`null`: the daemon keeps the stored one).
+    final resp = await _sendRequest('archive_settings_set', params: {
+      'config': config.withArchivePassword(null).toJson(),
+      'password': ?password,
+    });
+    return resp.success;
+  }
+
+  @override
+  Future<({bool reachable, ShareIdentityState? identity})?>
+      testArchiveShare() async {
+    final resp = await _sendRequest('archive_test_connection');
+    final reachable = resp.data['reachable'];
+    if (reachable is! bool) return null; // no share configured, or no answer
+    final identity = resp.data['identity'] as String?;
+    return (
+      reachable: reachable,
+      identity: identity == null
+          ? null
+          : ShareIdentityState.values.asNameMap()[identity],
+    );
+  }
+
   // ── Binary Seeding (§19.6.2) ─────────────────────────────────────────────
 
   /// WITHOUT CALLER, RE-MEASURED (S361) — but its counterpart answers
@@ -3745,19 +4025,17 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// (`test/e2e/tests/binary-update.spec.ts`,
   /// `scripts/publish-in-network-update.sh:191`) bypass the client here
   /// and go directly via the raw IPC string. It stays nevertheless — it is
-  /// the typed connection for GUI code, and since 02.09.2026 [maxFragments]
-  /// is also evaluated server-side instead of thrown away.
+  /// the typed connection for GUI code. `maxFragments` fell with
+  /// S407-UPDATEFRAGMENTE: only the complete object is stored.
   Future<Map<String, dynamic>> seedBinary({
     required String platform,
     required String version,
     required String filePath,
-    int? maxFragments,
   }) async {
     final resp = await _sendRequest('seed_binary', params: {
       'platform': platform,
       'version': version,
       'filePath': filePath,
-      'maxFragments': ?maxFragments,
     });
     return resp.data;
   }
@@ -3768,13 +4046,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<void> onNetworkChanged({bool triggerNodeReset = true}) async {
-    // Network changes are handled by the daemon — IPC client is a no-op.
-    // The `triggerNodeReset` flag is accepted for interface conformance only.
-  }
-
-  @override
   Future<void> stop() async {
+    _stopped = true;
     _link?.close();
     _link = null;
     _connected = false;
@@ -3784,4 +4057,79 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Future<void> disconnect() async {
     await stop();
   }
+}
+
+/// The IPC proxy of [SystemChannelApi] (S407 SK-4). Each method is one
+/// command; a failed answer throws — a preview that cannot be fetched must
+/// not look like an empty one (the lesson of S368, `buildLogReport`).
+class _IpcSystemChannels implements SystemChannelApi {
+  final IpcClient _c;
+  final StreamController<void> _changed = StreamController<void>.broadcast();
+
+  _IpcSystemChannels(this._c);
+
+  Future<Map<String, dynamic>> _ok(IpcResponse r) async {
+    if (!r.success) {
+      throw StateError('system channels: ${r.error ?? 'no answer'}');
+    }
+    return r.data;
+  }
+
+  @override
+  Stream<void> get changes => _changed.stream;
+
+  @override
+  Future<List<BugLogGroupView>> bugLog() async {
+    final d = await _ok(await _c._sendRequest('syschan_bug_log'));
+    return [
+      for (final g in (d['groups'] as List? ?? const []))
+        groupFromJson((g as Map).cast<String, dynamic>())
+    ];
+  }
+
+  @override
+  Future<List<FeatureRequestView>> featureRequests() async {
+    final d = await _ok(await _c._sendRequest('syschan_feature_requests'));
+    return [
+      for (final f in (d['requests'] as List? ?? const []))
+        requestFromJson((f as Map).cast<String, dynamic>())
+    ];
+  }
+
+  @override
+  Future<void> channelOpened(int channel) async => _ok(await _c
+      ._sendRequest('syschan_channel_opened', params: {'channel': channel}));
+
+  @override
+  Future<void> markSeen(int channel, List<String> idHexes) async =>
+      _ok(await _c._sendRequest('syschan_mark_seen',
+          params: {'channel': channel, 'ids': idHexes}));
+
+  @override
+  Future<SystemDepositPreview> prepare(SystemDraft draft) async =>
+      previewFromJson(await _ok(await _c._sendRequest('syschan_prepare',
+          params: {'draft': draftToJson(draft)})));
+
+  @override
+  Future<SystemSendResult> send(String token, SystemSendChoice choice) async =>
+      resultFromJson(await _ok(await _c._sendRequest('syschan_send',
+          params: {'token': token, 'choice': choice.name})));
+
+  @override
+  Future<void> discard(String token) async => _ok(
+      await _c._sendRequest('syschan_discard', params: {'token': token}));
+
+  @override
+  Future<SystemSendResult> vote(String requestIdHex, int option) async =>
+      resultFromJson(await _ok(await _c._sendRequest('syschan_vote',
+          params: {'id': requestIdHex, 'option': option})));
+
+  @override
+  Future<SystemSendResult> retract(String idHex) async => resultFromJson(
+      await _ok(await _c._sendRequest('syschan_retract', params: {'id': idHex})));
+
+  @override
+  Future<bool> holdersKnown() async =>
+      (await _ok(await _c._sendRequest('syschan_holders_known')))['known'] ==
+      true;
 }

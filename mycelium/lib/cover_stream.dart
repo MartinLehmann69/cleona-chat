@@ -8,6 +8,7 @@ import 'package:mycelium/address_entries.dart'
 import 'package:mycelium/wire.dart' show PacketRoute;
 import 'package:mycelium/shell_start.dart' show kShellSize;
 import 'package:mycelium/cover_stream_content.dart';
+import 'package:mycelium/durable_id.dart' show DurableId, kIdentifiersPerCover;
 
 /// The cover stream (§5).
 ///
@@ -50,7 +51,8 @@ import 'package:mycelium/cover_stream_content.dart';
 /// A drawn packet carries, in this order of checking:
 /// address entries, if the addresses have changed since the last packet to
 /// THIS target; otherwise an update piece, if
-/// [nextPiece] yields one; otherwise filling. No content ever creates
+/// [nextPiece] yields one — or young durable-object identifiers, the
+/// draw between them by chance (§5.5 rule 2); otherwise filling. No content ever creates
 /// a send time of its own (§5.5 rule 1). The code registration is NOT
 /// cover content (§5.5, F-B): it travels as `0x24` (`node_codes.dart`).
 ///
@@ -115,6 +117,20 @@ class CoverStream {
   /// `null`. At most [kPieceAtMost] B.
   Uint8List? Function()? nextPiece;
 
+  /// How many update objects [nextPiece] draws from — the identifiers count
+  /// as ONE more such object (§5.5 rule 2). Unset: one.
+  int Function()? pieceObjects;
+
+  /// The young durable-object identifiers this node names (§5.5 rule 2,
+  /// §16.0), youngest first, at most [kIdentifiersPerCover] — or `null`
+  /// when it holds none younger than 24 h (`durable_names.dart`).
+  List<DurableId>? Function()? nextIdentifiers;
+
+  /// Received identifiers (§16.0): the one content that may cause traffic
+  /// — a fetch outside the stream (§5.5 rule 4).
+  void Function(List<DurableId> ids, InternetAddress from, int fromPort)?
+      onIdentifiers;
+
   /// Received address entries — the sender's own addresses (joined into one
   /// neighbour, `neighbourhood_join.dart`) and candidates for the
   /// neighbourhood, none of which is believed (§11.9).
@@ -134,6 +150,7 @@ class CoverStream {
   int sentFill = 0;
   int sentPiece = 0;
   int sentEntries = 0;
+  int sentIdentifiers = 0;
 
   /// Drawn points in time that were dropped for lack of content ([emptyReduce]).
   int skipped = 0;
@@ -221,6 +238,8 @@ class CoverStream {
     if (s != null && s.isNotEmpty) onPiece?.call(s, from, fromPort);
     final o = t.keepAlive;
     if (o != null) onKeepAlive?.call(o, from, fromPort);
+    final ids = t.identifiers;
+    if (ids != null && ids.isNotEmpty) onIdentifiers?.call(ids, from, fromPort);
   }
 
   void _newPlan() {
@@ -263,11 +282,7 @@ class CoverStream {
       payload = coverPayloadBuild(kContentEntries, _random, entries: list);
       entriesIncluded = true;
     } else {
-      final s = nextPiece?.call();
-      if (s != null && s.isNotEmpty && s.length <= kPieceAtMost) {
-        payload = coverPayloadBuild(kContentPiece, _random, piece: s);
-        sentPiece++;
-      }
+      payload = _objectContent();
     }
     if (payload == null) {
       if (reduced) {
@@ -288,6 +303,33 @@ class CoverStream {
     }
     sent++;
     return true;
+  }
+
+  /// §5.5 rule 2: chance picks the object — every update object [nextPiece]
+  /// draws from, and the identifiers as one more; the other one fills in
+  /// when the drawn one has nothing at this moment.
+  Uint8List? _objectContent() {
+    final objects = pieceObjects?.call() ?? 1;
+    final idsFirst = nextIdentifiers != null &&
+        _random.nextInt((objects < 0 ? 0 : objects) + 1) == 0;
+    Uint8List? piece() {
+      final s = nextPiece?.call();
+      if (s == null || s.isEmpty || s.length > kPieceAtMost) return null;
+      sentPiece++;
+      return coverPayloadBuild(kContentPiece, _random, piece: s);
+    }
+
+    Uint8List? ids() {
+      final l = nextIdentifiers?.call();
+      if (l == null || l.isEmpty) return null;
+      sentIdentifiers++;
+      return coverPayloadBuild(kContentIdentifiers, _random,
+          identifiers: l.length > kIdentifiersPerCover
+              ? l.sublist(0, kIdentifiersPerCover)
+              : l);
+    }
+
+    return idsFirst ? (ids() ?? piece()) : (piece() ?? ids());
   }
 
   final Map<String, DateTime> _lastTo = {};

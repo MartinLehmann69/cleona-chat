@@ -7,10 +7,10 @@
 /// way back of a first contact, which names the reader's fixed neighbour in
 /// the clear to the issuer's neighbour (§15.2 "the first-contact code").
 ///
-/// The seat rule already keeps contacts off the card's seat where it can
-/// (`neighbourhood_seat.dart`); what is left — a contact's device that took
-/// the seat while nobody else answered, or a neighbour that became a
-/// contact after it took it — is closed HERE, at the one place every
+/// The seat rule keeps contacts off the card's seat (`neighbourhood_seat.dart`,
+/// D-26: a contact's device never holds it); what is left — a holder that
+/// became a contact while a standing invitation still names it, or a seat
+/// read between a confirmation and its edge — is closed HERE, at the one place every
 /// stranger-facing reader asks. A seat that is a contact's device names
 /// nobody: a card without a neighbour costs a first contact from the open
 /// internet its step 3 (§15.2 names that price), a friend's address in a

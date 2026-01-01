@@ -8,11 +8,11 @@
 /// ([StoredRotationLink.linkContentOf]) with Ed25519 AND ML-DSA-65 — the
 /// chain is a long-lived verifiable artifact and therefore hybrid (§4.4.3).
 ///
-/// Two consumers check it, and both call [RotationChain.holds]: the system
-/// channel (`system_channel_records.dart`, records of a rotated author) and
-/// the delivery layer (`package:mycelium`, the envelope, the key bundle and
-/// the text line of first contact). Until this file existed the check stood
-/// only in the system channel.
+/// The consumer that checks it calls [RotationChain.holds]: the delivery
+/// layer (`package:mycelium`, the envelope, the key bundle and the text
+/// line of first contact). The system channel, its first consumer, signs
+/// with a report pseudonym since S407 and carries no chain (§16.7). Until
+/// this file existed the check stood only in the system channel.
 ///
 /// ── WIRE FORM (§4.5.4) ───────────────────────────────────────────────────
 /// ```

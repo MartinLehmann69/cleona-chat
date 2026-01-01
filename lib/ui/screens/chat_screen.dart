@@ -24,10 +24,13 @@ import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
+import 'package:cleona/ui/screens/group_profile_screen.dart';
+import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
+import 'package:cleona/ui/components/group_alone_dialog.dart';
 import 'package:cleona/ui/components/forward_picker.dart';
 import 'package:cleona/ui/components/media_consent_dialog.dart';
 import 'package:cleona/ui/components/message_bubble.dart';
@@ -39,18 +42,18 @@ import 'package:cleona/core/media/clipboard_helper.dart';
 import 'package:cleona/core/media/media_store.dart';
 import 'package:cleona/core/media/media_vault.dart';
 import 'package:cleona/core/media/transient_files.dart';
-import 'package:cleona/core/platform/app_screenshot.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/archive/archive_placeholder.dart';
 import 'package:cleona/ui/components/archive_placeholder_tile.dart';
 import 'package:cleona/ui/components/archive_retrieval_state.dart';
+import 'package:cleona/ui/components/archive_preview_cache.dart';
 import 'package:cleona/ui/components/media_missing_tile.dart';
 import 'package:cleona/ui/components/transfer_progress_state.dart';
 import 'package:cleona/ui/components/poll_card.dart';
 import 'package:cleona/ui/components/calendar_event_card.dart';
 import 'package:cleona/ui/screens/poll_editor_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
-import 'package:cleona/ui/components/system_channel_post.dart';
 import 'package:cleona/ui/date_format.dart' as df;
 import 'package:cleona/core/contact/channel_uri.dart';
 
@@ -66,6 +69,112 @@ Uint8List? _safeBase64Decode(String? input) {
     return null;
   }
 }
+
+/// Escape closes what [child] shows (owner 13.10.2026): the emoji choice of
+/// the input field and the reaction sheet, as dialogs on the desktop do. The
+/// focus node takes the focus when the picker appears, so Escape reaches it
+/// although the input field gave the focus up.
+class _EscapeCloses extends StatelessWidget {
+  final VoidCallback onEscape;
+  final Widget child;
+  const _EscapeCloses({required this.onEscape, required this.child});
+
+  @override
+  Widget build(BuildContext context) => CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): onEscape,
+        },
+        child: Focus(autofocus: true, child: child),
+      );
+}
+
+/// The emoji choice under the input field; [onClose] on Escape.
+Widget inputEmojiPanel({
+  required Config config,
+  required void Function(String emoji) onEmoji,
+  required VoidCallback onClose,
+}) =>
+    _EscapeCloses(
+      onEscape: onClose,
+      child: SizedBox(
+        height: 260,
+        child: EmojiPicker(
+          key: const ValueKey('input_emoji_picker'),
+          onEmojiSelected: (category, emoji) => onEmoji(emoji.emoji),
+          config: config,
+        ),
+      ),
+    );
+
+/// The reaction sheet: quick row and full picker. A choice or Escape closes
+/// the sheet ([sheetContext] is the sheet's own route).
+Widget reactionSheet({
+  required BuildContext sheetContext,
+  required List<String> quickEmojis,
+  required bool Function(String emoji) isOwn,
+  required void Function(String emoji) onReact,
+  required Config config,
+}) {
+  final colorScheme = Theme.of(sheetContext).colorScheme;
+  void react(String emoji) {
+    Navigator.of(sheetContext).pop();
+    onReact(emoji);
+  }
+
+  return _EscapeCloses(
+    onEscape: () => Navigator.of(sheetContext).pop(),
+    child: SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 8),
+          Container(
+            width: 40, height: 4,
+            decoration: BoxDecoration(
+              color: colorScheme.onSurfaceVariant.withAlpha(80),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          // Quick-reaction row
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: quickEmojis.map((emoji) {
+                final selected = isOwn(emoji);
+                return InkWell(
+                  borderRadius: BorderRadius.circular(20),
+                  onTap: () => react(emoji),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: selected ? BoxDecoration(
+                      color: colorScheme.primaryContainer,
+                      shape: BoxShape.circle,
+                    ) : null,
+                    child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          Divider(height: 1, color: colorScheme.outlineVariant),
+          // Full emoji picker
+          SizedBox(
+            height: 300,
+            child: EmojiPicker(
+              key: const ValueKey('reaction_picker'),
+              onEmojiSelected: (category, emoji) => react(emoji.emoji),
+              config: config,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// The action a tap on a reaction chip reports, followed by the emoji.
+const String kReactionChipAction = 'reaction:';
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
@@ -102,6 +211,35 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Edit mode state
   String? _editingMessageId;
+
+  /// The text the message had when the edit began. An edit that leaves it
+  /// unchanged is not sent (rule 5: no traffic without a purpose).
+  String? _editingOriginalText;
+
+  /// §16.2.2: the question "delete the group?" is on screen — it is shown
+  /// once per opening, never stacked by the rebuilds a state change brings.
+  bool _aloneQuestionShowing = false;
+
+  /// §16.2.2: "When every other member has left or been removed and the own
+  /// identity is the only member, the application asks once whether to
+  /// delete the group." Asked when the group is opened, or at once while it
+  /// is open: the question concerns this conversation, so it comes where
+  /// the user is looking at it, not over another screen. The flag lives in
+  /// the service ([GroupInfo.aloneQuestion]); on the desktop it reaches this
+  /// window with the state over IPC, on Android/iOS the service is in-process.
+  Future<void> _askAlone(ICleonaService service) async {
+    final group = service.groups[widget.conversationId];
+    if (!mounted || group == null || !group.aloneQuestionDue) {
+      _aloneQuestionShowing = false;
+      return;
+    }
+    final delete = await showGroupAloneDialog(context, groupName: group.name);
+    // Closed without an answer: the question stays due for the next opening.
+    if (delete == null) return;
+    final ok = await service.answerGroupAloneQuestion(widget.conversationId,
+        delete: delete);
+    if (delete && ok && mounted) Navigator.pop(context);
+  }
 
   bool _isGroupManager(ICleonaService? service) {
     if (service == null || !widget.isGroup) return false;
@@ -140,26 +278,6 @@ class _ChatScreenState extends State<ChatScreen> {
       (widget.isGroup || widget.isChannel) &&
       (service?.isRemovedFromGroup(widget.conversationId) ?? false);
 
-  /// §9.5.3 D3 (S119): cached Feature-Request vote tallies per record id.
-  final Map<String, Map<String, int>> _frTallies = {};
-  final Set<String> _frTallyLoading = {};
-
-  void _loadFrTally(String recordIdHex, ICleonaService service,
-      {bool force = false}) {
-    if (!force && _frTallyLoading.contains(recordIdHex)) return;
-    _frTallyLoading.add(recordIdHex);
-    service.featureRequestTally(recordIdHex).then((tally) {
-      if (!mounted) return;
-      final prev = _frTallies[recordIdHex];
-      if (prev == null || prev.toString() != tally.toString()) {
-        setState(() => _frTallies[recordIdHex] = tally);
-      } else {
-        _frTallies[recordIdHex] = tally;
-      }
-    }).catchError((_) {
-      _frTallyLoading.remove(recordIdHex);
-    });
-  }
 
   // Search state
   bool _isSearching = false;
@@ -170,6 +288,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Typing indicator: debounce sending
   DateTime? _lastTypingSent;
+  /// The text [_onTextChanged] last saw — a value change with the same text
+  /// is a selection or composing change, not typing.
+  String _lastTypedText = '';
   ICleonaService? _cachedService;
 
   // EmojiPicker Config cache — keyed on PLATFORM brightness (instant, single
@@ -343,36 +464,6 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  /// §23.10: the application's own screenshot. Always offered; where
-  /// forwarding is not allowed it takes no picture and tells the user why.
-  /// The one-time warning about protection boundaries (key
-  /// `notice_leaves_protection_screenshot`) is not built here — it would hook
-  /// in before the first actual capture and guard the same path.
-  Future<void> _takeScreenshot(ChatConfig? config) async {
-    final locale = AppLocale.read(context);
-    final messenger = ScaffoldMessenger.of(context);
-
-    if (!(config?.allowForwarding ?? true)) {
-      messenger.showSnackBar(
-        SnackBar(content: Text(locale.get('screenshot_refused_forwarding'))),
-      );
-      return;
-    }
-
-    final result = await AppScreenshot.capture();
-    if (!mounted) return;
-
-    if (result.saved && result.uri != null) {
-      messenger.showSnackBar(
-        SnackBar(content: Text(locale.get('screenshot_saved'))),
-      );
-    } else {
-      messenger.showSnackBar(
-        SnackBar(content: Text(locale.get('screenshot_failed'))),
-      );
-    }
-  }
-
   /// Returns the subtitle as a plain [String] for use with [AppBarScaffold].
   String? _buildSubtitleText(BuildContext context, ICleonaService? service) {
     final locale = AppLocale.read(context);
@@ -445,7 +536,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onTextChanged() {
-    if (_textController.text.isEmpty) return;
+    // The controller notifies on EVERY value change, also when only the
+    // selection or the composing range moves (Ctrl+A, cursor keys, a click
+    // into the field). Only a changed TEXT is typing (S410 gui-04 4.22:
+    // Ctrl+A sent a second indicator whose 5 s window outlasted the
+    // cleared field at the receiver, S410-BEFUND8-BAU.md §5).
+    final text = _textController.text;
+    if (text == _lastTypedText) return;
+    _lastTypedText = text;
+    if (text.isEmpty) return;
     final now = DateTime.now();
     // Debounce: max once per 3 seconds
     if (_lastTypingSent != null && now.difference(_lastTypingSent!).inSeconds < 3) return;
@@ -472,18 +571,13 @@ class _ChatScreenState extends State<ChatScreen> {
     final appState = context.watch<CleonaAppState>();
     final service = appState.service;
     final conv = service?.conversations[widget.conversationId];
-    List<UiMessage> messages = conv?.messages ?? [];
-    // §9.5.3 (S119 D3): the Feature-Request channel sorts by net votes
-    // ("Ja" − "Nein", descending), ties broken newest-first — a local UI sort
-    // over the gossip-tallied vote records.
-    if (sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId)) {
-      messages = List<UiMessage>.from(messages)
-        ..sort((a, b) {
-          final netA = _frTallies[a.id]?['net'] ?? 0;
-          final netB = _frTallies[b.id]?['net'] ?? 0;
-          if (netA != netB) return netB.compareTo(netA);
-          return b.timestamp.compareTo(a.timestamp);
-        });
+    final List<UiMessage> messages = conv?.messages ?? [];
+    if (widget.isGroup &&
+        service != null &&
+        !_aloneQuestionShowing &&
+        (service.groups[widget.conversationId]?.aloneQuestionDue ?? false)) {
+      _aloneQuestionShowing = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _askAlone(service));
     }
 
     // Focus-guard: snapshot whether the input field was focused BEFORE this
@@ -525,7 +619,9 @@ class _ChatScreenState extends State<ChatScreen> {
         // attach button — the drop target itself isn't gated by any widget
         // visibility, so it needs its own check. §16.2.2 (S403, V2): a
         // removed member writes nothing either.
-        if (_isDeletedContactChat(service) || _isRemovedFromGroup(service)) {
+        if (_isDeletedContactChat(service) ||
+            _isRemovedFromGroup(service) ||
+            !_canPostInGroup(service)) {
           return;
         }
         for (final file in details.files) {
@@ -575,15 +671,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                 _currentSearchIndex >= 0 &&
                                 _currentSearchIndex < _searchMatchIndices.length &&
                                 _searchMatchIndices[_currentSearchIndex] == index;
-                            // §9.5.3 D3: lazily load the FR vote tally for
-                            // feature-request cards (async, cached).
-                            if (service != null &&
-                                sys_ch.SystemChannels.isFeatureReqChannel(
-                                    widget.conversationId) &&
-                                !_frTallies.containsKey(msg.id) &&
-                                msg.text.contains('"feature_request"')) {
-                              _loadFrTally(msg.id, service);
-                            }
                             final bubble = _MessageBubble(
                               message: msg,
                               isEditing: _editingMessageId == msg.id,
@@ -598,24 +685,11 @@ class _ChatScreenState extends State<ChatScreen> {
                               readOnlyArchive: _isDeletedContactChat(service) ||
                                   _isRemovedFromGroup(service),
                               onMessageAction: (action, m) => _handleMessageAction(action, m, service),
+                              ownIdHex: service?.nodeIdHex,
                               isSearchHighlight: isHighlighted,
-                              isSystemChannel: sys_ch.SystemChannels.isSystemChannel(widget.conversationId),
                               browserOpenMode: service?.linkPreviewSettings.browserOpenMode ?? BrowserOpenMode.normal,
-                              frTally: _frTallies[msg.id],
-                              onFrVote: service == null
-                                  ? null
-                                  : (option) async {
-                                      await service.voteFeatureRequest(
-                                          msg.id, option);
-                                      _loadFrTally(msg.id, service,
-                                          force: true);
-                                    },
-                              channelPostTexts: sys_ch.SystemChannels.isBugLogChannel(widget.conversationId)
-                                  ? messages.map((m) => m.text).toList()
-                                  : null,
                             );
-                            final isFr = sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId);
-                            if (!isFr && df.needsDateSeparator(
+                            if (df.needsDateSeparator(
                                 index > 0 ? messages[index - 1].timestamp : null,
                                 msg.timestamp)) {
                               final cs = Theme.of(context).colorScheme;
@@ -753,7 +827,10 @@ class _ChatScreenState extends State<ChatScreen> {
               _currentSearchIndex = -1;
             }),
           ),
-          actions: const [],
+          actions: [
+            AppScreenshotButton(
+                forwardingAllowed: conv?.config.allowForwarding ?? true),
+          ],
         ),
         body: SafeArea(
           top: false, // AppBar handles top
@@ -769,19 +846,11 @@ class _ChatScreenState extends State<ChatScreen> {
         tooltip: locale.get('search_messages'),
         onPressed: () => setState(() => _isSearching = true),
       ),
-      IconButton(
-        icon: const Icon(Icons.tune),
-        tooltip: locale.get('chat_settings'),
-        onPressed: () => _showChatSettings(context, service),
-      ),
-      // §23.10: the application's own screenshot. Offered where the window
-      // is excluded from capture, and there always; where forwarding is not
-      // allowed the button refuses instead of capturing.
-      if (AppScreenshot.isOffered && !widget.isGroup && !widget.isChannel)
+      if (!widget.isGroup && !widget.isChannel)
         IconButton(
-          icon: const Icon(Icons.screenshot),
-          tooltip: locale.get('screenshot_action'),
-          onPressed: () => _takeScreenshot(conv?.config),
+          icon: const Icon(Icons.tune),
+          tooltip: locale.get('chat_settings'),
+          onPressed: () => _showChatSettings(context, service),
         ),
       // §15.7: a deleted contact's inbox key is nobody's anymore — no
       // ringing, no outgoing offer.
@@ -810,29 +879,31 @@ class _ChatScreenState extends State<ChatScreen> {
       // push rightmost actions (poll, info) off the visible edge, so members
       // could not reach the poll-create entry. Group & channel polls/info
       // now live in a single overflow menu that always fits.
-      // §23.10: the screenshot also lives in that menu so it stays reachable.
+      // §23.10: the screenshot button is in the header itself (AppBarScaffold);
+      // the chat settings of a group or channel move into this menu, so the
+      // header keeps at most four icons on a narrow screen.
       if (widget.isGroup || widget.isChannel)
         PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert),
           tooltip: locale.get('more_options'),
           onSelected: (v) {
-            if (v == 'screenshot') _takeScreenshot(conv?.config);
+            if (v == 'settings') _showChatSettings(context, service);
             if (v == 'poll') _openPollEditor(context);
             if (v == 'info' && widget.isGroup) _showGroupInfo(context, service);
             if (v == 'info' && widget.isChannel) _showChannelInfo(context, service);
           },
           itemBuilder: (_) => [
-            if (AppScreenshot.isOffered)
-              PopupMenuItem(
-                value: 'screenshot',
-                child: Row(children: [
-                  const Icon(Icons.screenshot),
-                  const SizedBox(width: 12),
-                  Text(locale.get('screenshot_action')),
-                ]),
-              ),
+            PopupMenuItem(
+              value: 'settings',
+              child: Row(children: [
+                const Icon(Icons.tune),
+                const SizedBox(width: 12),
+                Text(locale.get('chat_settings')),
+              ]),
+            ),
             // §16.2.2 (S403, V2): a removed member starts no polls.
-            if ((widget.isGroup || _canPostInChannel(service)) &&
+            if (((widget.isGroup && _canPostInGroup(service)) ||
+                    (!widget.isGroup && _canPostInChannel(service))) &&
                 !_isRemovedFromGroup(service))
               PopupMenuItem(
                 value: 'poll',
@@ -867,6 +938,7 @@ class _ChatScreenState extends State<ChatScreen> {
       subtitle: _buildSubtitleText(context, service),
       leading: const BackButton(),
       actions: actions,
+      screenshotForwardingAllowed: conv?.config.allowForwarding ?? true,
       body: chatBody,
     );
   }
@@ -875,12 +947,36 @@ class _ChatScreenState extends State<ChatScreen> {
     if (service == null) return;
     final locale = AppLocale.read(context);
 
+    // A tap on a reaction chip: the own reaction is taken back, any other
+    // becomes the own one and replaces it (one reaction per person).
+    if (action.startsWith(kReactionChipAction)) {
+      final emoji = action.substring(kReactionChipAction.length);
+      final own = msg.reactions[emoji]?.contains(service.nodeIdHex) ?? false;
+      service.sendReaction(
+        conversationId: widget.conversationId,
+        messageId: msg.id,
+        emoji: emoji,
+        remove: own,
+      );
+      return;
+    }
+
     switch (action) {
       case 'edit':
         setState(() {
           _editingMessageId = msg.id;
-          _textController.text = msg.text;
+          _editingOriginalText = msg.text;
+          _textController.value = TextEditingValue(
+            text: msg.text,
+            selection: TextSelection.collapsed(offset: msg.text.length),
+          );
         });
+        // S410 B1-1: the tap on the 3-dot icon took the focus from the field
+        // (desktop: a tap outside a text field unfocuses it). Give it back,
+        // cursor at the end, so what the user types lands in the field. The
+        // field becomes the scope's focused child; when the action sheet
+        // closes, the route restores exactly that child.
+        _inputFocusNode.requestFocus();
         break;
       case 'delete':
         _confirmDelete(msg, service);
@@ -924,6 +1020,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _replyingToMessage = msg;
           _editingMessageId = null;
+          _editingOriginalText = null;
         });
         break;
       case 'react':
@@ -1109,6 +1206,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _cancelEdit() {
     setState(() {
       _editingMessageId = null;
+      _editingOriginalText = null;
       _textController.clear();
     });
   }
@@ -1131,9 +1229,12 @@ class _ChatScreenState extends State<ChatScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) {
-        void react(String emoji) {
-          Navigator.of(ctx).pop();
+      builder: (ctx) => reactionSheet(
+        sheetContext: ctx,
+        quickEmojis: quickEmojis,
+        isOwn: (emoji) =>
+            msg.reactions[emoji]?.contains(service.nodeIdHex) ?? false,
+        onReact: (emoji) {
           final alreadyReacted = msg.reactions[emoji]?.contains(service.nodeIdHex) ?? false;
           service.sendReaction(
             conversationId: widget.conversationId,
@@ -1141,56 +1242,21 @@ class _ChatScreenState extends State<ChatScreen> {
             emoji: emoji,
             remove: alreadyReacted,
           );
-        }
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 8),
-              Container(
-                width: 40, height: 4,
-                decoration: BoxDecoration(
-                  color: colorScheme.onSurfaceVariant.withAlpha(80),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              // Quick-reaction row
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: quickEmojis.map((emoji) {
-                    final selected = msg.reactions[emoji]?.contains(service.nodeIdHex) ?? false;
-                    return InkWell(
-                      borderRadius: BorderRadius.circular(20),
-                      onTap: () => react(emoji),
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: selected ? BoxDecoration(
-                          color: colorScheme.primaryContainer,
-                          shape: BoxShape.circle,
-                        ) : null,
-                        child: Text(emoji, style: const TextStyle(fontSize: 24)),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-              Divider(height: 1, color: colorScheme.outlineVariant),
-              // Full emoji picker
-              SizedBox(
-                height: 300,
-                child: EmojiPicker(
-                  key: const ValueKey('reaction_picker'),
-                  onEmojiSelected: (category, emoji) => react(emoji.emoji),
-                  config: _emojiConfig(colorScheme, 300),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+        },
+        config: _emojiConfig(colorScheme, 300),
+      ),
     );
+  }
+
+  /// §16.2.2: in a group in announcement mode only the owner and the
+  /// admins post; a member's input field is locked.
+  bool _canPostInGroup(ICleonaService? service) {
+    if (!widget.isGroup || service == null) return true;
+    final conv = service.conversations[widget.conversationId];
+    if (conv == null || !conv.config.announcementOnly) return true;
+    final myRole =
+        service.groups[widget.conversationId]?.members[service.nodeIdHex]?.role;
+    return myRole == 'owner' || myRole == 'admin';
   }
 
   bool _canPostInChannel(ICleonaService? service) {
@@ -1263,61 +1329,13 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    // Bug Log channel: info bar + manual log report button
-    if (widget.isChannel && sys_ch.SystemChannels.isBugLogChannel(widget.conversationId)) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
-          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.outline),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                locale.get('bug_log_auto_info'),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.outline,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            FilledButton.tonalIcon(
-              onPressed: () {
-                unawaited(_showLogReportDialog(context, service));
-              },
-              icon: const Icon(Icons.upload_outlined, size: 18),
-              label: Text(locale.get('bug_log_publish')),
-            ),
-          ],
-        ),
-      );
-    }
+    // The system channels have their own screen (system_channel_screen.dart,
+    // §16.7) and never reach this input area.
 
-    // Feature Request channel: FAB instead of text input
-    if (widget.isChannel && sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId)) {
-      return Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
-          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
-        ),
-        child: Center(
-          child: FilledButton.icon(
-            onPressed: () => _showFeatureRequestDialog(context, service),
-            icon: const Icon(Icons.lightbulb_outline),
-            label: Text(locale.get('feature_request_submit')),
-          ),
-        ),
-      );
-    }
-
-    // Subscribers can't post in channels
-    if (widget.isChannel && !_canPostInChannel(service)) {
+    // Subscribers can't post in channels; members can't in a group in
+    // announcement mode (§16.2.2).
+    if ((widget.isChannel && !_canPostInChannel(service)) ||
+        !_canPostInGroup(service)) {
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -1501,26 +1519,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildEmojiPickerPanel() {
     final colorScheme = Theme.of(context).colorScheme;
-    return SizedBox(
-      height: 260,
-      child: EmojiPicker(
-        key: const ValueKey('input_emoji_picker'),
-        onEmojiSelected: (category, emoji) {
-          final cursor = _textController.selection.baseOffset;
-          final text = _textController.text;
-          final newText = cursor >= 0
-              ? text.substring(0, cursor) + emoji.emoji + text.substring(cursor)
-              : text + emoji.emoji;
-          final newCursor = cursor >= 0
-              ? cursor + emoji.emoji.length
-              : newText.length;
-          _textController.value = TextEditingValue(
-            text: newText,
-            selection: TextSelection.collapsed(offset: newCursor),
-          );
-        },
-        config: _emojiConfig(colorScheme, 260),
-      ),
+    return inputEmojiPanel(
+      config: _emojiConfig(colorScheme, 260),
+      onClose: () => setState(() => _showEmojiPicker = false),
+      onEmoji: (emoji) {
+        final cursor = _textController.selection.baseOffset;
+        final text = _textController.text;
+        final newText = cursor >= 0
+            ? text.substring(0, cursor) + emoji + text.substring(cursor)
+            : text + emoji;
+        final newCursor = cursor >= 0
+            ? cursor + emoji.length
+            : newText.length;
+        _textController.value = TextEditingValue(
+          text: newText,
+          selection: TextSelection.collapsed(offset: newCursor),
+        );
+      },
     );
   }
 
@@ -1588,9 +1603,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
           return AlertDialog(
             title: Row(children: [
-              const Icon(Icons.group),
+              ProfileAvatar(
+                base64: currentGroup.pictureBase64,
+                radius: 18,
+                fallback: const Icon(Icons.group),
+              ),
               const SizedBox(width: 8),
               Expanded(child: Text(currentGroup.name)),
+              // §16.2.2: name, description and image — owner or admin.
+              if (canManage)
+                IconButton(
+                  icon: const Icon(Icons.edit),
+                  tooltip: locale.get('group_profile_edit'),
+                  onPressed: () =>
+                      _openGroupProfile(context, service, setDialogState),
+                ),
             ]),
             content: SizedBox(
               width: 320,
@@ -1598,6 +1625,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (currentGroup.description?.isNotEmpty ?? false) ...[
+                    Text(currentGroup.description!,
+                        style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(height: 8),
+                  ],
                   Text(locale.tr('members_count', {'count': '${currentGroup.members.length}'}),
                       style: Theme.of(context).textTheme.titleSmall),
                   const SizedBox(height: 8),
@@ -1776,224 +1808,15 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Future<void> _showLogReportDialog(
-      BuildContext context, ICleonaService? service) async {
-    if (service == null) return;
-    final locale = AppLocale.read(context);
-
-    // S368: the report is now AWAITED instead of built synchronously. On
-    // desktop the IPC bridge lies behind `service`; it could fetch
-    // nothing synchronously and delivered an EMPTY report, while
-    // `publishLogReport()` sent the real one. The dialog thus did not show the
-    // user what they were consenting to.
-    //
-    // If the query fails, there is NO preview — and thus also no
-    // consent. An empty preview window would be the worse
-    // false display: it looks like a result.
-    final sys_ch.LogReport report;
-    try {
-      report = await service.buildLogReport();
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(locale.get('bug_log_report_unavailable'))),
-      );
-      debugPrint('Log report preview unavailable: $e');
-      return;
-    }
-    if (!context.mounted) return;
-    final previewText = report.toPreviewText();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.article_outlined, color: Theme.of(ctx).colorScheme.secondary),
-            const SizedBox(width: 8),
-            Expanded(child: Text(locale.get('bug_log_publish_title'))),
-          ],
-        ),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(locale.get('bug_log_publish_text')),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  constraints: const BoxConstraints(maxHeight: 300),
-                  child: SingleChildScrollView(
-                    child: SelectableText(
-                      previewText,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Icon(Icons.shield_outlined, size: 16,
-                        color: Theme.of(ctx).colorScheme.outline),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        locale.get('bug_log_publish_privacy'),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Theme.of(ctx).colorScheme.outline,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(locale.get('cancel')),
-          ),
-          TextButton.icon(
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: previewText));
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-              );
-            },
-            icon: const Icon(Icons.copy, size: 16),
-            label: Text(locale.get('copy')),
-          ),
-          FilledButton.icon(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              try {
-                await service.publishLogReport();
-              } catch (e) {
-                debugPrint('Log report publish failed: $e');
-              }
-            },
-            icon: const Icon(Icons.upload_outlined, size: 16),
-            label: Text(locale.get('bug_log_publish_confirm')),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showFeatureRequestDialog(BuildContext context, ICleonaService? service) {
-    if (service == null) return;
-    final locale = AppLocale.read(context);
-    final headingCtrl = TextEditingController();
-    final descCtrl = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(locale.get('feature_request_submit')),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: headingCtrl,
-                decoration: InputDecoration(
-                  labelText: locale.get('feature_request_heading'),
-                  border: const OutlineInputBorder(),
-                ),
-                maxLength: 100,
-                autofocus: true,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: descCtrl,
-                decoration: InputDecoration(
-                  labelText: locale.get('feature_request_description'),
-                  border: const OutlineInputBorder(),
-                ),
-                maxLines: 4,
-                maxLength: 500,
-              ),
-              const SizedBox(height: 12),
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: Text(
-                  '${locale.get('poll_create')}:',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Theme.of(ctx).colorScheme.onSurface,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 4),
-              // Problem 7 (S119): plain bullets — the former radio icons
-              // were indistinguishable from real vote controls.
-              for (final key in ['feature_vote_yes', 'feature_vote_no', 'feature_vote_neutral'])
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Row(
-                    children: [
-                      Text('•',
-                          style: TextStyle(
-                              color: Theme.of(ctx).colorScheme.outline)),
-                      const SizedBox(width: 8),
-                      Text(locale.get(key)),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 4),
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: Text(
-                  locale.get('feature_request_options_hint'),
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontStyle: FontStyle.italic,
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(locale.get('cancel')),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final heading = headingCtrl.text.trim();
-              if (heading.isEmpty) return;
-              Navigator.pop(ctx);
-              try {
-                // §9.5.3 D3 (S119): SystemChannelRecord with embedded
-                // auto-poll + implicit "Ja" vote of the submitter — the
-                // old createPoll path fanned out over the always-empty
-                // members map and never left the local node (Problem 8).
-                await service.submitFeatureRequest(
-                    heading, descCtrl.text.trim());
-              } catch (e) {
-                debugPrint('Feature request submit failed: $e');
-              }
-            },
-            child: Text(locale.get('feature_request_submit')),
-          ),
-        ],
-      ),
-    );
+  /// Opens the screen for name, description and image of this group or
+  /// channel; the details dialog shows the change when it comes back.
+  Future<void> _openGroupProfile(BuildContext context, ICleonaService service,
+      StateSetter setDialogState) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => GroupProfileScreen(
+          service: service, conversationId: widget.conversationId),
+    ));
+    setDialogState(() {});
   }
 
   void _showChannelInfo(BuildContext context, ICleonaService? service) {
@@ -2020,9 +1843,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
           return AlertDialog(
             title: Row(children: [
-              const Icon(Icons.campaign),
+              ProfileAvatar(
+                base64: currentChannel.pictureBase64,
+                radius: 18,
+                fallback: const Icon(Icons.campaign),
+              ),
               const SizedBox(width: 8),
               Expanded(child: Text(currentChannel.name)),
+              // §16.2.2: a private channel — owner or admin.
+              if (canManage && !isSysChannel && !currentChannel.isPublic)
+                IconButton(
+                  icon: const Icon(Icons.edit),
+                  tooltip: locale.get('group_profile_edit'),
+                  onPressed: () =>
+                      _openGroupProfile(context, service, setDialogState),
+                ),
             ]),
             content: SizedBox(
               width: 320,
@@ -2470,6 +2305,11 @@ class _ChatScreenState extends State<ChatScreen> {
     // Channels are absent by design — CHANNEL_POST is not ack-worthy, so no
     // delivery signal exists there to withhold.
     final showDeliveryDisclosure = !widget.isChannel;
+    // §9.4 "Loading images in a group or channel" (§24.4.5): local, at any
+    // time, not gated by `canEdit` — it concerns collecting, not sending.
+    final showLoadImages = widget.isGroup || widget.isChannel;
+    bool alwaysLoadImages =
+        group?.alwaysLoadImages ?? channel?.alwaysLoadImages ?? true;
     bool deliveryStatusVisible = !(widget.isGroup
         ? (group?.withholdDeliveryStatus ?? false)
         : (service.getContact(widget.conversationId)?.withholdDeliveryStatus ?? false));
@@ -2479,6 +2319,11 @@ class _ChatScreenState extends State<ChatScreen> {
       allowForwarding: conv.config.allowForwarding,
       editWindowMs: conv.config.editWindowMs,
       expiryDurationMs: conv.config.expiryDurationMs,
+      // Both were missing from the copy: the dialog then showed them as on
+      // whatever the conversation held, and any save re-proposed them as on.
+      readReceipts: conv.config.readReceipts,
+      typingIndicators: conv.config.typingIndicators,
+      announcementOnly: conv.config.announcementOnly,
     );
 
     showDialog(
@@ -2559,11 +2404,20 @@ class _ChatScreenState extends State<ChatScreen> {
                     ],
                   ) : null,
                 ),
+                // §21.5.5 STO-4: while this node withholds its delivery
+                // status, no read receipt goes out either (coupled in
+                // `markConversationRead`). The switch shows that as off and
+                // locked; the negotiated `config.readReceipts` itself stays
+                // untouched, so no proposal results from it.
                 SwitchListTile(
                   title: Text(locale.get('read_receipts')),
                   subtitle: Text(locale.get('read_status_visible')),
-                  value: config.readReceipts,
-                  onChanged: canEdit ? (v) => setDialogState(() => config.readReceipts = v) : null,
+                  value: config.readReceipts &&
+                      (!showDeliveryDisclosure || deliveryStatusVisible),
+                  onChanged: canEdit &&
+                          (!showDeliveryDisclosure || deliveryStatusVisible)
+                      ? (v) => setDialogState(() => config.readReceipts = v)
+                      : null,
                 ),
                 SwitchListTile(
                   title: Text(locale.get('typing_indicator')),
@@ -2571,6 +2425,17 @@ class _ChatScreenState extends State<ChatScreen> {
                   value: config.typingIndicators,
                   onChanged: canEdit ? (v) => setDialogState(() => config.typingIndicators = v) : null,
                 ),
+                // §16.2.2: the owner (or an admin) decides between
+                // discussion and announcement mode.
+                if (widget.isGroup)
+                  SwitchListTile(
+                    title: Text(locale.get('announcement_mode')),
+                    subtitle: Text(locale.get('announcement_mode_subtitle')),
+                    value: config.announcementOnly,
+                    onChanged: canEditGroup
+                        ? (v) => setDialogState(() => config.announcementOnly = v)
+                        : null,
+                  ),
                 const Divider(),
                 if (showDeliveryDisclosure)
                   SwitchListTile(
@@ -2579,6 +2444,13 @@ class _ChatScreenState extends State<ChatScreen> {
                     value: deliveryStatusVisible,
                     // No `canEdit` guard — see §14.7.4 note above.
                     onChanged: (v) => setDialogState(() => deliveryStatusVisible = v),
+                  ),
+                if (showLoadImages)
+                  SwitchListTile(
+                    title: Text(locale.get('always_load_images')),
+                    subtitle: Text(locale.get('always_load_images_subtitle')),
+                    value: alwaysLoadImages,
+                    onChanged: (v) => setDialogState(() => alwaysLoadImages = v),
                   ),
                 const Divider(),
                 SwitchListTile(
@@ -2644,6 +2516,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (showDeliveryDisclosure) {
                   service.setWithholdDeliveryStatus(
                       widget.conversationId, !deliveryStatusVisible);
+                }
+                if (showLoadImages) {
+                  service.setAlwaysLoadImages(
+                      widget.conversationId, alwaysLoadImages);
                 }
                 // ONLY ON A REAL CHANGE — and the reason is not
                 // economy (30.08.).
@@ -2818,7 +2694,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isDeletedContactChat(service)) return; // §15.7: read-only archive
     if (_isRemovedFromGroup(service)) return; // §16.2.2 (S403, V2): removed
 
+    final unchanged = newText == _editingOriginalText?.trim();
     _cancelEdit();
+    // S410 B1-1: an edit without a change ends the edit mode and sends
+    // nothing — no packet, no "(edited)" mark at either side.
+    if (unchanged) return;
     // Fire-and-forget: don't block UI
     service.editMessage(widget.conversationId, msgId, newText).catchError((e) {
       debugPrint('Edit failed: $e');
@@ -2910,8 +2790,31 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   // ── Voice Recording ──────────────────────────────────────────────
+  /// S410 C2-9: a recording that cannot start says so. It used to fail
+  /// silently: on Linux `record_linux` runs the programs `parecord` and
+  /// `ffmpeg`; without `parecord` `Process.start` threw, nothing caught it,
+  /// and the tap on the microphone did nothing visible.
   Future<void> _startRecording() async {
-    if (await _recorder.hasPermission()) {
+    final locale = AppLocale.read(context);
+    // `record_linux` starts `ffmpeg` without awaiting it — a missing ffmpeg
+    // never reaches the catch below. Both programs are therefore looked up
+    // before the start, and the message names what is missing.
+    if (Platform.isLinux) {
+      final missing = missingLinuxRecorderPrograms(
+          Platform.environment['PATH'] ?? '',
+          (p) => File(p).existsSync());
+      if (missing.isNotEmpty) {
+        debugPrint('[chat] voice recording unavailable, missing: '
+            '${missing.join(', ')}');
+        _showRecordingUnavailable(locale, missing);
+        return;
+      }
+    }
+    try {
+      if (!await _recorder.hasPermission()) {
+        _showRecordingUnavailable(locale, const []);
+        return;
+      }
       // The recording is the spoken message in plaintext. It lies in the
       // surface's transient directory — not in the system temp directory,
       // which on Linux every account of the machine can read — and goes at
@@ -2921,6 +2824,7 @@ class _ChatScreenState extends State<ChatScreen> {
           'voice_${DateTime.now().millisecondsSinceEpoch}.m4a');
       _recordingPath = path;
       await _recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
+      if (!mounted) return;
       setState(() {
         _isRecording = true;
         _recordingStartedAt = DateTime.now();
@@ -2933,7 +2837,28 @@ class _ChatScreenState extends State<ChatScreen> {
           });
         }
       });
+    } catch (e) {
+      debugPrint('[chat] voice recording could not start: $e');
+      // No recording exists; the reserved path has no purpose.
+      TransientFiles.discardSurface(_takeRecordingPath());
+      final program = e is ProcessException ? e.executable : null;
+      _showRecordingUnavailable(locale, [?program]);
     }
+  }
+
+  /// [missing]: the programs the system lacks (Linux), or empty when the
+  /// cause is not a missing program.
+  void _showRecordingUnavailable(AppLocale locale, List<String> missing) {
+    if (!mounted) return;
+    final text = missing.isEmpty
+        ? locale.get('voice_record_unavailable')
+        : locale.tr('voice_record_programs_missing', {
+            'programs': missing.join(', '),
+            'packages': missing.map(linuxRecorderPackageOf).toSet().join(', '),
+          });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 8)),
+    );
   }
 
   /// Hands the file of the recording in progress to the caller, who from
@@ -3693,29 +3618,118 @@ String? _mediaUrl(String? plainPath, [String? mimeType]) => plainPath == null
 bool _mediaThere(String? plainPath) =>
     plainPath != null && MediaStore.instance.existsEitherWay(plainPath);
 
+/// Which edit action a message offers, as its i18n key — `null` for none.
+///
+/// A media message stores its filename as `text` and the bubble never shows
+/// that text; only a text that differs from the filename is a caption the
+/// user wrote. §21.5.1 edits text only (`MESSAGE_EDITED`), so a media message
+/// offers "edit caption" and nothing without a caption (owner decision
+/// 08.10.2026, V-EDIT-MEDIA B). Ownership and the edit window are checked by
+/// the caller.
+@visibleForTesting
+String? editLabelKeyFor(UiMessage m) {
+  // §17.2: a missed call is no text the user wrote — its text is a key.
+  if (m.type == UiMessageType.callMissed) return null;
+  if (!m.isMedia) return 'edit';
+  final hasCaption = m.text.trim().isNotEmpty && m.text != m.filename;
+  return hasCaption ? 'edit_caption' : null;
+}
+
+/// A message bubble with its reaction chips, reachable for widget tests.
+@visibleForTesting
+Widget reactionBubbleForTesting(UiMessage message,
+        {String? ownIdHex,
+        void Function(String action, UiMessage message)? onMessageAction}) =>
+    _MessageBubble(
+        message: message,
+        ownIdHex: ownIdHex,
+        onMessageAction: onMessageAction);
+
+/// The programs `record_linux` runs for a voice recording on Linux
+/// (package `record_linux` 1.3.0, constants `_parecordBin` and
+/// `_ffmpegBin`), each with the Debian/Ubuntu package that brings it.
+const Map<String, String> kLinuxRecorderPrograms = {
+  'parecord': 'pulseaudio-utils',
+  'ffmpeg': 'ffmpeg',
+};
+
+/// The package that brings [program]; the program name itself when it is
+/// not one of [kLinuxRecorderPrograms].
+String linuxRecorderPackageOf(String program) =>
+    kLinuxRecorderPrograms[program] ?? program;
+
+/// Which of [kLinuxRecorderPrograms] no directory of [pathVariable] holds —
+/// the same lookup `Process.start` does for a bare program name.
+List<String> missingLinuxRecorderPrograms(
+    String pathVariable, bool Function(String path) exists) {
+  final dirs = pathVariable.split(':').where((d) => d.isNotEmpty).toList();
+  return [
+    for (final program in kLinuxRecorderPrograms.keys)
+      if (!dirs.any((d) => exists('$d/$program'))) program,
+  ];
+}
+
+/// §21.5.1: "an edited message visibly carries the suffix "(edited)" with
+/// the timestamp of the last change" — S410 B1-2: the plain-text bubble
+/// showed no mark at all, the inline bubble the time of the original.
+String _editedSuffix(AppLocale locale, DateTime editedAt) {
+  final local = editedAt.toLocal();
+  final hh = local.hour.toString().padLeft(2, '0');
+  final mm = local.minute.toString().padLeft(2, '0');
+  return '(${locale.get('edited')} $hh:$mm)';
+}
+
+/// The full-screen viewer, reachable for widget tests.
+@visibleForTesting
+Widget messageBubbleForTesting(UiMessage message,
+        {BrowserOpenMode browserOpenMode = BrowserOpenMode.normal}) =>
+    _MessageBubble(message: message, browserOpenMode: browserOpenMode);
+
+@visibleForTesting
+Widget imageViewerForTesting(
+        {String? filePath,
+        Uint8List? imageBytes,
+        String? filename,
+        bool forwardingAllowed = true}) =>
+    _ImageViewer(
+        filePath: filePath,
+        imageBytes: imageBytes,
+        filename: filename,
+        forwardingAllowed: forwardingAllowed);
+
 // ── Image Fullscreen Viewer ──────────────────────────────────────
 class _ImageViewer extends StatelessWidget {
   final String? filePath;
   final Uint8List? imageBytes;
   final String? filename;
-  const _ImageViewer({this.filePath, this.imageBytes, this.filename});
+
+  /// §23.10: the viewer belongs to its conversation; where forwarding is
+  /// off there, the screenshot button refuses here as well.
+  final bool forwardingAllowed;
+  const _ImageViewer(
+      {this.filePath,
+      this.imageBytes,
+      this.filename,
+      this.forwardingAllowed = true});
 
   @override
   Widget build(BuildContext context) {
+    const broken = Icon(Icons.broken_image, size: 96, color: Colors.white54);
+    // The thumbnail is the fallback whenever the original cannot be shown
+    // (S407-IOS-BILD): a reader that does not answer must not end in the
+    // placeholder while a picture of the image is at hand.
+    final Widget fallback = imageBytes != null
+        ? Image.memory(imageBytes!, errorBuilder: (_, _, _) => broken)
+        : broken;
     Widget imageChild;
     final url = _mediaUrl(filePath);
     if (url != null) {
       imageChild = Image.network(
         url,
-        errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96, color: Colors.white54),
-      );
-    } else if (imageBytes != null) {
-      imageChild = Image.memory(
-        imageBytes!,
-        errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96, color: Colors.white54),
+        errorBuilder: (_, _, _) => fallback,
       );
     } else {
-      imageChild = const Icon(Icons.broken_image, size: 96, color: Colors.white54);
+      imageChild = fallback;
     }
 
     return Scaffold(
@@ -3724,6 +3738,7 @@ class _ImageViewer extends StatelessWidget {
         backgroundColor: Colors.transparent,
         foregroundColor: Colors.white,
         title: Text(filename ?? '', style: const TextStyle(fontSize: 14)),
+        actions: [AppScreenshotButton(forwardingAllowed: forwardingAllowed)],
       ),
       body: Center(
         child: InteractiveViewer(
@@ -3744,17 +3759,7 @@ class _MessageBubble extends StatefulWidget {
   final ChatConfig? chatConfig;
   final void Function(String action, UiMessage message)? onMessageAction;
   final bool isSearchHighlight;
-  final bool isSystemChannel;
   final BrowserOpenMode browserOpenMode;
-
-  /// §9.5.3 D3 (S119): FR vote tally (`ja`/`nein`/`egal`/`net`/`own`) and
-  /// vote callback for feature-request cards; null outside the FR channel.
-  final Map<String, int>? frTally;
-  final void Function(int option)? onFrVote;
-
-  /// F5-R1: all post texts in the Bug Log channel for crash-report
-  /// duplicate aggregation (§9.5.2 counter).
-  final List<String>? channelPostTexts;
 
   /// §15.7: the counterpart deleted their own identity — the conversation
   /// is an archive, not a chat. Suppresses reply/react/edit/delete/resend
@@ -3762,19 +3767,19 @@ class _MessageBubble extends StatefulWidget {
   /// stay available on purpose.
   final bool readOnlyArchive;
 
+  /// The own user id, to mark and toggle the own reaction chip.
+  final String? ownIdHex;
+
   const _MessageBubble({
     required this.message,
+    this.ownIdHex,
     this.isEditing = false,
     this.isGroup = false,
     this.senderDisplayName = '',
     this.chatConfig,
     this.onMessageAction,
     this.isSearchHighlight = false,
-    this.isSystemChannel = false,
     this.browserOpenMode = BrowserOpenMode.normal,
-    this.frTally,
-    this.onFrVote,
-    this.channelPostTexts,
     this.readOnlyArchive = false,
   });
 
@@ -3800,20 +3805,51 @@ class _MessageBubbleState extends State<_MessageBubble> {
   ChatConfig? get chatConfig => widget.chatConfig;
   void Function(String action, UiMessage message)? get onMessageAction => widget.onMessageAction;
   bool get isSearchHighlight => widget.isSearchHighlight;
-  bool get isSystemChannel => widget.isSystemChannel;
   BrowserOpenMode get browserOpenMode => widget.browserOpenMode;
   bool get readOnlyArchive => widget.readOnlyArchive;
 
-  /// Default edit window: 1 hour.
-  static const _defaultEditWindowMs = 60 * 60 * 1000;
+  /// The colour of this bubble's own text — one source for the message text
+  /// and every caption drawn inside the bubble (the transcript), so a dark
+  /// bubble (photo skin, own accent) never carries dark text.
+  /// Captions inside the bubble (transcript, file name and size, forwarded
+  /// note, quoted text, neutral status ticks): the bubble text colour at this
+  /// alpha. 0.85 keeps WCAG AA 4.5:1 on every solid skin bubble (measured
+  /// minimum 5.09:1, own bubble of `teal`); 0.7 fell to 3.61:1 there.
+  static const double _captionAlpha = 0.85;
+
+  /// On a photo skin's frosted-glass bubble the caption is the one 85%-white
+  /// colour of all secondary text on such surfaces ([kPhotoSecondaryText]).
+  Color _captionColor(BuildContext context) {
+    final photo = Theme.of(context).character.surfaceRenderMode ==
+        SurfaceRenderMode.photo;
+    if (photo && !isSearchHighlight && !isEditing) return kPhotoSecondaryText;
+    return _bubbleTextColor(context).withValues(alpha: _captionAlpha);
+  }
+
+  Color _bubbleTextColor(BuildContext context) {
+    final theme = Theme.of(context);
+    final useBlur =
+        theme.character.surfaceRenderMode == SurfaceRenderMode.photo;
+    if (useBlur && !isSearchHighlight && !isEditing) return Colors.white;
+    return message.isOutgoing
+        ? theme.colorScheme.onPrimaryContainer
+        : theme.colorScheme.onSurface;
+  }
+
+  /// Default edit window (§21.5.1): the sender's 15 minutes, the same value
+  /// the service uses.
+  static const _defaultEditWindowMs = kSenderEditWindowMs;
 
   // §15.7: `readOnlyArchive` closes every action below that would write
   // into (or send from) the conversation. `_canForward`, `_canSaveMedia`
   // and `_canCopyText` are deliberately NOT gated here — reading and
   // exporting stay available on a deleted contact's archive.
+  String get _editLabelKey => editLabelKeyFor(message) ?? 'edit';
+
   bool get _canEdit {
     if (readOnlyArchive) return false;
     if (!message.isOutgoing) return false;
+    if (editLabelKeyFor(message) == null) return false;
     final editWindowMs = chatConfig?.editWindowMs ?? _defaultEditWindowMs;
     if (editWindowMs == 0) return false; // editing disabled
     final ageMs = DateTime.now().millisecondsSinceEpoch - message.timestamp.millisecondsSinceEpoch;
@@ -3822,7 +3858,12 @@ class _MessageBubbleState extends State<_MessageBubble> {
 
   bool get _canDelete => !readOnlyArchive && message.isOutgoing;
 
-  bool get _canForward => chatConfig?.allowForwarding ?? true;
+  /// §17.2: a missed call carries an i18n key, not a text — it is neither
+  /// forwarded, copied nor sent again as one.
+  bool get _isMissedCall => message.type == UiMessageType.callMissed;
+
+  bool get _canForward =>
+      !_isMissedCall && (chatConfig?.allowForwarding ?? true);
 
   bool get _canSaveMedia => message.isMedia &&
       message.filePath != null && !_localCopyLost &&
@@ -3834,7 +3875,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
       _archivedMedium() == null &&
       mediaLocalCopyLost(message, (p) => _mediaThere(p));
 
-  bool get _canCopyText => message.text.isNotEmpty;
+  bool get _canCopyText => !_isMissedCall && message.text.isNotEmpty;
 
   bool get _canReply => !readOnlyArchive;
 
@@ -3853,7 +3894,11 @@ class _MessageBubbleState extends State<_MessageBubble> {
       !readOnlyArchive &&
       message.isOutgoing &&
       !message.isMedia &&
-      message.status == MessageStatus.failed;
+      !_isMissedCall &&
+      message.status == MessageStatus.failed &&
+      // A group or channel post: only when a member's leg failed — that
+      // leg is what goes again (owner decision 30.10.2026, S410 "B").
+      (message.fanoutLegs.isEmpty || message.legFailedBy.isNotEmpty);
 
   bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact || _canResend;
 
@@ -3912,7 +3957,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
               if (_canEdit)
                 ListTile(
                   leading: const Icon(Icons.edit),
-                  title: Text(locale.get('edit')),
+                  title: Text(locale.get(_editLabelKey)),
                   onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('edit', message); },
                 ),
               if (_canDelete)
@@ -3952,7 +3997,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
 
     // System messages (e.g., member left)
     if (message.senderNodeIdHex.isEmpty) {
-      return Center(
+      final notice = Center(
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Text(
@@ -3965,62 +4010,69 @@ class _MessageBubbleState extends State<_MessageBubble> {
           ),
         ),
       );
-    }
-
-    if (isSystemChannel && message.text.startsWith('{')) {
-      final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
-      final post = SystemChannelPost(
-        text: message.text,
-        isOutgoing: isOutgoing,
-        timestamp: ts,
-        frTally: widget.frTally,
-        onVote: widget.onFrVote,
-        channelPostTexts: widget.channelPostTexts,
-      );
-      if (!_hasMenu) return post;
-      final colorScheme = Theme.of(context).colorScheme;
-      return Stack(
-        clipBehavior: Clip.none,
-        children: [
-          post,
-          Positioned(
-            top: 0,
-            right: 0,
-            child: InkWell(
-              onTap: () => _showMessageActions(context),
-              customBorder: const CircleBorder(),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Icon(Icons.more_vert, size: 16, color: colorScheme.outline),
+      // §18.1.7: "The interactive event card in the group chat offers: RSVP
+      // buttons directly on the card". A received group invitation is an
+      // entry without a person (`handleCalendarInvite` writes it with an
+      // empty sender), so this early return used to swallow it before the
+      // `calendarEventId` branch below was ever reached: the member saw the
+      // italic line and no card, no "accept" (S410, gui-49 49.25). The card
+      // hangs on the INVITATION only — an UPDATE line stays a notice, because
+      // the card above it reads the event live and so updates in place
+      // ("in-place update via the same eventId"). Entries already stored
+      // carry type and event id, so they show the card too.
+      if (message.type == UiMessageType.calendarInvite &&
+          message.calendarEventId != null) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            notice,
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.75,
               ),
+              child: _buildCalendarEventCardContent(context),
             ),
-          ),
-        ],
-      );
+          ],
+        );
+      }
+      return notice;
     }
 
     // Simple plain-text messages: delegate to the design-system MessageBubble.
     // Complex message types (media, polls, link preview, forwarded,
     // search-highlight, edit mode, group sender label) retain the inline
     // implementation below because MessageBubble only handles plain text.
+    // A text with a link is NOT simple (S410, 9.16): MessageBubble draws plain
+    // `Text`, so a link in a 1:1 text without a preview card was not
+    // tappable at all since d5fc4017 — `_buildTextWithLinks` below makes it
+    // a link that opens by the chosen BrowserOpenMode.
     final isSimpleText = !message.isMedia &&
         message.pollId == null &&
         !message.hasLinkPreview &&
+        !_urlRegex.hasMatch(message.text) &&
         message.forwardedFrom == null &&
         !isEditing &&
         !isSearchHighlight &&
         !(isGroup && !isOutgoing && senderDisplayName.isNotEmpty);
     if (isSimpleText) {
       final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
-      final String? ticks = isOutgoing ? _statusTicksFor(message.status) : null;
+      final String? ticks = isOutgoing ? MessageBubble.statusTicksFor(message.status) : null;
       return MessageBubble(
-        text: message.text,
+        text: messageShownText(locale, message),
         isOwn: isOutgoing,
         timestamp: ts,
         statusTicks: ticks,
         replyTo: message.replyToText,
-        // reactions is Map<String,Set<String>>; MessageBubble takes List<String> emoji-only
-        reactions: message.reactions.keys.toList(),
+        // MessageBubble takes the emojis only; which ones show is decided by
+        // the counts (§16.2.4: totals in a private channel).
+        reactions: message.reactionCounts(widget.ownIdHex ?? '').keys.toList(),
+        ownReactions: {
+          for (final e in message.reactions.entries)
+            if (widget.ownIdHex != null && e.value.contains(widget.ownIdHex)) e.key,
+        },
+        onReactionTap: readOnlyArchive || onMessageAction == null
+            ? null
+            : (e) => onMessageAction?.call('$kReactionChipAction$e', message),
         // gui-42: surface an active per-chat disappearing-message timer. Uses
         // the accepted/active config (conv.config) — a pending proposal lives
         // separately in conv.pendingConfigProposal and must NOT light this up.
@@ -4030,6 +4082,9 @@ class _MessageBubbleState extends State<_MessageBubble> {
             ? message.expiryMs! > 0
             : chatConfig?.expiryDurationMs != null,
         membershipMismatch: message.membershipMismatch,
+        editedLabel: message.editedAt == null
+            ? null
+            : _editedSuffix(locale, message.editedAt!),
         onActionsPressed: _hasMenu
             ? () => _showMessageActions(context)
             : null,
@@ -4096,7 +4151,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
               if (message.forwardedFrom != null)
                 Text(
                   locale.tr('forwarded_from', {'name': message.forwardedFrom!}),
-                  style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: colorScheme.outline),
+                  style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: _captionColor(context)),
                 ),
               if (message.replyToText != null)
                 Container(
@@ -4114,7 +4169,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         Text(message.replyToSender!, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: colorScheme.secondary)),
                       Text(
                         message.replyToText!,
-                        style: TextStyle(fontSize: 11, color: colorScheme.outline),
+                        style: TextStyle(fontSize: 11, color: _captionColor(context)),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -4151,14 +4206,9 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 _buildTextWithLinks(
                   message.text,
                   TextStyle(
-                    color: useBlur && !isSearchHighlight && !isEditing
-                        // Photo-skin bubble fill is dark (50%-black neutral
-                        // ± accent tint); use white text + drop shadow so it
-                        // stays readable over any blurred photo region.
-                        ? Colors.white
-                        : (isOutgoing
-                            ? colorScheme.onPrimaryContainer
-                            : colorScheme.onSurface),
+                    // Photo-skin bubble fill is dark (50%-black neutral ±
+                    // accent tint): white text + drop shadow there.
+                    color: _bubbleTextColor(context),
                     shadows: useBlur && !isSearchHighlight && !isEditing
                         ? const [
                             Shadow(color: Color(0x99000000), blurRadius: 4, offset: Offset(0, 1)),
@@ -4215,23 +4265,46 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     ],
                   ),
                 ),
-              if (message.reactions.isNotEmpty)
+              if (message.reactionCounts(widget.ownIdHex ?? '').isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Wrap(
                     spacing: 4,
                     runSpacing: 2,
-                    children: message.reactions.entries.map((entry) {
-                      return Container(
+                    // Emoji and count only, never a name (§16.2.4).
+                    children: message
+                        .reactionCounts(widget.ownIdHex ?? '')
+                        .entries
+                        .map((entry) {
+                      final mine = widget.ownIdHex != null &&
+                          (message.reactions[entry.key]
+                                  ?.contains(widget.ownIdHex) ??
+                              false);
+                      final chip = Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: colorScheme.surfaceContainerHighest,
+                          color: mine
+                              ? colorScheme.primaryContainer
+                              : colorScheme.surfaceContainerHighest,
                           borderRadius: BorderRadius.circular(12),
+                          border: mine
+                              ? Border.all(color: colorScheme.primary, width: 1)
+                              : null,
                         ),
                         child: Text(
-                          '${entry.key} ${entry.value.length}',
+                          '${entry.key} ${entry.value}',
                           style: const TextStyle(fontSize: 12),
                         ),
+                      );
+                      if (readOnlyArchive || onMessageAction == null) {
+                        return chip;
+                      }
+                      return InkWell(
+                        key: ValueKey('reaction_chip_${entry.key}'),
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => onMessageAction?.call(
+                            '$kReactionChipAction${entry.key}', message),
+                        child: chip,
                       );
                     }).toList(),
                   ),
@@ -4266,11 +4339,9 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 children: [
                   if (message.editedAt != null) ...[
                     Text(
-                      locale.get('edited'),
+                      _editedSuffix(locale, message.editedAt!),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: useBlur && !isSearchHighlight && !isEditing
-                                ? Colors.white.withValues(alpha: 0.78)
-                                : colorScheme.outline,
+                            color: _captionColor(context),
                             fontSize: 10,
                             fontStyle: FontStyle.italic,
                           ),
@@ -4280,9 +4351,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   Text(
                     '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: useBlur && !isSearchHighlight && !isEditing
-                              ? Colors.white.withValues(alpha: 0.78)
-                              : colorScheme.outline,
+                          color: _captionColor(context),
                           fontSize: 10,
                         ),
                   ),
@@ -4303,7 +4372,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         color: _statusColor(
                             message.status,
                             message.readByRecipient,
-                            colorScheme),
+                            colorScheme,
+                            _captionColor(context)),
                       ),
                     ),
                   ],
@@ -4319,7 +4389,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   child: PopupMenuButton<String>(
                     padding: EdgeInsets.zero,
                     iconSize: 16,
-                    icon: Icon(Icons.more_vert, size: 16, color: colorScheme.outline),
+                    icon: Icon(Icons.more_vert, size: 16, color: _captionColor(context)),
                     onSelected: (action) => onMessageAction?.call(action, message),
                     itemBuilder: (_) => [
                       if (_canReply)
@@ -4337,7 +4407,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                       if (_canForward)
                         PopupMenuItem(value: 'forward', child: Row(children: [const Icon(Icons.forward, size: 18), const SizedBox(width: 8), Text(locale.get('forward'))])),
                       if (_canEdit)
-                        PopupMenuItem(value: 'edit', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('edit'))])),
+                        PopupMenuItem(value: 'edit', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get(_editLabelKey))])),
                       if (_canDelete)
                         PopupMenuItem(value: 'delete', child: Row(children: [const Icon(Icons.delete, size: 18), const SizedBox(width: 8), Text(locale.get('delete'))])),
                       // §5.8
@@ -4622,33 +4692,37 @@ class _MessageBubbleState extends State<_MessageBubble> {
     }
   }
 
-  void _launchIncognito(String url) async {
-    // Try platform-specific incognito launch
+  /// Opens [url] in a private window where this platform can, otherwise
+  /// normally — exactly ONE launch either way.
+  ///
+  /// S410: here stood a loop that started `xdg-open` FIRST (never private)
+  /// and then read `stdout` of the detached process, which a detached
+  /// process does not have (Dart SDK `_internal/vm/bin/process_patch.dart`
+  /// `get stdout`: `throw StateError("stdio is not connected")`) — the read
+  /// threw, the loop went on and started the next browser too. On Android it launched normally and then a second time.
+  ///
+  /// Linux: the default browser's own private switch
+  /// ([linuxPrivateBrowserCommands]); a browser without a known switch, or
+  /// one whose command is missing, opens normally. Android, iOS, Windows,
+  /// macOS: `url_launcher` has no private mode, so the link opens normally.
+  Future<void> _launchIncognito(String url) async {
     if (Platform.isLinux) {
-      // Try common Linux browsers in incognito mode
-      for (final cmd in [
-        ['xdg-open', url], // Fallback — no incognito, but works
-        ['google-chrome', '--incognito', url],
-        ['chromium-browser', '--incognito', url],
-        ['firefox', '--private-window', url],
-      ]) {
+      var entry = '';
+      try {
+        final r = await Process.run('xdg-settings', ['get', 'default-web-browser']);
+        if (r.exitCode == 0) entry = (r.stdout as String).trim();
+      } catch (_) {/* no xdg-settings: open normally below */}
+      for (final cmd in linuxPrivateBrowserCommands(entry, url)) {
         try {
-          final result = await Process.start(cmd[0], cmd.sublist(1),
+          await Process.start(cmd.first, cmd.sublist(1),
               mode: ProcessStartMode.detached);
-          result.stdout.drain();
-          result.stderr.drain();
           return;
-        } catch (_) {
-          continue;
+        } on ProcessException {
+          continue; // this browser command is not installed
         }
       }
-    } else if (Platform.isAndroid) {
-      // Android: Chrome supports incognito via Intent extra
-      // url_launcher doesn't support incognito, fallback to normal
-      launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     }
-    // Final fallback
-    launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
   }
 
   void _showBrowserModeDialog(BuildContext context, String url) {
@@ -4691,7 +4765,6 @@ class _MessageBubbleState extends State<_MessageBubble> {
   // lookup-by-id pattern as PollCard, just without its own StatelessWidget
   // because CalendarEventCard takes a resolved CalendarEvent, not an id.
   Widget _buildCalendarEventCardContent(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     final locale = AppLocale.read(context);
     final appState = context.watch<CleonaAppState>();
     final service = appState.service;
@@ -4701,7 +4774,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
       return Padding(
         padding: const EdgeInsets.all(8),
         child: Text(locale.get('calendar_event_unavailable'),
-            style: TextStyle(fontStyle: FontStyle.italic, color: colorScheme.outline)),
+            style: TextStyle(fontStyle: FontStyle.italic, color: _captionColor(context))),
       );
     }
     return CalendarEventCard(event: event, showCategory: true);
@@ -4717,6 +4790,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
         message,
         localFilePresent: _mediaThere(message.filePath),
         retrievals: ArchiveRetrievalState.instance,
+        previews: ArchivePreviewCache.instance,
       );
 
   /// Media content for one bubble.
@@ -4740,7 +4814,9 @@ class _MessageBubbleState extends State<_MessageBubble> {
     if (_archivedMedium() == null) return _buildPlainMediaContent(context);
     final locale = AppLocale.read(context);
     return AnimatedBuilder(
-      animation: ArchiveRetrievalState.instance,
+      // The preview of tier 2 arrives after the first drawing (S407-VORSCHAU).
+      animation: Listenable.merge(
+          [ArchiveRetrievalState.instance, ArchivePreviewCache.instance]),
       builder: (context, _) {
         final info = _archivedMedium();
         // A retrieval that succeeded puts the file back, and the tile's whole
@@ -4773,10 +4849,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 transcript,
                 style: TextStyle(
                     fontSize: 13,
-                    color: Theme.of(context)
-                        .colorScheme
-                        .onSurface
-                        .withValues(alpha: 0.7)),
+                    color: _captionColor(context)),
               ),
             ),
           ],
@@ -4807,7 +4880,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
               transcript,
               style: TextStyle(
                   fontSize: 13,
-                  color: colorScheme.onSurface.withValues(alpha: 0.7)),
+                  color: _captionColor(context)),
             ),
           ),
         ],
@@ -4863,13 +4936,20 @@ class _MessageBubbleState extends State<_MessageBubble> {
         if (hasFile || thumbBytes != null) {
           imageWidget = GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => _ImageViewer(
-                filePath: hasFile ? message.filePath : null,
-                imageBytes: !hasFile ? thumbBytes : null,
-                filename: message.filename,
-              )),
-            ),
+            onTap: () async {
+              // A user action, not a clock: check once that the reader still
+              // answers before the viewer asks it (S407-IOS-BILD).
+              await MediaVault.instance.ensureRunning();
+              if (!context.mounted) return;
+              unawaited(Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => _ImageViewer(
+                  filePath: hasFile ? message.filePath : null,
+                  imageBytes: thumbBytes,
+                  filename: message.filename,
+                  forwardingAllowed: _canForward,
+                )),
+              ));
+            },
             child: imageWidget,
           );
         }
@@ -4897,7 +4977,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
           const SizedBox(height: 2),
           Text(
             message.filename ?? locale.get('image_fallback'),
-            style: TextStyle(fontSize: 11, color: colorScheme.outline),
+            style: TextStyle(fontSize: 11, color: _captionColor(context)),
           ),
         ],
       );
@@ -4931,7 +5011,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
           if (message.mediaState == MediaDownloadState.announced)
             _downloadButton(context),
           Text(message.filename ?? locale.get('video_fallback'),
-              style: TextStyle(fontSize: 11, color: colorScheme.outline)),
+              style: TextStyle(fontSize: 11, color: _captionColor(context))),
         ],
       );
     }
@@ -4954,7 +5034,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
                 child: Text(
                   message.transcriptText!,
-                  style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.7)),
+                  style: TextStyle(fontSize: 13, color: _captionColor(context)),
                 ),
               ),
           ],
@@ -4977,8 +5057,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
               const SizedBox(width: 8),
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(message.filename ?? locale.get('audio_fallback'),
-                    style: const TextStyle(fontWeight: FontWeight.w500)),
-                Text(_formatSize(message.fileSize ?? 0), style: TextStyle(fontSize: 11, color: colorScheme.outline)),
+                    style: TextStyle(fontWeight: FontWeight.w500, color: _bubbleTextColor(context))),
+                Text(_formatSize(message.fileSize ?? 0), style: TextStyle(fontSize: 11, color: _captionColor(context))),
                 if (message.mediaState == MediaDownloadState.announced) _downloadButton(context),
               ]),
             ],
@@ -4988,7 +5068,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
               padding: const EdgeInsets.only(top: 4, left: 4, right: 4),
               child: Text(
                 message.transcriptText!,
-                style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.7)),
+                style: TextStyle(fontSize: 13, color: _captionColor(context)),
               ),
             ),
         ],
@@ -5011,13 +5091,13 @@ class _MessageBubbleState extends State<_MessageBubble> {
             children: [
               Text(
                 message.filename ?? locale.get('file_fallback'),
-                style: const TextStyle(fontWeight: FontWeight.w500),
+                style: TextStyle(fontWeight: FontWeight.w500, color: _bubbleTextColor(context)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               Text(
                 _formatSize(message.fileSize ?? 0),
-                style: TextStyle(fontSize: 11, color: colorScheme.outline),
+                style: TextStyle(fontSize: 11, color: _captionColor(context)),
               ),
               if (message.mediaState == MediaDownloadState.announced)
                 _downloadButton(context),
@@ -5139,27 +5219,13 @@ class _MessageBubbleState extends State<_MessageBubble> {
   /// [readByRecipient] colours the two ticks blue. That is the
   /// READ MARK and not a fifth state (§21.5.4, can be switched off per
   /// chat): the mark stays the same, only the colour changes.
-  Color? _statusColor(
-      MessageStatus status, bool readByRecipient, ColorScheme colorScheme) {
+  Color? _statusColor(MessageStatus status, bool readByRecipient,
+      ColorScheme colorScheme, Color neutral) {
     if (status == MessageStatus.failed) return colorScheme.error;
     if (readByRecipient && status == MessageStatus.delivered) {
       return Colors.blue;
     }
-    return colorScheme.outline;
-  }
-
-  /// §12.2 as symbols: waiting mark, ONE tick, TWO ticks, warning mark.
-  static String? _statusTicksFor(MessageStatus status) {
-    switch (status) {
-      case MessageStatus.resting:
-        return '⏳';
-      case MessageStatus.inTransit:
-        return '✓';
-      case MessageStatus.delivered:
-        return '✓✓';
-      case MessageStatus.failed:
-        return '✗';
-    }
+    return neutral;
   }
 }
 

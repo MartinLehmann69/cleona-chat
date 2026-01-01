@@ -28,7 +28,7 @@
 // FAILED WITH ITS REASON. [_mediaFail] is the one place that marks a file
 // `failed` (sender: the delivery state, §9.1; recipient: the media state)
 // and stores the [FailureReason]. When a transfer fails after the other end
-// already knows of it, that end is told: `MTV3_MEDIA_ABORT` = tag 16 ‖
+// already knows of it, that end is told: `MT_MEDIA_ABORT` = tag 16 ‖
 // reason u8 ‖ complete u32 ‖ stripes u32, both directions — the recipient
 // whose collection failed for good, the sender that gave up after its
 // announcement. Both ends show the same reason. A file is never sent again
@@ -45,7 +45,7 @@ const String kMediaOutgoingArea = 'media_outgoing';
 const String kMediaSentArea = 'media_sent';
 const int _kMediaSentAtMost = 1024;
 
-/// `MTV3_MEDIA_ABORT`: tag ‖ reason ‖ complete ‖ stripes.
+/// `MT_MEDIA_ABORT`: tag ‖ reason ‖ complete ‖ stripes.
 const int _kAbortLength = kTagLength + 1 + 4 + 4;
 
 typedef _MediaTargets = ({
@@ -79,7 +79,7 @@ extension CleonaServiceTransfer on CleonaService {
         status: 'accepted',
         // §15.2: the anchor comes from the real contact record, not from
         // this throwaway image (same group leg as the 1:1 path).
-        peerFoundingEd25519Pk: v41PeerFoundingPk(_contacts[hex]),
+        peerFoundingEd25519Pk: peerFoundingPk(_contacts[hex]),
       );
     }
 
@@ -138,8 +138,14 @@ extension CleonaServiceTransfer on CleonaService {
         '${msg.isOutgoing ? 'out' : 'in'} reason=${reason.wireName}'
         '${detail == null ? '' : ' ($detail)'} — $why');
     if (msg.isOutgoing) {
-      if (!msg.status.canTransitionTo(MessageStatus.failed)) {
-        return _fileOrderRelease(msg);
+      // A message already `failed` by its leg aggregate (one member without
+      // a way, §16.2.3, S410 finding 8) still takes the file's own reason:
+      // the file failed as a whole (§9.4 "Reasons").
+      if (msg.status != MessageStatus.failed &&
+          !msg.status.canTransitionTo(MessageStatus.failed)) {
+        // `delivered`: the receipt proved it (§9.2) — the file is no
+        // longer the line's business either way.
+        return _fileOrderRelease(msg, fileFailed: false);
       }
       msg.status = MessageStatus.failed;
     } else {
@@ -153,7 +159,7 @@ extension CleonaServiceTransfer on CleonaService {
     _saveConversations();
     onStateChanged?.call();
     // S398-W5: what waited behind the file goes now (§9.4).
-    _fileOrderRelease(msg);
+    _fileOrderRelease(msg, fileFailed: true);
   }
 
   // ── Records ───────────────────────────────────────────────────────────
@@ -282,7 +288,7 @@ extension CleonaServiceTransfer on CleonaService {
 
   /// Places the object of [msg] under the `K_T` of [r] and hands its
   /// announcement over — the full announcement, or the holder list when
-  /// lane 2 already announced (`MTV3_MEDIA_HOLDERS`, same tag). [resumed]:
+  /// lane 2 already announced (`MT_MEDIA_HOLDERS`, same tag). [resumed]:
   /// after a restart or at an edge; then "no holder known yet" keeps the
   /// record for the next edge instead of failing.
   Future<void> _laneThree(
@@ -328,7 +334,19 @@ extension CleonaServiceTransfer on CleonaService {
       'to': [for (final (c, _) in sends) bytesToHex(c.nodeId)],
       'at': DateTime.now().millisecondsSinceEpoch,
       'net': false,
+      // D-34 exception (`cleona_service_image_again.dart`): an image's
+      // recipient may ask once for stripes it lost — `K_T` and where the
+      // object lies outlive this record; [kImageAgainKey] marks that it did.
+      'kt': r['kt'],
+      'object': r['object'],
+      'own': r['own'],
+      'sha': r['sha'],
+      if (_mediaSent[tag]?[kImageAgainKey] == true) kImageAgainKey: true,
     });
+    final remainder = streamRemainderForTesting;
+    if (r['only'] == null && remainder != null) {
+      r['only'] = remainder.toList()..sort();
+    }
     _transferProgress(conversationId, msg.id, TransferPhase.seeding, 0);
     final kept = r['assigned'] as List?;
     var saved = (r['sent'] as int?) ?? 0;
@@ -347,6 +365,8 @@ extension CleonaServiceTransfer on CleonaService {
             r['assigned'] = [for (final x in a) _addressWrite(x)];
             _transferRecordPut(r);
           },
+          // S407 M-2: after a stream, only what the recipient still lacks.
+          only: (r['only'] as List?)?.cast<int>().toSet(),
           progress: (sent, total) {
             _transferProgress(conversationId, msg.id, TransferPhase.seeding,
                 total == 0 ? 0 : sent * 100 ~/ total);
@@ -385,7 +405,7 @@ extension CleonaServiceTransfer on CleonaService {
     }
 
     final legs = t.fanout ? msg.fanoutLegs.values.toList() : <String>[msg.id];
-    _v41ApplyOutgoingStatus(msg, legs); // index BEFORE sending (sendTextMessage)
+    _applyOutgoingLegStatus(msg, legs); // index BEFORE sending (sendTextMessage)
     var handed = 0;
     final Uint8List payload;
     if (announced) {
@@ -401,8 +421,8 @@ extension CleonaServiceTransfer on CleonaService {
       final ok = await sendToUser(
         recipientUserId: c.nodeId,
         messageType: announced
-            ? proto.MessageTypeV3.MTV3_MEDIA_HOLDERS
-            : proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
+            ? proto.MessageType.MT_MEDIA_HOLDERS
+            : proto.MessageType.MT_MEDIA_ANNOUNCE,
         payload: payload,
         contentMetadata: announced ? null : meta,
         messageId: announced ? null : wireId,
@@ -422,7 +442,7 @@ extension CleonaServiceTransfer on CleonaService {
         statsCollector.addMessageSent();
       }
     }
-    _v41ApplyOutgoingStatus(msg, legs);
+    _applyOutgoingLegStatus(msg, legs);
     _transferRecordDrop(r);
     _transferProgressEnd(msg.id);
     if (handed == 0) {
@@ -435,7 +455,9 @@ extension CleonaServiceTransfer on CleonaService {
     onStateChanged?.call();
     // S398-W5: in the network AND announced — only now may what waited
     // behind it go; before the announcement it would overtake it (§9.4).
-    _fileOrderRelease(msg);
+    // In the network — whatever the display over the legs says: one member
+    // without a way shows the message `failed` (§16.2.3), the file is not.
+    _fileOrderRelease(msg, fileFailed: false);
     _log.info('[E2E media-send-done] msgId=$short filename=${msg.filename} '
         'size=${msg.fileSize} recipient=${conversationId.substring(0, 8)} '
         'lane=mass${announced ? ' (after lane 2)' : ''}${resumed ? ' resumed' : ''} '
@@ -478,9 +500,15 @@ extension CleonaServiceTransfer on CleonaService {
       // (`_fileOrderStart`), not here.
       if (r['waiting'] == true) continue;
       final msg = _bulkMessage(r['conv'] as String, e.key);
+      // `failed` ends a record only where the display is the file's own
+      // state — 1:1, one leg. A group or channel file shown `failed` because
+      // ONE member had no way (§16.2.3, S410 finding 8) is in the network
+      // for the others: a record left by an ending between two
+      // announcements, or by "the image again" (D-34), continues. Its own
+      // failure dropped its record where it failed (`giveUp`, the end at
+      // `TTL_media` below, "no recipient with keys").
       if (msg == null ||
-          msg.status == MessageStatus.delivered ||
-          msg.status == MessageStatus.failed) {
+          transferRecordEnds(msg.status, oneLeg: msg.fanoutLegs.isEmpty)) {
         _transferRecordDrop(r);
         continue;
       }
@@ -551,14 +579,14 @@ extension CleonaServiceTransfer on CleonaService {
       ..setUint32(kTagLength + 5, stripes, Endian.big);
     unawaited(sendToUser(
       recipientUserId: c?.nodeId ?? hexToBytes(toHex),
-      messageType: proto.MessageTypeV3.MTV3_MEDIA_ABORT,
+      messageType: proto.MessageType.MT_MEDIA_ABORT,
       payload: payload,
       groupId: group == null ? null : hexToBytes(group),
     ).then((ok) => _log.info('[E2E media-abort] to ${toHex.substring(0, 8)} '
         'tag ${tag.substring(0, 8)} reason=${reason.wireName} sent=$ok')));
   }
 
-  /// `MTV3_MEDIA_ABORT`: the other end gave up this transfer for good.
+  /// `MT_MEDIA_ABORT`: the other end gave up this transfer for good.
   void _mediaAbortReceived(HarvestEvent event) {
     final from = event.senderUserId.hex;
     final b = Uint8List.fromList(event.payload);
@@ -578,7 +606,6 @@ extension CleonaServiceTransfer on CleonaService {
     final e = _bulkIncoming[tag];
     if (e != null && e['from'] == from) {
       _bulkIncomingRemove(tag);
-      _streamSeeds.remove(tag);
       myceliumMailbox?.bulkCollector.abandon(hexToBytes(tag));
       final msg = _bulkMessage(e['conv'] as String, e['msg'] as String);
       if (msg != null) {

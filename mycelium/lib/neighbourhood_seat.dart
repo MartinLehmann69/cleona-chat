@@ -13,11 +13,17 @@
 /// with that address). Otherwise nothing changes: between reachable ones
 /// the seat moves only on removal.
 ///
-/// **The card names no contact** (proposal "contacts as fixed neighbours",
-/// 6.5): a contact's device ([contact], set by the host) takes the card's
-/// seat only while no other neighbour answered, and hands it over at the
-/// next edge to one that is not a contact. Whatever is left is closed where
-/// strangers read it (`neighbourhood_card.dart`).
+/// **The card names no contact** (§5.2 "This place never goes to a
+/// contact's device", D-26): a contact's device ([contact], set by the host)
+/// never holds the card's seat. One that held it — it answered first, or
+/// it became a contact later — hands it over at that edge to a neighbour
+/// that is no contact and answered (a reachable one first, else a private
+/// one), and where there is none the seat stays EMPTY: two devices that know
+/// only each other have no card's seat (S407-EINST; until then the contact
+/// kept it until a reachable non-contact answered — BAU-KN-P1 deviation 4,
+/// S407-RBSEAT finding 2). Only a standing invitation that names the holder
+/// keeps it there (its readers hold cards with that address). Whatever is
+/// left is closed where strangers read it (`neighbourhood_card.dart`).
 ///
 /// "Public" comes from the confirmed address alone — no board (§11.8a), no
 /// cover (§3.1): [openNetwork] is `fromOutsideReachable`
@@ -26,6 +32,8 @@
 /// Pure functions over the list; `neighbourhood.dart` applies them. A
 /// separate file because the neighbourhood is at its line budget.
 library;
+
+import 'dart:io';
 
 import 'package:mycelium/neighbour.dart';
 
@@ -36,30 +44,27 @@ bool reachableNeighbour(Neighbour n, bool Function(NeighbourAddress a) public) =
 
 /// The seat a removal empties (W7 "the next CONFIRMED one"): the first of
 /// [list] that [answered] in this run — a reachable one before a private
-/// one (V6), a neighbour that is no [contact] device before one that is,
-/// and one without a contact seat before one with (the card names no
-/// contact where it can avoid it). `null`: nobody answered.
+/// one (V6), never a [contact] device (§5.2, D-26). `null`: no non-contact
+/// answered, the seat stays empty.
 Neighbour? seatAfterRemoval(List<Neighbour> list,
     bool Function(Neighbour n) answered, bool Function(NeighbourAddress a) public,
     [bool Function(Neighbour n) contact = _none]) {
   Neighbour? private;
-  for (final n in [
-    ...list.where((n) => !contact(n)),
-    ...list.where((n) => contact(n) && n.contactSeat == 0),
-    ...list.where((n) => contact(n) && n.contactSeat > 0),
-  ]) {
-    if (!answered(n)) continue;
+  for (final n in list) {
+    if (contact(n) || !answered(n)) continue;
     if (reachableNeighbour(n, public)) return n;
     private ??= n;
   }
   return private;
 }
 
-/// The edge "a confirmation" (V6): the seat moves from a private [fixed] —
-/// or from a [contact] device — to a reachable neighbour that is no contact
-/// device and answered in this run ([justNow] has, by the confirmation
-/// itself). `null`: the seat stays — the fixed one is reachable and no
-/// contact, a standing invitation [named] it, or there is nobody better.
+/// The edge "a confirmation" (V6): the seat moves from a private [fixed] to
+/// a reachable neighbour that is no contact device and answered in this run
+/// ([justNow] has, by the confirmation itself); from a [contact] device to
+/// such a one too, and failing that to a private non-contact that answered
+/// (§5.2, D-26). `null`: no move — the fixed one is reachable and no
+/// contact, a standing invitation [named] it, or there is nobody to take it
+/// (for a contact holder [cardSeatHandOver] then empties the seat).
 Neighbour? seatAfterConfirm(
   List<Neighbour> list,
   Neighbour fixed,
@@ -71,15 +76,32 @@ Neighbour? seatAfterConfirm(
 }) {
   final leave = contact(fixed);
   if ((reachableNeighbour(fixed, public) && !leave) || named(fixed)) return null;
+  Neighbour? private;
   for (final n in list) {
     if (n.id == fixed.id || n.contactSeat > 0) continue; // keeps its own seat
-    if (contact(n) || !reachableNeighbour(n, public)) continue;
-    if (n.id == justNow || answered(n)) return n;
+    if (contact(n) || (n.id != justNow && !answered(n))) continue;
+    if (reachableNeighbour(n, public)) return n;
+    if (leave) private ??= n;
   }
-  return null;
+  return private;
 }
 
 bool _none(Neighbour _) => false;
+
+/// Whether the confirmation of [address]:[port] of [old] (the entry BEFORE
+/// the stamp) is an edge for the fixed places (§11.8.8, C-14, S408): the
+/// neighbour answers for the first time in this run (§11.8.2), or for the
+/// first time under an address reachable from the open network — the first
+/// answer of the better qualified one. Any later answer stamps and moves no
+/// place. Without a yardstick ([answered] `null`) every confirmation counts.
+bool seatEdgeAt(Neighbour old, InternetAddress address, int port,
+    bool Function(Neighbour n)? answered,
+    bool Function(NeighbourAddress a) public) {
+  if (answered == null || !answered(old)) return true;
+  if (!public(NeighbourAddress(address, port, kUnconfirmed))) return false;
+  final reach = [for (final a in old.addresses) if (public(a)) a];
+  return reach.isEmpty || !answered(old.copy(addresses: reach));
+}
 
 /// The neighbours of the last run as they come back at start: addresses
 /// this node can use ([usable]) only, a neighbour without one stays out;
@@ -106,18 +128,25 @@ List<Neighbour> seatsFromMemory(
 /// confirmation asked it; a deleted contact left its former device holding
 /// the card's seat until the next confirmations (field 06.10.2026: 20:15:32
 /// deleted, 20:15:58 still "card neighbour NONE"). In place, like
-/// `seatContacts`; `true` if the seat moved.
+/// `seatContacts`; `true` if the seat moved. A contact's device on the seat
+/// with nobody to take it empties it (D-26); an empty seat is filled by the
+/// rule of a removal ([seatAfterRemoval]) — never with a contact's device.
 bool cardSeatHandOver(List<Neighbour> list, bool Function(Neighbour n) answered,
     bool Function(Neighbour n) named, bool Function(NeighbourAddress a) public,
     bool Function(Neighbour n) contact) {
   final f = list.where((n) => n.fixed).firstOrNull;
-  if (f == null) return false;
-  final to = seatAfterConfirm(list, f, -1,
-      answered: answered, named: named, public: public, contact: contact);
-  if (to == null) return false;
+  final Neighbour? to;
+  if (f == null) {
+    to = seatAfterRemoval(list, answered, public, contact);
+    if (to == null) return false;
+  } else {
+    to = seatAfterConfirm(list, f, -1,
+        answered: answered, named: named, public: public, contact: contact);
+    if (to == null && (!contact(f) || named(f))) return false;
+  }
   for (var j = 0; j < list.length; j++) {
-    if (list[j].fixed != (list[j].id == to.id)) {
-      list[j] = list[j].copy(fixed: list[j].id == to.id);
+    if (list[j].fixed != (list[j].id == to?.id)) {
+      list[j] = list[j].copy(fixed: list[j].id == to?.id);
     }
   }
   return true;

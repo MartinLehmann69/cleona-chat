@@ -28,23 +28,26 @@
 # required -- there is no code path in this backend that runs without
 # PipeWire.
 #
-# webrtc-audio-processing is required too, even though the PREFERRED chain
-# (the PipeWire echo-cancel filter) does not link it directly: the backend
-# falls back to linking it itself when the filter's AEC3 plugin cannot be
-# loaded (architecture §10.4's Linux row; SPEC §12 risk table: "link WebRTC APM;
-# C++ dependency on one platform deliberately accepted"). A build
-# without it therefore cannot deliver the fallback the architecture commits
-# to, so this is REQUIRED, not optional.
-#
-# VERSION NOTE (see voice_apm_shim.h for the full explanation): this file
-# looks for the classic `webrtc-audio-processing` pkg-config module (0.3.x,
-# the legacy component API voice_apm_shim.cpp binds against). A distribution
-# that only ships `webrtc-audio-processing-1` (the modern AEC3-based rewrite,
-# an entirely different C++ API) will fail this pkg_check_modules() call --
-# by design, not by omission: silently trying to compile the 0.3.x-shaped shim
-# against a 1.x header tree would fail with confusing C++ errors deep in a
-# vendored header instead of one clear CMake message here. Porting the shim to
-# the modern API is a follow-up, not a silent recompile.
+# THE FALLBACK CHAIN IS A SEPARATE LIBRARY (S410, owner decision B 29.10.2026;
+# S410-I6-MESSUNG.md finding 2). v4_2 §17.5: "Linux via PipeWire duplex with
+# the echo-cancel module, or failing that, a directly linked WebRTC APM".
+# Two targets:
+#   * cleona_voice      -> libcleona_voice.so, the backend. Links PipeWire
+#                          only. NO webrtc dependency: the preferred chain does
+#                          not need one, and until S410 the fixed link to the
+#                          system's webrtc-audio-processing 0.3.1 kept the
+#                          whole library from loading on Ubuntu 26.04 (which
+#                          ships only 1.3).
+#   * cleona_voice_apm  -> libcleona_voice_apm.so, voice_apm_shim.cpp with
+#                          webrtc-audio-processing 1.3 (AEC3) linked statically,
+#                          built from the pinned source by linux/webrtc_apm.
+#                          Exports only the cleona_voice_apm_* functions.
+#                          cleona_voice_linux.c dlopen()s it from its own
+#                          directory when it falls back (voice_apm_shim.h,
+#                          "WHY A SEPARATE LIBRARY").
+# Both carry RUNPATH $ORIGIN — they live in bundle/lib/ themselves, not in a
+# lib/ below it (the runner's global CMAKE_INSTALL_RPATH "$ORIGIN/lib" is for
+# the executable in the bundle root).
 
 cmake_minimum_required(VERSION 3.13)
 
@@ -92,42 +95,74 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(CLEONA_PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(CLEONA_SPA      REQUIRED IMPORTED_TARGET libspa-0.2)
-pkg_check_modules(CLEONA_WEBRTC_APM REQUIRED IMPORTED_TARGET webrtc-audio-processing)
-
-if(CLEONA_WEBRTC_APM_VERSION VERSION_GREATER_EQUAL "1.0")
-  message(WARNING
-    "native/cleona_voice/linux: found webrtc-audio-processing "
-    "${CLEONA_WEBRTC_APM_VERSION} (>= 1.0, the modern AEC3-based API). "
-    "voice_apm_shim.cpp binds the legacy 0.3.x component API "
-    "(EchoCancellation/NoiseSuppression/GainControl) and will not compile "
-    "against this version. Known limitation, see voice_apm_shim.h.")
-endif()
-
 enable_language(CXX)
-set(CMAKE_CXX_STANDARD 14)
+# webrtc-audio-processing 1.3 is C++17 (its meson.build: cpp_std=c++17).
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# webrtc-audio-processing 1.3 from the pinned source — one project for the
+# Flutter bundle and the standalone builds (scripts/build-daemon.sh); the
+# guard keeps a second add_subdirectory from defining it twice.
+if(NOT TARGET cleona_webrtc_apm)
+  add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../linux/webrtc_apm"
+                   "${CMAKE_CURRENT_BINARY_DIR}/webrtc_apm")
+endif()
+
+# --- the backend: PipeWire only, opens the fallback library on demand ---
 add_library(cleona_voice SHARED
     cleona_voice_linux.c
-    voice_apm_shim.cpp
 )
 
 target_link_libraries(cleona_voice PRIVATE
     cleona_voice_abi
     PkgConfig::CLEONA_PIPEWIRE
     PkgConfig::CLEONA_SPA
-    PkgConfig::CLEONA_WEBRTC_APM
+    pthread
+    ${CMAKE_DL_LIBS}
+)
+
+# --- the fallback chain: shim + static webrtc-audio-processing 1.3 ---
+add_library(cleona_voice_apm SHARED
+    voice_apm_shim.cpp
+)
+add_dependencies(cleona_voice_apm cleona_webrtc_apm)
+# The include directory exists only after cleona_webrtc_apm has installed
+# (build time), so it is a plain path here, not an imported target. SYSTEM:
+# the library's own headers do not pass -Wextra (audio_processing.h:85,
+# unused parameter) — their warnings are not ours to fix.
+target_include_directories(cleona_voice_apm SYSTEM PRIVATE
+    "${CLEONA_WEBRTC_APM_PREFIX}/include/webrtc-audio-processing-1"
+    "${CLEONA_WEBRTC_APM_PREFIX}/include")
+# The two defines the library's own pkg-config file hands to its users
+# (webrtc-audio-processing-1.pc: Cflags … -DWEBRTC_LIBRARY_IMPL -DWEBRTC_POSIX).
+target_compile_definitions(cleona_voice_apm PRIVATE WEBRTC_LIBRARY_IMPL WEBRTC_POSIX)
+target_link_libraries(cleona_voice_apm PRIVATE
+    "${CLEONA_WEBRTC_APM_LIBRARY}"
     pthread
 )
+# --exclude-libs,ALL: no symbol of the static archive is exported, so a
+# system webrtc-audio-processing that PipeWire's echo-cancel plugin may load
+# into the same process cannot be interposed by ours or vice versa.
+# --no-undefined: an unresolved symbol fails the link here, not the dlopen()
+# on a user's machine.
+target_link_options(cleona_voice_apm PRIVATE
+    "LINKER:--exclude-libs,ALL"
+    "LINKER:--no-undefined")
 
-set_target_properties(cleona_voice PROPERTIES
-    C_VISIBILITY_PRESET hidden
-    CXX_VISIBILITY_PRESET hidden
-)
-
-if(NOT MSVC)
-  target_compile_options(cleona_voice PRIVATE -Wall -Wextra)
-endif()
+foreach(_t cleona_voice cleona_voice_apm)
+  set_target_properties(${_t} PROPERTIES
+      C_VISIBILITY_PRESET hidden
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON
+      # Both live in the same directory (bundle/lib/, build/daemon/lib/, and
+      # this build directory); cleona_voice_linux.c opens the fallback from
+      # there. The same RUNPATH in the build tree and installed.
+      BUILD_WITH_INSTALL_RPATH ON
+      INSTALL_RPATH "$ORIGIN")
+  if(NOT MSVC)
+    target_compile_options(${_t} PRIVATE -Wall -Wextra)
+  endif()
+endforeach()
 
 # ---------------------------------------------------------------------------
 # Conformance test (SPEC §10 gate 4: "green on the target platform"), both

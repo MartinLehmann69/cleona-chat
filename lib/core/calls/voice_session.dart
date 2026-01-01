@@ -42,6 +42,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:meta/meta.dart';
 
+import 'package:cleona/core/calls/voice_lab_tone.dart';
 import 'package:cleona/core/calls/voice_report.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
@@ -287,6 +288,47 @@ typedef _GetReportNative = Void Function(
 typedef _GetReportDart = void Function(
     Pointer<_CVoiceSession>, Pointer<_CVoiceReport>);
 
+/// `cleona_voice_mock_config_t` (`native/cleona_voice/mock/cleona_voice_mock.h`)
+/// — sixteen `int32_t` in declaration order. Outside the ABI; bound only for
+/// the lab tone (`voice_lab_tone.dart`).
+final class _CMockConfig extends Struct {
+  @Int32()
+  external int forceRate;
+  @Int32()
+  external int defaultRate;
+  @Int32()
+  external int aecState;
+  @Int32()
+  external int nsState;
+  @Int32()
+  external int agcState;
+  @Int32()
+  external int chainOrigin;
+  @Int32()
+  external int duplex;
+  @Int32()
+  external int routesAvailableMask;
+  @Int32()
+  external int routeActiveIn;
+  @Int32()
+  external int routeActiveOut;
+  @Int32()
+  external int toneHz;
+  @Int32()
+  external int toneAmplitude;
+  @Int32()
+  external int openError;
+  @Int32()
+  external int startError;
+  @Int32()
+  external int chunkMin;
+  @Int32()
+  external int chunkMax;
+}
+
+typedef _MockConfigNative = Void Function(Pointer<_CMockConfig>);
+typedef _MockConfigDart = void Function(Pointer<_CMockConfig>);
+
 // ─────────────────────────────────────────────────────────────────────────
 // Library loading
 // ─────────────────────────────────────────────────────────────────────────
@@ -345,8 +387,50 @@ class VoiceNativeLibrary {
 
   /// The real platform backend (V1.1-V1.4) — or, in a probe, what
   /// [platformForTesting] names.
+  ///
+  /// A lab daemon with a lab tone switch (`voice_lab_tone.dart`) gets the
+  /// mock instead, set to the switch's tone. A switch that is there but
+  /// unusable throws — no silent fall back to the real microphone.
   static VoiceNativeLibrary platform() =>
-      platformForTesting?.call() ?? _load('cleona_voice');
+      platformForTesting?.call() ?? _labTone() ?? _load('cleona_voice');
+
+  /// The mock, configured from the lab tone switch, or `null` without one.
+  static VoiceNativeLibrary? _labTone() {
+    final tone = VoiceLabTone.read();
+    if (tone == null) return null;
+    final key = 'lab:${tone.library}';
+    var lib = _cache[key];
+    if (lib == null) {
+      final DynamicLibrary dl;
+      try {
+        dl = DynamicLibrary.open(tone.library);
+      } catch (e) {
+        throw VoiceLabToneInvalid('cannot load ${tone.library}: $e');
+      }
+      // Only the mock exports its configuration surface: a real backend
+      // named in the switch is refused, not used as a microphone.
+      if (!dl.providesSymbol('cleona_voice_mock_set_config')) {
+        throw VoiceLabToneInvalid(
+            '${tone.library} is not the voice mock (no mock configuration)');
+      }
+      lib = VoiceNativeLibrary._(dl, 'cleona_voice_mock');
+      _cache[key] = lib;
+    }
+    // Applied to the NEXT cleona_voice_open() (cleona_voice_mock.h): the
+    // caller opens its session right after asking for the library.
+    final cfg = calloc<_CMockConfig>();
+    try {
+      lib._lib.lookupFunction<_MockConfigNative, _MockConfigDart>(
+          'cleona_voice_mock_config_desktop')(cfg);
+      cfg.ref.toneHz = tone.toneHz;
+      cfg.ref.toneAmplitude = tone.amplitude;
+      lib._lib.lookupFunction<_MockConfigNative, _MockConfigDart>(
+          'cleona_voice_mock_set_config')(cfg);
+    } finally {
+      calloc.free(cfg);
+    }
+    return lib;
+  }
 
   /// Probes only: which library [platform] hands out. `CallService` and
   /// `AudioMixer` ask [platform] and nothing else; a probe that runs a

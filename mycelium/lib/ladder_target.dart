@@ -43,6 +43,21 @@ class Target {
   /// three proofs of work (`berichte/S389-BAU-QUITTUNG.md`).
   final bool postBoxApplicable;
 
+  /// A SIGNAL: the shipment takes ladder steps 1 and 3, both at once, and
+  /// nothing else (§17.2, D-45) — no step 4, so no proof of work and no
+  /// holder, whatever [postBoxApplicable] says. A call rings within 10 s or
+  /// not at all; a post box reaches a device when it returns, and a call
+  /// that rings then rings for nobody. Its sender keeps it out of every
+  /// re-dispatch at an edge (§9.3, `mailbox_signal.dart`). A property of the
+  /// shipment, not a second ladder: the same steps, one fewer applies — for
+  /// a contact's signal as for one over a group pair (§4.3).
+  final bool signal;
+
+  /// Whether step 4 applies: a post box for a recipient who is off, never
+  /// for a signal ([signal]) or a proven-reachable answer
+  /// ([postBoxApplicable]).
+  bool get stepFour => postBoxApplicable && !signal;
+
   /// The invitation value `dayValue(pk_inv)` — ONLY for a line join's
   /// request (2): step 4 leaves it there, never under a day value another
   /// identity of this node knows (OP-20, S398; §15.1).
@@ -53,8 +68,15 @@ class Target {
   /// way carries the search call ([noAddress]).
   final CardAddress? public;
 
+  /// Every address where the recipient ITSELF is (a line join: the proven
+  /// one and all the card names) — no node of them holds its post box, the
+  /// recipient never asks itself (§8.2). No step sends to this field; a
+  /// contact's are looked up at step 4 (`host_codes.dart`, `neighboursFrom`).
+  final List<CardAddress> recipientOwn;
+
   const Target({this.lan, this.neighbour, this.code, this.identifier,
-      this.postBoxApplicable = true, this.neighbours = const [], this.boxValue, this.public});
+      this.postBoxApplicable = true, this.neighbours = const [], this.boxValue, this.public,
+      this.recipientOwn = const [], this.signal = false});
 
   /// §7.2: "A send has no way when the recipient holds no address at all —
   /// none of their own, neither from the card nor observed, and no neighbour
@@ -80,7 +102,9 @@ class Target {
           Uint8List? code,
           Uint8List? identifier,
           bool postBoxApplicable = true,
-          Uint8List? boxValue}) =>
+          Uint8List? boxValue,
+          List<CardAddress> recipientOwn = const [],
+          bool signal = false}) =>
       Target(
         lan: lan ?? w?.lan,
         neighbour: neighbours.firstOrNull ?? neighbour ?? w?.neighbour,
@@ -90,6 +114,8 @@ class Target {
         postBoxApplicable: postBoxApplicable,
         boxValue: boxValue,
         public: w?.public,
+        recipientOwn: recipientOwn,
+        signal: signal,
       );
 
   /// No step except the post box carries.

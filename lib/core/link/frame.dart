@@ -82,9 +82,9 @@ abstract final class LinkFrameType {
   ///
   /// `0x05` was added when AP-7 claimed it. Adding a type here is
   /// **additive for existing consumers**: `Reassembler.offer`
-  /// (`tagline/reassembly.dart:71`) passes a non-fragment type through
+  /// (`tagline/reassembly.dart`, fallen S408-P23) passed a non-fragment type through
   /// unchanged, and `CellTransport.classify`
-  /// (`tagline/cell_transport.dart:192`) drops everything that is neither
+  /// (`tagline/cell_transport.dart`, fallen S408-P23) dropped everything that is neither
   /// `control` nor `spore`. A 0x05 frame therefore reaches exactly the
   /// consumer that asks for it, and no other.
   static const Set<int> known = {

@@ -47,6 +47,17 @@
 /// listener at the group address thus loses nothing there that the wildcard
 /// would have. Evidence that the group binding CARRIES over a real wire
 /// is thus still outstanding (§9 of the report).
+///
+/// **Windows binds neither (S407-WINSUCHE, measured 19.10.2026 on the VM,
+/// Dart 3.12.2):** a bind to 239.192.67.76, to 255.255.255.255 and to the
+/// segment broadcast fails with WSAEADDRNOTAVAIL (10049), with and without
+/// reuseAddress/reusePort; the wildcard and the own address bind and both
+/// receive group, broadcast AND unicast. There is no binding on Windows that
+/// proves the route. §7.2 prescribes the fallback for exactly this: "fall back
+/// to the wildcard address and continue" — `Neighbours._onCall` then answers
+/// the search call itself, but only to a sender the open network does not
+/// reach (§11.6 "local segment only"), so the find never amplifies towards a
+/// public address. Smoke: `smoke_search_call_fallback.dart`.
 library;
 
 import 'dart:io';
@@ -63,6 +74,12 @@ typedef SegmentBinding = Future<RawDatagramSocket> Function(
 Future<RawDatagramSocket> realSegmentBinding(
         InternetAddress destination, int port) =>
     RawDatagramSocket.bind(destination, port, reuseAddress: true, reusePort: true);
+
+/// The socket that calls, on a port of its own. Replaceable for the smoke,
+/// which needs a socket that refuses a datagram the way Windows does
+/// (`neighbours_send.dart`). Default value.
+Future<RawDatagramSocket> realCallerBinding(int port) =>
+    RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
 
 /// Everything that was bound on the call port.
 ///
@@ -89,6 +106,7 @@ Future<Listener> listenerOpen({
   GroupJoin join = realGroupJoin,
   BroadcastRelease release = realBroadcastRelease,
   SegmentBinding segment = realSegmentBinding,
+  ListenerBinding caller = realCallerBinding,
   void Function(String)? report,
 }) async {
   RawDatagramSocket? listen;
@@ -110,7 +128,7 @@ Future<Listener> listenerOpen({
     }
   }
 
-  final call = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+  final call = await caller(0);
   var broadcastCallOpen = true;
   String? broadcastCallReason;
   try {
@@ -134,7 +152,7 @@ Future<Listener> listenerOpen({
   }
 
   final segments = <RawDatagramSocket>[];
-  for (final (what, destination) in [('Gruppe', group), ('Rundruf', broadcastCall)]) {
+  for (final (what, destination) in [('group', group), ('broadcast', broadcastCall)]) {
     try {
       final s = await segment(destination, port);
       if (destination == group) join(s, group);
@@ -142,17 +160,20 @@ Future<Listener> listenerOpen({
     } catch (e) {
       _say(
           report,
-          'Neighbour search: no listening on ${destination.address}:$port ($e). A '
-          'search call via $what stays unanswered here — answered is '
-          'ONLY what came via group or broadcast (F-7). Not an error.');
+          'Neighbour search: no listening on ${destination.address}:$port ($e) '
+          '— this platform does not bind the $what address. Not an error.');
     }
   }
   if (segments.isEmpty) {
     _say(
         report,
-        'Neighbour search: no segment-wide listening. This node answers '
-        'NO search call any more; it is still found via the neighbour call '
-        'and via the addresses of its card.');
+        listen != null
+            ? 'Neighbour search: no segment-wide listening — §7.2 fallback: '
+                'the wildcard listener on $port answers the search call, '
+                'only to senders the open network does not reach (§11.6).'
+            : 'Neighbour search: no segment-wide listening and no listener on '
+                '$port. This node answers NO search call; it is still found '
+                'via the addresses of its card.');
   }
 
   return (listen: listen, call: call, segment: segments, route: route);

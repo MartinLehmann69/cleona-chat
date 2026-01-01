@@ -30,11 +30,14 @@ import 'package:mycelium/post_box_deposit.dart' show Neighbour;
 const int kDepositHolders = 3;
 
 /// The recipient's [named] fixed neighbours that are [usable], then [own],
-/// without duplicates, at most [kDepositHolders]. [node]: the node an
-/// address belongs to — one place per NODE (OP-19 part A, S398: two
+/// without duplicates, at most [atMost] (`null`: all of them — the ordered
+/// candidate list of a deposit, whose first [kDepositHolders] are addressed
+/// and whose rest stands in for a holder that fails, §8.2). [node]: the
+/// node an address belongs to — one place per NODE (OP-19 part A, S398: two
 /// addresses of one node took two of three places); by default the address.
 List<Neighbour> depositHolders(List<CardAddress> named, List<Neighbour> own,
-    bool Function(Neighbour a) usable, {String Function(Neighbour a)? node}) {
+    bool Function(Neighbour a) usable,
+    {String Function(Neighbour a)? node, int? atMost = kDepositHolders}) {
   final first = [
     for (final c in named)
       if ((InternetAddress.fromRawAddress(Uint8List.fromList(c.address)), c.port)
@@ -45,7 +48,7 @@ List<Neighbour> depositHolders(List<CardAddress> named, List<Neighbour> own,
   final seen = <String>{};
   return [
     for (final a in [...first, ...own])
-      if (seen.length < kDepositHolders && seen.add(key(a))) a,
+      if ((atMost == null || seen.length < atMost) && seen.add(key(a))) a,
   ];
 }
 

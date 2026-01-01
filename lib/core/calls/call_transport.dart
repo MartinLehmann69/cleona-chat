@@ -46,7 +46,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/calls/punch_window.dart';
 import 'package:cleona/core/calls/call_control_frame.dart';
 import 'package:cleona/core/link_io/d_frame.dart';
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
 /// Why a media frame could not be delivered. Deliberately passes
 /// no transport state upwards — the call layer only needs the
@@ -115,7 +115,7 @@ abstract class CallTransport {
   /// the number of attempts.
   Future<bool> sendSignal({
     required Uint8List recipientUserId,
-    required proto.MessageTypeV3 type,
+    required proto.MessageType type,
     required Uint8List payload,
   });
 
@@ -216,7 +216,7 @@ abstract class CallTransport {
     required String participantHex,
     required Uint8List peerX25519Pk,
     required Uint8List peerMlKemPk,
-    required proto.MessageTypeV3 type,
+    required proto.MessageType type,
     required Uint8List payload,
     bool expectsReply,
   });
@@ -242,6 +242,26 @@ abstract class CallTransport {
   MediaSendFailure? sendControl({
     required String participantHex,
     required ControlRecord record,
+  });
+
+  /// A CONTROL RECORD that expects an answer (§11.3a), e.g. the broker
+  /// records of §17.7 (`relayAsk`, `relayBind`, …).
+  ///
+  /// "A packet that expects an answer and gets none within its answer wait
+  /// is repeated, at most three times" — and "the transport alone handles
+  /// silence": the caller learns one of two things, answered (the first
+  /// arriving record from [participantHex] for which [answeredBy] is true)
+  /// or failed ([onFailed], after the record and its three repeats stayed
+  /// unanswered, or when the session to the participant is gone). It does
+  /// not repeat, count or time anything itself.
+  ///
+  /// Return value as for [sendControl]: `null` = queued, otherwise the
+  /// reason it was not (then [onFailed] is not called).
+  MediaSendFailure? requestControl({
+    required String participantHex,
+    required ControlRecord record,
+    required bool Function(ControlRecord answer) answeredBy,
+    void Function()? onFailed,
   });
 
   /// Every CONTROL RECORD that arrived under an admitted session
@@ -294,7 +314,8 @@ abstract class CallTransport {
   /// it is the same event as the V3 route downgrade: the call no longer
   /// holds.
   ///
-  /// Fires only for a session armed with [watchMediaLoss].
+  /// Fires only for a session armed with [watchMediaLoss] (1:1) or
+  /// [watchPairLoss] (a group media pair).
   set onMediaPathLost(void Function(String peerHex)? cb);
 
   /// Arms §17.4's loss detection for the session to [peerHex]: from now on,
@@ -303,9 +324,28 @@ abstract class CallTransport {
   /// Called by the 1:1 call once the punch window has found a carrying pair
   /// (§17.3) — not before: the window itself may run 30 s without a media
   /// frame. Ends with the session ([forgetParticipant]). A group call does
-  /// not arm it: there a participant legitimately receives no media from a
-  /// peer that is not its neighbour in the tree (§17.7).
+  /// not arm it: there a media pair may legitimately carry no media (a muted
+  /// peer sends the life sign instead, D-74), and [watchPairLoss] counts
+  /// every valid frame.
   void watchMediaLoss(String peerHex);
+
+  /// This device holds a group media pair with [peerHex] (§17.7) and keeps
+  /// it alive (§17.4, D-74): the life sign ([ControlRecordType.lifeSign])
+  /// goes out once now, and then in every control tick (1 Hz, §17.1.1) in
+  /// which no frame left on this session — a muted participant, one that
+  /// cannot capture, or a pair its voice does not run on sends one control
+  /// frame per second instead of silence. Ends with the session
+  /// ([forgetParticipant]). Not for a 1:1 call: there the device always
+  /// sends voice frames, encoded silence included.
+  void keepPairAlive(String peerHex);
+
+  /// Arms §17.4's loss rule for the group media pair with [peerHex]: from
+  /// now on 10 s without any valid frame of the session — media OR control
+  /// — fire [onMediaPathLost] once. Armed on the peer's first life sign
+  /// ([ControlRecordType.lifeSign]): "toward a participant that never sent
+  /// one — a v4.2.3 device — the rule does not apply". Ends with the session
+  /// ([forgetParticipant]).
+  void watchPairLoss(String peerHex);
 
   /// Cost estimate for the path to a participant, for building the
   /// overlay multicast tree of a group call. [fallback] is

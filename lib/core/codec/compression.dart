@@ -1,6 +1,7 @@
 import 'dart:ffi';
 import 'dart:io' show Platform;
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -95,13 +96,12 @@ class ZstdCompression {
       throw StateError('libzstd.dll not found');
     }
     if (Platform.isAndroid) return DynamicLibrary.open('libzstd.so');
-    for (final p in [
-      'libzstd.so',
-      '${AppPaths.bundleLibDir}/libzstd.so',
-    ]) {
-      try { return DynamicLibrary.open(p); } catch (_) {}
+    if (Platform.isLinux) {
+      // S410, I-6: runtime soname of the distribution package first; the
+      // list lives in `platform/linux_native_libraries.dart`.
+      return openLinuxNativeLibrary(linuxZstd);
     }
-    throw StateError('libzstd.so not found');
+    throw StateError('Unsupported platform for libzstd');
   }
 
   late final DynamicLibrary _lib;

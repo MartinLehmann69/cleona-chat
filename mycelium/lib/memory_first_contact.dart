@@ -37,6 +37,10 @@
 /// keys:     count (u16) | per invitation: code 16 B | X25519 pk 32 | sk 32
 ///                       | ML-KEM-768 pk 1184 | sk 2400
 ///                       | box pk_inv 32 | sk_inv 64
+/// S407, only when some join has one (may be missing — a 4.2.3 file):
+/// card keys: count (u16) | per entry: join index (u16) | bits (1) — 0x01 the
+///                       card neighbour's record key follows (32 B), 0x02 the
+///                       issuer reads keyed lists (`card_text_key.dart`)
 /// ```
 ///
 /// Version 2 (S398, proposal A): the address carries the identifier and its
@@ -47,6 +51,12 @@
 /// its invitation box key `pk_inv` and, until the post box took it, the
 /// request (2) itself — so it goes out again, unchanged, at the next edge
 /// after a restart (D-44, §9.3); a join without them is a QR/NFC one.
+///
+/// STILL version 3 (S407 a'): the card keys go in a trailing section, so a
+/// 4.2.3 file reads unchanged. A new version would make the enforcer remove
+/// the store of every updating device — its open joins — and fire the S405
+/// one-shot (`memory_last_seen_clear.dart`) a second time (owner 09.10.2026:
+/// 4.2.x stays compatible).
 ///
 /// Encrypted and written atomically like the memory ([FileEncryption]).
 library;
@@ -64,6 +74,7 @@ import 'package:mycelium/card.dart';
 import 'package:mycelium/memory_contact.dart'
     show addressChainRead, addressChainWrite;
 import 'package:mycelium/memory_invitation.dart' show MemoryError, Reader;
+import 'package:mycelium/card_text_key.dart' show cardWithNeighbour;
 import 'package:mycelium/pair.dart' show kCodeLength, kDayKeyDays;
 
 /// The file name — [FileEncryption] appends `.enc`.
@@ -185,6 +196,7 @@ class FirstContactStore {
         ..add(e.value.box.pk)
         ..add(e.value.box.sk);
     }
+    _cardKeysWrite(b, joins);
     return b.toBytes();
   }
 
@@ -232,12 +244,53 @@ class FirstContactStore {
           box: (pk: l.bytes(32), sk: l.bytes(cryptoSignSecretKeyBytes)),
         );
       }
+      if (!l.atEnd) _cardKeysRead(l, joins);
       l.done();
     } on MemoryError {
       rethrow;
     } catch (e) {
       throw MemoryError('first-contact store damaged: $e');
     }
+  }
+}
+
+/// The S407 trailing section (file header): per join whose card carries a
+/// neighbour record key or the "reads keys" mark.
+void _cardKeysWrite(BytesBuilder b, List<RememberedJoin> joins) {
+  final at = [
+    for (var i = 0; i < joins.length; i++)
+      if (joins[i].card.readsKeys ||
+          joins[i].card.neighbourAddress?.recordKey != null)
+        i,
+  ];
+  if (at.isEmpty) return;
+  b.add(_u16(at.length));
+  for (final i in at) {
+    final c = joins[i].card, nk = c.neighbourAddress?.recordKey;
+    b
+      ..add(_u16(i))
+      ..addByte((nk == null ? 0 : 1) | (c.readsKeys ? 2 : 0));
+    if (nk != null) b.add(nk);
+  }
+}
+
+void _cardKeysRead(Reader l, List<RememberedJoin> joins) {
+  for (var n = l.u16(); n > 0; n--) {
+    final i = l.u16(), bits = l.byte();
+    if (i >= joins.length || bits > 3) {
+      throw MemoryError('card keys: join $i, bits $bits');
+    }
+    final nk = bits & 1 != 0 ? l.bytes(32) : null;
+    final j = joins[i];
+    joins[i] = (
+      card: cardWithNeighbour(j.card, j.card.neighbourAddress?.withRecordKey(nk),
+          readsKeys: bits & 2 != 0),
+      counterpart: j.counterpart,
+      answerCode: j.answerCode,
+      window: j.window,
+      pkInv: j.pkInv,
+      request: j.request,
+    );
   }
 }
 

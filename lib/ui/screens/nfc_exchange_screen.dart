@@ -11,6 +11,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/invitation_messages.dart';
 import 'package:cleona/ui/components/invitation_redeem.dart';
 import 'package:cleona/ui/components/invitation_way_in.dart';
+import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// NFC contact exchange (V4.2 §15.5, §15.10 "NFC exchange").
 ///
@@ -240,6 +241,7 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(locale.get('nfc_contact_exchange')),
+        actions: const [AppScreenshotButton()],
         leading: IconButton(
           icon: const Icon(Icons.close),
           onPressed: () {

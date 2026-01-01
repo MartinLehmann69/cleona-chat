@@ -48,7 +48,12 @@ fi
 # desktop libraries; neither is built into the iOS image, and the file is
 # only reached from the Linux branch of `KeyringService.init`
 # (`Platform.isLinux`). Its symbols cannot exist in the iOS image.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_send_path\.dart|dpapi_ffi\.dart|process_hardening\.dart|libsecret_ffi\.dart"
+#
+# ADDED S409 (28.10.2026): `gobject_signal.dart` holds the
+# `g_signal_connect_data` binding moved out of `native_tray.dart` (S409 tray
+# fix); it binds libgobject-2.0.so.0 for the Linux GTK tray only. Same reason
+# as `native_tray.dart`: not built into the iOS image.
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|gobject_signal\.dart|native_send_path\.dart|dpapi_ffi\.dart|process_hardening\.dart|libsecret_ffi\.dart"
 
 # Symbols this gate deliberately does NOT require in the exports file.
 # Currently empty, and the bar for adding one is high.

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/shell_link.dart' show kAnswerDeadline;
+import 'package:mycelium/silence.dart' show kSendingsAtMost;
 import 'package:mycelium/send_batch.dart';
 import 'package:mycelium/split_flow.dart';
 import 'package:mycelium/split_missing.dart';
@@ -48,9 +49,10 @@ const Duration kRestPeriod = Duration(milliseconds: 300);
 Duration endedAfter(Duration restPeriod) => restPeriod + kAnswerDeadline;
 
 /// After this many re-request rounds IN A ROW that brought no new part the
-/// sending counts as failed (D-43, §11.3). A round with progress resets
-/// the count; [kDropAfter] stays the hard bound.
-const int kAtMostAttempts = 3;
+/// sending counts as failed (D-43, §11.3): the request and its three repeats
+/// (§11.3a, `silence.dart` — until S407 three rounds). A round with progress
+/// resets the count; [kDropAfter] stays the hard bound.
+const int kAtMostAttempts = kSendingsAtMost;
 
 /// Absolute upper limit after which an unfinished sending is discarded —
 /// independent of the quiet period. Catches the case that constantly new (but never
@@ -265,7 +267,7 @@ class Splitter {
     final key = _key(identifier, from, fromPort);
     final s = _incoming.putIfAbsent(key, () {
       final fresh = _IncomingShipment(identifier, count, from, fromPort);
-      // §11.3 "after 3 rounds without progress, or 30 s": the hard bound
+      // §11.3 "after the request and its repeats bring nothing, or 30 s": the hard bound
       // tells the caller too — with rounds that keep progressing it is the
       // one that ends a transmission that never completes.
       fresh.dropTimer = Timer(dropAfter, () {
@@ -321,7 +323,7 @@ class Splitter {
     if (missing.isEmpty) return; // already gone through [_checkComplete]
     // D-43 (§11.3): a round counts only if it brought no new part. A burst
     // that the receive buffer thinned out comes back round by round; it
-    // fails after three rounds in a row without progress, or after
+    // fails after four rounds in a row without progress, or after
     // [dropAfter].
     if (s.parts.length > s.heldAtRequest) s.attempt = 0;
     if (s.attempt >= atMostAttempts) return _fail(key, s);

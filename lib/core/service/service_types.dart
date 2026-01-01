@@ -4,7 +4,39 @@ import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
 import 'package:cleona/core/services/key_change_policy.dart' show KeyChangeOutcome;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
+
+/// Sender-side edit window (§21.5.1): the edit button disappears 15 minutes
+/// after the original. One value for the service and the chat screen.
+const int kSenderEditWindowMs = 15 * 60 * 1000;
+
+/// Members a new group needs besides its owner (§16.2.2, owner decision
+/// 13.10.2026): with one other person the conversation is a direct chat.
+/// Only creation is bounded — an invitation into a smaller group from an
+/// older 4.2 device is still taken (D-21, 4.2.x compatibility).
+const int kGroupMinOtherMembers = 2;
+
+/// Whether a group with [otherMembers] members besides its owner may be
+/// created (§16.2.2). One rule for the service and the create dialog.
+bool groupCreationAllowed(int otherMembers) =>
+    otherMembers >= kGroupMinOtherMembers;
+
+/// [GroupInfo.aloneQuestion]: the own identity is the only member left and
+/// the question whether to delete the group waits (§16.2.2).
+const String kGroupAloneDue = 'due';
+
+/// [GroupInfo.aloneQuestion]: the question was asked and the group kept.
+const String kGroupAloneAnswered = 'answered';
+
+/// The description of a group or private channel, in characters (§16.2.2;
+/// the bound of the profile update, §15.8 "description ≤ 500 characters").
+const int kGroupDescriptionAtMost = 500;
+
+/// The image of a group or private channel, in bytes (§16.2.2; the bound of
+/// the profile picture, §15.8 "picture ≤ 64 KB", which a 1:1 delivery
+/// already carries — `setProfilePicture`). One value for the service, the
+/// receiving side and the screen that picks the image.
+const int kGroupPictureAtMost = 64 * 1024;
 
 /// One built fan-out leg of a [ServiceContext.sendToUser] call: the outer
 /// packet as it was signed for exactly one recipient device.
@@ -19,7 +51,7 @@ import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 /// [builtAt] is older than that — see [isReusable].
 class SendLeg {
   final Uint8List deviceId;
-  final proto.NetworkPacketV3 packet;
+  final proto.NetworkPacket packet;
   final DateTime builtAt;
 
   SendLeg(this.deviceId, this.packet) : builtAt = DateTime.now();
@@ -33,7 +65,7 @@ class SendLeg {
 }
 
 /// UI tag enum, decoupled from the wire layer; persisted by ordinal
-/// [wireValue]. V3 wire frames use `MessageTypeV3` exclusively — this enum
+/// [wireValue]. V3 wire frames use `MessageType` exclusively — this enum
 /// is purely UI/persistence-internal.
 enum UiMessageType {
   // Content payloads
@@ -60,6 +92,9 @@ enum UiMessageType {
   calendarDelete(16),
   // Polls
   pollCreate(17),
+  // Calls: the missed-call message (§17.2); its text is an i18n key
+  // (`lib/core/calls/missed_call.dart`).
+  callMissed(18),
   ;
 
   final int wireValue;
@@ -186,7 +221,7 @@ enum MessageStatus {
   /// can be right for a record read from disk:
   ///
   ///   * [resting] and [inTransit] are LIVE states. They are
-  ///     updated by `_myceliumStatusFor` or `_v41StatusFor` from an outgoing entry,
+  ///     updated by `_myceliumStatusFor` or `_statusFor` from an outgoing entry,
   ///     and that outgoing entry lives in working memory
   ///     (`_myceliumOutbounds`, capped). Behind a loaded record
   ///     there is none — the message would rest on a promise that
@@ -256,6 +291,104 @@ extension MessageStatusGuard on MessageStatus {
     return true;
   }
 }
+
+// ── THE ONE RULE for the display of an outgoing message over its legs ────
+//
+// §16.2.3: "The state shown for a group message is the weakest across all
+// members, using the four states of §9.1". §21.5.5: "visible `delivered`
+// only once every leg has received a delivery-receipt cell and no leg is
+// withholding". Owner decision 30.10.2026 (S410 finding 8, variant A):
+// `failed` is the weakest of the four — a message one member did not get is
+// shown with the warning mark, not with one tick.
+//
+// Until S410 two rules stood side by side: the register path took failed
+// legs out of the ranking (`failed` only when EVERY leg failed), the receipt
+// path counted them (never `delivered`). A message with one failed leg thus
+// stood on one tick for good — neither two ticks nor the warning mark
+// (`mycelium/berichte/S410-FIX-LAUF4.md`, finding 8). Every path that
+// changes the display of an outgoing message now goes through
+// [legDisplayState] and [weakestLegState].
+
+/// Rank of the four states for [weakestLegState]: `failed` is the weakest
+/// (§16.2.3 read word for word, owner decision 30.10.2026).
+int legStateRank(MessageStatus s) => switch (s) {
+      MessageStatus.failed => 0,
+      MessageStatus.resting => 1,
+      MessageStatus.inTransit => 2,
+      MessageStatus.delivered => 3,
+    };
+
+/// What ONE leg of a group or channel message contributes to the display.
+///
+/// * [receipted]: the member's delivery receipt arrived, proven (§9.2) —
+///   the member is in `UiMessage.deliveredBy`. It wins over the register: a
+///   leg that had no way and reached the member later (§9.5 catching up)
+///   is delivered.
+/// * [withheld]: that receipt carried "withhold" (§21.5.5) — the leg never
+///   contributes a visible `delivered`; it stands on `inTransit`.
+/// * [register]: the state of the leg in the delivery layer, `null` when
+///   the leg is not known there (displaced, or a new run of the app).
+///   `delivered` there without the application's receipt (a 0x11 alone)
+///   is `inTransit` here: only the receipt carries the member's bit
+///   (§21.5.5 "`in transit` → `delivered` only on a received
+///   delivery-receipt cell **with** `disclose`").
+MessageStatus? legDisplayState({
+  required bool receipted,
+  required bool withheld,
+  required MessageStatus? register,
+}) {
+  if (receipted) {
+    return withheld ? MessageStatus.inTransit : MessageStatus.delivered;
+  }
+  if (register == MessageStatus.delivered) return MessageStatus.inTransit;
+  return register;
+}
+
+/// The display state over all [legs] (`null` = that leg is not known), or
+/// `null` when nothing may change.
+///
+/// The weakest known leg counts, `failed` below `resting` (§16.2.3).
+/// `delivered` comes only with [deliveredAllowed] — for a group message
+/// `UiMessage.isFullyDelivered` (every leg receipted, none withholding,
+/// §21.5.5); a leg that is not known here is no proof, so the previous
+/// value stays.
+MessageStatus? weakestLegState(Iterable<MessageStatus?> legs,
+    {required bool deliveredAllowed}) {
+  MessageStatus? weakest;
+  for (final s in legs) {
+    if (s == null) continue;
+    if (weakest == null || legStateRank(s) < legStateRank(weakest)) {
+      weakest = s;
+    }
+  }
+  if (weakest == MessageStatus.delivered && !deliveredAllowed) return null;
+  return weakest;
+}
+
+// ── Control works per file, not on the display over the legs ────────────
+//
+// Since the rule above a group or channel file is shown `failed` when ONE
+// member's leg had no way (§16.2.3), while it lies in the network for every
+// other member. What steers the file's own course — the line of a member
+// (§9.4 "nothing overtakes a file", D-34) and the resumption of its sending
+// record — asks the FILE's outcome, never that display (S410 finding 8).
+
+/// Did the file of a line slot fail? [kept] is the outcome its release
+/// stored (`'failed'`, `_fileOrderRelease`); without one (not released yet,
+/// or a line written before S410) the display counts only where it is the
+/// file's own state: [oneLeg] (1:1).
+bool fileSlotFailed(Object? kept,
+    {required bool oneLeg, required MessageStatus display}) {
+  if (kept is bool) return kept;
+  return oneLeg && display == MessageStatus.failed;
+}
+
+/// Does a sending record of a file end at its resumption? `delivered`
+/// always; `failed` only where it is the file's own state ([oneLeg], 1:1).
+/// A group or channel file's own failure drops its record where it fails.
+bool transferRecordEnds(MessageStatus display, {required bool oneLeg}) =>
+    display == MessageStatus.delivered ||
+    (oneLeg && display == MessageStatus.failed);
 
 /// The running transfer of a media message beside its delivery state
 /// (§22.5.1 "Media and delivery state"): shown as progress, never folded
@@ -356,7 +489,7 @@ enum FailureReason {
   /// Stable name over IPC and in the store — never the index (§22.5.1).
   final String wireName;
 
-  /// Stable byte in `MTV3_MEDIA_ABORT` (`cleona_service_transfer.dart`).
+  /// Stable byte in `MT_MEDIA_ABORT` (`cleona_service_transfer.dart`).
   final int code;
 
   /// `null` for an absent or unknown name — no reason is better than a
@@ -497,6 +630,34 @@ enum CallVideoOffReason {
 /// Participant state in a group call.
 enum ParticipantState { invited, ringing, joined, left, crashed }
 
+/// How a fellow participant of a group call is heard (§17.7, D-69). The
+/// display never names through whom a pair runs (D-69 F-4 = B).
+///
+/// Travels by NAME over the IPC, not by index: a value added later must
+/// not shift the meaning of an existing one.
+enum GroupPeerReach {
+  /// Over the media pair with it, or over the tree (from 7).
+  direct,
+
+  /// Not decided yet: the media pair or its broker is still being found.
+  pending,
+
+  /// Through a broker, voice and video as wanted.
+  brokered,
+
+  /// Through a broker that cannot carry the pair's video — the voice stays
+  /// ("No video with {name} — forwarding is at capacity").
+  voiceOnly,
+
+  /// No participant holds a media pair with both ("No common contact in
+  /// the call").
+  noCommonContact,
+
+  /// Common contacts exist, but none can still carry the pair's voice
+  /// ("No free forwarding to {name}").
+  noFreeForwarding,
+}
+
 /// Why a 1:1 call ended, where the end has a reason the UI must name.
 ///
 /// Travels by NAME over the IPC (`CallInfo.toJson`), not by index: a value
@@ -508,14 +669,23 @@ enum CallEndReason {
   /// §17.4 loss detection: 10 s without valid media frames ended the session
   /// (UI: "connection lost", i18n key `call_connection_lost`).
   connectionLost,
+
+  /// §17.2: no `RING_ACK` within 10 s — no device of the callee was reached
+  /// (UI: "not reachable", i18n key `call_not_reachable`).
+  notReachable,
 }
 
-/// Why a 1:1 call did not come about although both sides wanted it: Plane D
-/// carries no media (§17.3).
+/// Why a 1:1 call did not come about: Plane D carries no media (§17.3), or
+/// the user switched calls off for this contact (§17 principle, RL-7).
 ///
 /// Travels by NAME over the IPC (event `call_unavailable`), like
 /// [CallEndReason].
 enum CallUnavailableReason {
+  /// The own switch "allow calls" is off for this contact (§17 principle,
+  /// RL-7, D-69): no INVITE goes out (i18n key
+  /// `call_unavailable_calls_not_allowed`).
+  callsNotAllowed,
+
   /// No address pair carries, or this device has no Plane D at all — §17.3:
   /// "honestly, "no call"" (i18n key `call_unavailable_no_path`).
   noMediaPath,
@@ -552,6 +722,11 @@ class CallInfo {
   /// hear the user (UI: i18n key `call_microphone_unavailable`).
   final bool captureUnavailable;
 
+  /// §17.2: an outgoing call stands at "reaching …" until the callee's first
+  /// `RING_ACK` — [state] is `ringing` meanwhile (see `CallSession.reaching`).
+  /// A daemon that does not send the field reads as `false`.
+  final bool reaching;
+
   CallInfo({
     required this.callId,
     required this.peerNodeIdHex,
@@ -565,6 +740,7 @@ class CallInfo {
     this.videoFramesReceived = 0,
     this.endReason = CallEndReason.unspecified,
     this.captureUnavailable = false,
+    this.reaching = false,
   }) : startedAt = startedAt ?? DateTime.now();
 
   Map<String, dynamic> toJson() => {
@@ -580,6 +756,7 @@ class CallInfo {
         'videoFramesReceived': videoFramesReceived,
         'endReason': endReason.name,
         'captureUnavailable': captureUnavailable,
+        'reaching': reaching,
       };
 
   static CallInfo fromJson(Map<String, dynamic> json) => CallInfo(
@@ -597,6 +774,7 @@ class CallInfo {
         endReason: CallEndReason.values.asNameMap()[json['endReason']] ??
             CallEndReason.unspecified,
         captureUnavailable: json['captureUnavailable'] as bool? ?? false,
+        reaching: json['reaching'] as bool? ?? false,
       );
 }
 
@@ -608,12 +786,25 @@ class GroupCallParticipantInfo {
   final bool isMuted;
   final double audioLevel;
 
+  /// How this participant is heard (§17.7) — for its tile.
+  final GroupPeerReach reach;
+
+  /// This device's hearing of the participant (`peer_hearing.dart`): voice
+  /// frames heard, frames that came a second time, tone of the signal.
+  final int framesHeard;
+  final int framesDuplicate;
+  final double toneHz;
+
   GroupCallParticipantInfo({
     required this.nodeIdHex,
     required this.displayName,
     required this.state,
     this.isMuted = false,
     this.audioLevel = 0.0,
+    this.reach = GroupPeerReach.direct,
+    this.framesHeard = 0,
+    this.framesDuplicate = 0,
+    this.toneHz = 0.0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -622,6 +813,10 @@ class GroupCallParticipantInfo {
         'state': state.index,
         'isMuted': isMuted,
         'audioLevel': audioLevel,
+        'reach': reach.name,
+        'framesHeard': framesHeard,
+        'framesDuplicate': framesDuplicate,
+        'toneHz': toneHz,
       };
 
   static GroupCallParticipantInfo fromJson(Map<String, dynamic> json) =>
@@ -631,6 +826,47 @@ class GroupCallParticipantInfo {
         state: ParticipantState.values[json['state'] as int? ?? 0],
         isMuted: json['isMuted'] as bool? ?? false,
         audioLevel: (json['audioLevel'] as num?)?.toDouble() ?? 0.0,
+        reach: GroupPeerReach.values.firstWhere(
+            (r) => r.name == json['reach'],
+            orElse: () => GroupPeerReach.direct),
+        framesHeard: json['framesHeard'] as int? ?? 0,
+        framesDuplicate: json['framesDuplicate'] as int? ?? 0,
+        toneHz: (json['toneHz'] as num?)?.toDouble() ?? 0.0,
+      );
+}
+
+/// This device's place in the crystal of a group call (§17.7).
+class GroupCallCrystalInfo {
+  final String root;
+  final String? parent;
+  final List<String> children;
+
+  /// Still asking for a place (a join is out and unanswered).
+  final bool seeking;
+
+  GroupCallCrystalInfo({
+    required this.root,
+    required this.parent,
+    this.children = const [],
+    this.seeking = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'root': root,
+        'parent': parent,
+        'children': children,
+        'seeking': seeking,
+      };
+
+  static GroupCallCrystalInfo fromJson(Map<String, dynamic> json) =>
+      GroupCallCrystalInfo(
+        root: json['root'] as String? ?? '',
+        parent: json['parent'] as String?,
+        children: (json['children'] as List<dynamic>?)
+                ?.map((c) => c as String)
+                .toList() ??
+            const [],
+        seeking: json['seeking'] as bool? ?? false,
       );
 }
 
@@ -648,6 +884,16 @@ class GroupCallInfo {
   final int videoFramesSent;
   final int videoFramesReceived;
 
+  /// §17.7: video is off for this call because more participants joined
+  /// than video is offered for ([GroupCallSession.applyVideoCap]).
+  final bool videoSwitchedOff;
+
+  /// Voice library of this device's group mixer (`AudioMixer.backendLibrary`).
+  final String audioBackend;
+
+  /// This device's place in the crystal, `null` while the call is a mesh.
+  final GroupCallCrystalInfo? crystal;
+
   GroupCallInfo({
     required this.callId,
     required this.groupIdHex,
@@ -660,6 +906,9 @@ class GroupCallInfo {
     this.totalFramesReceived = 0,
     this.videoFramesSent = 0,
     this.videoFramesReceived = 0,
+    this.videoSwitchedOff = false,
+    this.audioBackend = '',
+    this.crystal,
   }) : startedAt = startedAt ?? DateTime.now();
 
   Map<String, dynamic> toJson() => {
@@ -674,6 +923,9 @@ class GroupCallInfo {
         'totalFramesReceived': totalFramesReceived,
         'videoFramesSent': videoFramesSent,
         'videoFramesReceived': videoFramesReceived,
+        'videoSwitchedOff': videoSwitchedOff,
+        'audioBackend': audioBackend,
+        'crystal': crystal?.toJson(),
       };
 
   static GroupCallInfo fromJson(Map<String, dynamic> json) => GroupCallInfo(
@@ -693,6 +945,12 @@ class GroupCallInfo {
         totalFramesReceived: json['totalFramesReceived'] as int? ?? 0,
         videoFramesSent: json['videoFramesSent'] as int? ?? 0,
         videoFramesReceived: json['videoFramesReceived'] as int? ?? 0,
+        videoSwitchedOff: json['videoSwitchedOff'] as bool? ?? false,
+        audioBackend: json['audioBackend'] as String? ?? '',
+        crystal: json['crystal'] is Map<String, dynamic>
+            ? GroupCallCrystalInfo.fromJson(
+                json['crystal'] as Map<String, dynamic>)
+            : null,
       );
 }
 
@@ -783,7 +1041,7 @@ class UiMessage {
   int? expiryMs;
 
   /// OUTGOING: the recipient's read receipt has arrived
-  /// (`_handleReadReceiptV3`). Colours the two ticks, does not change the
+  /// (`_handleReadReceipt`). Colours the two ticks, does not change the
   /// delivery state.
   ///
   /// **Why a field and not a state (S390, finding B-4).** §9.1 lists
@@ -795,7 +1053,9 @@ class UiMessage {
   bool readByRecipient;
 
   /// INCOMING: the own read receipt for this message has already
-  /// gone out (`markConversationRead`).
+  /// gone out (`markConversationRead`) — or the message was read while
+  /// read receipts were off or the delivery status withheld, and is settled:
+  /// it never gets a read receipt afterwards (§21.5.5 STO-4).
   ///
   /// Pure flag against double sending — it spares exactly what §1.2
   /// forbids: the same packet a second time without cause. Until S390
@@ -843,12 +1103,15 @@ class UiMessage {
   /// type icon)").
   DateTime? archivedAt;
 
-  /// The mini image of tier 3 (~2–5 KB, 64 px) as base64.
+  /// The mini image (~2–5 KB, 64 px) as base64, on tiers 2 and 3.
   ///
-  /// **May stay empty and today always does.** The downscaler is built by
-  /// S392/B1 (`lib/core/archive/archive_thumbnail.dart`); until it exists,
-  /// `applyArchiveView` does not fill this field. No consumer may conclude
-  /// "no archive" from `null` — that is what [archiveTier] is for.
+  /// Made by `ArchiveThumbnails` when the original leaves the device
+  /// (`ArchiveManager._releaseOriginal`, S407-VORSCHAU) and stamped by
+  /// `applyArchiveView`. The tier-2 preview (up to 50 KB) does NOT travel
+  /// here — a snapshot carries every loaded message; the tile fetches it
+  /// on demand (`ArchiveManager.previewOf`). Empty for media without a still
+  /// image (video) and on tier 4. No consumer may conclude "no archive" from
+  /// `null` — that is what [archiveTier] is for.
   String? archiveMiniBase64;
 
   /// Display name of original sender if this message was forwarded.
@@ -874,6 +1137,12 @@ class UiMessage {
   String? calendarEventId;
   // GM-2 (§9.1.4): true when sender's membership hash differs at same/lower epoch
   bool membershipMismatch;
+
+  /// §16.2.3/§16.2.5 (S407 channel step 2): an own post served on the shared
+  /// key — its state is that of its placing with the keepers (`resting`
+  /// until two acknowledged, then `in transit`, final); legs to members on
+  /// pairwise legs do not enter it.
+  bool sharedKey;
 
   /// Why this file failed (§9.4 "Reasons", S398-W1): on an outgoing message
   /// with `failed`, on an incoming one with `mediaState == failed`. `null`
@@ -911,6 +1180,50 @@ class UiMessage {
   /// Example: {"👍": {"aabb...", "ccdd..."}, "❤️": {"aabb..."}}
   Map<String, Set<String>> reactions = {};
 
+  /// §16.2.4, at a subscriber or an admin of a private channel: the newest
+  /// totals the owner sent for this post — emoji → count, no identity —, or
+  /// `null` while none came. [reactions] holds only the own reaction there;
+  /// the owner counts from [reactions] itself and keeps this `null`.
+  Map<String, int>? reactionTotals;
+
+  /// The owner's clock in the content of [reactionTotals] (ms).
+  int reactionTotalsAtMs = 0;
+
+  /// When this device last changed its own reaction on this post (ms) — set
+  /// only in a private channel it does not own.
+  int ownReactionAtMs = 0;
+
+  /// The own reaction the newest [reactionTotals] already contain: the own
+  /// choice when totals newer than it arrived (`null`: none).
+  String? ownReactionCounted;
+
+  /// What the reaction chips show (§16.2.4, §21.5.1): emoji → count, never a
+  /// name. Without totals the persons in [reactions] are counted. With totals
+  /// these are the base, and an own choice newer than them replaces the own
+  /// reaction they contain, until totals newer than it arrive.
+  Map<String, int> reactionCounts(String ownHex) {
+    final totals = reactionTotals;
+    if (totals == null) {
+      return {
+        for (final e in reactions.entries)
+          if (e.value.isNotEmpty) e.key: e.value.length,
+      };
+    }
+    final counts = Map<String, int>.of(totals);
+    // Totals not newer than the own change do not contain it yet (§16.2.4).
+    if (ownReactionAtMs != 0 && ownReactionAtMs >= reactionTotalsAtMs) {
+      final counted = ownReactionCounted;
+      if (counted != null && (counts[counted] ?? 0) > 0) {
+        counts[counted] = counts[counted]! - 1;
+      }
+      for (final e in reactions.entries) {
+        if (e.value.contains(ownHex)) counts[e.key] = (counts[e.key] ?? 0) + 1;
+      }
+    }
+    counts.removeWhere((_, n) => n <= 0);
+    return counts;
+  }
+
   /// §5.8/§14.7.4 fan-out delivery tracking: recipientUserIdHex → the wire
   /// messageId that carried this message to that recipient.
   ///
@@ -930,6 +1243,16 @@ class UiMessage {
   /// Their leg must never contribute to a visible `delivered`, otherwise the
   /// aggregate symbol would reveal exactly what they chose to withhold.
   Set<String> withheldBy = {};
+
+  /// Recipients whose leg FAILED — no rung carried it (§9.1): no contact and
+  /// no group pair (`_groupLegWithoutWay`), or closed after 14 days without
+  /// a way (§9.3). Kept by the leg aggregate (`_applyOutgoingLegStatus`)
+  /// from what the delivery layer knows, in the store so that it outlives
+  /// the run that knew it (the delivery layer keeps that in memory). It is
+  /// what "retry" sends again in a group or channel — to these members
+  /// only, under the leg's own identifier (owner decision 30.10.2026, S410
+  /// "B"). A leg not known in this run keeps its entry.
+  Set<String> legFailedBy = {};
 
   /// §14.7.4: aggregate over all fan-out legs — `true` only when every leg is
   /// confirmed AND every recipient discloses. Callers must not upgrade the
@@ -980,6 +1303,7 @@ class UiMessage {
     this.pollId,
     this.calendarEventId,
     this.membershipMismatch = false,
+    this.sharedKey = false,
     this.failureReason,
     this.failureDetail,
     this.afterFile,
@@ -988,13 +1312,15 @@ class UiMessage {
     Map<String, String>? fanoutLegs,
     Set<String>? deliveredBy,
     Set<String>? withheldBy,
+    Set<String>? legFailedBy,
   })  : _status = status,
         sentAt = sentAt ??
             (isOutgoing && _hasLeft(status) ? timestamp : null),
         reactions = reactions ?? {},
         fanoutLegs = fanoutLegs ?? {},
         deliveredBy = deliveredBy ?? {},
-        withheldBy = withheldBy ?? {};
+        withheldBy = withheldBy ?? {},
+        legFailedBy = legFailedBy ?? {};
 
   bool get hasLinkPreview =>
       linkPreviewUrl != null && linkPreviewUrl!.isNotEmpty;
@@ -1050,6 +1376,10 @@ class UiMessage {
         if (calendarEventId != null) 'calendarEventId': calendarEventId,
         if (reactions.isNotEmpty)
           'reactions': reactions.map((emoji, senders) => MapEntry(emoji, senders.toList())),
+        if (reactionTotals != null) 'reactionTotals': reactionTotals,
+        if (reactionTotalsAtMs != 0) 'reactionTotalsAt': reactionTotalsAtMs,
+        if (ownReactionAtMs != 0) 'ownReactionAt': ownReactionAtMs,
+        if (ownReactionCounted != null) 'ownReactionCounted': ownReactionCounted,
         // GM-2 (§9.1.4). Missing here AND in `fromJson` since the field
         // exists — the warning on a group message with a
         // deviating membership hash silently vanished on every restart,
@@ -1057,6 +1387,7 @@ class UiMessage {
         // The loss is OLDER than the store (the JSON form used
         // the same method); it was noticed during the round-trip comparison for S366.
         if (membershipMismatch) 'membershipMismatch': true,
+        if (sharedKey) 'sharedKey': true,
         if (failureReason != null) 'failureReason': failureReason!.wireName,
         if (failureDetail != null) 'failureDetail': failureDetail,
         if (afterFile != null) 'afterFile': afterFile,
@@ -1064,9 +1395,17 @@ class UiMessage {
         if (fanoutLegs.isNotEmpty) 'fanoutLegs': fanoutLegs,
         if (deliveredBy.isNotEmpty) 'deliveredBy': deliveredBy.toList(),
         if (withheldBy.isNotEmpty) 'withheldBy': withheldBy.toList(),
+        if (legFailedBy.isNotEmpty) 'legFailedBy': legFailedBy.toList(),
       };
 
-  static UiMessage fromJson(Map<String, dynamic> json) => UiMessage(
+  static UiMessage fromJson(Map<String, dynamic> json) => _fromJson(json)
+    ..reactionTotals = (json['reactionTotals'] as Map<String, dynamic>?)
+        ?.map((k, v) => MapEntry(k, (v as num).toInt()))
+    ..reactionTotalsAtMs = (json['reactionTotalsAt'] as num?)?.toInt() ?? 0
+    ..ownReactionAtMs = (json['ownReactionAt'] as num?)?.toInt() ?? 0
+    ..ownReactionCounted = json['ownReactionCounted'] as String?;
+
+  static UiMessage _fromJson(Map<String, dynamic> json) => UiMessage(
         id: json['id'] as String,
         conversationId: json['conversationId'] as String,
         senderNodeIdHex: json['sender'] as String? ?? '',
@@ -1080,6 +1419,7 @@ class UiMessage {
             isOutgoing: json['isOutgoing'] as bool),
         isOutgoing: json['isOutgoing'] as bool,
         membershipMismatch: json['membershipMismatch'] as bool? ?? false,
+        sharedKey: json['sharedKey'] as bool? ?? false,
         failureReason: FailureReason.fromWire(json['failureReason']),
         failureDetail: json['failureDetail'] as String?,
         afterFile: json['afterFile'] as String?,
@@ -1138,6 +1478,7 @@ class UiMessage {
             ?.map((k, v) => MapEntry(k, v as String)),
         deliveredBy: _parseHexSet(json['deliveredBy']),
         withheldBy: _parseHexSet(json['withheldBy']),
+        legFailedBy: _parseHexSet(json['legFailedBy']),
       );
 
   static Set<String>? _parseHexSet(dynamic raw) =>
@@ -1216,6 +1557,10 @@ class ChatConfig {
   bool readReceipts;
   bool typingIndicators;
 
+  /// §16.2.2: a group in announcement mode — only the owner and the admins
+  /// post; members read and react. Groups only; set by the owner or an admin.
+  bool announcementOnly;
+
   ChatConfig({
     this.allowDownloads = true,
     this.allowForwarding = true,
@@ -1223,6 +1568,7 @@ class ChatConfig {
     this.editWindowMs,
     this.readReceipts = true,
     this.typingIndicators = true,
+    this.announcementOnly = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1232,6 +1578,7 @@ class ChatConfig {
         if (editWindowMs != null) 'editWindowMs': editWindowMs,
         'readReceipts': readReceipts,
         'typingIndicators': typingIndicators,
+        if (announcementOnly) 'announcementOnly': true,
       };
 
   static ChatConfig fromJson(Map<String, dynamic> json) => ChatConfig(
@@ -1241,6 +1588,7 @@ class ChatConfig {
         editWindowMs: json['editWindowMs'] as int?,
         readReceipts: json['readReceipts'] as bool? ?? true,
         typingIndicators: json['typingIndicators'] as bool? ?? true,
+        announcementOnly: json['announcementOnly'] as bool? ?? false,
       );
 
   /// Value equality — so that "has something changed?" can be answered.
@@ -1268,11 +1616,13 @@ class ChatConfig {
       other.expiryDurationMs == expiryDurationMs &&
       other.editWindowMs == editWindowMs &&
       other.readReceipts == readReceipts &&
-      other.typingIndicators == typingIndicators;
+      other.typingIndicators == typingIndicators &&
+      other.announcementOnly == announcementOnly;
 
   @override
   int get hashCode => Object.hash(allowDownloads, allowForwarding,
-      expiryDurationMs, editWindowMs, readReceipts, typingIndicators);
+      expiryDurationMs, editWindowMs, readReceipts, typingIndicators,
+      announcementOnly);
 }
 
 /// Conversation state.
@@ -1320,6 +1670,14 @@ class Conversation {
   ChatConfig? pendingConfigProposal;
   /// Who proposed the pending config (nodeIdHex of proposer).
   String? pendingConfigProposer;
+  /// §21.5.4 "In 1:1, the change requires consent": an acceptance from the
+  /// partner that does not answer an open proposal of this identity seen on
+  /// this device — kept, not applied (at most one per conversation; a newer
+  /// one replaces it). It is applied when the identity's own proposal of
+  /// exactly these values arrives from another own device (D-72), and
+  /// dropped by an own proposal of other values or an own answer
+  /// (S407-OFFEN-EINST O-1).
+  ChatConfig? parkedConfigAcceptance;
   /// At least one message here carries a deadline of its own
   /// ([UiMessage.expiryMs]). The expiry sweep visits a conversation whose
   /// deadline was switched off later only because of this mark — existing
@@ -1344,6 +1702,7 @@ class Conversation {
     ChatConfig? config,
     this.pendingConfigProposal,
     this.pendingConfigProposer,
+    this.parkedConfigAcceptance,
     this.isFavorite = false,
     this.notificationsEnabled,
     this.notificationSoundName,
@@ -1362,6 +1721,8 @@ class Conversation {
         'config': config.toJson(),
         if (pendingConfigProposal != null) 'pendingConfigProposal': pendingConfigProposal!.toJson(),
         if (pendingConfigProposer != null) 'pendingConfigProposer': pendingConfigProposer,
+        if (parkedConfigAcceptance != null)
+          'parkedConfigAcceptance': parkedConfigAcceptance!.toJson(),
         if (isFavorite) 'isFavorite': true,
         if (notificationsEnabled != null) 'notificationsEnabled': notificationsEnabled,
         if (notificationSoundName != null) 'notificationSoundName': notificationSoundName,
@@ -1390,6 +1751,10 @@ class Conversation {
           ? ChatConfig.fromJson(json['pendingConfigProposal'] as Map<String, dynamic>)
           : null,
       pendingConfigProposer: json['pendingConfigProposer'] as String?,
+      parkedConfigAcceptance: json['parkedConfigAcceptance'] != null
+          ? ChatConfig.fromJson(
+              json['parkedConfigAcceptance'] as Map<String, dynamic>)
+          : null,
       isFavorite: json['isFavorite'] as bool? ?? false,
       notificationsEnabled: json['notificationsEnabled'] as bool?,
       notificationSoundName: json['notificationSoundName'] as String?,
@@ -1417,6 +1782,10 @@ class GroupMemberInfo {
   /// Its fixed neighbours as the inviter knew them (neighbour-list codec).
   Uint8List? neighbours;
 
+  /// S407-UMSCHLAG (v4_2 §4.4.3, §1.2 principle 8): the member said in its own
+  /// entry that it reads the envelope with the pair tag (`reads_pair_tag`).
+  bool readsPairTag;
+
   /// Whether this member carries a checked, self-signed entry.
   bool get hasSignedEntry =>
       address != null && addressSigEd25519 != null && addressSigMlDsa != null;
@@ -1432,6 +1801,7 @@ class GroupMemberInfo {
     this.addressSigEd25519,
     this.addressSigMlDsa,
     this.neighbours,
+    this.readsPairTag = false,
   });
 
   /// [withEntry] `false` leaves out the signed entry (≈ 6.7 KB per member) —
@@ -1448,6 +1818,7 @@ class GroupMemberInfo {
           'addressSigEd25519': bytesToHex(addressSigEd25519!),
           'addressSigMlDsa': bytesToHex(addressSigMlDsa!),
           if (neighbours != null) 'neighbours': bytesToHex(neighbours!),
+          if (readsPairTag) 'readsPairTag': true,
         },
       };
 
@@ -1465,6 +1836,7 @@ class GroupMemberInfo {
       addressSigEd25519: bytes('addressSigEd25519'),
       addressSigMlDsa: bytes('addressSigMlDsa'),
       neighbours: bytes('neighbours'),
+      readsPairTag: json['readsPairTag'] == true,
     );
   }
 }
@@ -1508,6 +1880,25 @@ class GroupInfo {
   /// Who invited this identity (UserID hex) — the explicit join goes there.
   String? inviterNodeIdHex;
 
+  /// §16.2.2: "When every other member has left or been removed and the own
+  /// identity is the only member, the application asks once whether to
+  /// delete the group." `null` — nothing to ask; [kGroupAloneDue] — the
+  /// question waits for the user; [kGroupAloneAnswered] — asked, kept, never
+  /// again. Local to this device (not taken from another own device).
+  String? aloneQuestion;
+
+  /// Whether the question of [aloneQuestion] waits for the user.
+  bool get aloneQuestionDue => aloneQuestion == kGroupAloneDue;
+  /// §9.4 "Loading images in a group or channel": "always load images" —
+  /// local, changeable at any time; on by default.
+  bool alwaysLoadImages;
+
+  /// §16.2.2 (S407 group profile): members a change of name, description or
+  /// image made on this device did not reach, because they had not shown
+  /// the capability; each is told the whole profile when its capability
+  /// notice arrives (`cleona_service_group_profile.dart`).
+  final Set<String> profileOwed;
+
   GroupInfo({
     required this.groupIdHex,
     required String name,
@@ -1520,8 +1911,12 @@ class GroupInfo {
     this.withholdDeliveryStatus = false,
     this.joined = true,
     this.inviterNodeIdHex,
+    this.aloneQuestion,
+    this.alwaysLoadImages = true,
+    Set<String>? profileOwed,
   })  : _name = name,
         members = members ?? {},
+        profileOwed = profileOwed ?? {},
         createdAt = createdAt ?? DateTime.now() {
     LogRedaction.registerName(name, kind: 'group');
   }
@@ -1541,6 +1936,9 @@ class GroupInfo {
         'withholdDeliveryStatus': withholdDeliveryStatus,
         'joined': joined,
         if (inviterNodeIdHex != null) 'inviterNodeIdHex': inviterNodeIdHex,
+        if (aloneQuestion != null) 'aloneQuestion': aloneQuestion,
+        if (!alwaysLoadImages) 'alwaysLoadImages': false,
+        if (profileOwed.isNotEmpty) 'profileOwed': profileOwed.toList(),
       };
 
   static GroupInfo fromJson(Map<String, dynamic> json) {
@@ -1563,6 +1961,15 @@ class GroupInfo {
       withholdDeliveryStatus: json['withholdDeliveryStatus'] as bool? ?? false,
       joined: json['joined'] as bool? ?? true,
       inviterNodeIdHex: json['inviterNodeIdHex'] as String?,
+      aloneQuestion: switch (json['aloneQuestion']) {
+        kGroupAloneDue => kGroupAloneDue,
+        kGroupAloneAnswered => kGroupAloneAnswered,
+        _ => null,
+      },
+      alwaysLoadImages: json['alwaysLoadImages'] as bool? ?? true,
+      profileOwed: {
+        for (final h in json['profileOwed'] as List? ?? const []) h as String
+      },
     );
   }
 }
@@ -1576,6 +1983,29 @@ class ChannelMemberInfo {
   Uint8List? x25519Pk;
   Uint8List? mlKemPk;
 
+  /// §16.2.2, §4.3 (as [GroupMemberInfo]): the subscriber's address as it
+  /// signed it itself for this channel, both signatures, and its fixed
+  /// neighbours as the inviter knew them — the base of a group pair with a
+  /// co-subscriber who is not a contact. `null` until it signed.
+  Uint8List? address;
+  Uint8List? addressSigEd25519;
+  Uint8List? addressSigMlDsa;
+  Uint8List? neighbours;
+
+  /// Whether this member carries a checked, self-signed entry.
+  bool get hasSignedEntry =>
+      address != null && addressSigEd25519 != null && addressSigMlDsa != null;
+
+  /// §16.2.2, D-21 (S407 channel step 1): what the member showed in its
+  /// acceptance (`GroupJoin.capabilities`); 0 for a device of an older 4.2
+  /// version or before its acceptance arrived. Kept by owner and admins.
+  int capabilities;
+
+  /// §16.2.2 (S407 channel step 1): for a subscriber, the epoch of the
+  /// short list (owner, admins and itself) it was last given; 0 while it
+  /// holds the complete list. Kept by owner and admins.
+  int viewEpoch;
+
   ChannelMemberInfo({
     required this.nodeIdHex,
     required this.displayName,
@@ -1583,25 +2013,50 @@ class ChannelMemberInfo {
     this.ed25519Pk,
     this.x25519Pk,
     this.mlKemPk,
+    this.address,
+    this.addressSigEd25519,
+    this.addressSigMlDsa,
+    this.neighbours,
+    this.capabilities = 0,
+    this.viewEpoch = 0,
   });
 
-  Map<String, dynamic> toJson() => {
+  /// [withEntry] `false` leaves out the signed entry — for the GUI.
+  Map<String, dynamic> toJson({bool withEntry = true}) => {
         'nodeIdHex': nodeIdHex,
         'displayName': displayName,
         'role': role,
         if (ed25519Pk != null) 'ed25519Pk': bytesToHex(ed25519Pk!),
         if (x25519Pk != null) 'x25519Pk': bytesToHex(x25519Pk!),
         if (mlKemPk != null) 'mlKemPk': bytesToHex(mlKemPk!),
+        if (withEntry && hasSignedEntry) ...{
+          'address': bytesToHex(address!),
+          'addressSigEd25519': bytesToHex(addressSigEd25519!),
+          'addressSigMlDsa': bytesToHex(addressSigMlDsa!),
+          if (neighbours != null) 'neighbours': bytesToHex(neighbours!),
+        },
+        if (capabilities != 0) 'capabilities': capabilities,
+        if (viewEpoch != 0) 'viewEpoch': viewEpoch,
       };
 
-  static ChannelMemberInfo fromJson(Map<String, dynamic> json) => ChannelMemberInfo(
-        nodeIdHex: json['nodeIdHex'] as String,
-        displayName: json['displayName'] as String? ?? '',
-        role: json['role'] as String? ?? 'subscriber',
-        ed25519Pk: json['ed25519Pk'] != null ? hexToBytes(json['ed25519Pk'] as String) : null,
-        x25519Pk: json['x25519Pk'] != null ? hexToBytes(json['x25519Pk'] as String) : null,
-        mlKemPk: json['mlKemPk'] != null ? hexToBytes(json['mlKemPk'] as String) : null,
-      );
+  static ChannelMemberInfo fromJson(Map<String, dynamic> json) {
+    Uint8List? bytes(String k) =>
+        json[k] != null ? hexToBytes(json[k] as String) : null;
+    return ChannelMemberInfo(
+      nodeIdHex: json['nodeIdHex'] as String,
+      displayName: json['displayName'] as String? ?? '',
+      role: json['role'] as String? ?? 'subscriber',
+      ed25519Pk: bytes('ed25519Pk'),
+      x25519Pk: bytes('x25519Pk'),
+      mlKemPk: bytes('mlKemPk'),
+      address: bytes('address'),
+      addressSigEd25519: bytes('addressSigEd25519'),
+      addressSigMlDsa: bytes('addressSigMlDsa'),
+      neighbours: bytes('neighbours'),
+      capabilities: json['capabilities'] as int? ?? 0,
+      viewEpoch: json['viewEpoch'] as int? ?? 0,
+    );
+  }
 }
 
 /// Channel info.
@@ -1654,7 +2109,27 @@ class ChannelInfo {
   bool tombstoned;
 
   /// GM-4 (§9.1.4): monotonic membership epoch for consistency detection.
+  /// At a subscriber holding the short list ([roleView]) only a number —
+  /// the membership epoch owner and admins keep (§16.2.2).
   int membershipEpoch;
+
+  /// §16.2.2 (S407 channel step 1): the epoch of the role state — owner and
+  /// admins with their roles —, which every member holds; the membership
+  /// epoch of the last change of that state. 0: not known yet.
+  int roleEpoch;
+
+  /// §16.2.2: this device is a subscriber and holds the short list — the
+  /// owner, the admins and itself; [viewEpoch] is the epoch that list came
+  /// with.
+  bool roleView;
+  int viewEpoch;
+
+  /// §9.4 "Loading images in a group or channel": "always load images" —
+  /// local, changeable at any time; on by default.
+  bool alwaysLoadImages;
+
+  /// §16.2.2 (S407 group profile): as [GroupInfo.profileOwed].
+  final Set<String> profileOwed;
 
   ChannelInfo({
     required this.channelIdHex,
@@ -1685,20 +2160,29 @@ class ChannelInfo {
     this.csamObjectionJuryId,
     this.tombstoned = false,
     this.membershipEpoch = 0,
+    this.roleEpoch = 0,
+    this.roleView = false,
+    this.viewEpoch = 0,
+    this.alwaysLoadImages = true,
+    Set<String>? profileOwed,
   })  : _name = name,
         members = members ?? {},
+        profileOwed = profileOwed ?? {},
         createdAt = createdAt ?? DateTime.now() {
     LogRedaction.registerName(name, kind: 'channel');
   }
 
-  Map<String, dynamic> toJson() => {
+  /// [withEntries] `false`: the member entries without their signed
+  /// address — for the state the GUI reads.
+  Map<String, dynamic> toJson({bool withEntries = true}) => {
         'channelIdHex': channelIdHex,
         'name': name,
         'description': description,
         'pictureBase64': pictureBase64,
         'ownerNodeIdHex': ownerNodeIdHex,
         'createdAt': createdAt.millisecondsSinceEpoch,
-        'members': members.map((k, v) => MapEntry(k, v.toJson())),
+        'members': members
+            .map((k, v) => MapEntry(k, v.toJson(withEntry: withEntries))),
         if (isPublic) 'isPublic': true,
         if (isAdult) 'isAdult': true,
         'language': language,
@@ -1713,6 +2197,11 @@ class ChannelInfo {
         if (csamObjectionJuryId != null) 'csamObjectionJuryId': csamObjectionJuryId,
         if (tombstoned) 'tombstoned': true,
         if (membershipEpoch > 0) 'membershipEpoch': membershipEpoch,
+        if (roleEpoch > 0) 'roleEpoch': roleEpoch,
+        if (roleView) 'roleView': true,
+        if (viewEpoch > 0) 'viewEpoch': viewEpoch,
+        if (!alwaysLoadImages) 'alwaysLoadImages': false,
+        if (profileOwed.isNotEmpty) 'profileOwed': profileOwed.toList(),
       };
 
   static ChannelInfo fromJson(Map<String, dynamic> json) {
@@ -1751,6 +2240,13 @@ class ChannelInfo {
       csamObjectionJuryId: json['csamObjectionJuryId'] as String?,
       tombstoned: json['tombstoned'] as bool? ?? false,
       membershipEpoch: json['membershipEpoch'] as int? ?? 0,
+      roleEpoch: json['roleEpoch'] as int? ?? 0,
+      roleView: json['roleView'] as bool? ?? false,
+      viewEpoch: json['viewEpoch'] as int? ?? 0,
+      alwaysLoadImages: json['alwaysLoadImages'] as bool? ?? true,
+      profileOwed: {
+        for (final h in json['profileOwed'] as List? ?? const []) h as String
+      },
     );
   }
 }
@@ -2413,6 +2909,16 @@ class ContactInfo {
   /// Default false.
   bool neverFixedNeighbour;
 
+  /// §17 principle, RL-7, D-69: "allow calls = disclose IP", per contact,
+  /// on unless switched off, revocable. A call is the only place where two
+  /// devices see each other's addresses; with the switch off this device
+  /// neither calls the contact nor rings for it (`call_consent.dart`).
+  /// Purely local: the mark travels nowhere (not in twin-sync Type 0, not
+  /// in the recovery bundle). Stored only when off — a record without the
+  /// field reads as on, so every 4.2 record written before the switch
+  /// existed keeps its calls. Default true.
+  bool callsAllowed;
+
   /// Re-verify lock (v4_2 "Contact verification and key-change detection";
   /// S405 finding A-4). Set when a key change makes a `verified`/`trusted`
   /// contact fall back to `unverified`: the level then stays `unverified`
@@ -2486,6 +2992,7 @@ class ContactInfo {
     this.trustAnchorQuarantineReason,
     this.withholdDeliveryStatus = false,
     this.neverFixedNeighbour = false,
+    this.callsAllowed = true,
     this.reverifyRequired = false,
   })  : deviceNodeIds = deviceNodeIds ?? {},
         deviceSigKeys = deviceSigKeys ?? [],
@@ -2547,6 +3054,7 @@ class ContactInfo {
           'trustAnchorQuarantineReason': trustAnchorQuarantineReason,
         if (withholdDeliveryStatus) 'withholdDeliveryStatus': true,
         if (neverFixedNeighbour) 'neverFixedNeighbour': true,
+        if (!callsAllowed) 'callsAllowed': false,
         if (reverifyRequired) 'reverifyRequired': true,
       };
 
@@ -2617,6 +3125,7 @@ class ContactInfo {
         withholdDeliveryStatus:
             json['withholdDeliveryStatus'] as bool? ?? false,
         neverFixedNeighbour: json['neverFixedNeighbour'] as bool? ?? false,
+        callsAllowed: json['callsAllowed'] as bool? ?? true,
         reverifyRequired: json['reverifyRequired'] as bool? ?? false,
       );
 }
@@ -2729,6 +3238,13 @@ class DeviceRecord {
   bool isThisDevice;
   /// §26 Phase 4: routing-level node ID for this device (from IdentityContext.deviceNodeId).
   String? deviceNodeIdHex;
+  /// §14.7 (D-46): where another own device is reachable, as its last
+  /// own-line deposit named it — its fixed neighbours and its segment
+  /// addresses, each in the delivery layer's wire form (`ownWhereWire`),
+  /// hex. `null` until such a deposit arrived. Kept so that a restart still
+  /// knows where to mirror a call signal.
+  String? whereNeighboursHex;
+  String? whereSegmentHex;
 
   DeviceRecord({
     required this.deviceId,
@@ -2738,6 +3254,8 @@ class DeviceRecord {
     required this.lastSeen,
     this.isThisDevice = false,
     this.deviceNodeIdHex,
+    this.whereNeighboursHex,
+    this.whereSegmentHex,
   });
 
   Map<String, dynamic> toJson() => {
@@ -2748,6 +3266,8 @@ class DeviceRecord {
         'lastSeen': lastSeen.millisecondsSinceEpoch,
         'isThisDevice': isThisDevice,
         if (deviceNodeIdHex != null) 'deviceNodeIdHex': deviceNodeIdHex,
+        if (whereNeighboursHex != null) 'whereNeighbours': whereNeighboursHex,
+        if (whereSegmentHex != null) 'whereSegment': whereSegmentHex,
       };
 
   static DeviceRecord fromJson(Map<String, dynamic> json) => DeviceRecord(
@@ -2758,6 +3278,8 @@ class DeviceRecord {
         lastSeen: DateTime.fromMillisecondsSinceEpoch(json['lastSeen'] as int? ?? 0),
         isThisDevice: json['isThisDevice'] as bool? ?? false,
         deviceNodeIdHex: json['deviceNodeIdHex'] as String?,
+        whereNeighboursHex: json['whereNeighbours'] as String?,
+        whereSegmentHex: json['whereSegment'] as String?,
       );
 }
 
@@ -3011,7 +3533,8 @@ class PollSettings {
   int maxChoices; // 0 = unlimited
   int scaleMin;
   int scaleMax;
-  bool onlyMembersCanVote;
+  // §18.3.3 POLL-4: no "members only" setting — it had no checkable
+  // denominator and was never enforced (owner 14.10.2026: removed).
 
   PollSettings({
     this.anonymous = false,
@@ -3021,7 +3544,6 @@ class PollSettings {
     this.maxChoices = 0,
     this.scaleMin = 1,
     this.scaleMax = 5,
-    this.onlyMembersCanVote = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -3032,7 +3554,6 @@ class PollSettings {
         'maxChoices': maxChoices,
         'scaleMin': scaleMin,
         'scaleMax': scaleMax,
-        'onlyMembersCanVote': onlyMembersCanVote,
       };
 
   static PollSettings fromJson(Map<String, dynamic> json) => PollSettings(
@@ -3044,7 +3565,6 @@ class PollSettings {
         maxChoices: json['maxChoices'] as int? ?? 0,
         scaleMin: json['scaleMin'] as int? ?? 1,
         scaleMax: json['scaleMax'] as int? ?? 5,
-        onlyMembersCanVote: json['onlyMembersCanVote'] as bool? ?? false,
       );
 }
 

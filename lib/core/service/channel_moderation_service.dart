@@ -10,7 +10,7 @@ import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
-import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/core/service/harvest_event.dart';
 
@@ -173,7 +173,7 @@ class ChannelModerationService {
 
   /// §16.4 channel report. S398-W4 (seam report B-9): this answered `true` for a
   /// report that never left the device — no sender for
-  /// `MTV3_CHANNEL_REPORT`, and §16.4 does not want one anyway: a channel
+  /// `MT_CHANNEL_REPORT`, and §16.4 does not want one anyway: a channel
   /// report is a PUBLIC cell under `tag_report`, signed by the registered
   /// reporter pseudonym (§16.5). Neither the public tag cell nor the
   /// registry has a carrier in the 4.2 delivery layer, so the report cannot
@@ -541,6 +541,7 @@ class ChannelModerationService {
     if (newDescription != null) channel.description = newDescription;
     channel.correctionSubmitted = true;
     _ctx.saveChannels();
+    _ctx.mirrorChannelToOwnDevices(channel);
 
     // Update index
     if (channel.isPublic) {
@@ -707,7 +708,7 @@ class ChannelModerationService {
 
     // Include full member list
     for (final m in channel.members.values) {
-      final gm = proto.GroupMemberV3()
+      final gm = proto.GroupMember()
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role;
@@ -734,7 +735,7 @@ class ChannelModerationService {
     // V3: sendToUser handles KEM/Sig + per-device fan-out.
     await _ctx.sendToUser(
       recipientUserId: hexToBytes(memberNodeIdHex),
-      messageType: proto.MessageTypeV3.MTV3_CHANNEL_INVITE,
+      messageType: proto.MessageType.MT_CHANNEL_INVITE,
       payload: Uint8List.fromList(invite.writeToBuffer()),
       groupId: hexToBytes(channel.channelIdHex),
     );
@@ -765,6 +766,7 @@ class ChannelModerationService {
       );
       _ctx.channels[channelIdHex] = channel;
       _ctx.saveChannels();
+      _ctx.mirrorChannelToOwnDevices(channel);
 
       _ctx.conversations[channelIdHex] = Conversation(
         id: channelIdHex,
@@ -788,7 +790,7 @@ class ChannelModerationService {
         ..mlKemPk = _ctx.identity.mlKemPublicKey;
       unawaited(_ctx.sendToUser(
         recipientUserId: hexToBytes(entry.ownerNodeIdHex),
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST,
+        messageType: proto.MessageType.MT_CHANNEL_JOIN_REQUEST,
         payload: Uint8List.fromList(joinReq.writeToBuffer()),
       ));
       _log.info('CHANNEL_JOIN_REQUEST sent for "${entry.name}" to owner '
@@ -1277,7 +1279,7 @@ class ChannelModerationService {
     // JURY_REQUEST — same Sub-Message-Bump TODO as Channel-Join).
     _ctx.sendToUser(
       recipientUserId: hexToBytes(juror.nodeIdHex),
-      messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
+      messageType: proto.MessageType.MT_CHANNEL_JURY_VOTE,
       payload: Uint8List.fromList(juryReq.writeToBuffer()),
       groupId: hexToBytes(session.channelIdHex),
     );
@@ -1364,7 +1366,7 @@ class ChannelModerationService {
           ..epochDay = request.epochDay;
         await _ctx.sendToUser(
           recipientUserId: hexToBytes(request.requesterNodeIdHex!),
-          messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
+          messageType: proto.MessageType.MT_CHANNEL_JURY_VOTE,
           payload: Uint8List.fromList(voteMsg.writeToBuffer()),
           groupId: hexToBytes(request.channelIdHex),
         );
@@ -1753,7 +1755,7 @@ class ChannelModerationService {
       if (contact?.x25519Pk == null || contact?.mlKemPk == null) continue;
       _ctx.sendToUser(
         recipientUserId: hexToBytes(jurorId),
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION,
+        messageType: proto.MessageType.MT_CHANNEL_MOD_DECISION,
         payload: payload,
         groupId: channelIdBytes,
       );
@@ -1784,7 +1786,7 @@ class ChannelModerationService {
       // `JuryRequest` for this juryId, BEFORE it is cleared below.
       final pending = pendingJuryRequests[juryId];
       if (pending == null) {
-        // Every recipient of MTV3_CHANNEL_MOD_DECISION is a juror the
+        // Every recipient of MT_CHANNEL_MOD_DECISION is a juror the
         // initiator addressed directly (`_broadcastJuryResult` sends only
         // to `session.jurorNodeIds`) — so an honest, first delivery
         // always finds a pending entry here. A missing one is far more
@@ -1932,24 +1934,24 @@ class ChannelModerationService {
   // ── V3 Dispatch Handlers ──────────────────────────────────────
 
   /// §9.3.1 Bad Badge Reporting (moderation Phase 2, not yet implemented).
-  void handleChannelBadBadgeReportV3(HarvestEvent event) {}
+  void handleChannelBadBadgeReport(HarvestEvent event) {}
 
-  /// V3-direct handler for MTV3_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
+  /// V3-direct handler for MT_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
   /// Owner-bound AppFrame; payload is the `ChannelJoinRequest` proto
   /// already decrypted+authenticated by the V3 receive pipeline.
-  void handleChannelJoinRequestV3(HarvestEvent event) {
+  void handleChannelJoinRequestEvent(HarvestEvent event) {
     handleChannelJoinRequest(
       Uint8List.fromList(event.payload),
       Uint8List.fromList(event.senderUserId),
     );
   }
 
-  /// V3-direct handler for MTV3_CHANNEL_REPORT (Wave 2B.3, §10.2). No
+  /// V3-direct handler for MT_CHANNEL_REPORT (Wave 2B.3, §10.2). No
   /// active V3 sender today (reportChannel mutates local state only) —
   /// handler in place so future moderator-fanout can land without a
   /// silent drop. Payload is the `ChannelReportMsg` proto already
   /// decrypted+authenticated by the V3 receive pipeline.
-  void handleChannelReportV3(HarvestEvent event) {
+  void handleChannelReport(HarvestEvent event) {
     handleIncomingChannelReport(
       Uint8List.fromList(event.payload),
       Uint8List.fromList(event.senderUserId),
@@ -1957,13 +1959,13 @@ class ChannelModerationService {
   }
 
   // S368: here stood `handleChannelIndexExchangeInfra` — the V3 entrance for
-  // MTV3_CHANNEL_INDEX_EXCHANGE on the InfrastructureFrame. It had
+  // MT_CHANNEL_INDEX_EXCHANGE on the InfrastructureFrame. It had
   // ZERO callers in `lib/`+`bin/`, on this branch as on `v4/knoten-host`,
   // and only passed `frame.payload` through to `handleChannelIndexExchange`.
   // The frame type itself falls with it. `handleChannelIndexExchange` (without
   // `Infra`) followed in S398 P1 — it had no caller either.
 
-  /// V3-direct dispatcher for MTV3_CHANNEL_JURY_VOTE. The wire-type is
+  /// V3-direct dispatcher for MT_CHANNEL_JURY_VOTE. The wire-type is
   /// overloaded by the V3 sender (cleona_service Z.~5023) — it carries
   /// either a `JuryRequestMsg` (initiator → juror, "you've been selected")
   /// or a `JuryVoteMsg` (juror → initiator, "here's my vote"). Both
@@ -1971,7 +1973,7 @@ class ChannelModerationService {
   /// `JuryVoteMsg` and discriminate by initiator-side state: if we hold an
   /// `_activeSessions[juryId]` entry, this incoming frame is a vote-back
   /// for that session; otherwise it's a fresh request to participate.
-  void handleChannelJuryVoteV3(HarvestEvent event) {
+  void handleChannelJuryVote(HarvestEvent event) {
     try {
       final payload = Uint8List.fromList(event.payload);
       final senderUserId = Uint8List.fromList(event.senderUserId);
@@ -1990,22 +1992,22 @@ class ChannelModerationService {
       }
       handleIncomingJuryRequest(payload, senderUserId);
     } catch (e) {
-      _log.warn('handleChannelJuryVoteV3: dispatch fail: $e '
+      _log.warn('handleChannelJuryVote: dispatch fail: $e '
           '(sender=${_hexShort(Uint8List.fromList(event.senderUserId))})');
     }
   }
 
-  /// V3-direct handler for MTV3_CHANNEL_MOD_DECISION (jury verdict
+  /// V3-direct handler for MT_CHANNEL_MOD_DECISION (jury verdict
   /// broadcast). Payload is the `JuryResultMsg` proto already
   /// decrypted+authenticated by the V3 receive pipeline. The handler is
   /// sender-agnostic (only updates local state from the result tally), so
   /// no senderUserId is forwarded.
-  void handleChannelModDecisionV3(HarvestEvent event) {
+  void handleChannelModDecision(HarvestEvent event) {
     handleIncomingJuryResult(Uint8List.fromList(event.payload));
   }
 
   /// §9.3.1a Subscribe Probe (moderation reachability check, not yet implemented).
-  void handleChannelSubscribeProbeV3(HarvestEvent event) {}
+  void handleChannelSubscribeProbe(HarvestEvent event) {}
 
   // ── Dispose ───────────────────────────────────────────────────
 

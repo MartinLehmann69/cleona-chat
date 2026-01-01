@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:mycelium/silence.dart' show SilentRounds;
 import 'package:mycelium/update_piece.dart';
 
 /// How long a request waits for the first packet back before it is asked
@@ -32,7 +33,7 @@ class UpdateRun {
   Uint8List? task;
   int piecesFromHolder = 0;
   int emptyAnswers = 0;
-  bool askedAgain = false;
+  SilentRounds rounds = SilentRounds(); // §11.3a: the plea and its repeats
   Duration? rtt;
   int asked = kPiecesPerAnswer;
   DateTime pleaAt = DateTime.now();
@@ -97,6 +98,6 @@ class UpdateRun {
     rtt = null;
     piecesFromHolder = 0;
     emptyAnswers = 0;
-    askedAgain = false;
+    rounds = SilentRounds();
   }
 }

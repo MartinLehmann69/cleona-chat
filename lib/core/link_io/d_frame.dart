@@ -215,7 +215,7 @@ enum DFrameClass {
   /// **The derivation was then proved by moving it.** On 2026-09-06 the
   /// step 160 → 176 changed this line and nothing else in `lib/`: every
   /// consumer — `kControlRecordMaxValue`, the `capacity` default of
-  /// `packControlRecords`, `CallTransportV41.sendMedia`, the upload probe's
+  /// `packControlRecords`, `PlaneDCallTransport.sendMedia`, the upload probe's
   /// wire accounting — followed on its own. Only the freeze guards had to
   /// be pulled along, which is what a freeze guard is for.
   voice(176),
@@ -354,7 +354,7 @@ enum DFrameKind {
   /// frame — it carries no media and is never handed to a codec."
   ///
   /// Until S368 it did not exist, and exactly that was the reason why
-  /// `CallTransportV41.sendSecuredToParticipant` returned `noCarrier` for EVERY
+  /// `PlaneDCallTransport.sendSecuredToParticipant` returned `noCarrier` for EVERY
   /// frame type: the blueprint of the forwarding tree
   /// (CALL_TREE_UPDATE) reached no participant, so nobody except
   /// the initiator entered the tree, and the upper limit of 30 was a

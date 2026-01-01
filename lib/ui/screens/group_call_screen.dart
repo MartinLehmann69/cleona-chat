@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_types.dart';
 
@@ -183,6 +184,20 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
                   : _buildVideoGrid(context, locale, joinedParticipants, activeSpeaker),
             ),
 
+            // §17.7: video switched off past the video limit
+            if (currentCall?.videoSwitchedOff ?? false)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Text(
+                  locale.get('group_call_video_capped').replaceAll(
+                      '{max}', '${GroupCallManager.maxParticipantsVideo}'),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ),
+
             // Controls
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
@@ -317,12 +332,31 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     );
   }
 
+  /// The notice of §17.7 for a participant's tile, or `null`. It never says
+  /// through whom a pair runs (D-69 F-4 = B).
+  String? _reachNotice(AppLocale locale, GroupCallParticipantInfo p) =>
+      switch (p.reach) {
+        GroupPeerReach.direct ||
+        GroupPeerReach.pending ||
+        GroupPeerReach.brokered =>
+          null,
+        GroupPeerReach.voiceOnly => locale
+            .get('group_call_no_video_forwarding')
+            .replaceAll('{name}', p.displayName),
+        GroupPeerReach.noCommonContact =>
+          locale.get('group_call_no_common_contact'),
+        GroupPeerReach.noFreeForwarding => locale
+            .get('group_call_no_free_forwarding')
+            .replaceAll('{name}', p.displayName),
+      };
+
   /// Single participant video tile: shows video frame or avatar, with active
   /// speaker highlighting and mute indicator.
   Widget _buildParticipantVideo(BuildContext context,
       GroupCallParticipantInfo participant,
       {bool isActiveSpeaker = false}) {
     final frame = _remoteFrames[participant.nodeIdHex];
+    final notice = _reachNotice(AppLocale.read(context), participant);
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
@@ -353,6 +387,28 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
                     fontSize: 24,
                     color: Theme.of(context).colorScheme.onPrimaryContainer,
                   ),
+                ),
+              ),
+            ),
+          // §17.7: how this participant is heard, where it is not plainly
+          if (notice != null)
+            Positioned(
+              top: 4,
+              left: 4,
+              right: 4,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  notice,
+                  key: ValueKey('group_call_reach_${participant.nodeIdHex}'),
+                  style: const TextStyle(color: Colors.amber, fontSize: 11),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ),
@@ -435,14 +491,23 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
             appState.service?.toggleMute();
           },
         ),
-        _GroupCallButton(
-          icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
-          label: _videoEnabled ? locale.get('group_call_video_on') : locale.get('group_call_video_off'),
-          active: !_videoEnabled,
-          onPressed: () {
-            setState(() => _videoEnabled = !_videoEnabled);
-          },
-        ),
+        // §17.7: not offered past the video limit.
+        if (appState.service?.currentGroupCall?.videoSwitchedOff ?? false)
+          _GroupCallButton(
+            icon: Icons.videocam_off,
+            label: locale.get('group_call_video_off'),
+            active: true,
+            onPressed: null,
+          )
+        else
+          _GroupCallButton(
+            icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
+            label: _videoEnabled ? locale.get('group_call_video_on') : locale.get('group_call_video_off'),
+            active: !_videoEnabled,
+            onPressed: () {
+              setState(() => _videoEnabled = !_videoEnabled);
+            },
+          ),
         _GroupCallButton(
           icon: _speaker ? Icons.volume_up : Icons.volume_down,
           label: locale.get('group_call_speaker'),
@@ -551,7 +616,8 @@ class _GroupCallButton extends StatelessWidget {
   final String label;
   final Color? color;
   final bool active;
-  final VoidCallback onPressed;
+  /// `null` draws the button disabled.
+  final VoidCallback? onPressed;
 
   const _GroupCallButton({
     required this.icon,

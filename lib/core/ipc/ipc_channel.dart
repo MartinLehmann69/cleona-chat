@@ -32,7 +32,8 @@
 //
 //   client → daemon   {"cleona_ipc":1,"nonce":"<32 bytes, base64>"}     open
 //   daemon → client   {"cleona_ipc":1,"nonce":"<32 bytes, base64>"}     open
-//   daemon → client   seal({"type":"ready","cleona_ipc":1})            proof of the daemon
+//   daemon → client   seal({"type":"ready","cleona_ipc":1,"app":"<version>"})
+//                                                                      proof of the daemon
 //   client → daemon   seal(<first request>)                              proof of the client
 //   …                 every further line sealed, in both directions
 //
@@ -41,6 +42,13 @@
 // before a sealed line opened, and the client sends nothing before the
 // daemon's first sealed line opened — each side has proven the secret to
 // the other before it acts on what the other says.
+//
+// The ready line names the app version of the daemon (S407-E7). Daemon and
+// GUI are one program in two processes (§22.1); after an update the daemon
+// restarts from the new bundle while the GUI process still runs the old code,
+// and a fast reconnect would join the two silently. The GUI compares the
+// version and restores one version on both sides (`ipcVersionAction`).
+// A ready line without "app" is a daemon from before this change.
 //
 // The open hello carries no secret and nothing about one. It does tell a
 // caller that a Cleona daemon listens — which `ipc_probe.dart` uses for the
@@ -52,6 +60,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/service/app_version.dart' show kAppVersion;
 
 /// Version of the exchange; carried in the open hello.
 const int kIpcProtocolVersion = 1;
@@ -60,8 +69,29 @@ const String _kdfInfo = 'cleona-ipc-v1';
 const int _nonceLength = 32;
 const int _secretLength = 32;
 
-/// The line the daemon seals first — the proof that it holds the secret.
-const String kIpcReadyLine = '{"type":"ready","cleona_ipc":1}';
+/// The ready line of a daemon from before S407-E7: no version.
+const String kIpcReadyLineBare = '{"type":"ready","cleona_ipc":1}';
+
+/// The line the daemon seals first — the proof that it holds the secret —
+/// with the app version of the daemon.
+String ipcReadyLine(String appVersion) => jsonEncode(
+    {'type': 'ready', 'cleona_ipc': kIpcProtocolVersion, 'app': appVersion});
+
+/// The daemon version in a ready line: the version, `''` for a ready line
+/// without one, `null` if [plain] is no ready line of this exchange.
+String? ipcReadyVersion(String plain) {
+  try {
+    final json = jsonDecode(plain);
+    if (json is! Map<String, dynamic>) return null;
+    if (json['type'] != 'ready' || json['cleona_ipc'] != kIpcProtocolVersion) {
+      return null;
+    }
+    final app = json['app'];
+    return app is String ? app : '';
+  } catch (_) {
+    return null;
+  }
+}
 
 class IpcChannelException implements Exception {
   final String message;
@@ -159,6 +189,8 @@ class IpcDirection {
 /// The daemon's side of ONE connection.
 class IpcDaemonSession {
   final Uint8List Function() _secret;
+  /// Named in the ready line: this program's version, other only in probes.
+  final String appVersion;
   IpcDirection? _send;
   IpcDirection? _receive;
   bool _proven = false;
@@ -166,7 +198,7 @@ class IpcDaemonSession {
   /// [secret] is asked when the client's hello arrives — once per
   /// connection, so that a device database created anew (and with it a new
   /// secret) applies to every connection made after it.
-  IpcDaemonSession(this._secret);
+  IpcDaemonSession(this._secret, {this.appVersion = kAppVersion});
 
   /// Whether the client has proven the secret (one sealed line opened).
   bool get proven => _proven;
@@ -189,7 +221,7 @@ class IpcDaemonSession {
       _receive = IpcDirection(keys.clientToDaemon);
       final send = _send = IpcDirection(keys.daemonToClient);
       writeRaw('${IpcHello.line(daemonNonce)}\n');
-      writeRaw('${send.seal(kIpcReadyLine)}\n');
+      writeRaw('${send.seal(ipcReadyLine(appVersion))}\n');
       return null;
     }
     final plain = receive.open(line);
@@ -254,6 +286,10 @@ class IpcSecureLink {
 
   IpcSecureLink._(this.socket, this._send, this._lines);
 
+  /// The app version the daemon named in its ready line; `''` for a daemon
+  /// that named none.
+  String daemonAppVersion = '';
+
   /// The opened lines from the daemon. The stream ends (with an error, if a
   /// line did not open) when the connection ends.
   Stream<String> get lines => _lines.stream;
@@ -315,11 +351,12 @@ class IpcSecureLink {
         return;
       }
       if (!ready.isCompleted) {
-        if (plain != kIpcReadyLine) {
-          fail(const IpcChannelException(
+        final version = ipcReadyVersion(plain);
+        if (version == null) {
+          return fail(const IpcChannelException(
               'the first sealed line of the daemon is not the ready line'));
-          return;
         }
+        link!.daemonAppVersion = version;
         ready.complete(link!);
         return;
       }
