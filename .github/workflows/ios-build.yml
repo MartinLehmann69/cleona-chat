@@ -152,22 +152,50 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Verify force_load injection
+      - name: Inject force_load into Runner target
         run: |
-          # The Podfile post_install hook should have injected -force_load
-          # into the Runner target. Verify it worked.
-          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-          COUNT=$(grep -c 'force_load.*libcleona_all' "$PBXPROJ" || true)
-          echo "force_load references in project.pbxproj: $COUNT"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: -force_load not found in project.pbxproj!"
-            echo "The Podfile post_install hook did not inject the linker flags."
-            echo "Check that libcleona_all_device.a exists in ios/CleonaNative/"
+          # CocoaPods "Integrating client project" overwrites Runner.xcodeproj
+          # AFTER the Podfile post_install hook. So we inject -force_load as a
+          # separate step using the xcodeproj gem (bundled with CocoaPods).
+          DEVICE_A="$(pwd)/ios/CleonaNative/libcleona_all_device.a"
+          SIM_A="$(pwd)/ios/CleonaNative/libcleona_all_simulator.a"
+          if [ ! -f "$DEVICE_A" ]; then
+            echo "ERROR: $DEVICE_A not found"
             ls -la ios/CleonaNative/
             exit 1
           fi
-          # Show the actual flags for verification
-          grep -A2 'force_load' "$PBXPROJ" | head -20
+          ruby - "$DEVICE_A" "$SIM_A" <<'RUBY'
+          require 'xcodeproj'
+          device_a, sim_a = ARGV
+          project = Xcodeproj::Project.open('ios/Runner.xcodeproj')
+          runner = project.targets.find { |t| t.name == 'Runner' }
+          abort "Runner target not found" unless runner
+          runner.build_configurations.each do |config|
+            flags = config.build_settings['OTHER_LDFLAGS'] || ['$(inherited)']
+            flags = [flags] if flags.is_a?(String)
+            flags.reject! { |f| f.include?('force_load') && f.include?('libcleona_all') }
+            if config.name == 'Debug'
+              config.build_settings.delete('OTHER_LDFLAGS[sdk=iphoneos*]')
+              config.build_settings.delete('OTHER_LDFLAGS[sdk=iphonesimulator*]')
+              config.build_settings['OTHER_LDFLAGS'] = flags
+              iphoneos_flags = flags.dup + ["-force_load #{device_a}"]
+              config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] = iphoneos_flags
+              if File.exist?(sim_a.to_s)
+                sim_flags = flags.dup + ["-force_load #{sim_a}"]
+                config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] = sim_flags
+              end
+            else
+              flags << "-force_load #{device_a}"
+              config.build_settings['OTHER_LDFLAGS'] = flags
+            end
+            puts "  #{config.name}: force_load injected"
+          end
+          project.save
+          pbx = File.read('ios/Runner.xcodeproj/project.pbxproj')
+          count = pbx.scan('force_load').length
+          puts "Verified: #{count} force_load references in project.pbxproj"
+          abort "ERROR: force_load not written!" if count == 0
+          RUBY
 
       - name: Install distribution certificate
         env:
