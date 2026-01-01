@@ -60,6 +60,7 @@ jobs:
           import 'dart:io';
           import 'package:cleona/core/crypto/sodium_ffi.dart';
           import 'package:cleona/core/crypto/oqs_ffi.dart';
+          import 'package:cleona/core/crypto/keyring_service.dart';
           import 'package:cleona/core/identity/identity_manager.dart';
           import 'package:cleona/core/node/identity_context.dart';
           import 'package:cleona/core/crypto/network_secret.dart';
@@ -69,6 +70,7 @@ jobs:
             final home = Platform.environment['HOME']!;
             final baseDir = '$home/.cleona';
             Directory(baseDir).createSync(recursive: true);
+            await KeyringService.init(baseDir);
             final mgr = IdentityManager(baseDir: baseDir);
             if (!mgr.hasMasterSeed()) mgr.generateSeedPhrase();
             final identity = await mgr.createIdentity('Alice');
@@ -90,6 +92,10 @@ jobs:
             File('$baseDir/last_profile.json').writeAsStringSync(
               '{"identityId":"${ids.first.id}","profileDir":"${ids.first.profileDir}"}');
             File('${ids.first.profileDir}/port').writeAsStringSync('8081');
+            File('$baseDir/.keyring_migrated').writeAsStringSync(
+              DateTime.now().toIso8601String());
+            File('$baseDir/.keyring_repair_v2').writeAsStringSync(
+              DateTime.now().toIso8601String());
             print('Profile created at $baseDir');
             exit(0);
           }
@@ -148,6 +154,10 @@ jobs:
         continue-on-error: true
         run: cd ios && pod install --repo-update
 
+      - name: Generate Flutter iOS framework
+        continue-on-error: true
+        run: flutter build ios --debug --no-codesign
+
       - name: Build iOS Simulator app
         continue-on-error: true
         run: |
@@ -159,15 +169,36 @@ jobs:
             -arch arm64 \
             -derivedDataPath build/ios-sim \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tail -20
+            2>&1 | tee /tmp/xcodebuild-sim.log | tail -40
           echo "---"
+          if grep -q "BUILD FAILED" /tmp/xcodebuild-sim.log; then
+            echo "=== BUILD ERRORS ==="
+            grep -E "error:|fatal|undefined|cannot find" /tmp/xcodebuild-sim.log | head -20
+          fi
           find build/ios-sim -name "Runner.app" -type d 2>/dev/null
-          # Verify executable exists
           find build/ios-sim -name "Runner" -not -name "*.app" -type f 2>/dev/null | head -3
 
       # ════════════════════════════════════════════════════════════════
-      #  Create demo profile
+      #  Setup keychain + Create demo profile
       # ════════════════════════════════════════════════════════════════
+      - name: Setup CI keychain
+        if: always()
+        run: |
+          KEYCHAIN_PASSWORD="ci_screenshots_temp"
+          KEYCHAIN_PATH="$HOME/Library/Keychains/ci-screenshots.keychain-db"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Prepend to search list and make default
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          echo "Keychain created and unlocked: $KEYCHAIN_PATH"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> $GITHUB_ENV
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
       - name: Make native libs available for init-profile
         if: always()
         run: |
@@ -183,6 +214,21 @@ jobs:
           echo "=== Profile ==="
           ls -la "$HOME/.cleona/"
 
+      - name: Allow keychain access without prompts
+        if: always()
+        run: |
+          # Set partition list to allow security CLI and all Apple tools access
+          security set-key-partition-list \
+            -S "apple-tool:,apple:,teamid:,:" \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" 2>/dev/null || true
+
+          # Verify the keychain entries exist
+          security find-generic-password -a cleona -s cleona_master_seed "$KEYCHAIN_PATH" >/dev/null 2>&1 && \
+            echo "master_seed found in keychain" || echo "master_seed NOT in keychain"
+          security find-generic-password -a cleona -s cleona_seed_phrase "$KEYCHAIN_PATH" >/dev/null 2>&1 && \
+            echo "seed_phrase found in keychain" || echo "seed_phrase NOT in keychain"
+
       # ════════════════════════════════════════════════════════════════
       #  macOS Screenshots
       # ════════════════════════════════════════════════════════════════
@@ -194,15 +240,20 @@ jobs:
           SCREENSHOTS="build/screenshots/macos"
           mkdir -p "$SCREENSHOTS"
 
-          # Launch the app (use path, not -a which searches by name)
+          # Launch the app
           open "$APP"
-          echo "App launched, waiting 25s for startup..."
-          sleep 25
+          echo "App launched, waiting 30s for startup..."
+          sleep 30
 
-          # Bring app to front and check visibility
+          # Bring app to front
           osascript -e 'tell application "Cleona" to activate' 2>/dev/null || true
           sleep 3
+
+          # List visible processes for debugging
           osascript -e 'tell application "System Events" to get name of every process whose visible is true' || true
+
+          # Check if IPC socket exists (daemon started successfully)
+          ls -la "$HOME/.cleona/cleona.sock" 2>/dev/null || echo "WARNING: No IPC socket found"
 
           # Helper function for IPC
           ipc_cmd() {
@@ -228,8 +279,22 @@ jobs:
           " 2>&1
           }
 
-          # Get the window ID for Cleona app
-          WINID=$(osascript -e 'tell application "System Events" to tell process "Cleona" to get id of window 1' 2>/dev/null || echo "")
+          # Get CGWindowID using Quartz (not System Events which returns wrong ID)
+          WINID=$(python3 -c "
+          try:
+            import Quartz
+            windows = Quartz.CGWindowListCopyWindowInfo(
+              Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+              Quartz.kCGNullWindowID)
+            for w in windows:
+              owner = w.get('kCGWindowOwnerName', '')
+              layer = w.get('kCGWindowLayer', 999)
+              if owner == 'Cleona' and layer == 0:
+                print(w.get('kCGWindowNumber', ''))
+                break
+          except:
+            pass
+          " 2>/dev/null)
           echo "Window ID: $WINID"
 
           # Capture function: window if available, else full screen
@@ -293,7 +358,7 @@ jobs:
           SCREENSHOTS="build/screenshots/ios"
           mkdir -p "$SCREENSHOTS"
 
-          # Find a suitable iPhone simulator (6.7" = iPhone 15/16 Pro Max)
+          # Find a suitable iPhone simulator (6.7" display)
           echo "Available simulators:"
           xcrun simctl list devices available | grep -i "iphone"
 
@@ -318,7 +383,7 @@ jobs:
           xcrun simctl boot "$DEVICE" 2>/dev/null || true
           sleep 15
 
-          # Set status bar to a clean state (removes battery %, sets time)
+          # Set status bar to a clean state
           xcrun simctl status_bar "$DEVICE" override --time "9:41" --batteryState charged --batteryLevel 100 2>/dev/null || true
 
           # Find the iOS simulator .app
@@ -334,9 +399,19 @@ jobs:
             SIM_APP=$(find build/ios-sim build/ios -name "Runner.app" -path "*simulator*" -type d 2>/dev/null | head -1)
           fi
 
+          # Verify executable exists inside the .app
+          if [ -n "$SIM_APP" ]; then
+            if [ ! -f "$SIM_APP/Runner" ]; then
+              echo "ERROR: $SIM_APP exists but has no Runner executable"
+              ls -la "$SIM_APP/"
+              SIM_APP=""
+            fi
+          fi
+
           if [ -z "$SIM_APP" ]; then
-            echo "ERROR: No iOS simulator app found"
-            find build/ios-sim build/ios -name "Runner.app" -type d 2>/dev/null || true
+            echo "ERROR: No valid iOS simulator app found — skipping iOS screenshots"
+            echo "Build log errors:"
+            grep -E "error:|BUILD FAILED" /tmp/xcodebuild-sim.log 2>/dev/null | head -10
           else
             echo "Installing: $SIM_APP"
             xcrun simctl install "$DEVICE" "$SIM_APP"
@@ -356,21 +431,18 @@ jobs:
 
             # Launch the app
             echo "Launching app..."
-            xcrun simctl launch "$DEVICE" chat.cleona.cleona 2>/dev/null || true
+            xcrun simctl launch "$DEVICE" chat.cleona.cleona
             sleep 20
 
             # Screenshot 1: Home screen
             xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/01-home.png"
             echo "Captured: ios/01-home.png"
 
-            # Wait and take another (app might still be loading)
+            # Wait and take more
             sleep 5
             xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/02-main.png"
             echo "Captured: ios/02-main.png"
 
-            # Try tapping settings icon area (top-right, approximate)
-            # On iPhone 15 Pro Max (1290x2796 at 3x = 430x932 points)
-            # Settings gear is typically in AppBar, top-right area
             sleep 3
             xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/03-loaded.png"
             echo "Captured: ios/03-loaded.png"

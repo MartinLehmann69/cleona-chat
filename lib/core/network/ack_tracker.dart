@@ -77,6 +77,11 @@ class AckTracker {
   /// for immediate re-send via alternative route (Architecture Section 2.4.3).
   void Function(String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId)? onRetryNeeded;
 
+  /// Callback when ALL retries are exhausted for a message. Triggers Layer 3
+  /// offline cascade (S&F + Erasure). Distinct from onRetryNeeded which fires
+  /// on each intermediate timeout while retries remain.
+  void Function(String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId)? onRetryExhausted;
+
   /// Callback when a route becomes unreachable (3x consecutive ACK timeout).
   /// V3.1: includes viaNextHopHex for surgical route-down.
   void Function(String peerNodeIdHex, {String? viaNextHopHex})? onRouteDown;
@@ -296,9 +301,10 @@ class AckTracker {
         _messageRetryCount[messageIdHex] = retries;
         onRetryNeeded?.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
       } else {
-        _log.debug('ACK retry limit ($retries/$maxRetries) reached for $msgShort — '
-            'message stays in queue for periodic drain');
+        _log.info('ACK retry limit ($retries/$maxRetries) reached for $msgShort — '
+            'triggering offline cascade');
         _messageRetryCount.remove(messageIdHex);
+        onRetryExhausted?.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
       }
     }
   }

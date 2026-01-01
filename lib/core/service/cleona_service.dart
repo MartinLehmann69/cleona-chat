@@ -2598,8 +2598,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
 
-  void _handleRetryExhausted(
-      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) {
+  Future<void> _handleRetryExhausted(
+      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) async {
     _log.info('Offline cascade for message $messageIdHex '
         '→ ${_hexShort(recipientUserId)}');
     final recipientHex = bytesToHex(recipientUserId);
@@ -2608,7 +2608,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // §5.4: Erasure-coded backup on DHT
     final fragmentBundleId =
         SodiumFFI().sha256(serializedPacket).sublist(0, 16);
-    _distributeErasureFragments(
+    final erasureOk = await _distributeErasureFragments(
       packetBytes: serializedPacket,
       messageId: fragmentBundleId,
       recipientUserEd25519Pk: contact?.ed25519Pk,
@@ -2616,19 +2616,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
 
     // §5.5: S&F copy on mutual peers
-    _storeSafOnContactPeers(
+    final safOk = _storeSafOnContactPeers(
       recipientUserId: recipientUserId,
       wrappedEnvelope: serializedPacket,
       storeId: SodiumFFI().randomBytes(16),
     );
 
-    // §5.8: Update message status to queuedOffline — L3 artefacts were placed
-    // by the retry-exhaustion path, so the message IS in the network waiting
-    // for the recipient to pull it.  No outbox entry needed here — the
-    // AckTracker already tracks the canonical packet; if the recipient
-    // eventually pulls from S&F/Erasure the DELIVERY_RECEIPT will arrive.
-    _updateMessageStatusById(
-        messageIdHex, recipientHex, MessageStatus.queuedOffline);
+    if (erasureOk || safOk) {
+      _updateMessageStatusById(
+          messageIdHex, recipientHex, MessageStatus.queuedOffline);
+    } else {
+      // Neither erasure nor S&F succeeded — park in outbox for retry on
+      // next network-change edge (the outbox flush runs L1→L2→L3).
+      _addToOutbox(
+        messageIdHex: messageIdHex,
+        recipientUserIdHex: recipientHex,
+        recipientEd25519PkHex:
+            contact?.ed25519Pk != null ? bytesToHex(contact!.ed25519Pk!) : null,
+        canonicalPacket: serializedPacket,
+      );
+      _log.warn('Offline cascade failed (erasure=$erasureOk, saf=$safOk) '
+          '— $messageIdHex parked in outbox');
+    }
   }
 
   /// §5.5: Store a complete message copy on up to 3 mutual peers.
@@ -2655,6 +2664,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         innerPayload: payload,
         recipientDeviceId: mutualDeviceId,
       );
+    }
+    if (mutuals.length < 3) {
+      _log.warn('S&F: only ${mutuals.length}/3 mutual peers for '
+          '${_hexShort(recipientUserId)} — offline delivery fragile');
     }
     _log.info('S&F: stored on ${mutuals.length} mutual peers '
         'for ${_hexShort(recipientUserId)}');
@@ -9465,14 +9478,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // (DV-bridge → confirmRoute), on 3× consecutive timeout per route it
     // fires `onRouteDown` (markRouteDown + Poison Reverse). `wasDirect` is
     // computed at receipt time from the source address.
-    //
-    // V3.0 has no local re-send park (`onRetryNeeded` consumer in cleona_node
-    // forwards to `onMessageRetryExhausted`, which the offline cascade —
-    // S&F + Reed-Solomon — picks up). So we deliberately pass empty
-    // `usedAddresses` and null `serializedPacket`: the AckTracker only
-    // does timeout-bookkeeping + DV-bridge for V3 sends, not local retry.
-    // Address-success crediting still happens in the inbound path
-    // (`_onEnvelopeReceived → _touchPeer`) — see ack_tracker.dart:178.
     if (dispatched > 0 &&
         AckTracker.isAckWorthyV3(messageType) &&
         !_constantTimeEq(recipientUserId, identity.userId)) {
@@ -9480,9 +9485,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final recipientHex = bytesToHex(recipientUserId);
       final baseRtt = node.dhtRpc.getRtt(recipientUserId);
       final timeout = AckTracker.computeTimeout(baseRtt);
-      // Fire-and-forget — completer resolves on receipt or timeout, but
-      // the resolution path is already wired through the tracker callbacks
-      // (onAckReceived / onAckTimeout / onRouteDown).
       final canonicalBytes = canonicalPacket != null
           ? node.serializePacketForOfflineDelivery(canonicalPacket)
           : null;
@@ -9494,6 +9496,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         serializedPacket: canonicalBytes,
         recipientUserId: recipientUserId,
       ));
+
+      // §5.8 Crash-safety: park sent-but-unACK'd messages in outbox so an
+      // app kill between send and DELIVERY_RECEIPT does not lose the message.
+      // The entry is removed on ACK receipt (_handleDeliveryReceiptV3) or
+      // flushed with full L1→L2→L3 cascade on next restart.
+      if (canonicalBytes != null) {
+        _addToOutbox(
+          messageIdHex: messageIdHex,
+          recipientUserIdHex: recipientHex,
+          recipientEd25519PkHex:
+              contact.ed25519Pk != null ? bytesToHex(contact.ed25519Pk!) : null,
+          canonicalPacket: canonicalBytes,
+        );
+      }
     }
 
     // §5.4 Erasure-coded offline-delivery: the sender places fragments
@@ -10537,6 +10553,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // operates on routing-layer IDs, not identity-layer IDs.
       node.ackTracker.handleAck(
           msgIdHex, bytesToHex(senderDeviceId), wasDirect: wasDirect);
+
+      // §5.8 Crash-safety: remove outbox entry for delivered message.
+      if (_outbox.containsKey(msgIdHex)) {
+        _outbox.remove(msgIdHex);
+        _saveOutbox();
+      }
 
       final conv = conversations[conversationId];
       if (conv == null) return;

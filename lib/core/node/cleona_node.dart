@@ -616,24 +616,12 @@ class CleonaNode {
       return total;
     };
 
-    // onRetryNeeded fires after AckTracker has surgically marked the failing
-    // route DOWN and bumped the per-message retry counter. "Retry" here does
-    // not mean "park locally and re-attempt the same recipient via DV
-    // cascade" — that is what the AckTracker's per-route logic already
-    // exhausted. Instead, a single `onMessageRetryExhausted` signal is
-    // forwarded to the service layer so the V3 offline cascade can take
-    // over: Reed-Solomon S&F (§5.4 + §5.5) plus mailbox publication (§5.6).
-    // Sender stops attempting direct delivery, receiver pulls on next online.
-    //
-    // The actual S&F + mailbox-push consumer lives in cleona_service —
-    // see `cleona_service.dart` `_handleFragmentStore` / `_storeErasureCoded
-    // Backup` (separate subagent migration). Until that consumer is wired
-    // here via `onMessageRetryExhausted`, the AckTracker still counts up to
-    // `maxRetries` and fires `onRouteDown` for DV bookkeeping; the offline
-    // cascade is just not triggered, matching V3.1.x post-MessageQueue
-    // behaviour. Once the service registers a consumer, exhausted messages
-    // get S&F-stored automatically.
-    ackTracker.onRetryNeeded =
+    // §5.1 Layer 3 trigger: when ALL ACK retries are exhausted for a message,
+    // forward to service layer for offline cascade (S&F + Erasure).
+    // onRetryExhausted fires once after maxRetries consecutive timeouts.
+    // onRetryNeeded (per-timeout) is intentionally unwired — V3 does not
+    // re-send via alternative DV routes (the cascade handles offline delivery).
+    ackTracker.onRetryExhausted =
         (messageIdHex, serializedPacket, recipientUserId) {
       onMessageRetryExhausted?.call(
           messageIdHex, serializedPacket, recipientUserId);
@@ -4341,17 +4329,15 @@ class CleonaNode {
         ..port = pubPort
         ..addressType = proto.AddressType.IPV4_PUBLIC);
     }
-    // §4.7 IPv6 Inbound Probe: include the global IPv6 address only when:
-    //   • ipv6InboundVerified == true  → confirmed bidirectional → include
-    //   • ipv6InboundVerified == null  → probe pending (just set) → include
-    //     optimistically so peers learn the address while the probe is in flight
-    //   • ipv6InboundVerified == false → carrier likely blocks inbound → EXCLUDE
-    //     from Priority-3 Direct. The address is still advertised as a relay hint
-    //     by the Liveness Record builder (which calls this method with all
-    //     addresses) — the IPv6InboundVerified=false flag is checked there too.
+    // §4.7 IPv6 Inbound Probe: always include the global IPv6 address.
+    // On mobile carriers the inbound probe often fails (carrier stateful
+    // firewall blocks unsolicited UDP), but the address is still valid for
+    // outbound-initiated connections: if BOTH peers send to each other's
+    // IPv6 simultaneously, the carrier firewall opens in both directions
+    // (simultaneous-open). Suppressing the address entirely prevents peers
+    // from ever attempting direct IPv6 delivery.
     final pubV6 = natTraversal.publicIpv6;
-    if (pubV6 != null && pubV6.isNotEmpty &&
-        natTraversal.ipv6InboundVerified != false) {
+    if (pubV6 != null && pubV6.isNotEmpty) {
       list.add(proto.PeerAddressProto()
         ..ip = pubV6
         ..port = port
@@ -5536,8 +5522,11 @@ class CleonaNode {
   /// Whether a peer at [peerIp] needs UDP keepalive to maintain a NAT
   /// pinhole. Returns false for LAN-reachable peers (no NAT involved).
   bool _needsKeepalive(String peerIp) {
-    // IPv6 has no NAT — global addresses are end-to-end routable.
-    if (peerIp.contains(':')) return false;
+    // IPv6: no NAT, but mobile carriers run stateful firewalls that drop
+    // inbound UDP after 30-120s of silence. Keepalive is needed on Android/iOS.
+    if (peerIp.contains(':')) {
+      return Platform.isAndroid || Platform.isIOS;
+    }
 
     // Private IPv4: same LAN or cross-subnet via local routing, no pinhole.
     if (_isPrivateIp(peerIp)) return false;
