@@ -359,10 +359,92 @@ build_cleona_audio() {
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
     cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
-    # On iOS, CMake's Ninja generator embeds the speexdsp subdirectory
-    # objects into libcleona_audio.a automatically (unlike shared lib
-    # builds on other platforms). No separate speexdsp/lib needed.
+
+    # speexdsp MUSS separat mitkommen (S280).
+    #
+    # Hier stand vorher, CMakes Ninja-Generator bette die speexdsp-Objekte
+    # automatisch in libcleona_audio.a ein. Das ist fuer ein STATIC-Target
+    # falsch: native/cleona_audio/CMakeLists.txt:12-13 baut cleona_audio unter
+    # CLEONA_IOS_STATIC als STATIC, und target_link_libraries() traegt bei
+    # statischen Zielen nur eine Usage-Requirement ein — es kopiert keine
+    # Objekte ins Archiv. Der vendored speexdsp ist ein eigenes STATIC-Target
+    # (vendor/speexdsp/CMakeLists.txt:12, per add_subdirectory als
+    # "speexdsp_build" eingehaengt) und landete damit nirgends im Merge.
+    #
+    # Folge: der Runner-Link scheiterte an _speex_echo_state_init,
+    # _speex_preprocess_run und sechs weiteren. Aufgefallen erst beim ersten
+    # cache-freien iOS-Build (v3.1.158), weil der Prefix-Cache bis dahin einen
+    # Baum vom 2026-07-07 lieferte.
+    #
+    # cleona_audio/lib steht bereits auf der Merge-Subdir-Liste, deshalb reicht
+    # es, das Archiv dort abzulegen — keine Aenderung an der Liste noetig.
+    SPEEX_A=$(find . -name 'libspeexdsp.a' -type f | head -1)
+    if [ -z "$SPEEX_A" ]; then
+        echo "  [!] libspeexdsp.a nicht gefunden — Runner-Link wuerde an _speex_* scheitern"
+        exit 1
+    fi
+    cp "$SPEEX_A" "$INSTALL_DIR/cleona_audio/lib/"
+    echo "  speexdsp: $SPEEX_A -> cleona_audio/lib/"
+
+    # Fail-closed verifizieren statt annehmen — genau die Annahme oben hat
+    # monatelang ueberlebt.
+    if ! nm -g "$INSTALL_DIR/cleona_audio/lib/libspeexdsp.a" 2>/dev/null \
+         | grep -q '_speex_echo_state_init'; then
+        echo "  [!] libspeexdsp.a definiert _speex_echo_state_init nicht"
+        exit 1
+    fi
+
     cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
+    cd "$PROJECT_DIR"
+}
+
+# Dart-FFI-Bruecke zu whisper.cpp (S280).
+#
+# native/whisper_wrapper.c liefert whisper_full_from_ptr() plus die Setter
+# whisper_params_set_language/_n_threads. Die beiden Setter stehen seit
+# 2026-07-26 in ios/CleonaNative/cleona_exported_symbols.txt (Zeile 83-84) und
+# werden damit beim Runner-Link zwingend aufgeloest — gebaut wurden sie fuer
+# iOS aber nie. build-whisper-wrapper.sh behauptet in seinem Kopf,
+# "iOS/macOS-Statik-Builds linken die Quelle direkt mit"; fuer iOS stimmte das
+# nicht. Der letzte gruene iOS-Build (v3.1.156, 2026-07-24) lag vor diesen
+# Zeilen, danach kaschierte der Prefix-Cache den Bruch.
+#
+# Installation nach whisper/lib, weil dieses Verzeichnis bereits auf der
+# Merge-Subdir-Liste steht.
+build_whisper_wrapper() {
+    local platform="$1"
+    echo "── whisper_wrapper ($platform) ───────────────────────────────"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/whisper_wrapper.c"
+    local build="$BUILD_DIR/whisper_wrapper"
+    rm -rf "$build" && mkdir -p "$build" && cd "$build"
+
+    if [ ! -f "$INSTALL_DIR/whisper/include/whisper.h" ]; then
+        echo "  [!] whisper.h fehlt in $INSTALL_DIR/whisper/include — whisper muss vorher gebaut sein"
+        exit 1
+    fi
+
+    # whisper.h zieht ggml.h nach; im Installationsbaum liegen beide unter
+    # include/, bei manchen whisper-Releases zusaetzlich unter ggml/include.
+    local ggml_inc=""
+    [ -d "$INSTALL_DIR/whisper/include/ggml" ] && ggml_inc="-I$INSTALL_DIR/whisper/include/ggml"
+
+    # shellcheck disable=SC2086  # CFLAGS bewusst wortgetrennt (Arch/-isysroot/-target)
+    "$CC" $CFLAGS -I"$INSTALL_DIR/whisper/include" $ggml_inc \
+        -c "$src" -o whisper_wrapper.o
+    "$AR" rcs libwhisper_wrapper.a whisper_wrapper.o
+    "$RANLIB" libwhisper_wrapper.a
+
+    for sym in _whisper_params_set_language _whisper_params_set_n_threads _whisper_full_from_ptr; do
+        if ! nm -g libwhisper_wrapper.a 2>/dev/null | grep -q "$sym"; then
+            echo "  [!] libwhisper_wrapper.a definiert $sym nicht"
+            exit 1
+        fi
+    done
+
+    mkdir -p "$INSTALL_DIR/whisper/lib"
+    cp libwhisper_wrapper.a "$INSTALL_DIR/whisper/lib/"
+    echo "  -> $INSTALL_DIR/whisper/lib/libwhisper_wrapper.a"
     cd "$PROJECT_DIR"
 }
 
@@ -480,7 +562,10 @@ for platform in "${PLATFORMS[@]}"; do
             zstd)          build_libzstd "$platform" ;;
             erasurecode)   build_liberasurecode "$platform" ;;
             opus)          build_libopus "$platform" ;;
-            whisper)       build_whisper "$platform" ;;
+            # Wrapper haengt an whisper (braucht dessen Header) und wird
+            # deshalb im selben Ziel gebaut — so greift auch
+            # `build-ios-libs.sh whisper`.
+            whisper)       build_whisper "$platform"; build_whisper_wrapper "$platform" ;;
             cleona_audio)  build_cleona_audio "$platform" ;;
             cleona_pow)    build_cleona_pow "$platform" ;;
             vpx)           build_libvpx "$platform" ;;
