@@ -287,7 +287,7 @@ jobs:
               api_key: api_key,
               ipa: ENV['IPA_PATH'],
               distribute_external: true,
-              groups: ["CleonaTestUser", "CleonaWeitereTestUser"],
+              groups: ["CleonaWeitereTestUser"],
               skip_waiting_for_build_processing: false,
               notify_external_testers: true,
               changelog: "Bug fixes and improvements"
