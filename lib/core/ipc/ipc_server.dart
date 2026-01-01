@@ -2452,8 +2452,13 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          await svcSound.notificationSound.playMessageSound();
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          // Use sync variant: awaits the pw-play/paplay process exit so the
+          // test can verify actual playback from the exit code (message.ogg is
+          // only 280ms — too short for process-polling in the test).
+          final exitCode = await svcSound.notificationSound.playMessageSoundSync();
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'exitCode': exitCode,
+          }));
           break;
 
         case 'get_seed_phrase':

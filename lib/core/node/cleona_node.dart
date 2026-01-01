@@ -3726,7 +3726,10 @@ class CleonaNode {
     // 2b. Reconnect UDP sockets — Android invalidates sockets when the active
     // network interface changes (WiFi→mobile→WiFi). Without this, all
     // subsequent sends return 0 even though the interface is back.
+    // Also reconnect the discovery socket — it suffers the same Dart IOCP
+    // defect class on Windows (dead from birth or dies under load).
     await transport.reconnectUdpSockets();
+    await localDiscovery.reconnectSocket();
 
     // 3. Update local IPs (all interfaces)
     _localIp = updatedIps.isNotEmpty ? updatedIps.first : '127.0.0.1';

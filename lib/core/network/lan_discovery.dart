@@ -667,6 +667,34 @@ class LocalDiscovery {
     _scanTimer = null;
   }
 
+  /// Close and reopen the discovery socket on the same port. Called from
+  /// onNetworkChanged() when the transport watchdog detects dead IOCP sockets
+  /// — the discovery socket suffers the same Dart IOCP defect class and has
+  /// no independent watchdog of its own.
+  Future<void> reconnectSocket() async {
+    try {
+      _socket?.close();
+      _socket = null;
+      _socket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        discoveryPort,
+        reuseAddress: true,
+        reusePort: !Platform.isWindows,
+      );
+      _socket!.broadcastEnabled = true;
+      _socket!.readEventsEnabled = true;
+      _socket!.multicastHops = 4;
+      try {
+        _socket!.joinMulticast(InternetAddress(multicastGroupV4));
+      } catch (_) {}
+      _socket!.listen(_onEvent,
+          onError: (e) => _log.debug('discovery socket error: $e'));
+      _log.info('Discovery socket reconnected on port $discoveryPort');
+    } catch (e) {
+      _log.warn('Discovery socket reconnect failed: $e');
+    }
+  }
+
   void stop() {
     _timer?.cancel();
     _timer = null;

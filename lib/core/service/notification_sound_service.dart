@@ -232,6 +232,48 @@ class NotificationSoundService {
     await _playOnce('message.ogg');
   }
 
+  /// Play message sound synchronously and return the process exit code.
+  /// Used by test IPC to verify actual playback without race conditions
+  /// (message.ogg is only 280ms — too short for process-polling).
+  Future<int> playMessageSoundSync() async {
+    if (!_settings.soundEnabled || !_settings.messageSoundEnabled) return -2;
+    return await _playOnceSync('message.ogg');
+  }
+
+  /// Like [_playOnce] but awaits the process exit code for testability.
+  Future<int> _playOnceSync(String filename) async {
+    if (Platform.isAndroid) {
+      if (onPlaySoundAndroid != null) {
+        try { await onPlaySoundAndroid!(filename); return 0; } catch (_) { return -1; }
+      }
+      return -3;
+    }
+    if (_soundsDir == null) return -4;
+    final path = '$_soundsDir/$filename';
+    if (!File(path).existsSync()) return -5;
+    try {
+      final player = _getAudioPlayer();
+      if (Platform.isWindows) {
+        final wavPath = path.replaceAll('.ogg', '.wav');
+        if (!File(wavPath).existsSync()) return -6;
+        final p = await Process.start('powershell', ['-NoProfile', '-Command',
+          '(New-Object Media.SoundPlayer "$wavPath").PlaySync()']);
+        return await p.exitCode;
+      }
+      final args = player == 'paplay'
+          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
+          : [path];
+      _log.debug('_playOnceSync: player=$player path=$path');
+      final p = await Process.start(player, args);
+      final code = await p.exitCode;
+      _log.debug('_playOnceSync: exit=$code player=$player');
+      return code;
+    } catch (e) {
+      _log.warn('_playOnceSync: error=$e');
+      return -1;
+    }
+  }
+
   /// Start looping ringtone for incoming call.
   Future<void> startRingtone({Ringtone? ringtone}) async {
     if (!_settings.soundEnabled) return;

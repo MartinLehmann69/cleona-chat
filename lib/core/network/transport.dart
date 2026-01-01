@@ -54,6 +54,8 @@ class Transport {
   int _consecutiveZeroSends = 0;
   bool _reconnecting = false;
   int _lastUdpReceiveMs = 0;
+  int _startedAtMs = 0;
+  bool _selfProbeAcked = false;
   SecureServerSocket? _tlsServer;
   SecureServerSocket? _tlsServer6; // IPv6 TLS (§27)
   Timer? _tlsRebindTimer;
@@ -177,6 +179,7 @@ class Transport {
         }
       },
     );
+    _startedAtMs = DateTime.now().millisecondsSinceEpoch;
     _log.info('UDP listening on port $port');
 
     // iOS: Dart's RawDatagramSocket.send() returns 0 for ALL sends (errno
@@ -314,6 +317,20 @@ class Transport {
         _log.debug('Fragment NACK sent: id=$fragmentId missing=${missing.length} to $sourceIp:$sourcePort');
       } catch (_) {}
     };
+
+    // Self-probe: send a tiny packet to localhost to verify the receive path.
+    // On Windows, Dart's IOCP-based RawDatagramSocket can be dead from birth
+    // (never delivers RawSocketEvent.read). The watchdog at checkReceiveHealth()
+    // catches sockets that stop working, but cannot detect sockets that NEVER
+    // worked (_lastUdpReceiveMs stays 0 → early return). A loopback probe
+    // fixes this: if the socket is alive, _onUdpEvent fires within ~50ms and
+    // sets _lastUdpReceiveMs; the probe payload is too short for HMAC
+    // validation so it's silently dropped by _processUdpDatagram. If the
+    // socket is dead, nothing arrives, and checkReceiveHealth() can now
+    // detect the 0-state after a grace period.
+    if (Platform.isWindows) {
+      _sendSelfProbe();
+    }
 
     // TLS on same port as UDP (anti-censorship fallback, activates after 15 consecutive UDP failures).
     // UDP (SOCK_DGRAM) and TCP (SOCK_STREAM) live in separate kernel namespaces, so sharing the port number is safe.
@@ -1249,19 +1266,51 @@ class Transport {
   /// CleonaNode uses this to trigger onNetworkChanged().
   void Function()? onUdpSocketDead;
 
+  /// Send a 4-byte probe to 127.0.0.1:port. If the receive path is alive,
+  /// _onUdpEvent fires and sets _lastUdpReceiveMs (the probe is silently
+  /// dropped by _processUdpDatagram — too short for HMAC). If the IOCP
+  /// socket is dead from birth, nothing arrives and checkReceiveHealth()
+  /// detects the 0-state.
+  void _sendSelfProbe() {
+    try {
+      final probe = Uint8List.fromList([0x43, 0x50, 0x52, 0x42]); // "CPRB"
+      _udpSocket?.send(probe, InternetAddress.loopbackIPv4, port);
+      _log.debug('Self-probe sent to 127.0.0.1:$port');
+    } catch (e) {
+      _log.debug('Self-probe send failed: $e');
+    }
+  }
+
   /// Windows UDP receive watchdog. Dart's IOCP-based RawDatagramSocket
   /// silently stops delivering RawSocketEvent.read after sustained traffic
   /// bursts — same defect class as the send-path 87.9% drop that
   /// libcleona_net fixed. Triggers the full network-change recovery cycle
   /// (reconnect sockets + re-PING neighbors + re-publish addresses).
+  ///
+  /// Dead-from-birth detection: after start(), a self-probe is sent to
+  /// loopback. If the socket is alive, _lastUdpReceiveMs is set within
+  /// ~50ms. If after 10s it is still 0, the socket never delivered any
+  /// event — trigger recovery and re-probe.
   void checkReceiveHealth() {
     if (!Platform.isWindows) return;
-    if (_lastUdpReceiveMs == 0) return;
     if (_reconnecting) return;
-    final silenceMs = DateTime.now().millisecondsSinceEpoch - _lastUdpReceiveMs;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastUdpReceiveMs == 0) {
+      // Socket has never received anything. After start() a self-probe was
+      // sent; if 10s passed and it still hasn't arrived, the IOCP socket is
+      // dead from birth.
+      if (!_selfProbeAcked && _startedAtMs > 0 && (now - _startedAtMs) > 10000) {
+        _log.warn('UDP socket dead from birth (self-probe not received after '
+            '${(now - _startedAtMs) ~/ 1000}s) — triggering recovery');
+        _selfProbeAcked = true; // prevent re-triggering every 5s
+        onUdpSocketDead?.call();
+      }
+      return;
+    }
+    final silenceMs = now - _lastUdpReceiveMs;
     if (silenceMs > 30000) {
       _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
-      _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
+      _lastUdpReceiveMs = now;
       onUdpSocketDead?.call();
     }
   }
@@ -1309,6 +1358,10 @@ class Transport {
         _udpSocket6 = null;
       }
       _consecutiveZeroSends = 0;
+      _lastUdpReceiveMs = 0;
+      _selfProbeAcked = false;
+      _startedAtMs = DateTime.now().millisecondsSinceEpoch;
+      if (Platform.isWindows) _sendSelfProbe();
       // iOS: old fd is stale after socket close+reopen — must rescan.
       if (Platform.isIOS) {
         _iosUdpSender = null;
