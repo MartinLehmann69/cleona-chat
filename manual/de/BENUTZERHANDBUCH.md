@@ -1,6 +1,6 @@
 # Cleona Chat -- Benutzerhandbuch
 
-Version 3.1 | Stand April 2026
+Version 3.1 | Stand Juni 2026
 
 ---
 
@@ -13,11 +13,14 @@ Version 3.1 | Stand April 2026
 5. [Gruppen](#5-gruppen)
 6. [Oeffentliche Kanaele](#6-oeffentliche-kanaele)
 7. [Anrufe](#7-anrufe)
-8. [Mehrere Identitaeten](#8-mehrere-identitaeten)
-9. [Wiederherstellung](#9-wiederherstellung)
-10. [Einstellungen](#10-einstellungen)
-11. [Sicherheit](#11-sicherheit)
-12. [Haeufige Fragen](#12-haeufige-fragen)
+8. [Kalender](#8-kalender)
+9. [Umfragen](#9-umfragen)
+10. [Mehrere Identitaeten](#10-mehrere-identitaeten)
+11. [Multi-Device](#11-multi-device)
+12. [Wiederherstellung](#12-wiederherstellung)
+13. [Einstellungen](#13-einstellungen)
+14. [Sicherheit](#14-sicherheit)
+15. [Haeufige Fragen](#15-haeufige-fragen)
 
 ---
 
@@ -56,6 +59,10 @@ gemeinsame Kontakte die Nachricht zwischen und liefern sie zu, sobald der
 Empfaenger wieder da ist. Deine Kontakte sind also gleichzeitig auch dein
 Netzwerk.
 
+### Plattformen
+
+Cleona ist verfuegbar fuer Android, iOS, macOS, Linux und Windows.
+
 ---
 
 ## 2. Erste Schritte
@@ -63,10 +70,22 @@ Netzwerk.
 ### App installieren
 
 **Android:**
-1. Lade die APK-Datei von der Cleona-Website herunter.
+1. Lade die APK-Datei von der Cleona-Website oder von GitHub Releases herunter.
 2. Oeffne die Datei auf deinem Handy. Falls noetig, erlaube die Installation
    aus unbekannten Quellen (Android fragt dich automatisch).
 3. Tippe auf "Installieren" und warte, bis die Installation abgeschlossen ist.
+
+**iOS:**
+1. Oeffne den TestFlight-Einladungslink auf deinem iPhone.
+2. Tippe auf "Installieren". TestFlight ist Apples offizieller Weg, um
+   Beta-Apps zu verteilen.
+3. Nach der Installation findest du Cleona auf deinem Homescreen.
+
+**macOS:**
+1. Lade die DMG-Datei von der Cleona-Website oder von GitHub Releases herunter.
+2. Oeffne das DMG und ziehe Cleona in deinen Programme-Ordner.
+3. Beim ersten Start fragt macOS moeglicherweise, ob du die App eines
+   identifizierten Entwicklers oeffnen moechtest -- bestaetige dies.
 
 **Linux (Ubuntu/Debian):**
 1. Lade die .deb-Datei von der Cleona-Website oder von GitHub Releases herunter.
@@ -78,13 +97,13 @@ Netzwerk.
 2. Installiere mit: `sudo dnf install cleona-chat-VERSION.x86_64.rpm`
 3. Starte Cleona ueber das Anwendungsmenue oder im Terminal mit `cleona-chat`.
 
-**Linux (alle Distributionen — AppImage):**
+**Linux (alle Distributionen -- AppImage):**
 1. Lade die .AppImage-Datei von der Cleona-Website oder von GitHub Releases herunter.
-2. Mache die Datei ausfuehrbar: Rechtsklick → Eigenschaften → Ausfuehrbar, oder im Terminal: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
+2. Mache die Datei ausfuehrbar: Rechtsklick, Eigenschaften, Ausfuehrbar, oder im Terminal: `chmod +x cleona-chat-VERSION-x86_64.AppImage`
 3. Starte per Doppelklick oder im Terminal: `./cleona-chat-VERSION-x86_64.AppImage`
 
 **Windows:**
-1. Lade den Installer von der Cleona-Website herunter.
+1. Lade den Installer von der Cleona-Website oder von GitHub Releases herunter.
 2. Fuehre die Installationsdatei aus und folge den Anweisungen.
 3. Starte Cleona ueber das Startmenue oder die Desktop-Verknuepfung.
 
@@ -131,7 +150,7 @@ Der einfachste Weg, einen Kontakt hinzuzufuegen:
 
 1. Dein Gegenueber oeffnet seine Identitaets-Detailseite (Tipp auf den eigenen
    Namen in der oberen Leiste) und zeigt dir seinen QR-Code.
-2. Du tippst auf den Plus-Button und wahlst "QR-Code scannen".
+2. Du tippst auf den Plus-Button und waehlst "QR-Code scannen".
 3. Halte dein Handy vor den QR-Code deines Gegenueber.
 4. Die Kontaktanfrage wird automatisch gesendet. Sobald dein Gegenueber sie
    annimmt, koennt ihr miteinander schreiben.
@@ -322,7 +341,7 @@ Jede Gruppe hat drei Rollen:
 
 1. Oeffne das Drei-Punkte-Menue in der Gruppenuebersicht.
 2. Waehle "Verlassen".
-3. Bestatige deine Entscheidung.
+3. Bestaetige deine Entscheidung.
 
 Wenn du eine Gruppe verlaesst, bleiben deine bisherigen Nachrichten fuer die
 anderen Mitglieder sichtbar.
@@ -421,7 +440,117 @@ entschluesseln.
 
 ---
 
-## 8. Mehrere Identitaeten
+## 8. Kalender
+
+Cleona enthaelt einen eingebauten Kalender, der verschluesselt und komplett
+dezentral funktioniert -- ohne Cloud-Dienst.
+
+### Ansichten
+
+Der Kalender bietet fuenf Ansichten: Tag, Woche, Monat, Jahr und eine
+Aufgaben-Ansicht. Wechsle zwischen ihnen ueber die Tabs am oberen Rand des
+Kalender-Bildschirms.
+
+### Termine erstellen
+
+Tippe auf einen Zeitslot oder verwende den Hinzufuegen-Button, um einen neuen
+Termin zu erstellen. Du kannst Titel, Datum, Uhrzeit, Ort und Notizen
+eingeben. Termine werden verschluesselt auf deinem Geraet gespeichert.
+
+### Wiederkehrende Termine
+
+Termine koennen sich taeglich, woechentlich, monatlich oder jaehrlich
+wiederholen. Du kannst das Muster anpassen (z.B. jeden zweiten Dienstag,
+jeden Ersten des Monats) und ein Enddatum oder eine Anzahl von Wiederholungen
+festlegen.
+
+### Kontakte einladen
+
+Beim Erstellen oder Bearbeiten eines Termins kannst du deine Cleona-Kontakte
+einladen. Sie erhalten eine verschluesselte Kalendereinladung und koennen mit
+Zusagen, Absagen oder Vielleicht antworten. Aenderungen am Termin werden
+automatisch an alle Eingeladenen gesendet.
+
+### Frei/Belegt-Anzeige
+
+Du kannst deine Verfuegbarkeit mit Kontakten teilen, ohne Termindetails
+preiszugeben. Es gibt drei Datenschutzstufen: volle Details, nur Zeitbloecke
+oder verborgen. Du kannst einen Standard setzen und ihn pro Kontakt
+ueberschreiben.
+
+### Erinnerungen
+
+Termine koennen Erinnerungen haben, die vor Terminbeginn eine
+System-Benachrichtigung ausloesen. Du kannst Erinnerungen bei Bedarf
+schlummern lassen.
+
+### Externer Kalender-Sync
+
+Cleona kann sich mit externen Kalenderdiensten synchronisieren:
+
+- **CalDAV** -- Verbinde dich mit jedem CalDAV-kompatiblen Server (Nextcloud,
+  Radicale usw.).
+- **Google Kalender** -- Synchronisation ueber die Google Calendar API mit
+  sicherer OAuth2-Authentifizierung.
+- **Lokaler CalDAV-Server** -- Cleona kann einen lokalen CalDAV-Server auf
+  deinem Geraet starten, sodass Desktop-Kalender-Apps (Thunderbird, Outlook,
+  Apple Kalender, Evolution) mit deinem Cleona-Kalender synchronisieren
+  koennen.
+- **Android-Systemkalender** -- Termine aus Cleona koennen in die
+  eingebaute Kalender-App deines Android-Geraets uebertragen werden.
+- **ICS-Dateien** -- Importiere und exportiere Termine im
+  Standard-iCalendar-Format.
+
+### PDF-Export
+
+Du kannst jede Kalenderansicht (Tag, Woche, Monat, Jahr) als PDF-Dokument
+drucken oder exportieren.
+
+---
+
+## 9. Umfragen
+
+Du kannst in jedem Chat oder jeder Gruppe Umfragen erstellen, um Meinungen
+einzuholen oder Termine zu planen.
+
+### Umfragetypen
+
+Cleona unterstuetzt fuenf Arten von Umfragen:
+
+- **Einfachauswahl** -- Teilnehmer waehlen eine Option.
+- **Mehrfachauswahl** -- Teilnehmer koennen mehrere Optionen auswaehlen.
+- **Terminumfrage** -- Finde einen Termin, der fuer alle passt. Jeder
+  Teilnehmer markiert Termine als verfuegbar, vielleicht oder nicht
+  verfuegbar.
+- **Skala** -- Bewerte etwas auf einer numerischen Skala (z.B. 1 bis 5).
+- **Freitext** -- Teilnehmer schreiben ihre eigene Antwort.
+
+### Umfrage erstellen
+
+Oeffne einen Chat und tippe auf das Umfrage-Symbol (oder nutze das
+Anhaenge-Menue). Waehle den Umfragetyp, formuliere deine Frage und die
+Optionen, und sende die Umfrage. Sie erscheint als Nachricht im Chat.
+
+### Abstimmen
+
+Tippe auf eine Umfrage, um deine Stimme abzugeben. Du kannst deine Stimme
+jederzeit aendern oder zurueckziehen.
+
+### Anonyme Abstimmung
+
+Umfragen koennen fuer anonyme Abstimmung konfiguriert werden. Wenn aktiviert,
+sind Stimmen kryptografisch anonym -- niemand, nicht einmal der
+Umfrage-Ersteller, kann sehen, wer wofuer gestimmt hat. Die Stimmenzahl
+bleibt trotzdem sichtbar.
+
+### Terminumfrage zum Kalender
+
+Wenn eine Terminumfrage abgeschlossen ist, kann der Gewinner-Termin mit einem
+Tipp direkt in einen Kalendereintrag umgewandelt werden.
+
+---
+
+## 10. Mehrere Identitaeten
 
 ### Warum mehrere Identitaeten?
 
@@ -470,7 +599,57 @@ Geraet entfernt. Dieser Vorgang ist nicht umkehrbar.
 
 ---
 
-## 9. Wiederherstellung
+## 11. Multi-Device
+
+### Cleona auf mehreren Geraeten nutzen
+
+Du kannst dieselbe Identitaet auf bis zu 5 Geraeten gleichzeitig nutzen. Ein
+Geraet ist das primaere (es haelt die Seed-Phrase), und weitere Geraete werden
+damit verknuepft.
+
+### Neues Geraet verknuepfen
+
+1. Oeffne die Einstellungen auf deinem primaeren Geraet.
+2. Gehe zu "Verknuepfte Geraete".
+3. Waehle "Neues Geraet verknuepfen".
+4. Installiere auf dem neuen Geraet Cleona und waehle beim Start "Mit
+   bestehendem Geraet verknuepfen".
+5. Scanne den Pairing-QR-Code, der auf deinem primaeren Geraet angezeigt
+   wird, oder verwende den Pairing-Link.
+
+Das verknuepfte Geraet erhaelt ein Delegationszertifikat vom primaeren Geraet.
+Nachrichten, die von einem verknuepften Geraet gesendet werden, sind
+kryptografisch mit einem delegierten Schluessel signiert, sodass Kontakte
+ueberpruefen koennen, dass die Nachricht tatsaechlich von deiner Identitaet
+stammt.
+
+### Wie es funktioniert
+
+- Das primaere Geraet haelt deine Seed-Phrase und die Master-Schluessel.
+- Verknuepfte Geraete erhalten abgeleitete Signatur-Schluessel und ein
+  Delegationszertifikat -- sie erhalten niemals die Seed-Phrase selbst.
+- Alle Geraete teilen dieselbe Identitaet und Kontakte. Nachrichten kommen
+  auf allen Geraeten an.
+- Delegationszertifikate werden automatisch vor Ablauf erneuert.
+
+### Geraeteverwaltung
+
+Oeffne die Einstellungen und gehe zu "Verknuepfte Geraete", um alle deine
+verknuepften Geraete, deren Status und letzte Aktivitaet zu sehen. Du kannst
+ein verknuepftes Geraet jederzeit widerrufen, falls es verloren geht oder
+gestohlen wird.
+
+### Notfall-Schluesselrotation
+
+Wenn du vermutest, dass ein Geraet kompromittiert wurde, kannst du eine
+Notfall-Schluesselrotation ausloesen. Dabei werden neue Schluessel generiert,
+und die Rotation muss von einer Mehrheit deiner anderen Geraete bestaetigt
+werden. Das verhindert, dass ein einzelnes gestohlenes Geraet eigenmaechtig
+Schluessel rotieren kann.
+
+---
+
+## 12. Wiederherstellung
 
 ### Seed-Phrase verwenden
 
@@ -524,7 +703,7 @@ erfolgreiche Wiederherstellung aus.
 
 ---
 
-## 10. Einstellungen
+## 13. Einstellungen
 
 Die Einstellungen erreichst du ueber das Zahnrad-Symbol in der oberen rechten
 Ecke.
@@ -538,10 +717,10 @@ Ecke.
 
 ### Designs (Skins)
 
-Cleona bietet neun verschiedene Designs an, von hell und farbenfroh bis dunkel
-und dezent. Darunter befindet sich auch ein spezielles Kontrastdesign, das die
-hoechste Zugaenglichkeitsstufe (WCAG AAA) erfuellt und bei eingeschraenktem
-Sehvermoegen besonders gut lesbar ist.
+Cleona bietet zehn verschiedene Designs an: Teal, Ocean, Sunset, Forest,
+Amethyst, Fire, Storm, Slate, Gold und Contrast. Das Contrast-Design erfuellt
+die hoechste Zugaenglichkeitsstufe (WCAG AAA) und ist bei eingeschraenktem
+Sehvermoegen besonders gut lesbar.
 
 Jede Identitaet kann ihr eigenes Design haben. Du aenderst das Design in der
 Identitaets-Detailseite (Tipp auf den aktiven Identitaets-Tab).
@@ -593,9 +772,14 @@ Du kannst einstellen, ab welcher Groesse Medien automatisch heruntergeladen
 werden sollen. So kannst du zum Beispiel Bilder automatisch laden lassen, aber
 bei grossen Videos manuell entscheiden.
 
+### Verknuepfte Geraete
+
+Verwalte deine verknuepften Geraete in diesem Bereich der Einstellungen.
+Siehe das Multi-Device-Kapitel fuer Details.
+
 ---
 
-## 11. Sicherheit
+## 14. Sicherheit
 
 ### Was bedeutet Post-Quantum-Verschluesselung?
 
@@ -638,6 +822,20 @@ Wenn du eine Nachricht sendest und der Empfaenger offline ist:
 Sobald der Empfaenger wieder online kommt, werden die Nachrichten zugestellt.
 Du bekommst eine Bestaetigung, wenn deine Nachricht angekommen ist.
 
+### Anti-Zensur
+
+Wenn dein Netzwerk die Standard-Verbindungsmethode (UDP) blockiert, wechselt
+Cleona automatisch auf eine alternative Uebertragung (TLS), die schwerer zu
+erkennen und zu blockieren ist. Das geschieht transparent -- du musst nichts
+konfigurieren.
+
+### Sichere Schluesselspeicherung
+
+Auf unterstuetzten Plattformen speichert Cleona deine Verschluesselungs-
+Schluessel im sicheren Schluesselring des Betriebssystems (Android Keystore,
+iOS Keychain, macOS Keychain). Wo verfuegbar, bietet das hardwaregestuetzten
+Schutz fuer deine Schluessel.
+
 ### Datenbank-Verschluesselung
 
 Alle deine Nachrichten, Kontakte und Einstellungen sind auf deinem Geraet
@@ -646,9 +844,16 @@ bekaeme, koennte er ohne deinen kryptografischen Schluessel nichts lesen.
 Dieser Schluessel wird aus deiner Identitaet abgeleitet und existiert nur auf
 deinem Geraet.
 
+### Geschlossenes Netzwerk
+
+Cleona arbeitet als geschlossenes Netzwerk. Jedes Netzwerkpaket ist
+authentifiziert, sodass nur legitime Cleona-Geraete teilnehmen koennen. Das
+verhindert, dass Aussenstehende gefaelschte Nachrichten einschleusen oder
+den Netzwerkverkehr abhoeren koennen.
+
 ---
 
-## 12. Haeufige Fragen
+## 15. Haeufige Fragen
 
 ### "Kann ich Cleona ohne Internet nutzen?"
 
@@ -723,19 +928,20 @@ WhatsApp-Gruppe postest und bittest, dass dich die anderen dort hinzufuegen.
 
 ### "Kann ich Cleona auf mehreren Geraeten gleichzeitig nutzen?"
 
-Derzeit laeuft Cleona auf einem Geraet pro Identitaet. Du kannst aber mehrere
-Identitaeten haben und verschiedene Identitaeten auf verschiedenen Geraeten
-nutzen. Die Multi-Geraete-Synchronisation fuer eine einzelne Identitaet ist
-fuer eine zukuenftige Version geplant.
+Ja. Du kannst bis zu 5 Geraete mit derselben Identitaet verknuepfen. Ein Geraet
+ist das primaere (es haelt die Seed-Phrase), und weitere Geraete werden ueber
+einen sicheren Pairing-Prozess verknuepft. Alle Geraete teilen dieselbe
+Identitaet, Kontakte und Unterhaltungen. Siehe das Multi-Device-Kapitel fuer
+Details.
 
 ---
 
 ## Hilfe und Kontakt
 
 Wenn du Fragen hast oder auf ein Problem stoesst, findest du aktuelle
-Informationen auf der Cleona-Website. Da Cleona ein dezentrales Projekt ist,
-gibt es keinen klassischen Kundensupport -- aber eine aktive Gemeinschaft, die
-gerne hilft.
+Informationen auf der Cleona-Website und auf GitHub. Da Cleona ein dezentrales
+Projekt ist, gibt es keinen klassischen Kundensupport -- aber eine aktive
+Gemeinschaft, die gerne hilft.
 
 ---
 
