@@ -43,6 +43,18 @@ import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
+/// Atomic JSON write via tmp+rename (POSIX crash-safe).
+void _atomicWriteJson(String path, Object json) {
+  final file = File(path);
+  final tmp = File('$path.tmp');
+  file.parent.createSync(recursive: true);
+  tmp.writeAsStringSync(jsonEncode(json), flush: true);
+  if (Platform.isWindows && file.existsSync()) {
+    file.deleteSync();
+  }
+  tmp.renameSync(path);
+}
+
 /// Central network component. Handles transport, DHT, discovery, and message dispatch.
 /// Shared by all identities — one node, one port, one network stack.
 class CleonaNode {
@@ -1133,6 +1145,13 @@ class CleonaNode {
       }
       // Kademlia bootstrap — populate DHT after we know the mesh.
       _kademliaBootstrap();
+      // Retry port probes that failed at startup due to "no confirmed peer".
+      // Now that we have a live peer, the probe can succeed.
+      final extIp = natTraversal.publicIpForNatContext;
+      if (!natTraversal.hasPublicIp && extIp != null) {
+        _initiatePortProbe(extIp);
+      }
+      _probeIpv6Inbound();
       onDiscoveryComplete?.call();
     });
   }
@@ -5072,9 +5091,7 @@ class CleonaNode {
 
   void _saveRoutingTable() {
     try {
-      final file = File('$profileDir/routing_table.json');
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync(jsonEncode(routingTable.toJson()));
+      _atomicWriteJson('$profileDir/routing_table.json', routingTable.toJson());
     } catch (e) {
       _log.warn('Failed to save routing table: $e');
     }
@@ -5122,9 +5139,7 @@ class CleonaNode {
 
   void _saveDvRouting() {
     try {
-      final file = File('$profileDir/dv_routing.json');
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync(jsonEncode(dvRouting.toJson()));
+      _atomicWriteJson('$profileDir/dv_routing.json', dvRouting.toJson());
     } catch (e) {
       _log.warn('Failed to save DV-routing: $e');
     }
@@ -5138,9 +5153,7 @@ class CleonaNode {
           data[e.key] = e.value.millisecondsSinceEpoch;
         }
       }
-      final file = File('$profileDir/confirmed_peers.json');
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync(jsonEncode(data));
+      _atomicWriteJson('$profileDir/confirmed_peers.json', data);
     } catch (e) {
       _log.warn('Failed to save confirmed peers: $e');
     }

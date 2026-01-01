@@ -392,7 +392,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.99';
+  static const String kCurrentAppVersion = '3.1.100';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -621,6 +621,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // After load: surface the persisted unreadCount to the system badge so
     // the Launcher-Badge matches the on-disk truth right after daemon-start.
     _updateBadgeCount();
+
+    // Load persisted message-ID dedup set (H12 replay-window fix).
+    _loadProcessedMessageIds();
 
     // §5.8: Load persisted outbox (messages that failed L3 placement when the
     // sender had 0 connectivity). Flush is edge-triggered by onNetworkChanged —
@@ -5988,6 +5991,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _saveChannels();
   }
 
+  void _saveProcessedMessageIds() {
+    if (_processedMessageIds.isEmpty) return;
+    try {
+      _fileEnc.writeJsonFile('$profileDir/processed_msg_ids.json', {
+        'ids': _processedMessageIds.toList(),
+      });
+    } catch (e) {
+      _log.warn('Failed to save processed message IDs: $e');
+    }
+  }
+
+  void _loadProcessedMessageIds() {
+    try {
+      final json = _fileEnc.readJsonFile('$profileDir/processed_msg_ids.json');
+      if (json == null) return;
+      final ids = json['ids'] as List<dynamic>?;
+      if (ids == null) return;
+      for (final id in ids) {
+        _processedMessageIds.add(id as String);
+      }
+      while (_processedMessageIds.length > _processedMessageIdsCap) {
+        _processedMessageIds.remove(_processedMessageIds.first);
+      }
+      _log.info('Loaded ${_processedMessageIds.length} processed message IDs '
+          '(replay protection)');
+    } catch (e) {
+      _log.warn('Failed to load processed message IDs: $e');
+    }
+  }
+
   void _saveConversations() {
     // Safety net: never overwrite an existing conversations file before the
     // load has completed. Before _conversationsLoaded, `conversations` can only
@@ -8849,6 +8882,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _saveContacts();
     _saveGroups();
     _saveConversations();
+    _saveProcessedMessageIds();
     mailboxStore.dispose();
     await _voiceTranscription?.stop();
     await _archiveManager?.stopScheduler();

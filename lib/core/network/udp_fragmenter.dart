@@ -192,6 +192,10 @@ class FragmentReassembler {
   /// Timeout for incomplete reassemblies (hard limit).
   static const Duration reassemblyTimeout = Duration(seconds: 10);
 
+  /// Hard cap on concurrent reassembly buffers to prevent memory exhaustion.
+  /// 255 fragments × 1200B = ~300KB per buffer; 256 buffers ≈ 75MB worst case.
+  static const int maxBuffers = 256;
+
   /// Initial delay before sending first NACK after last fragment received.
   static const Duration nackDelayInitial = Duration(milliseconds: 500);
 
@@ -217,7 +221,30 @@ class FragmentReassembler {
     final payload = UdpFragmenter.extractPayload(rawPacket);
 
     var buffer = _buffers[key];
+    if (buffer != null && buffer.total != header.total) {
+      // Different total = different message on the same key (NAT collision).
+      buffer.nackTimer?.cancel();
+      _buffers.remove(key);
+      onLog?.call('Fragment collision (total ${buffer.total}→${header.total}): '
+          'key=$key — reset buffer');
+      buffer = null;
+    }
     if (buffer == null) {
+      if (_buffers.length >= maxBuffers) {
+        // Evict oldest buffer to stay within memory budget.
+        String? oldestKey;
+        DateTime? oldestTime;
+        for (final e in _buffers.entries) {
+          if (oldestTime == null || e.value.createdAt.isBefore(oldestTime)) {
+            oldestKey = e.key;
+            oldestTime = e.value.createdAt;
+          }
+        }
+        if (oldestKey != null) {
+          _buffers.remove(oldestKey)!.nackTimer?.cancel();
+          onLog?.call('Fragment buffer evicted (cap=$maxBuffers): key=$oldestKey');
+        }
+      }
       buffer = _ReassemblyBuffer(
         fragmentId: header.fragmentId,
         total: header.total,

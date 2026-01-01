@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a1f6831df2b6, 2026-06-19). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1cec481ddd4f, 2026-06-20). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1227,7 +1227,7 @@ files/.cleona/                                (Android, in app-private storage)
 ```
 
 **Key cascade**:
-1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) — the DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.enc` files. On Android: AndroidKeyStore with a biometric/device-credential gate.
+1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) — the DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.enc` files. On Android: AndroidKeyStore with a biometric/device-credential gate. On macOS: Keychain via `security` CLI. When no OS keyring is available (headless daemons, iOS, unsupported platforms), a **file-based fallback** encrypts key material at rest using XSalsa20-Poly1305 (secretbox) with a key derived from `SHA-256(hostname + baseDir + salt)`. This is not equivalent to hardware-backed protection (the key is reconstructible from machine context), but prevents plaintext seed exposure via backup copies, accidental file access, or forensic disk reads. Legacy plaintext keyring files are transparently migrated on first load.
 2. The **Master-Seed** is held in RAM after daemon start (in a protected memory region via libsodium `sodium_mlock`).
 3. **HD-Wallet derivation** (§3.6) generates all further keys on demand — the private keys live only in protected memory.
 4. The **DB-Encryption-Key** is derived from the User-Identity Ed25519 private key (§3.8).
@@ -1235,7 +1235,7 @@ files/.cleona/                                (Android, in app-private storage)
 
 **Memory hygiene**:
 - libsodium `sodium_mlock` prevents swap-out of the keys
-- private keys are actively overwritten with `sodium_memzero` after use (e.g. after KEM decapsulation)
+- private keys and intermediate KEM session material (DH shared secret, KEM shared secret, IKM, derived message key) are actively overwritten with `sodium_memzero` / `fillRange(0)` after use — in both `encrypt()` and `decrypt()` paths of `PerMessageKem`
 - pubkeys live in normal heap (no secret)
 
 **Secret-Rotation** (§13.2): network_secret may be rotated by the maintainer. The daemon holds a dual-secret window during the transition phase.
@@ -1694,7 +1694,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 
 **Isolated-node exception.** A node at **`peerCount == 0`** (empty persisted routing table — fresh install or long offline) skips Tier 1 and starts at Tier 2. If all tiers exhaust without success, it runs a self-terminating **re-discovery retry** with exponential backoff (1 min → 5 min → 30 min, capped at 60 min). Each tick re-runs the full cascade from Tier 2. The retry stops the instant the first peer is confirmed. Traffic cost is O(1) (an isolated node has no peers to storm) and the timer is never armed in a populated mesh. See §12.3 for the shared recovery sequence it feeds into.
 
-**Cold-start jitter**: after discovery completes, the node delays 0–3 s (uniform random) before the first DV route propagation and address broadcast round. This staggers the O(N²) `PEER_LIST_PUSH` cascade that occurs when many nodes boot simultaneously (e.g. a mod-lab cluster or power-cycle event).
+**Cold-start jitter**: after discovery completes, the node delays 0–3 s (uniform random) before the first DV route propagation and address broadcast round. This staggers the O(N²) `PEER_LIST_PUSH` cascade that occurs when many nodes boot simultaneously (e.g. a mod-lab cluster or power-cycle event). After the jitter, the node also **retries deferred reachability probes**: if ipify discovered the external IP before discovery completed but the IPv4 port probe failed due to "no confirmed peer available", the probe is re-issued now that a live peer exists. Similarly, the IPv6 inbound probe (§4.7) is retried if it was deferred at startup. This is a one-shot per network-join (guarded by `_discoveryComplete`); three event-driven opportunities exist in total: (1) ipify callback at startup, (2) `_onDiscoveryComplete` retry, (3) next `onNetworkChanged` which resets `_discoveryComplete` and re-runs ipify. No periodic timer. This closes a timing gap where nodes behind NAT (especially bootstrap nodes starting with zero peers) never confirmed their external IPv4 despite it being port-forwarded and fully reachable — the unconfirmed address was absent from `ownPeerInfo()`, `PEER_LIST_PUSH`, and ContactSeed URIs, making the node invisible for cross-network peers.
 
 #### 4.5.2 Native UDP Send Path (libcleona_net)
 
@@ -2002,6 +2002,8 @@ This places nodes with different `network_secret` values in entirely separate DH
 | Anti-spam | PoW (selective) | NetworkPacket.pow |
 
 **Defense in depth**: HMAC is the first filter stage (rejected without sig-verify, without KEM decap, cheap). Only after the HMAC passes are the replay window, the duplicate-frame cache and the device signature checked (cheap before expensive). Only then comes the routing decision or KEM decap.
+
+**Application-layer dedup**: in addition to the transport-layer duplicate-frame cache, `CleonaService` maintains a `processedMessageIds` set (LRU, cap 4096) that deduplicates by `MessageEnvelope.messageId`. This set is persisted to disk (encrypted, alongside contacts/conversations) at daemon shutdown and restored at startup, closing the replay window across daemon restarts for Store-and-Forward and Reed-Solomon recovery messages.
 
 **Secret rotation**: see §13.2.
 

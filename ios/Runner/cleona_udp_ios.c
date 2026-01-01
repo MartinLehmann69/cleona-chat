@@ -20,11 +20,18 @@
 #include <string.h>
 #include <unistd.h>
 
+static int _max_scan_fd(void) {
+    long m = sysconf(_SC_OPEN_MAX);
+    if (m <= 0 || m > 8192) m = 8192;
+    return (int)m;
+}
+
 /* Find the file descriptor of a UDP socket bound to the given local port.
- * Returns the fd on success, -1 if not found. Scans fds 3..1023. */
+ * Returns the fd on success, -1 if not found. */
 __attribute__((visibility("default"), used))
 int cleona_ios_find_udp_fd(int local_port) {
-    for (int fd = 3; fd < 1024; fd++) {
+    const int max_fd = _max_scan_fd();
+    for (int fd = 3; fd < max_fd; fd++) {
         struct sockaddr_in addr;
         socklen_t len = sizeof(addr);
         if (getsockname(fd, (struct sockaddr*)&addr, &len) != 0) continue;
@@ -44,7 +51,8 @@ int cleona_ios_find_udp_fd(int local_port) {
  * Returns the fd on success, -1 if not found. */
 __attribute__((visibility("default"), used))
 int cleona_ios_find_udp6_fd(int local_port) {
-    for (int fd = 3; fd < 1024; fd++) {
+    const int max_fd = _max_scan_fd();
+    for (int fd = 3; fd < max_fd; fd++) {
         struct sockaddr_in6 addr;
         socklen_t len = sizeof(addr);
         if (getsockname(fd, (struct sockaddr*)&addr, &len) != 0) continue;

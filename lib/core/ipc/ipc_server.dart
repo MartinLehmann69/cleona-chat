@@ -66,6 +66,9 @@ class IpcServer {
   /// Callback to delete an identity at runtime.
   Future<bool> Function(String nodeIdHex)? onDeleteIdentity;
 
+  /// Rate-limit for `get_seed_phrase` — defence-in-depth against local scraping.
+  DateTime? _lastSeedPhraseAccess;
+
   /// Debounce state for `manual_reconnect` IPC command (§12.3.1 tier 2).
   /// Sits between the 10 s spec-minimum and the §5.10 Stage-4/5 cooldown so
   /// consecutive taps cannot trigger a burst storm, while keeping the button
@@ -89,9 +92,12 @@ class IpcServer {
         _log = CLogger.get('ipc-server');
 
   Future<void> start() async {
-    // Ensure parent directory exists
+    // Ensure parent directory exists with owner-only permissions.
     final parentDir = socketPath.substring(0, socketPath.lastIndexOf(Platform.isWindows ? '\\' : '/'));
     Directory(parentDir).createSync(recursive: true);
+    if (!Platform.isWindows) {
+      Process.runSync('chmod', ['700', parentDir]);
+    }
 
     if (Platform.isWindows) {
       // Windows: Unix Domain Sockets not supported in Dart — use TCP loopback.
@@ -113,6 +119,7 @@ class IpcServer {
         InternetAddress(socketPath, type: InternetAddressType.unix),
         0,
       );
+      Process.runSync('chmod', ['600', socketPath]);
       _log.info('IPC server listening on $socketPath');
     }
 
@@ -140,6 +147,7 @@ class IpcServer {
         InternetAddress(socketPath, type: InternetAddressType.unix),
         0,
       );
+      Process.runSync('chmod', ['600', socketPath]);
       _server!.listen(
         _onClientConnected,
         onError: (e) => _log.error('IPC server error: $e'),
@@ -2823,6 +2831,16 @@ class IpcServer {
           break;
 
         case 'get_seed_phrase':
+          final now = DateTime.now();
+          if (_lastSeedPhraseAccess != null &&
+              now.difference(_lastSeedPhraseAccess!).inSeconds < 10) {
+            _log.warn('get_seed_phrase rate-limited');
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false, error: 'Rate limited — wait 10s'));
+            break;
+          }
+          _lastSeedPhraseAccess = now;
+          _log.warn('get_seed_phrase accessed');
           final cleonaDir = socketPath.substring(0, socketPath.lastIndexOf(Platform.isWindows ? '\\' : '/'));
           final identityMgr = IdentityManager(baseDir: cleonaDir);
           final words = identityMgr.loadSeedPhrase();

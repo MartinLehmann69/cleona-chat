@@ -137,9 +137,13 @@ class PerMessageKem {
       version: version,
     );
 
-    // 7. Zero ephemeral secrets
+    // 7. Zero all intermediate key material
     for (var i = 0; i < ephX25519Sk.length; i++) { ephX25519Sk[i] = 0; }
     for (var i = 0; i < ephEd25519.secretKey.length; i++) { ephEd25519.secretKey[i] = 0; }
+    for (var i = 0; i < dhSecret.length; i++) { dhSecret[i] = 0; }
+    for (var i = 0; i < kemSecret.length; i++) { kemSecret[i] = 0; }
+    for (var i = 0; i < ikm.length; i++) { ikm[i] = 0; }
+    for (var i = 0; i < msgKey.length; i++) { msgKey[i] = 0; }
 
     return (header, ciphertext);
   }
@@ -179,7 +183,15 @@ class PerMessageKem {
 
     // 4. Decrypt with AES-256-GCM
     final nonce = kemHeader.aesNonce;
-    return _sodium.aesGcmDecrypt(ciphertext, msgKey, nonce);
+    final plaintext = _sodium.aesGcmDecrypt(ciphertext, msgKey, nonce);
+
+    // 5. Zero all intermediate key material
+    for (var i = 0; i < dhSecret.length; i++) { dhSecret[i] = 0; }
+    for (var i = 0; i < kemSecret.length; i++) { kemSecret[i] = 0; }
+    for (var i = 0; i < ikm.length; i++) { ikm[i] = 0; }
+    for (var i = 0; i < msgKey.length; i++) { msgKey[i] = 0; }
+
+    return plaintext;
   }
 
   // Encryption decision lives in V3FrameCodec; ephemeral / erasure-skip

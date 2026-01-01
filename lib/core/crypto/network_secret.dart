@@ -86,39 +86,20 @@ class NetworkSecret {
   static const int transitionDays = 90;
 
   // ---------------------------------------------------------------------------
-  // Beta secret V1 fragments (XOR-masked, Architecture 17.5.6)
-  // secret = HMAC-SHA256(maintainer_seed, "cleona-network-beta")[:16]
-  // Note: V1 uses the original derivation string without "-v1" suffix
-  // for backwards compatibility with the initial release.
+  // V1 key material (Architecture 17.5.6).
+  // Interleaved pairs at permuted positions — run _reassemble() to recover
+  // the 16-byte secret.  See scripts/gen_secret_table.dart for generation.
   // ---------------------------------------------------------------------------
-  static const _f0 = [0x00, 0xa5, 0x59, 0xba];
-  static const _m0 = [0x6e, 0x30, 0xf1, 0xc2];
-  static const _f1 = [0x47, 0xd9, 0x6e, 0xcb];
-  static const _m1 = [0xca, 0x77, 0x99, 0x77];
-  static const _f2 = [0x46, 0xc7, 0x92, 0x8a];
-  static const _m2 = [0x47, 0xc7, 0x0e, 0x92];
-  static const _f3 = [0x35, 0x79, 0xa2, 0x90];
-  static const _m3 = [0x0c, 0x7c, 0x2b, 0x3a];
+  static const _betaTable = [0x67, 0x7f, 0x8d, 0x00, 0x7d, 0xf4, 0x13, 0x86, 0x53, 0x52, 0xb1, 0xb4, 0x31, 0x99, 0x77, 0xcb, 0xef, 0x45, 0x85, 0x72, 0x15, 0x15, 0x1b, 0x75, 0x1b, 0xb5, 0x59, 0xc5, 0x29, 0x51, 0x6f, 0x56];
+  static const _liveTable = [0x67, 0x9b, 0x8d, 0x81, 0x7d, 0xd6, 0x13, 0xb4, 0x53, 0x71, 0xb1, 0xdc, 0x31, 0x0c, 0x77, 0x89, 0xef, 0xfe, 0x85, 0xb2, 0x15, 0x0f, 0x1b, 0x77, 0x1b, 0xa6, 0x59, 0xcb, 0x29, 0x02, 0x6f, 0x99];
+  static const _perm = [11, 4, 14, 1, 8, 13, 2, 7, 15, 6, 9, 0, 5, 10, 3, 12];
 
   // ---------------------------------------------------------------------------
-  // Live secret V1 fragments (XOR-masked)
-  // secret = HMAC-SHA256(maintainer_seed, "cleona-network-live")[:16]
-  // ---------------------------------------------------------------------------
-  static const _lf0 = [0xdb, 0x39, 0x86, 0xec];
-  static const _lm0 = [0xb7, 0x9e, 0xbb, 0xc7];
-  static const _lf1 = [0x3e, 0xcf, 0x65, 0x4b];
-  static const _lm1 = [0x32, 0x72, 0x52, 0xb5];
-  static const _lf2 = [0x2d, 0xa8, 0xa0, 0x0e];
-  static const _lm2 = [0x0f, 0xb2, 0x32, 0xf2];
-  static const _lf3 = [0x32, 0xca, 0x4d, 0x99];
-  static const _lm3 = [0xc4, 0xa7, 0xe6, 0x88];
-
-  // ---------------------------------------------------------------------------
-  // V2 secret fragments would go here when rotating:
+  // V2 key material would go here when rotating:
   //
   // When rotating to V2:
   // 1. Generate new secret: HMAC-SHA256(maintainer_key, "cleona-network-beta-v2")[:16]
-  // 2. Add V2 fragments below (XOR-masked as usual)
+  // 2. Generate V2 tables via scripts/gen_secret_table.dart
   // 3. Set currentSecretVersion = 2, previousSecretVersion = 1
   // 4. After 90 days: set previousSecretVersion = 0, expiredHintSecretVersion = 1
   // ---------------------------------------------------------------------------
@@ -171,20 +152,10 @@ class NetworkSecret {
   }
 
   static Uint8List _reassemble(NetworkChannel ch) {
-    final List<List<int>> frags;
-    final List<List<int>> masks;
-    if (ch == NetworkChannel.live) {
-      frags = [_lf0, _lf1, _lf2, _lf3];
-      masks = [_lm0, _lm1, _lm2, _lm3];
-    } else {
-      frags = [_f0, _f1, _f2, _f3];
-      masks = [_m0, _m1, _m2, _m3];
-    }
+    final table = ch == NetworkChannel.live ? _liveTable : _betaTable;
     final result = Uint8List(16);
-    for (var i = 0; i < 4; i++) {
-      for (var j = 0; j < 4; j++) {
-        result[i * 4 + j] = frags[i][j] ^ masks[i][j];
-      }
+    for (var i = 0; i < 16; i++) {
+      result[_perm[i]] = table[2 * i] ^ table[2 * i + 1];
     }
     return result;
   }
