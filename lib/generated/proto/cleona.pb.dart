@@ -11130,6 +11130,7 @@ class CalendarInviteMsg extends $pb.GeneratedMessage {
     $fixnum.Int64? rsvpDeadline,
     EventCategory? category,
     $core.Iterable<CalendarReminderOffset>? reminders,
+    $core.Iterable<$core.List<$core.int>>? attendeeNodeIds,
   }) {
     final $result = create();
     if (eventId != null) {
@@ -11180,6 +11181,9 @@ class CalendarInviteMsg extends $pb.GeneratedMessage {
     if (reminders != null) {
       $result.reminders.addAll(reminders);
     }
+    if (attendeeNodeIds != null) {
+      $result.attendeeNodeIds.addAll(attendeeNodeIds);
+    }
     return $result;
   }
   CalendarInviteMsg._() : super();
@@ -11203,6 +11207,7 @@ class CalendarInviteMsg extends $pb.GeneratedMessage {
     ..aInt64(14, _omitFieldNames ? '' : 'rsvpDeadline')
     ..e<EventCategory>(15, _omitFieldNames ? '' : 'category', $pb.PbFieldType.OE, defaultOrMaker: EventCategory.APPOINTMENT, valueOf: EventCategory.valueOf, enumValues: EventCategory.values)
     ..pc<CalendarReminderOffset>(16, _omitFieldNames ? '' : 'reminders', $pb.PbFieldType.PM, subBuilder: CalendarReminderOffset.create)
+    ..p<$core.List<$core.int>>(17, _omitFieldNames ? '' : 'attendeeNodeIds', $pb.PbFieldType.PY)
     ..hasRequiredFields = false
   ;
 
@@ -11364,6 +11369,9 @@ class CalendarInviteMsg extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(16)
   $core.List<CalendarReminderOffset> get reminders => $_getList(15);
+
+  @$pb.TagNumber(17)
+  $core.List<$core.List<$core.int>> get attendeeNodeIds => $_getList(16);
 }
 
 class CalendarRsvpMsg extends $pb.GeneratedMessage {

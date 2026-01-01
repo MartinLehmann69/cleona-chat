@@ -1732,7 +1732,7 @@ class Transport {
   ///
   /// Dead-from-birth detection: after start(), a self-probe is sent to
   /// loopback. If the socket is alive, _lastUdpReceiveMs is set within
-  /// ~50ms. If after 10s it is still 0, the socket never delivered any
+  /// ~50ms. If after 30s it is still 0, the socket never delivered any
   /// event — trigger recovery and re-probe.
   void checkReceiveHealth() {
     if (!Platform.isWindows) return;
@@ -1740,16 +1740,16 @@ class Transport {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_lastUdpReceiveMs == 0) {
       // Socket has never received anything. After start() a self-probe was
-      // sent; if 10s passed and it still hasn't arrived, the IOCP socket is
+      // sent; if 30s passed and it still hasn't arrived, the IOCP socket is
       // dead from birth.
-      if (!_selfProbeAcked && _startedAtMs > 0 && (now - _startedAtMs) > 10000) {
+      if (!_selfProbeAcked && _startedAtMs > 0 && (now - _startedAtMs) > 30000) {
         _consecutiveDeadFromBirth++;
         // Exponential backoff: after repeated dead-from-birth, delay reconnect
         // to avoid a tight 15s cycle that never recovers (observed: Dart IOCP
         // bug produces dead sockets on every RawDatagramSocket.bind(), cycling
         // 4x/min until the VM GCs the old completion port — typically 2-10min).
         final cooldownMs = _consecutiveDeadFromBirth <= 2
-            ? 0
+            ? 15000
             : min(60000, 5000 * (1 << (_consecutiveDeadFromBirth - 2)));
         final sinceLast = now - _lastReconnectMs;
         if (sinceLast < cooldownMs) {

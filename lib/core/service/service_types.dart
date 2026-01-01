@@ -1383,7 +1383,8 @@ class CalendarEvent {
   String? birthdayContactId;     // Linked contact's node ID hex
   int? birthdayYear;             // Birth year for age calculation
 
-  // Group/Call integration
+  // Participants: either individual contacts OR a group (not both)
+  List<String> attendeeNodeIds;  // Individual contact node IDs (hex)
   String? groupId;               // Linked group/channel ID hex
   bool hasCall;
 
@@ -1423,6 +1424,7 @@ class CalendarEvent {
     this.taskPriority = 0,
     this.birthdayContactId,
     this.birthdayYear,
+    List<String>? attendeeNodeIds,
     this.groupId,
     this.hasCall = false,
     List<int>? reminders,
@@ -1433,7 +1435,8 @@ class CalendarEvent {
     int? updatedAt,
     required this.createdBy,
     this.cancelled = false,
-  })  : recurrenceExceptions = recurrenceExceptions ?? [],
+  })  : attendeeNodeIds = attendeeNodeIds ?? [],
+        recurrenceExceptions = recurrenceExceptions ?? [],
         tags = tags ?? [],
         reminders = reminders ?? [15],
         visibilityOverrides = visibilityOverrides ?? {},
@@ -1461,6 +1464,7 @@ class CalendarEvent {
         'taskPriority': taskPriority,
         if (birthdayContactId != null) 'birthdayContactId': birthdayContactId,
         if (birthdayYear != null) 'birthdayYear': birthdayYear,
+        if (attendeeNodeIds.isNotEmpty) 'attendeeNodeIds': attendeeNodeIds,
         if (groupId != null) 'groupId': groupId,
         'hasCall': hasCall,
         'reminders': reminders,
@@ -1495,6 +1499,7 @@ class CalendarEvent {
         taskPriority: json['taskPriority'] as int? ?? 0,
         birthdayContactId: json['birthdayContactId'] as String?,
         birthdayYear: json['birthdayYear'] as int?,
+        attendeeNodeIds: (json['attendeeNodeIds'] as List?)?.cast<String>(),
         groupId: json['groupId'] as String?,
         hasCall: json['hasCall'] as bool? ?? false,
         reminders: (json['reminders'] as List?)?.cast<int>(),

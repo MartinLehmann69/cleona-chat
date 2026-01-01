@@ -355,6 +355,7 @@ abstract class ICleonaService {
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
     bool? taskCompleted, int? taskPriority, bool? cancelled,
+    List<String>? attendeeNodeIds,
   });
   /// Delete a calendar event (local CRUD + group delete if applicable).
   Future<bool> deleteCalendarEvent(String eventIdHex);

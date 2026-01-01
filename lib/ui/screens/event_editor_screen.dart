@@ -38,7 +38,8 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
   late int _taskPriority;
   String? _recurrenceRule;
 
-  // Group selection for group events
+  // Participant selection: contacts OR group (not both)
+  List<String> _selectedAttendeeIds = [];
   String? _selectedGroupId;
 
   @override
@@ -62,6 +63,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     _reminders = List.from(e.reminders);
     _taskPriority = e.taskPriority;
     _recurrenceRule = e.recurrenceRule;
+    _selectedAttendeeIds = List.from(e.attendeeNodeIds);
     _selectedGroupId = e.groupId;
   }
 
@@ -216,15 +218,13 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
           ),
           const Divider(),
 
-          // Group event / Call integration
+          // Participants: contacts or group
           if (service != null) ...[
             ListTile(
               contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.group),
-              title: Text(_selectedGroupId != null
-                  ? locale.get('calendar_group_event')
-                  : locale.get('calendar_personal_event')),
-              onTap: () => _showGroupSelector(context, locale),
+              leading: const Icon(Icons.people),
+              title: Text(_participantSummary(service, locale)),
+              onTap: () => _showParticipantSelector(context, locale, service),
             ),
             if (_selectedGroupId != null)
               SwitchListTile(
@@ -265,8 +265,9 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
             const SizedBox(height: 16),
           ],
 
-          // RSVP status (for received group events)
-          if (!widget.isNew && widget.event.groupId != null &&
+          // RSVP status (for received invites)
+          if (!widget.isNew &&
+              (widget.event.groupId != null || widget.event.attendeeNodeIds.isNotEmpty) &&
               widget.event.createdBy != widget.event.identityId)
             _RsvpSection(event: widget.event, colorScheme: colorScheme, locale: locale),
         ],
@@ -321,6 +322,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     event.reminders = _reminders;
     event.taskPriority = _taskPriority;
     event.recurrenceRule = _recurrenceRule;
+    event.attendeeNodeIds = List.from(_selectedAttendeeIds);
     event.groupId = _selectedGroupId;
     event.updatedAt = DateTime.now().millisecondsSinceEpoch;
 
@@ -339,6 +341,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
         recurrenceRule: event.recurrenceRule,
         taskCompleted: event.taskCompleted,
         taskPriority: event.taskPriority,
+        attendeeNodeIds: event.attendeeNodeIds,
       );
     }
 
@@ -438,34 +441,121 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     );
   }
 
-  void _showGroupSelector(BuildContext context, AppLocale locale) {
-    final appState = context.read<CleonaAppState>();
-    final service = appState.service;
-    if (service == null) return;
+  String _participantSummary(dynamic service, AppLocale locale) {
+    if (_selectedGroupId != null) {
+      final group = service.groups[_selectedGroupId];
+      return '${locale.get("calendar_group_event")}: ${group?.name ?? "?"}';
+    }
+    if (_selectedAttendeeIds.isNotEmpty) {
+      final names = _selectedAttendeeIds.map((id) {
+        final c = service.contacts[id];
+        return c?.effectiveName ?? id.substring(0, 8);
+      }).toList();
+      if (names.length <= 2) return names.join(', ');
+      return '${names[0]}, ${names[1]} +${names.length - 2}';
+    }
+    return locale.get('calendar_personal_event');
+  }
 
-    final groups = service.groups;
+  void _showParticipantSelector(BuildContext context, AppLocale locale, dynamic service) {
+    final groups = service.groups as Map<String, dynamic>;
+    final contacts = (service.contacts as Map<String, ContactInfo>)
+        .entries
+        .where((e) => e.value.status == 'accepted')
+        .toList()
+      ..sort((a, b) => a.value.effectiveName.toLowerCase()
+          .compareTo(b.value.effectiveName.toLowerCase()));
+
+    var tempAttendees = List<String>.from(_selectedAttendeeIds);
+    String? tempGroupId = _selectedGroupId;
+
     showDialog(
       context: context,
-      builder: (ctx) => SimpleDialog(
-        title: Text(locale.get('calendar_select_group')),
-        children: [
-          SimpleDialogOption(
-            onPressed: () {
-              setState(() => _selectedGroupId = null);
-              Navigator.pop(ctx);
-            },
-            child: Text(locale.get('calendar_personal_event'),
-                style: TextStyle(fontWeight: _selectedGroupId == null ? FontWeight.bold : FontWeight.normal)),
-          ),
-          ...groups.entries.map((e) => SimpleDialogOption(
-            onPressed: () {
-              setState(() => _selectedGroupId = e.key);
-              Navigator.pop(ctx);
-            },
-            child: Text(e.value.name,
-                style: TextStyle(fontWeight: _selectedGroupId == e.key ? FontWeight.bold : FontWeight.normal)),
-          )),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final isPersonal = tempGroupId == null && tempAttendees.isEmpty;
+          return AlertDialog(
+            title: Text(locale.get('calendar_select_participants')),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  // Personal
+                  RadioListTile<String?>(
+                    title: Text(locale.get('calendar_personal_event')),
+                    value: null,
+                    groupValue: isPersonal ? null : (tempGroupId ?? '__contacts__'),
+                    onChanged: (_) => setDialogState(() {
+                      tempGroupId = null;
+                      tempAttendees.clear();
+                    }),
+                  ),
+                  const Divider(),
+
+                  // Contacts section
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16, top: 8, bottom: 4),
+                    child: Text(locale.get('tab_chats'),
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  ),
+                  ...contacts.map((entry) => CheckboxListTile(
+                    title: Text(entry.value.effectiveName),
+                    value: tempAttendees.contains(entry.key),
+                    onChanged: (checked) => setDialogState(() {
+                      if (checked == true) {
+                        tempAttendees.add(entry.key);
+                        tempGroupId = null;
+                      } else {
+                        tempAttendees.remove(entry.key);
+                      }
+                    }),
+                    dense: true,
+                  )),
+
+                  // Groups section
+                  if (groups.isNotEmpty) ...[
+                    const Divider(),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16, top: 8, bottom: 4),
+                      child: Text(locale.get('calendar_group_event'),
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                    ),
+                    ...groups.entries.map((e) => RadioListTile<String>(
+                      title: Text((e.value as dynamic).name as String),
+                      value: e.key,
+                      groupValue: tempGroupId,
+                      onChanged: (v) => setDialogState(() {
+                        tempGroupId = v;
+                        tempAttendees.clear();
+                      }),
+                      dense: true,
+                    )),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(locale.get('cancel')),
+              ),
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _selectedAttendeeIds = tempAttendees;
+                    _selectedGroupId = tempGroupId;
+                    if (_selectedGroupId == null && _selectedAttendeeIds.isEmpty) {
+                      _hasCall = false;
+                    }
+                  });
+                  Navigator.pop(ctx);
+                },
+                child: Text(locale.get('ok')),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

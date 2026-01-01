@@ -114,6 +114,7 @@ class CalendarManager {
     FreeBusyLevel? freeBusyVisibility,
     bool? taskCompleted,
     int? taskPriority,
+    List<String>? attendeeNodeIds,
   }) {
     final event = events[eventId];
     if (event == null) return false;
@@ -132,6 +133,7 @@ class CalendarManager {
     if (freeBusyVisibility != null) event.freeBusyVisibility = freeBusyVisibility;
     if (taskCompleted != null) event.taskCompleted = taskCompleted;
     if (taskPriority != null) event.taskPriority = taskPriority;
+    if (attendeeNodeIds != null) event.attendeeNodeIds = attendeeNodeIds;
     event.updatedAt = DateTime.now().millisecondsSinceEpoch;
 
     save();

@@ -463,7 +463,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.126';
+  static const String kCurrentAppVersion = '3.1.127';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -9512,6 +9512,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
     bool? taskCompleted, int? taskPriority, bool? cancelled,
+    List<String>? attendeeNodeIds,
   }) => _calendarProto.updateCalendarEvent(eventIdHex,
     title: title, description: description, location: location,
     startTime: startTime, endTime: endTime, allDay: allDay,

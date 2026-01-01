@@ -188,7 +188,9 @@ class _SetupScreenState extends State<SetupScreen> {
       barrierDismissible: false,
       builder: (ctx) {
         final locale = AppLocale.of(ctx);
-        return AlertDialog(
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
           title: Text(locale.get('your_recovery_phrase')),
           content: SizedBox(
             width: 400,
@@ -270,6 +272,7 @@ class _SetupScreenState extends State<SetupScreen> {
               },
             ),
           ],
+          ),
         );
       },
     );

@@ -38,7 +38,7 @@ class CalendarProtocolService {
       return '';
     }
     calendarManager.createEvent(event);
-    if (event.groupId != null) {
+    if (event.attendeeNodeIds.isNotEmpty || event.groupId != null) {
       await sendCalendarInvite(event);
     }
     return event.eventId;
@@ -63,7 +63,8 @@ class CalendarProtocolService {
     );
     if (ok) {
       final evt = calendarManager.events[eventIdHex];
-      if (evt?.groupId != null && evt?.createdBy == _ctx.identity.userIdHex) {
+      if (evt != null && evt.createdBy == _ctx.identity.userIdHex &&
+          (evt.groupId != null || evt.attendeeNodeIds.isNotEmpty)) {
         await sendCalendarUpdate(eventIdHex);
       }
     }
@@ -76,7 +77,8 @@ class CalendarProtocolService {
       return false;
     }
     final evt = calendarManager.events[eventIdHex];
-    if (evt?.groupId != null && evt?.createdBy == _ctx.identity.userIdHex) {
+    if (evt != null && evt.createdBy == _ctx.identity.userIdHex &&
+        (evt.groupId != null || evt.attendeeNodeIds.isNotEmpty)) {
       await sendCalendarDelete(eventIdHex);
     } else {
       calendarManager.deleteEvent(eventIdHex);
@@ -86,18 +88,27 @@ class CalendarProtocolService {
 
   // ── Senders ───────────────────────────────────────────────────────
 
+  List<String> _resolveRecipients(CalendarEvent event) {
+    if (event.groupId != null) {
+      final group = _ctx.groups[event.groupId!];
+      if (group == null) return [];
+      return group.members.keys
+          .where((h) => h != _ctx.identity.userIdHex)
+          .toList();
+    }
+    return event.attendeeNodeIds
+        .where((h) => h != _ctx.identity.userIdHex)
+        .toList();
+  }
+
   Future<void> sendCalendarInvite(CalendarEvent event) async {
     if (_ctx.reducedMode) {
       _log.warn('sendCalendarInvite blocked: reducedMode active');
       return;
     }
-    if (event.groupId == null) return;
 
-    final group = _ctx.groups[event.groupId!];
-    if (group == null) {
-      _log.warn('Cannot send calendar invite: group ${event.groupId} not found');
-      return;
-    }
+    final recipients = _resolveRecipients(event);
+    if (recipients.isEmpty) return;
 
     final invite = proto.CalendarInviteMsg()
       ..eventId = hexToBytes(event.eventId)
@@ -110,25 +121,29 @@ class CalendarProtocolService {
       ..timeZone = event.timeZone
       ..recurrenceRule = event.recurrenceRule ?? ''
       ..hasCall = event.hasCall
-      ..groupId = hexToBytes(event.groupId!)
       ..createdBy = _ctx.identity.userId
       ..createdByName = _ctx.displayName
       ..category = proto.EventCategory.valueOf(event.category.index) ?? proto.EventCategory.APPOINTMENT;
+    if (event.groupId != null) {
+      invite.groupId = hexToBytes(event.groupId!);
+    }
+    for (final nodeHex in event.attendeeNodeIds) {
+      invite.attendeeNodeIds.add(hexToBytes(nodeHex));
+    }
     for (final m in event.reminders) {
       invite.reminders.add(proto.CalendarReminderOffset()..minutesBefore = m);
     }
 
     final payload = invite.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == _ctx.identity.userIdHex) continue;
+    for (final recipientHex in recipients) {
       await _ctx.sendEncryptedPayload(
-        hexToBytes(memberHex),
+        hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
         Uint8List.fromList(payload),
       );
     }
 
-    _log.info('Sent CALENDAR_INVITE for ${event.title} to ${group.members.length - 1} members');
+    _log.info('Sent CALENDAR_INVITE for ${event.title} to ${recipients.length} recipients');
   }
 
   Future<void> sendCalendarRsvp(String eventIdHex, RsvpStatus status, {
@@ -141,10 +156,11 @@ class CalendarProtocolService {
       return;
     }
     final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
+    if (event == null) return;
+    if (event.groupId == null && event.attendeeNodeIds.isEmpty) return;
 
-    final group = _ctx.groups[event.groupId!];
-    if (group == null) return;
+    final recipients = _resolveRecipients(event);
+    if (recipients.isEmpty) return;
 
     final rsvp = proto.CalendarRsvpMsg()
       ..eventId = hexToBytes(eventIdHex)
@@ -156,10 +172,9 @@ class CalendarProtocolService {
     calendarManager.setRsvp(eventIdHex, _ctx.identity.userIdHex, status);
 
     final payload = rsvp.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == _ctx.identity.userIdHex) continue;
+    for (final recipientHex in recipients) {
       await _ctx.sendEncryptedPayload(
-        hexToBytes(memberHex),
+        hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
         Uint8List.fromList(payload),
       );
@@ -174,10 +189,10 @@ class CalendarProtocolService {
       return;
     }
     final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
+    if (event == null) return;
 
-    final group = _ctx.groups[event.groupId!];
-    if (group == null) return;
+    final recipients = _resolveRecipients(event);
+    if (recipients.isEmpty) return;
 
     final update = proto.CalendarUpdateMsg()
       ..eventId = hexToBytes(eventIdHex)
@@ -197,10 +212,9 @@ class CalendarProtocolService {
     }
 
     final payload = update.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == _ctx.identity.userIdHex) continue;
+    for (final recipientHex in recipients) {
       await _ctx.sendEncryptedPayload(
-        hexToBytes(memberHex),
+        hexToBytes(recipientHex),
         proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
         Uint8List.fromList(payload),
       );
@@ -215,23 +229,23 @@ class CalendarProtocolService {
       return;
     }
     final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
+    if (event == null) return;
 
-    final group = _ctx.groups[event.groupId!];
-    if (group == null) return;
+    final recipients = _resolveRecipients(event);
 
-    final del = proto.CalendarDeleteMsg()
-      ..eventId = hexToBytes(eventIdHex)
-      ..deletedAt = Int64(DateTime.now().millisecondsSinceEpoch);
+    if (recipients.isNotEmpty) {
+      final del = proto.CalendarDeleteMsg()
+        ..eventId = hexToBytes(eventIdHex)
+        ..deletedAt = Int64(DateTime.now().millisecondsSinceEpoch);
 
-    final payload = del.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == _ctx.identity.userIdHex) continue;
-      await _ctx.sendEncryptedPayload(
-        hexToBytes(memberHex),
-        proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
-        Uint8List.fromList(payload),
-      );
+      final payload = del.writeToBuffer();
+      for (final recipientHex in recipients) {
+        await _ctx.sendEncryptedPayload(
+          hexToBytes(recipientHex),
+          proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
+          Uint8List.fromList(payload),
+        );
+      }
     }
 
     calendarManager.deleteEvent(eventIdHex);
@@ -283,6 +297,9 @@ class CalendarProtocolService {
         timeZone: invite.timeZone.isNotEmpty ? invite.timeZone : 'UTC',
         recurrenceRule: invite.recurrenceRule.isNotEmpty ? invite.recurrenceRule : null,
         hasCall: invite.hasCall,
+        attendeeNodeIds: invite.attendeeNodeIds
+            .map((b) => bytesToHex(Uint8List.fromList(b)))
+            .toList(),
         groupId: invite.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(invite.groupId)) : null,
         category: EventCategory.values[invite.category.value.clamp(0, EventCategory.values.length - 1)],
         reminders: invite.reminders.map((r) => r.minutesBefore).toList(),

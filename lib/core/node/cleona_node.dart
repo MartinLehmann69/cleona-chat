@@ -686,12 +686,21 @@ class CleonaNode {
   DateTime? _lastReDiscoveryTrigger;
   static const Duration _reDiscoveryCooldown = Duration(seconds: 60);
 
+  /// §5.10.4 — global rate limit for Mesh Refresh (token bucket).
+  /// Per-peer cooldown alone allows N distinct ghost peers to fire N bursts
+  /// per minute. The global bucket caps total bursts to [_meshRefreshGlobalMax]
+  /// per [_meshRefreshGlobalWindow], regardless of how many peers fail.
+  final List<DateTime> _meshRefreshGlobalBucket = [];
+  static const int _meshRefreshGlobalMax = 3;
+  static const Duration _meshRefreshGlobalWindow = Duration(seconds: 60);
+
   /// §5.10.4 — timestamp of the most recent Stage-4 PEER_LIST_WANT burst,
   /// used by `_handlePeerListPushInfra` to detect "we received a reply
   /// inside the tail window" → set `_stage4ReplySeen = true`.
   DateTime? _lastStage4BurstAt;
   Duration _lastStage4TailWindow = Duration.zero;
   bool _stage4ReplySeen = false;
+  String? _stage4FailedHex;
 
   /// §5.5b First-CR-Mailbox: stored CRs waiting for the target to come
   /// online. Keyed by recipientDeviceIdHex. Each entry holds the opaque
@@ -1917,8 +1926,13 @@ class CleonaNode {
       }
       // Fire-and-forget relay forward — exclude the relay sender from
       // route candidates to prevent 2-node bounce loops.
+      // expectsReply: false — relay nodes never receive the E2E
+      // DELIVERY_RECEIPT (that goes to the originator), so counting
+      // relay-forwards as unACK'd would monotonically inflate the
+      // counter and trigger spurious Stage-4 Mesh Refresh storms.
       sendToDevice(packet, nextHop,
-              excludeNextHopHex: relaySenderHex, isRelay: true)
+              excludeNextHopHex: relaySenderHex, isRelay: true,
+              expectsReply: false)
           .then((ok) {
         if (!ok) {
           _log.warn('V3 relay send FAILED to ${nextHopHex.substring(0, 8)} '
@@ -2529,19 +2543,26 @@ class CleonaNode {
 
   void _handlePeerListPushInfra(proto.InfrastructureFrameV3 frame,
       Uint8List senderDeviceId, InternetAddress from) {
-    // §5.10.4 — Stage-4 success signal. If we are currently inside the tail
-    // window of a Mesh-Refresh burst, ANY incoming PEER_LIST_PUSH counts as a
-    // refreshed peer-state and lets the post-tail check skip Stage 5
-    // Re-Discovery (which is the heavier hammer). The flag is consumed by the
-    // delayed callback in `_triggerMeshRefresh`.
-    if (_lastStage4BurstAt != null) {
-      final age = DateTime.now().difference(_lastStage4BurstAt!);
-      if (age <= _lastStage4TailWindow) {
-        _stage4ReplySeen = true;
-      }
-    }
+    // §5.10.4 — Stage-4 success signal: only count if this PUSH actually
+    // contains the failed peer we asked about. A bystander PUSH (from
+    // unrelated gossip) was previously resetting the ghost peer's counter,
+    // creating a re-arm loop: bystander PUSH → counter cleared → 6 more
+    // sends → threshold → mesh refresh → bystander PUSH → repeat forever.
+    // Deferred to after parse so we can inspect the PUSH contents.
     try {
       final push = proto.PeerListPush.fromBuffer(frame.payload);
+      if (_lastStage4BurstAt != null && _stage4FailedHex != null) {
+        final age = DateTime.now().difference(_lastStage4BurstAt!);
+        if (age <= _lastStage4TailWindow) {
+          final failedBytes = hexToBytes(_stage4FailedHex!);
+          for (final peerProto in push.peers) {
+            if (_bytesEqual(Uint8List.fromList(peerProto.nodeId), failedBytes)) {
+              _stage4ReplySeen = true;
+              break;
+            }
+          }
+        }
+      }
 
       // §5.10.4 Solicited-Reply-Adoption (Architektur §5.10.4):
       //
@@ -2867,7 +2888,10 @@ class CleonaNode {
     try {
       final want = proto.PeerListWant.fromBuffer(frame.payload);
       final pushData = proto.PeerListPush();
-      for (final wantedId in want.wantedNodeIds) {
+      // Cap at 50 entries to avoid giant PUSH responses (defense-in-depth
+      // against old nodes or malicious WANTs with 100+ entries).
+      final wantedIds = want.wantedNodeIds.take(50);
+      for (final wantedId in wantedIds) {
         final id = Uint8List.fromList(wantedId);
         final peer = routingTable.getPeer(id);
         if (peer == null) continue;
@@ -3022,12 +3046,22 @@ class CleonaNode {
   /// does NOT await this.
   void _triggerMeshRefresh(Uint8List failedDeviceId) {
     final failedHex = bytesToHex(failedDeviceId);
+    final now = DateTime.now();
     final last = _lastMeshRefresh[failedHex];
-    if (last != null &&
-        DateTime.now().difference(last) < _meshRefreshThrottle) {
-      return; // throttle — already refreshed recently
+    if (last != null && now.difference(last) < _meshRefreshThrottle) {
+      return; // throttle — already refreshed recently for this peer
     }
-    _lastMeshRefresh[failedHex] = DateTime.now();
+    // Global token bucket: prune expired entries, then check capacity.
+    // Checked BEFORE stamping per-peer cooldown so a peer that loses the
+    // global race isn't penalized with a 60s per-peer wait for a refresh
+    // that never fired.
+    _meshRefreshGlobalBucket.removeWhere(
+        (t) => now.difference(t) >= _meshRefreshGlobalWindow);
+    if (_meshRefreshGlobalBucket.length >= _meshRefreshGlobalMax) {
+      return; // global rate limit — too many refreshes across all peers
+    }
+    _meshRefreshGlobalBucket.add(now);
+    _lastMeshRefresh[failedHex] = now;
 
     // Build the candidate list: every peer in the routing table EXCEPT the
     // failed one and our own identities. Cost-order via DV `bestRouteTo`
@@ -3094,6 +3128,7 @@ class CleonaNode {
     _lastStage4BurstAt = DateTime.now();
     _lastStage4TailWindow = tailTotal;
     _stage4ReplySeen = false;
+    _stage4FailedHex = failedHex;
     Future.delayed(tailTotal, () {
       if (!_running) return;
       if (_stage4ReplySeen) {
@@ -3237,7 +3272,7 @@ class CleonaNode {
       // bootstrap on another subnet) never appear in peerSummaries and
       // cannot be included as seed peers in ContactSeed URIs.
       if (result.changed) {
-        final missing = <Uint8List>[];
+        final candidates = <({Uint8List id, String hex, int cost})>[];
         final now = DateTime.now();
         for (final entry in entries) {
           if (entry.cost >= Route.infinity) continue;
@@ -3245,13 +3280,21 @@ class CleonaNode {
           if (routingTable.getPeer(destBytes) != null) continue;
           final lastWant = _dvSeedWantCooldown[entry.destinationHex];
           if (lastWant != null && now.difference(lastWant).inSeconds < 120) continue;
-          missing.add(destBytes);
-          _dvSeedWantCooldown[entry.destinationHex] = now;
+          candidates.add((id: destBytes, hex: entry.destinationHex, cost: entry.cost));
         }
-        if (missing.isNotEmpty) {
+        // Cap at 10 per batch (cheapest first) to avoid giant PUSH
+        // responses (109 entries → 107KB / 90 fragments). Remaining
+        // destinations are eligible on the next ROUTE_UPDATE cycle.
+        candidates.sort((a, b) => a.cost.compareTo(b.cost));
+        final batch = candidates.take(10).toList();
+        // Only stamp cooldown for destinations actually requested.
+        for (final c in batch) {
+          _dvSeedWantCooldown[c.hex] = now;
+        }
+        if (batch.isNotEmpty) {
           final wantData = proto.PeerListWant();
-          for (final id in missing) {
-            wantData.wantedNodeIds.add(id);
+          for (final c in batch) {
+            wantData.wantedNodeIds.add(c.id);
           }
           _sendInfra(
             messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
@@ -3259,8 +3302,9 @@ class CleonaNode {
             recipientDeviceId: senderDeviceId,
           );
           _outstandingPeerListWants[fromHex] = now;
-          _log.info('DV: Requested peer metadata for ${missing.length} '
-              'DV-only destinations from ${fromHex.substring(0, 8)}');
+          _log.info('DV: Requested peer metadata for ${batch.length} '
+              'DV-only destinations from ${fromHex.substring(0, 8)}'
+              '${candidates.length > 10 ? " (${candidates.length - 10} deferred)" : ""}');
         }
       }
 
@@ -4224,6 +4268,7 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_PEER_STORE:
       case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
       case proto.MessageTypeV3.MTV3_PEER_LIST_PUSH:
+      case proto.MessageTypeV3.MTV3_PEER_LIST_WANT:
       case proto.MessageTypeV3.MTV3_ROUTE_UPDATE:
       case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
       case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
@@ -5007,7 +5052,13 @@ class CleonaNode {
     // Notify daemon/headless to re-query public IP
     onNetworkChangeDetected?.call();
 
-    // 0. Deactivate mobile fallback (new network = fresh start via WiFi)
+    // 0. Abort any running subnet scan BEFORE reconnecting sockets — the scan
+    // uses its own NativeUdpSender (FFI to WSASendTo) at 50 pps. If it runs
+    // concurrently with reconnectUdpSockets(), the combined FFI burst can trip
+    // the Dart VM's stack-guard on Windows (SEGFAULT, no error handler).
+    localDiscovery.stopSubnetScan();
+
+    // 0b. Deactivate mobile fallback (new network = fresh start via WiFi)
     transport.stopMobileFallback();
 
     // 1. Reset NAT + port mapping
@@ -5045,7 +5096,14 @@ class CleonaNode {
     // 3b. Soft-reset of per-peer state (Architektur §2.7.2 / §7.6).
     // Per-address failure counters and exponential backoff are network-bound
     // and cleared outright — a peer unreachable on the old network may be
-    // perfectly reachable on the new one. Learned relay routes are NOT
+    // perfectly reachable on the new one.
+    // §5.10.4: Clear accumulated unacked counters — failure evidence from the
+    // old interface is void; without this, frozen counters suppress Stage-4
+    // recovery against peers now reachable on the new interface.
+    _unackedPacketsToPeer.clear();
+    _lastMeshRefresh.clear();
+    _meshRefreshGlobalBucket.clear();
+    // Learned relay routes are NOT
     // cleared but marked `stale` (cost penalty +5, 30 s revalidation
     // deadline): a route that was working before the event almost always
     // still is, and the cost penalty just ensures fresh post-recovery

@@ -543,14 +543,15 @@ class IdentityManager {
         createdAt: DateTime.now(),
       );
 
-      // Read nodeIdHex if keys exist
       final keysFile = File('${identity.profileDir}/keys.json');
-      if (keysFile.existsSync()) {
-        try {
-          final keys = jsonDecode(keysFile.readAsStringSync()) as Map<String, dynamic>;
-          identity.nodeIdHex = keys['nodeIdHex'] as String?;
-        } catch (_) {}
+      if (!keysFile.existsSync()) return [];
+      final Map<String, dynamic> keys;
+      try {
+        keys = jsonDecode(keysFile.readAsStringSync()) as Map<String, dynamic>;
+      } catch (_) {
+        return [];
       }
+      identity.nodeIdHex = keys['nodeIdHex'] as String?;
 
       saveIdentities([identity]);
       return [identity];

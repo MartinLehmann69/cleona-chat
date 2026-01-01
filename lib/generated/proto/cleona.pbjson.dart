@@ -2573,6 +2573,7 @@ const CalendarInviteMsg$json = {
     {'1': 'rsvp_deadline', '3': 14, '4': 1, '5': 3, '10': 'rsvpDeadline'},
     {'1': 'category', '3': 15, '4': 1, '5': 14, '6': '.cleona.EventCategory', '10': 'category'},
     {'1': 'reminders', '3': 16, '4': 3, '5': 11, '6': '.cleona.CalendarReminderOffset', '10': 'reminders'},
+    {'1': 'attendee_node_ids', '3': 17, '4': 3, '5': 12, '10': 'attendeeNodeIds'},
   ],
 };
 
@@ -2588,7 +2589,7 @@ final $typed_data.Uint8List calendarInviteMsgDescriptor = $convert.base64Decode(
     '0gASgJUg1jcmVhdGVkQnlOYW1lEiMKDXJzdnBfZGVhZGxpbmUYDiABKANSDHJzdnBEZWFkbGlu'
     'ZRIxCghjYXRlZ29yeRgPIAEoDjIVLmNsZW9uYS5FdmVudENhdGVnb3J5UghjYXRlZ29yeRI8Cg'
     'lyZW1pbmRlcnMYECADKAsyHi5jbGVvbmEuQ2FsZW5kYXJSZW1pbmRlck9mZnNldFIJcmVtaW5k'
-    'ZXJz');
+    'ZXJzEioKEWF0dGVuZGVlX25vZGVfaWRzGBEgAygMUg9hdHRlbmRlZU5vZGVJZHM=');
 
 @$core.Deprecated('Use calendarRsvpMsgDescriptor instead')
 const CalendarRsvpMsg$json = {

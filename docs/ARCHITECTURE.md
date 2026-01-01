@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c8a7b26a4772, 2026-07-08). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:3c22c01bddb6, 2026-07-08). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -4811,8 +4811,9 @@ CalendarEvent {
   birthdayContactId: bytes (optional, linked contact's node ID)
   birthdayYear:     int32 (optional, birth year for age calculation, 0 = unknown)
 
-  // Group/Call integration
-  groupId:          bytes (optional, linked group/channel ID)
+  // Participants: individual contacts OR group (mutually exclusive)
+  attendeeNodeIds:  List<bytes> (individual invitees, node IDs; empty for personal/group events)
+  groupId:          bytes (optional, linked group/channel ID; empty when attendeeNodeIds is set)
   hasCall:          bool (if true, a group call can be started from this event)
   callStarted:      bool (runtime flag, not persisted in invite)
 
@@ -4848,30 +4849,34 @@ message ReminderOffset {
 }
 ```
 
-##### 11.1.2.2 CalendarInvite (Group Events)
+##### 11.1.2.2 CalendarInvite (Contact & Group Events)
 
-When a user creates an event linked to a group (`groupId` set), an invitation is distributed to all group members via Pairwise Fanout (§9.1):
+An event can target either **individual contacts** (`attendeeNodeIds` set) or an **entire group** (`groupId` set). The two modes are mutually exclusive — the UI enforces this. When saving, the invite is sent to the resolved recipient list:
+
+- **Contact event:** invite is sent to each node in `attendeeNodeIds` via `sendEncryptedPayload()`.
+- **Group event:** invite is sent to all group members (minus self) via Pairwise Fanout (§9.1).
 
 ```
 CalendarInvite {
-  eventId:      UUID
-  title:        string
-  description:  string
-  location:     string
-  startTime:    int64
-  endTime:      int64
-  allDay:       bool
-  timeZone:     string
-  recurrenceRule: string (optional)
-  hasCall:      bool
-  groupId:      bytes
-  createdBy:    bytes (inviter's node ID)
-  createdByName: string (inviter's display name)
-  rsvpDeadline: int64 (optional, Unix ms)
+  eventId:          UUID
+  title:            string
+  description:      string
+  location:         string
+  startTime:        int64
+  endTime:          int64
+  allDay:           bool
+  timeZone:         string
+  recurrenceRule:   string (optional)
+  hasCall:          bool
+  groupId:          bytes (set for group events)
+  attendeeNodeIds:  repeated bytes (set for contact events)
+  createdBy:        bytes (inviter's node ID)
+  createdByName:    string (inviter's display name)
+  rsvpDeadline:     int64 (optional, Unix ms)
 }
 ```
 
-The invite appears both in the recipient's calendar and as an interactive card in the group chat (see §11.1.7).
+The same `_resolveRecipients()` helper is used for RSVP, Update and Delete — it checks `groupId` first (group members minus self), falling back to `attendeeNodeIds`. For group events the invite additionally appears as an interactive card in the group chat (see §11.1.7).
 
 ##### 11.1.2.3 RSVP Response
 

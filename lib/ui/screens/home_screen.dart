@@ -1255,12 +1255,12 @@ class _ConversationListViewState extends State<_ConversationListView> {
               // Type-specific entries
               if (conv.isGroup) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('group_info'))])),
-                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_group'), style: const TextStyle(color: Colors.red))])),
               ],
               if (conv.isChannel) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
                 if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
-                  PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+                  PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_channel'), style: const TextStyle(color: Colors.red))])),
               ],
               if (!conv.isGroup && !conv.isChannel) ...[
                 PopupMenuItem(value: 'rename_contact', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('rename_contact'))])),
@@ -1357,13 +1357,13 @@ class _ConversationListViewState extends State<_ConversationListView> {
         content: Text(locale.tr('leave_confirm', {'name': conv.displayName})),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: colorScheme.error),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
             onPressed: () {
               Navigator.pop(ctx);
               widget.service.leaveGroup(conv.id);
             },
-            child: Text(locale.get('leave')),
+            child: Text(locale.get('leave_group')),
           ),
         ],
       ),
@@ -1379,13 +1379,13 @@ class _ConversationListViewState extends State<_ConversationListView> {
         content: Text(locale.tr('leave_confirm', {'name': conv.displayName})),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: colorScheme.error),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
             onPressed: () {
               Navigator.pop(ctx);
               widget.service.leaveChannel(conv.id);
             },
-            child: Text(locale.get('leave')),
+            child: Text(locale.get('leave_channel')),
           ),
         ],
       ),

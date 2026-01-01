@@ -2349,6 +2349,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
     bool? taskCompleted, int? taskPriority, bool? cancelled,
+    List<String>? attendeeNodeIds,
   }) async {
     final resp = await _sendRequest('calendar_update_event', params: {
       'eventId': eventIdHex,
@@ -2365,6 +2366,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         'taskCompleted': ?taskCompleted,
         'taskPriority': ?taskPriority,
         'cancelled': ?cancelled,
+        'attendeeNodeIds': ?attendeeNodeIds,
       },
     });
     if (resp.success) {

@@ -406,7 +406,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final isFirstRender = _lastRenderedMessageCount < 0;
       final grew = messages.length > _lastRenderedMessageCount;
       _lastRenderedMessageCount = messages.length;
-      if ((isFirstRender || grew) && (isFirstRender || _isNearBottom())) {
+      final lastIsOutgoing = grew && messages.isNotEmpty && messages.last.isOutgoing;
+      if ((isFirstRender || grew) && (isFirstRender || lastIsOutgoing || _isNearBottom())) {
         _scrollToBottomAfterBuild();
       }
     }
@@ -1413,15 +1414,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 onPressed: () => Navigator.pop(ctx),
                 child: Text(locale.get('cancel')),
               ),
-              // Fix #U14: Destructive action gets Danger styling + confirmation
-              // sub-dialog so "Leave" is no longer visually equivalent to "Cancel".
-              FilledButton.icon(
-                icon: const Icon(Icons.exit_to_app, size: 18),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error,
-                  foregroundColor: Theme.of(context).colorScheme.onError,
+              TextButton.icon(
+                icon: Icon(Icons.exit_to_app, size: 18, color: Theme.of(context).colorScheme.error),
+                style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(context).colorScheme.error,
                 ),
-                label: Text(locale.get('leave')),
+                label: Text(locale.get('leave_group')),
                 onPressed: () {
                   // Folgefix #U14: Owner-aware confirm body — warnt den Owner,
                   // dass die Ownership automatisch transferiert wird, und
@@ -1464,8 +1462,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           onPressed: () => Navigator.pop(confirmCtx),
                           child: Text(locale.get('cancel')),
                         ),
-                        FilledButton(
-                          style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+                        TextButton(
+                          style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
                           onPressed: () {
                             Navigator.pop(confirmCtx);
                             Navigator.pop(ctx);
@@ -1474,7 +1472,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               if (context.mounted) Navigator.pop(context);
                             });
                           },
-                          child: Text(locale.get('leave')),
+                          child: Text(locale.get('leave_group')),
                         ),
                       ],
                     ),
@@ -1827,16 +1825,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 onPressed: () => Navigator.pop(ctx),
                 child: Text(locale.get('cancel')),
               ),
-              // Fix #U14: same treatment as group-info dialog — destructive
-              // "Leave" now requires a confirmation so it cannot be confused
-              // with the neutral dismiss action.
-              FilledButton.icon(
-                icon: const Icon(Icons.exit_to_app, size: 18),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error,
-                  foregroundColor: Theme.of(context).colorScheme.onError,
+              TextButton.icon(
+                icon: Icon(Icons.exit_to_app, size: 18, color: Theme.of(context).colorScheme.error),
+                style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(context).colorScheme.error,
                 ),
-                label: Text(locale.get('leave')),
+                label: Text(locale.get('leave_channel')),
                 onPressed: () {
                   // Folgefix #U14 (symmetrisch zum Group-Leave): Channel-Owner
                   // wird vor Auto-Transfer der Owner-Rolle gewarnt. Transfer-
@@ -1878,8 +1872,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           onPressed: () => Navigator.pop(confirmCtx),
                           child: Text(locale.get('cancel')),
                         ),
-                        FilledButton(
-                          style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+                        TextButton(
+                          style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
                           onPressed: () {
                             Navigator.pop(confirmCtx);
                             Navigator.pop(ctx);
@@ -1888,7 +1882,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               if (context.mounted) Navigator.pop(context);
                             });
                           },
-                          child: Text(locale.get('leave')),
+                          child: Text(locale.get('leave_channel')),
                         ),
                       ],
                     ),
@@ -2449,6 +2443,17 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         _scrollController.jumpTo(after);
         _suppressScrollNav = false;
+        _scheduleLateContentRecheck(after);
+      }
+    });
+  }
+
+  void _scheduleLateContentRecheck(double stableExtent) {
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted || !_scrollController.hasClients) return;
+      final pos = _scrollController.position;
+      if (pos.maxScrollExtent > stableExtent + 0.5 && _isNearBottom()) {
+        _jumpToBottomRepeatedly(remainingAttempts: 4);
       }
     });
   }

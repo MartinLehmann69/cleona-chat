@@ -1098,6 +1098,7 @@ message CalendarInviteMsg {
   int64 rsvp_deadline = 14;        // Optional deadline (Unix ms, 0 = no deadline)
   EventCategory category = 15;
   repeated CalendarReminderOffset reminders = 16;
+  repeated bytes attendee_node_ids = 17;  // Individual invitees (node IDs, 32 bytes each)
 }
 
 message CalendarRsvpMsg {
