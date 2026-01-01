@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:cleona/core/platform/process_runner.dart';
+
 /// Content extracted from the system clipboard.
 class ClipboardContent {
   final Uint8List? data;
@@ -66,12 +68,10 @@ class ClipboardHelper {
 
   /// Run an external process with a hard timeout.
   ///
-  /// [Process.run] has no timeout parameter, and `xclip -o` blocks forever when
-  /// the owner of the X selection never answers: the future never completes and
-  /// the process stays behind as an orphan. Wrapping [Process.run] in
-  /// `.timeout()` only unblocks the caller — the child is leaked because there
-  /// is no handle to kill. This helper keeps the [Process] handle and SIGKILLs
-  /// the child when the timeout fires.
+  /// Thin delegate to [ProcessRunner.run] — the implementation (Process.start +
+  /// SIGKILL on deadline, so the child is not leaked) lives there because the
+  /// archive transports need the exact same guarantee. This wrapper only keeps
+  /// the clipboard-specific default deadline, see [_defaultProcessTimeout].
   ///
   /// Returns `null` on timeout or when the process cannot be started; callers
   /// must treat that exactly like a non-zero exit code.
@@ -82,48 +82,13 @@ class ClipboardHelper {
     List<String> args, {
     Duration timeout = _defaultProcessTimeout,
     bool binaryStdout = false,
-  }) async {
-    final Process proc;
-    try {
-      proc = await Process.start(executable, args);
-    } catch (_) {
-      return null;
-    }
-    final stdoutBytes = <int>[];
-    final stderrBytes = <int>[];
-    // Drain both pipes concurrently — an undrained pipe buffer would block the
-    // child even without a hanging selection owner.
-    final stdoutDone = proc.stdout.listen(stdoutBytes.addAll).asFuture<void>();
-    final stderrDone = proc.stderr.listen(stderrBytes.addAll).asFuture<void>();
-    var exitCode = -1;
-    try {
-      await Future.wait<void>([
-        proc.exitCode.then<void>((c) => exitCode = c),
-        stdoutDone,
-        stderrDone,
-      ]).timeout(timeout);
-    } on TimeoutException {
-      proc.kill(ProcessSignal.sigkill);
-      return null;
-    } catch (_) {
-      proc.kill(ProcessSignal.sigkill);
-      return null;
-    }
-    return ProcessResult(
-      proc.pid,
-      exitCode,
-      binaryStdout ? stdoutBytes : _decodeBytes(stdoutBytes),
-      _decodeBytes(stderrBytes),
-    );
-  }
-
-  static String _decodeBytes(List<int> bytes) {
-    try {
-      return systemEncoding.decode(bytes);
-    } catch (_) {
-      return String.fromCharCodes(bytes);
-    }
-  }
+  }) =>
+      ProcessRunner.run(
+        executable,
+        args,
+        timeout: timeout,
+        binaryStdout: binaryStdout,
+      );
 
   /// Detect which clipboard tool is available (cached).
   ///

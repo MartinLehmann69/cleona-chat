@@ -408,20 +408,35 @@ class Transport {
     // our data port from the CLEO discovery payload (bytes 36-37), not
     // from the UDP header. Same pattern as LocalDiscovery (2026-05-15).
     if (Platform.isWindows && nativeUdpSupportedPlatform()) {
-      try {
-        _nativeSender = NativeUdpSender.open(
-          localPort: 0,
-          reuseAddr: true,
-          broadcastEnable: true,
-        );
-        _nativeSender!.setBuffers(sndBytes: 4 * 1024 * 1024);
-        _log.info('Native UDP transport sender attached '
-            '(${NativeUdpSender.libraryVersion()})');
-      } catch (e) {
-        _log.warn('Native UDP transport sender unavailable, '
-            'falling back to Dart socket: $e');
-        _nativeSender = null;
-      }
+      // §4.5.2: der Shim ist eine HARTE Abhaengigkeit auf Windows-Desktop, es
+      // gibt keinen Runtime-Fallback. Die Ausnahme propagiert deshalb bewusst.
+      //
+      // Hier stand bis S290 ein `catch`, das auf Darts Sendepfad zurueckfiel
+      // und das mit einer warn-Zeile meldete. Genau dieser Fallback wurde in
+      // §4.5.2 erwogen und verworfen, mit der dort ausgeschriebenen Begruendung:
+      // er maskiert die Bedingungen, gegen die der Shim gebaut wurde — Darts
+      // Windows-Sendepfad verwirft "roughly 89 percent of sustained UDP send
+      // calls", der Ausfall sah im Betrieb also aus wie "der Shim hilft nicht"
+      // statt wie "der Shim laeuft nicht". §20.3a wiederholt es in der Tabelle:
+      // "Required on both desktop platforms (no runtime fallback)".
+      //
+      // Der Vertrag steht auch am Aufgerufenen (native_udp_sender.dart:14,
+      // "callers are expected to let the exception"), und lan_discovery.dart
+      // haelt ihn ein. Nur diese Stelle tat es nicht — und weil
+      // CleonaNode.start() den Transport VOR der Discovery startet (§20.3a),
+      // erschien bei fehlender Bibliothek zuerst die irreführende
+      // "falling back"-Zeile, bevor die Discovery den Lauf beendete. Schlimmer
+      // war der Fall "Bibliothek vorhanden, cleona_udp_open scheitert": die
+      // Discovery oeffnet mit localPort 0 und kam durch, der Daemon lief mit
+      // dem Dart-Sendepfad auf dem Datenport weiter, sichtbar allein als warn.
+      _nativeSender = NativeUdpSender.open(
+        localPort: 0,
+        reuseAddr: true,
+        broadcastEnable: true,
+      );
+      _nativeSender!.setBuffers(sndBytes: 4 * 1024 * 1024);
+      _log.info('Native UDP transport sender attached '
+          '(${NativeUdpSender.libraryVersion()})');
     }
 
     // Native IPv6 sender — same rationale as IPv4 native sender: bypass
@@ -779,12 +794,13 @@ class Transport {
       final m2 = data[10];
       final m3 = data[11];
       final isDiscoveryMagic =
-          // CLEO / CPRB / CFRA / CFNK / CEEP all start with 'C' (0x43)
+          // CLEO / CPRB / CFRA / CFRL / CFNK / CEEP all start with 'C' (0x43)
           m0 == 0x43 &&
               ((m1 == cleoMagic[1] && m2 == cleoMagic[2] && m3 == cleoMagic[3]) ||
                   (m1 == cprbMagic[1] && m2 == cprbMagic[2] && m3 == cprbMagic[3]) ||
-                  (m1 == fragmentMagic[1] && m2 == fragmentMagic[2] && m3 == fragmentMagic[3]) ||
-                  (m1 == fragmentNackMagic[1] && m2 == fragmentNackMagic[2] && m3 == fragmentNackMagic[3]) ||
+                  // CFRA + CFRL + CFNK — the fragmenter owns its own magic
+                  // list so a new framing never has to be re-typed here.
+                  UdpFragmenter.matchesFragmentMagicTail(m1, m2, m3) ||
                   (m1 == ceepMagic[1] && m2 == ceepMagic[2] && m3 == ceepMagic[3]));
       if (isDiscoveryMagic) {
         _processPrefixWrappedPacket(data, datagram.address, datagram.port);
@@ -1040,11 +1056,17 @@ class Transport {
   /// For wire bytes >1200, automatically fragments. The caller is
   /// responsible for producing [serialized] via [serializeWithTag] (which
   /// computes and embeds the Closed-Network HMAC `network_tag`).
+  ///
+  /// [liveMedia] (Architecture §10.3.1, invariant I8): fragment with the
+  /// FEC-protected CFRL framing and do NOT keep the fragments for NACK
+  /// resend. Only `CleonaNode._sendV3ViaHop` sets it, and only for the four
+  /// live-media message types — this layer never infers it.
   Future<bool> sendUdpSerialized(
     Uint8List serialized,
     InternetAddress address,
-    int remotePort,
-  ) async {
+    int remotePort, {
+    bool liveMedia = false,
+  }) async {
     // Transport invariant: 0.0.0.0 / :: are never valid destinations.
     // Sending to them causes EINVAL which kills the Dart UDP socket.
     if (address.address == '0.0.0.0' || address.address == '::' || remotePort <= 0) {
@@ -1082,7 +1104,8 @@ class Transport {
       // on the receiver side are then parsed as NetworkPacketV3 with its
       // own in-frame tag verified end-to-end.
       if (data.length > maxFragmentPacketSize) {
-        final fragments = UdpFragmenter.fragment(data);
+        final fragments =
+            UdpFragmenter.fragment(data, liveMedia: liveMedia);
         var anySent = false;
         final wrappedFragments = <Uint8List>[];
         for (final frag in fragments) {
@@ -1143,7 +1166,16 @@ class Transport {
           onBytesSent?.call(data.length);
           _log.info('sendUdp: ${wrappedFragments.length} fragments (${data.length}B) '
               'sent to ${address.address}:$remotePort');
-          final header = UdpFragmenter.parseHeader(fragments.first);
+          // §10.3.1 / I8: live-media fragments are NOT cached. The cache
+          // exists solely to answer a fragment NACK with a retransmit, and
+          // live media must never be retransmitted — its recovery is the
+          // FEC parity carried in the CFRL group itself. Skipping the write
+          // also closes the door on a peer that NACKs live fragments anyway
+          // (old build, or deliberately): with no cache entry there is
+          // nothing to resend.
+          final header = liveMedia
+              ? null
+              : UdpFragmenter.parseHeader(fragments.first);
           if (header != null) {
             final cacheKey = '${address.address}:${header.fragmentId}';
             // Evict oldest entry if cache is full (Dart Map preserves insertion order).
@@ -1499,6 +1531,16 @@ class Transport {
   /// (last attempt succeeded). Returns false on `false` while still in
   /// the cooldown window; returns true once cooldown elapsed (re-probe
   /// eligible).
+  /// Whether the TLS [SecurityContext] could not be obtained at all (missing
+  /// openssl, no profile dir — see [_tlsContextUnavailable]). When true,
+  /// [tlsBulkCapable] returns false for EVERY destination, i.e. Stufe 3 der
+  /// Protocol Escalation (§4.1) existiert auf dieser Instanz nicht.
+  ///
+  /// Read-only accessor for diagnostics: `_sendV3ViaHop` reports it on the
+  /// TLS-skip path so a skipped target is distinguishable from a failed TLS
+  /// attempt in the log (Befund 3).
+  bool get tlsContextUnavailable => _tlsContextUnavailable;
+
   bool tlsBulkCapable(InternetAddress address, int port) {
     if (_tlsContextUnavailable) return false;
     final entry = _tlsCapability['${address.address}:$port'];

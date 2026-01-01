@@ -44,6 +44,12 @@ import Network
       CameraHandler.register(with: cameraRegistrar)
     }
 
+    // Session behaviour (V1.10): AudioFocus/interruption/proximity — iOS
+    // counterpart to Android's session-behaviour channel in MainActivity.kt.
+    if let sessionBehaviourRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "SessionBehaviourHandler") {
+      SessionBehaviourHandler.register(with: sessionBehaviourRegistrar)
+    }
+
     // Deep link drain: Dart calls consumePendingDeepLink to pick up
     // cleona:// URIs that opened the app (cold or warm start).
     if let deepLinkRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "DeepLinkHandler") {

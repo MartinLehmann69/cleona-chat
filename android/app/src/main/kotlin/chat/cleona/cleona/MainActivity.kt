@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -47,11 +49,45 @@ class MainActivity : FlutterActivity() {
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
     private val UPDATE_CHANNEL = "chat.cleona/update"
+    private val SESSION_BEHAVIOUR_CHANNEL = "chat.cleona/session_behaviour"
     private val MSG_CHANNEL_ID = "cleona_messages"
     private val CALL_CHANNEL_ID = "cleona_calls"
     private val CALL_NOTIFICATION_ID = 42001
     private val NOTIFICATION_PERMISSION_CODE = 1001
     private var cameraHandler: CameraXHandler? = null
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session behaviour (V1.10, docs/SPEC_VOICE_VIDEO_REWORK.md §7 "V1.10",
+    // Cleona_Chat_Architecture_v3_0.md §10.4 "Session behaviour" table).
+    // ─────────────────────────────────────────────────────────────────────
+
+    // Registered once per configureFlutterEngine call so the focus-change
+    // callback can invokeMethod back into Dart without threading state
+    // through onAudioFocusChange's own signature.
+    private var sessionBehaviourChannel: MethodChannel? = null
+
+    // Non-null exactly while requestAudioFocus() has an outstanding grant —
+    // this IS the "do we currently hold focus" state, read by
+    // onAudioFocusChange to decide whether a LOSS is an interruption of ours
+    // or noise from a focus we never held (or already abandoned).
+    private var audioFocusRequest: AudioFocusRequest? = null
+    @Suppress("DEPRECATION")
+    private var legacyAudioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
+
+    // True from AUDIOFOCUS_LOSS_TRANSIENT(_CAN_DUCK) until the matching
+    // AUDIOFOCUS_GAIN — the round trip this class turns into
+    // onInterruptionBegin/onInterruptionEnd. A plain AUDIOFOCUS_LOSS (another
+    // app took focus for good, not just transiently) begins an interruption
+    // but is not expected to end with a GAIN of our own, so it does not set
+    // this flag — see onAudioFocusChange.
+    private var focusInterrupted = false
+
+    // PROXIMITY_SCREEN_OFF_WAKE_LOCK — held only while the active call route
+    // is the earpiece (architecture §10.4, "Proximity": "screen off if and
+    // only if the active route is the earpiece"). The decision itself is
+    // Dart's (session_behaviour.dart, shouldMonitorProximity); this field
+    // only executes it.
+    private var proximityWakeLock: PowerManager.WakeLock? = null
 
     // Bug #U10b — RECORD_AUDIO runtime-permission-flow. We retain the
     // pending MethodChannel.Result across the system permission dialog so
@@ -90,6 +126,16 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // Binds libcleona_voice.so through the Java runtime (JNI_OnLoad) and
+        // hands the Android voice backend (V1.2) an application context.
+        // Without this, cleona_voice_open() always fails with
+        // CLEONA_VOICE_ERR_BACKEND — see BUILD_REQUEST_V1.2.md §2, addressed
+        // to this file's owner (V1.10). install() is idempotent and swallows
+        // UnsatisfiedLinkError on purpose (the .so and this line land in two
+        // different commits by two different owners), so it is safe to call
+        // here even before scripts/build-android-libs.sh ships the library.
+        VoiceSession.install(applicationContext)
 
         // Camera channel for video calls (Phase 3b)
         cameraHandler = CameraXHandler(
@@ -444,6 +490,32 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // Session behaviour (V1.10): AudioFocus, interruption, proximity —
+        // architecture §10.4 "Session behaviour" table. See the class-level
+        // fields above and lib/core/calls/session_behaviour.dart for why the
+        // interruption signal is bridged through this channel rather than
+        // through the cleona_voice ABI's own event queue.
+        val behaviourChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SESSION_BEHAVIOUR_CHANNEL
+        )
+        sessionBehaviourChannel = behaviourChannel
+        behaviourChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestAudioFocus" -> result.success(requestCallAudioFocus())
+                "abandonAudioFocus" -> {
+                    abandonCallAudioFocus()
+                    result.success(null)
+                }
+                "setProximityMonitoring" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    setProximityMonitoring(enabled)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -482,6 +554,19 @@ class MainActivity : FlutterActivity() {
 
     private fun ensureForegroundService() {
         startForegroundService(Intent(this, CleonaForegroundService::class.java))
+    }
+
+    // Defensive release only — a leaked PROXIMITY_SCREEN_OFF_WAKE_LOCK would
+    // otherwise survive an Activity recreation the system decided to do
+    // outside the configChanges list above (e.g. under memory pressure).
+    // Audio focus is deliberately NOT abandoned here: it is scoped to the
+    // call, not to the Activity instance, and a call keeps running via the
+    // foreground service (Arbeitsregel #8) independent of whether this
+    // Activity currently exists.
+    override fun onDestroy() {
+        proximityWakeLock?.let { if (it.isHeld) it.release() }
+        proximityWakeLock = null
+        super.onDestroy()
     }
 
     // Warm-launch via Share-Sheet or deep link (singleTop reuses this activity).
@@ -718,6 +803,147 @@ class MainActivity : FlutterActivity() {
         am.mode = AudioManager.MODE_NORMAL
         @Suppress("DEPRECATION")
         am.isSpeakerphoneOn = false
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Session behaviour (V1.10): AudioFocus, interruption, proximity.
+    //
+    // Architecture §10.4, "Session behaviour" table:
+    //   "Audio focus: Android AudioFocusRequest with
+    //    AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE, loss handled ... Without it,
+    //    media from other apps keeps playing through the call."
+    //   "Interruption: a cellular call, Siri or another VoIP call takes the
+    //    session; Cleona releases it cleanly and reclaims it afterwards.
+    //    Without this the audio stays gone after the foreign call ends."
+    //   "Proximity: screen off if and only if the active route is the
+    //    earpiece. Android PROXIMITY_SCREEN_OFF_WAKE_LOCK ..."
+    //
+    // Deliberately independent of VoiceSession's own lifecycle (I2/I6, see
+    // session_behaviour.dart's file doc): this class never calls
+    // VoiceSession.start()/stop() here. AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+    // asks the platform to silence/pause other apps' playback for the
+    // duration — EXCLUSIVE rather than plain GAIN_TRANSIENT because a call is
+    // not "background music that may duck a little", it is the one thing
+    // that should be audible.
+    // ─────────────────────────────────────────────────────────────────────
+
+    private fun requestCallAudioFocus(): Boolean {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val listener = AudioManager.OnAudioFocusChangeListener { onAudioFocusChange(it) }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(attrs)
+                .setOnAudioFocusChangeListener(listener)
+                .build()
+            val rc = am.requestAudioFocus(request)
+            val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            if (granted) {
+                audioFocusRequest = request
+                focusInterrupted = false
+            } else {
+                Log.w("Cleona", "requestAudioFocus (AudioFocusRequest) rc=$rc")
+            }
+            return granted
+        }
+
+        // API 24-25: no AudioFocusRequest class. Same duration hint via the
+        // deprecated overload.
+        @Suppress("DEPRECATION")
+        val rc = am.requestAudioFocus(
+            listener, AudioManager.STREAM_VOICE_CALL,
+            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+        )
+        val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (granted) {
+            legacyAudioFocusListener = listener
+            focusInterrupted = false
+        } else {
+            Log.w("Cleona", "requestAudioFocus (legacy) rc=$rc")
+        }
+        return granted
+    }
+
+    private fun abandonCallAudioFocus() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+            audioFocusRequest = null
+        } else {
+            @Suppress("DEPRECATION")
+            legacyAudioFocusListener?.let { am.abandonAudioFocus(it) }
+            legacyAudioFocusListener = null
+        }
+        focusInterrupted = false
+    }
+
+    // Runs on whichever thread the platform delivers focus changes on
+    // (documented as an arbitrary thread; in practice the main thread on all
+    // tested API levels, but not guaranteed) — invokeMethod requires the
+    // platform thread, hence runOnUiThread rather than a bare call.
+    private fun onAudioFocusChange(focusChange: Int) {
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // I2/I6: nothing here touches VoiceSession. This only tells
+                // Dart that a foreign call/app took the session, so the UI
+                // can show it (§10.4, "behaves like a telephony call").
+                focusInterrupted = true
+                runOnUiThread {
+                    sessionBehaviourChannel?.invokeMethod("onInterruptionBegin", null)
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                // Only an "interruption ended" if we were actually
+                // interrupted — the very first GAIN after a successful
+                // request also arrives here on some OEMs and must not be
+                // reported as an end-of-interruption with nothing to end.
+                if (focusInterrupted) {
+                    focusInterrupted = false
+                    runOnUiThread {
+                        sessionBehaviourChannel?.invokeMethod(
+                            "onInterruptionEnd",
+                            // Android has no separate "should resume" signal —
+                            // AUDIOFOCUS_GAIN itself IS the resume signal
+                            // (session_behaviour.dart, InterruptionEndInfo).
+                            mapOf("shouldResume" to true)
+                        )
+                    }
+                }
+            }
+            else -> Log.i("Cleona", "onAudioFocusChange: unhandled focusChange=$focusChange")
+        }
+    }
+
+    // Held only while the active route is the earpiece — never while the
+    // route is the speaker (architecture §10.4, "Proximity"). The decision
+    // itself is Dart's (session_behaviour.dart shouldMonitorProximity); this
+    // method only executes it and reports a level-not-supported device
+    // explicitly rather than silently no-op-ing (same "never guess, state
+    // it" posture as the ABI's I11, applied to this platform corner).
+    private fun setProximityMonitoring(enabled: Boolean) {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!enabled) {
+            proximityWakeLock?.let { if (it.isHeld) it.release() }
+            proximityWakeLock = null
+            return
+        }
+        if (proximityWakeLock?.isHeld == true) return // already on
+        if (!pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+            Log.w("Cleona", "PROXIMITY_SCREEN_OFF_WAKE_LOCK not supported on this device")
+            return
+        }
+        @Suppress("DEPRECATION")
+        val wl = pm.newWakeLock(
+            PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "cleona:call-proximity"
+        )
+        wl.acquire()
+        proximityWakeLock = wl
     }
 
     private fun triggerVibration(durationMs: Long) {

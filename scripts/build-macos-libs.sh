@@ -377,6 +377,14 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
+    # cleona_voice / cleona_video deliberately absent — see the matching
+    # comment in scripts/build-ios-libs.sh (V1.3 shares this backend with iOS;
+    # V1.15 is the video counterpart). Only the mocks exist today and they must
+    # never enter a shipped dylib bundle (native/cleona_voice/BUILD_REQUEST.md §4,
+    # native/cleona_video/BUILD_REQUEST.md §5). When V1.3/V1.15 land, add a
+    # `build_cleona_voice`/`build_cleona_video` function (dylib into
+    # Contents/Frameworks, matching cleona_audio) and add it here and to the
+    # `case "$t"` dispatch below.
     local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_pow cleona_audio)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")

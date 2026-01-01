@@ -199,6 +199,47 @@ class DvRoutingTable {
       if (existingDirect.isAlive && existingDirect.cost <= cost) {
         return false;
       }
+      // Befund 4: Route wurde per markRouteDown (3x ausgebliebenes
+      // DELIVERY_RECEIPT, §5.3/§5.8) gefallen. Eingehende Pakete beweisen
+      // ausschliesslich die Empfangsrichtung, NICHT die Sendbarkeit —
+      // dieselbe Regel, die `cleona_node.dart:1887-1890` schon fuer
+      // confirmRoute festhaelt. Ohne diesen Zweig laeuft der isAlive-Guard
+      // oben ins Leere (die Route ist ja gerade nicht alive), unten wird ein
+      // frisches Route-Objekt mit consecutiveFailures=0 und endlichem Cost
+      // gebaut, und `_addOrUpdateRoute` ERSETZT den DOWN-Eintrag
+      // (removeWhere auf `route.isDirect && r.isDirect`). Bei asymmetrischer
+      // Erreichbarkeit belebt so die intakte Empfangsrichtung die tote
+      // Sendroute in jedem Maintenance-Intervall neu.
+      //
+      // Stattdessen: Empfangsrichtung frisch halten, aber die
+      // Routing-Entscheidung unangetastet lassen — kein _addOrUpdateRoute,
+      // kein routeEpoch++, kein onRouteChanged, denn es gibt nichts Neues zu
+      // propagieren. Die Empfangs-Frische steckt bereits in `_neighbors[hex]`
+      // (:178, laeuft bei jedem Aufruf vor diesem Zweig) sowie in
+      // `PeerInfo.lastSeen` / `PeerAddress.lastReceivedAt` /
+      // `CleonaNode._confirmedPeers` — `Route.lastConfirmed` wird hier
+      // ABSICHTLICH nicht angefasst: dieses Feld ist der Alterszaehler fuer
+      // genau die Aufraeumpfade, die diesen DOWN-Zustand begrenzen.
+      // `pruneExpiredRoutes` (:511-513) und die 5-min-Grace-Entfernung in
+      // `markRouteDown` (:706) evakuieren nur Routen mit `!isAlive` UND
+      // altem `lastConfirmed`; ein Refresh bei jedem eingehenden Paket wuerde
+      // die DOWN-Route unsterblich machen und sie zusaetzlich dauerhaft in
+      // den Poison-Reverse-Advertisements halten (:567/:618/:654).
+      //
+      // Die Route verlaesst DOWN also entweder durch Entfernen (Grace 5 min /
+      // pruneExpiredRoutes; danach baut der naechste addDirectNeighbor ein
+      // frisches Route-Objekt) oder durch confirmRoute mit ausgehender
+      // Evidenz.
+      //
+      // Kein Schwarzes Loch in der Zwischenzeit: die DV-Schleife in
+      // `sendToDeviceTracked` uebergeht die Route per
+      // `!route.isAlive → continue` (cleona_node.dart:4119),
+      // `triedDirectViaDv` bleibt damit false, und der
+      // Confirmed-Neighbor-Zweig (:4163) macht weiterhin genau EINEN
+      // fire-and-forget-Direktversuch.
+      if (existingDirect.downedByAck) {
+        return false;
+      }
       // Revive dead/stale route or update cost — replace in routing table
       // but return false (not a new neighbor).
       final route = Route(
@@ -652,6 +693,10 @@ class DvRoutingTable {
           r.cost = Route.infinity;
           r.consecutiveFailures = 3;
           r.ackConfirmed = false;
+          // Befund 4: sperrt die Route gegen Wiederbelebung durch eingehende
+          // Pakete (addDirectNeighbor). Nur ausgehende Evidenz (confirmRoute)
+          // loescht das Flag wieder. Siehe Route.downedByAck.
+          r.downedByAck = true;
         }
       }
     } else {
@@ -660,6 +705,8 @@ class DvRoutingTable {
         r.cost = Route.infinity;
         r.consecutiveFailures = 3;
         r.ackConfirmed = false;
+        // Befund 4: siehe Kommentar im viaNextHopHex-Zweig oben.
+        r.downedByAck = true;
       }
     }
 
@@ -719,6 +766,24 @@ class DvRoutingTable {
     target.consecutiveFailures = 0;
     target.lastConfirmed = DateTime.now();
     target.ackConfirmed = true;
+    // Befund 4: ausgehende Evidenz — ein Receipt/PONG auf dieser Route ist
+    // der EINZIGE Grund, die Wiederbelebungssperre zu loeschen.
+    //
+    // Die Zuweisung steht bewusst NACH dem isAlive-Gate oben: eine per
+    // markRouteDown gefallene Route darf ein spaeter Confirm nicht
+    // entsperren (Befund 17) — sonst waere die Sperre durch genau das
+    // Zombie-Revival umgehbar, das dieses Gate verhindert. Dadurch ist die
+    // Zuweisung hier heute defence-in-depth: markRouteDown setzt zusammen
+    // mit dem Flag consecutiveFailures=3, und keine andere Code-Stelle
+    // senkt den Zaehler einer nicht-alive Route wieder (processRouteUpdate
+    // :332ff aktualisiert nur cost/hopCount, addRelayRouteHint :772 greift
+    // nur bei `r.isAlive`) — eine lebende Route mit downedByAck=true ist im
+    // aktuellen Stand also nicht erreichbar. Der Weg aus DOWN heraus ist das
+    // Entfernen der Route (markRouteDown-Grace 5 min / pruneExpiredRoutes)
+    // und ein danach frisch gebautes Route-Objekt. Sollte je eine Stelle
+    // dazukommen, die eine Route in-place wiederbelebt, ist die Invariante
+    // "Flag ueberlebt keine bewiesene Sendbarkeit" hier schon verankert.
+    target.downedByAck = false;
     // ackConfirmed flip lifts the bias → re-sort so the proven route takes
     // its rightful primary slot.
     _sortRoutes(destHex);

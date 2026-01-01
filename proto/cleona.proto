@@ -522,12 +522,146 @@ message CallInvite {
   bool is_group_call = 5;
   bytes group_id = 6;
   bytes group_call_key = 7;        // DEPRECATED for group media (§10.2.1): media now uses per-sender GroupCallSenderKey. Retained for wire-compat.
+
+  // ── Versionsgate (§10.4, Spec-Erratum E5) ────────────────────────────
+  //
+  // Die App-Version des Anrufers, kodiert als `major * 1000 + minor`.
+  // 3.1.x -> 3001, 3.2.0 -> 3002, 4.0.0 -> 4000. Monoton ueber jeden
+  // Versionssprung hinweg, auch ueber einen Major-Wechsel.
+  //
+  // WOZU. §10.4 legt fest, dass Abtastrate, Codec und Frame-Format sich mit
+  // 3.2.0 alle drei aendern und ein 3.1.x-Client mit einem 3.2.x-Client
+  // deshalb keinen Call halten kann. Der Empfaenger braucht dafuer eine
+  // Aussage darueber, welchen Voice-Stack der Anrufer spricht.
+  //
+  // EIN FEHLENDES FELD IST EINE AUSSAGE, KEINE LUECKE. proto3 liefert 0, und
+  // 0 ist kleiner als jede reale Version — es heisst definiert "Sender aelter
+  // als 3.2.0, abgeloester Voice-Stack". Jeder Sender ab 3.2.0 setzt das Feld.
+  // Ein Empfaenger darf aus dem Fehlen deshalb NICHT "unbekannt, also wohl in
+  // Ordnung" ableiten, sondern behandelt es wie jede zu alte Version.
+  //
+  // WARUM major+minor UND NICHT NUR DER MINOR. §10.4 formuliert das Gate als
+  // `minor >= 2`. Der Minor allein ueberlebt keinen Major-Sprung: 4.0.0 hat
+  // Minor 0, und eine Pruefung `minor >= 2` wuerde jeden 4.0-Client abweisen,
+  // obwohl er den neueren Stack hat. Das Feld traegt deshalb beides. Damit ist
+  // sowohl die woertliche Regel aus §10.4 bildbar (`(v % 1000) >= 2`) als auch
+  // eine rollover-feste (`v >= 3002`) — die Wahl zwischen beiden ist eine
+  // Entscheidung ueber die Auswertung, nicht ueber das Wire-Format, und faellt
+  // damit nicht hier. Siehe Befund zu §10.4 im Paketbericht V1.12.
+  //
+  // WARUM OHNE PATCH. Ein Patch-Release aendert den Voice-Stack nicht (semver),
+  // und der Patch-Zaehler dieses Projekts laeuft bis weit ueber 99 (v3.1.160).
+  // Jede Kodierung, die ihn in eine feste Stelle packt, waere darueber
+  // uebergelaufen und haette 3.1.160 groesser als 3.2.0 aussehen lassen.
+  // Kappung: minor < 1000.
+  //
+  // DIE PRUEFUNG SELBST LIEGT NICHT HIER. Sie gehoert zu V2.1
+  // (`call_service.dart`, `handleCallInviteV3`), zusammen mit dem fuer den
+  // Nutzer sichtbaren Ablehnungsgrund und dessen Uebersetzung. §10.4: ein
+  // Call zwischen inkompatiblen Versionen wird ausdruecklich abgelehnt,
+  // "never allowed to fail silently".
+  uint32 caller_app_major_minor = 8;
+
+  // ── Medienformat-Aushandlung (§10.3.1/§10.4/§10.6, V1.18) ────────────
+  //
+  // Die Spanne der Medienformate, die der Anrufer sprechen kann. Getrennt
+  // fuer Audio und Video, weil beide getrennte ABIs (`cleona_voice.h`,
+  // `cleona_video.h`), getrennte Codecs und getrennte Stufenplaene haben —
+  // §10.4 Stufe 5 tauscht den Audio-Codec (Opus), §10.6 Stufe 4/5 den
+  // Video-Codec, unabhaengig voneinander. Ein gemeinsamer Zaehler wuerde
+  // eine Video-Aenderung zwingen, Audio mit abzuwerten, obwohl sich am
+  // Audioformat nichts geaendert hat.
+  //
+  // WAS EIN ZAEHLER UMFASST. Fuer seine Mediengattung: die Wire-Rahmung der
+  // Medien-Nachricht, den Codec samt Parametern, das Frame-Layout und die
+  // AEAD-Konstruktion auf dieser Nutzlast. Diese vier aendern sich in diesem
+  // Projekt gemeinsam, nicht einzeln: §10.4 aendert mit 3.2.0 Abtastrate,
+  // Codec UND Frame-Format und nennt das EINE Inkompatibilitaet. Vier
+  // getrennte Zaehler wuerden Kombinationen beschreibbar machen, die kein
+  // Build je erzeugt und die niemand testen kann.
+  //
+  // WOZU — UND WOZU AUSDRUECKLICH NICHT. Zu 3.1 gibt es keine
+  // Rueckwaertskompatibilitaet, das bleibt so (§10.4 "Compatibility: none,
+  // by decision"). Diese Felder stellen sie nicht her. Sie existieren fuer
+  // den umgekehrten Fall: damit eine KUENFTIGE Version (3.3, 4.0, ...) mit
+  // 3.2 noch sprechen kann, statt einen zweiten harten Schnitt zu erzwingen.
+  //
+  // VERHAELTNIS ZU FELD 8. Feld 8 ist ein einseitiger Boden ("ist der Peer
+  // mindestens 3.2.0") und wird nicht ausgehandelt. Er kann nicht
+  // ausdruecken, was die Gegenseite spricht, und ein heute ausgelieferter
+  // 3.2-Client traegt `>= 3002` einbetoniert: er nimmt jede kuenftige
+  // Version bedingungslos an und kann nie lernen, dass 3.4-Medien fuer ihn
+  // undekodierbar sind. Genau diese Luecke schliessen diese Felder. Die
+  // beiden ueberschneiden sich nicht — Feld 8 beantwortet "koennen wir
+  // ueberhaupt reden", diese Felder "in welchem Dialekt", und sie wirken
+  // ausschliesslich oberhalb des Bodens von Feld 8.
+  //
+  // EIN FEHLENDES FELD IST EINE AUSSAGE, KEINE LUECKE. proto3 liefert 0.
+  // Weglassen kann diese Felder nur ein Build ab 3.2.0, der vor V1.18
+  // entstanden ist — und der spricht genau das Basisformat 1. 0 heisst hier
+  // deshalb definiert "Spanne [1,1], nur das 3.2.0-Basisformat", nicht
+  // "unbekannt, also wohl in Ordnung". Das ist bewusst die ANDERE Folgerung
+  // als bei Feld 8, wo 0 zur Ablehnung fuehrt: dort stammt die 0 von einem
+  // 3.1.x-Client, der ueberhaupt keinen Call halten kann, hier von einem
+  // 3.2.0-Client, der es kann. Gleiche Regel, verschiedene Sachlage — die
+  // Folgerung ist abgeleitet, nicht gewaehlt.
+  //
+  // WARUM SPANNE UND NICHT NUR EIN MAXIMUM. Alte Formate werden fallen
+  // gelassen, nicht ewig mitgeschleppt: `PerMessageKem.acceptKemVersions`
+  // ist von {1} auf {2} gewechselt (v1 in V3.1.72 entfernt). Ohne das
+  // Minimum koennte der Angerufene ein Format waehlen, das der Anrufer
+  // laengst nicht mehr spricht; der Abbruch faende erst eine Runde spaeter
+  // beim Anrufer statt, mit schlechterem Grund. Eine zusammenhaengende
+  // Spanne genuegt — die Akzeptanzmenge dieses Projekts war immer
+  // zusammenhaengend.
+  //
+  // WARUM NICHT PRO FRAME. Ein Feld in jedem Audio-Frame kostet bei 50
+  // Frames/s dauerhaft rund 100 B/s je Richtung, gegen das Opus-Ziel von
+  // 24-32 kbps (§10.4) also ~2,7 % — fuer eine Eigenschaft, die sich
+  // waehrend der Session nie aendert. Arbeitsregel 5 und die harten
+  // Groessenschranken aus §10.3.1/I9 verbieten wiederkehrende Kosten ohne
+  // Gegenwert. Was sich mitten im Call sehr wohl aendert, ist Aufloesung
+  // und Bitrate (V1.17); die stehen bereits in `VideoFrame.width/height`
+  // und sind ein Preset, kein Format. Ein Wechsel des Formats selbst
+  // erfordert einen Neuaufbau (`MTV3_CALL_REJOIN`), der neu aushandelt.
+  // Die Aushandlung ist verlaesslich: `CALL_INVITE`/`CALL_ANSWER` sind
+  // Setup-Frames mit ML-DSA, zstd und der normalen Zustellkaskade, nicht
+  // Live-Media — sie koennen nicht still verlorengehen.
+  //
+  // DIE AUSWERTUNG LIEGT NICHT HIER. Die Aushandlungsregel steht in
+  // `lib/core/calls/media_format_version.dart`; die Verdrahtung in
+  // `call_service.dart` samt sichtbarem Ablehnungsgrund gehoert V2.1
+  // (BUILD_REQUEST_V1.18.md).
+  uint32 caller_audio_format_min = 9;
+  uint32 caller_audio_format_max = 10;
+  uint32 caller_video_format_min = 11;
+  uint32 caller_video_format_max = 12;
 }
 
 message CallAnswer {
   bytes call_id = 1;
   bytes callee_eph_x25519_pk = 2;
   bytes callee_kem_ciphertext = 3;
+
+  // ── Medienformat-Aushandlung, Ergebnis (§10.4, V1.18) ────────────────
+  //
+  // Das vom Angerufenen GEWAEHLTE Format je Mediengattung — das hoechste,
+  // das beide Seiten sprechen. Vor V1.18 trug `CallAnswer` ueberhaupt keine
+  // Versionsinformation (Felder 1-3), die Faehigkeiten des Angerufenen
+  // erreichten den Anrufer also nie. Ohne diesen Rueckkanal kann der Anrufer
+  // nicht herunterschalten, und "kuenftige Abwaertskompatibilitaet" bleibt
+  // unerreichbar — unabhaengig davon, wie das Format kodiert wird.
+  //
+  // Der Anrufer prueft den Wert gegen die eigene Spanne und gegen das, was
+  // er selbst angeboten hat, und bricht bei Abweichung mit sichtbarem Grund
+  // ab. Ein defekter oder boeswilliger Peer kann so kein Format erzwingen,
+  // das der Anrufer nie angeboten hat.
+  //
+  // Fehlt das Feld (0), gilt dieselbe Regel wie bei `CallInvite`: der
+  // Angerufene ist ein 3.2.0-Build vor V1.18 und hat damit das Basisformat 1
+  // gewaehlt. Eine Aussage, keine Luecke.
+  uint32 selected_audio_format = 4;
+  uint32 selected_video_format = 5;
 }
 
 message CallReject {
@@ -974,6 +1108,61 @@ message VideoFrame {
 
 message KeyframeRequest {
   bytes call_id = 1;              // 16-Byte Call-ID
+}
+
+// ── Own-video state (§10.6, Spec-Erratum E2) ──────────────────────────
+//
+// Why a sender is currently not sending video. Meaningful ONLY while
+// CallMediaState.sending_video == false.
+//
+// Invariante I12 — this is a statement about the SENDER'S OWN transmission.
+// It is not an instruction to the peer and grants no control over the peer's
+// camera. No value here may ever mean "switch your video off"; a message with
+// that meaning does not exist in this protocol and must not be added.
+//
+// OPEN enumeration. The extension rule is binding for every future change:
+//   * a new reason gets a NEW number. Existing numbers are never reused,
+//     never renumbered, never redefined.
+//   * a receiver that does not recognise a value MUST fall back to
+//     VIDEO_OFF_REASON_UNSPECIFIED — "no picture, and this build does not
+//     know why" — and MUST NOT map it onto a reason it does know. Folding an
+//     unknown reason into USER_DISABLED would state the peer's intent as a
+//     fact without evidence, which is the exact confusion E2 exists to
+//     remove.
+// proto3 open-enum decoding already yields that fallback: an unrecognised
+// value is kept in the unknown fields and the getter returns 0.
+enum VideoOffReason {
+  // No reason given, or a reason this build does not know (see rule above).
+  VIDEO_OFF_REASON_UNSPECIFIED            = 0;
+  // The sender switched their own video off. A deliberate act, not a fault.
+  VIDEO_OFF_REASON_USER_DISABLED          = 1;
+  // The sender cannot send: no supported encoder step produces frames that
+  // fit under the current per-frame ceiling. This is the wire form of
+  // CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE (cleona_video.h, Spec-Erratum E1),
+  // surfaced by the rate control of V1.17. The receiver shows an explanatory
+  // text — never the same state as USER_DISABLED, and never a black picture
+  // with no explanation.
+  VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT = 2;
+}
+
+// The sender's own media state inside a call (§10.6). Sent whenever the
+// sender's own video starts or stops, and never on the peer's behalf (I12).
+message CallMediaState {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  // "I am sending video." False means the peer should render the state in
+  // video_off_reason instead of the last received frame — the frozen picture
+  // is what this message exists to prevent.
+  bool sending_video = 2;
+  // Only meaningful while sending_video == false. Senders set
+  // VIDEO_OFF_REASON_UNSPECIFIED while sending_video == true, and receivers
+  // ignore the field in that case.
+  VideoOffReason video_off_reason = 3;
+  // Monotonic per (call_id, sender), starting at 1. The state travels over an
+  // unordered datagram network, so a reordered older frame would otherwise
+  // reinstate a stale "video off" while frames are arriving — precisely the
+  // wrong picture. Receivers accept strictly greater values only. Same role
+  // as GroupCallKeyRotate.key_version and CallTreeUpdate.version.
+  uint64 state_seq = 4;
 }
 
 // ── Group Calls (Phase 3c) ───────────────────────────────────────────
@@ -1769,6 +1958,16 @@ enum MessageTypeV3 {
   MTV3_CALL_TREE_UPDATE           = 84;
   MTV3_CALL_KEYFRAME_REQUEST      = 85;
   MTV3_CALL_GROUP_SENDER_KEY      = 86; // Per-sender media key announce (§10.2.1)
+
+  // ── Calls (Own-Media state, §10.6 / V1.12) ──────────────────
+  // Deliberately NOT in the live-media class above. CALL_MEDIA_STATE is a
+  // small signaling frame about the sender's own video, not a media frame:
+  // it has no 20-33 ms deadline, it must arrive, and it keeps ML-DSA + zstd
+  // and the ordinary delivery cascade. The §10.3.1 exemptions (no TLS
+  // escalation, no NACK retry, FEC instead of retransmit) apply to
+  // MTV3_CALL_AUDIO/VIDEO/GROUP_* only and must not be extended to 87.
+  MTV3_CALL_MEDIA_STATE           = 87;
+  // 88, 89 free.
 
   // ── Channel Gossip & Moderation Plumbing (§10.2) ────────────
   // Wave 2B.3: V3 carriers for the V2 CHANNEL_INDEX_EXCHANGE / JOIN_REQUEST /

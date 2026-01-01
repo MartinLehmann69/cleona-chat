@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/network/nfc_contact_exchange.dart';
 import 'package:cleona/core/network/nfc_android.dart' as nfc_hw;
-import 'package:cleona/core/services/contact_manager.dart';
+import 'package:cleona/core/services/contact_manager.dart' show Contact;
 
 // Conditional: nfc_manager only works on Android/iOS.
 bool _isNfcPlatform() => Platform.isAndroid || Platform.isIOS;

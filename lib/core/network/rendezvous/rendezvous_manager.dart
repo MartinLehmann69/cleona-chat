@@ -21,7 +21,7 @@ const Duration kRendezvousRefreshInterval = Duration(hours: 4);
 const Duration kRendezvousNetworkChangeDebounce = Duration(seconds: 10);
 
 // ---------------------------------------------------------------------------
-// Contact descriptor (minimal, no dependency on ContactManager)
+// Contact descriptor (minimal, no dependency on the contact store)
 // ---------------------------------------------------------------------------
 
 class RendezvousContact {

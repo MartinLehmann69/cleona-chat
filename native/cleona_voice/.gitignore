@@ -1,0 +1,7 @@
+# Local CMake build trees for the mock and the smoke programme.
+# `build/` is the plain build, `build-asan/` the sanitizer build used for
+# SPEC §6 check 9. Neither belongs in git — and without this file they show up
+# as untracked noise inside a directory whose contents are otherwise all
+# tracked, which makes `git status` useless as a review aid.
+build/
+build-*/

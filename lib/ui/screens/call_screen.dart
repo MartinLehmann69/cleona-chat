@@ -3,7 +3,11 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/service/cleona_service.dart'
+    show CleonaService, PeerCallMediaState;
+import 'package:cleona/ui/components/peer_video_status.dart';
 
 /// In-Call Screen — shows audio/video call with PiP layout and controls.
 class CallScreen extends StatefulWidget {
@@ -38,6 +42,20 @@ class _CallScreenState extends State<CallScreen> {
   // reads are unreliable once the element starts unmounting).
   CleonaAppState? _appStateRef;
 
+  // ── V1.6: what the peer last said about its own video (§10.6, V1.12) ──
+  //
+  // `onPeerCallMediaStateChanged`/`peerCallMediaState()` live on the
+  // concrete `CleonaService` (cleona_service.dart), not on the
+  // `ICleonaService` interface — `IpcClient` (the Linux/Windows daemon-split
+  // GUI's view of the service, see `lib/core/ipc/ipc_client.dart`) does not
+  // forward `CALL_MEDIA_STATE` yet. Gating on the concrete type (same
+  // pattern as `main.dart:544`'s `_service is CleonaService` check) keeps
+  // this correct rather than reaching for `dynamic`, which would throw on
+  // `IpcClient` at runtime instead of doing nothing. See
+  // BUILD_REQUEST_V1.6.md for what closes this gap.
+  CleonaService? _voiceCapableService;
+  PeerCallMediaState? _peerVideoState;
+
   @override
   void initState() {
     super.initState();
@@ -57,8 +75,44 @@ class _CallScreenState extends State<CallScreen> {
       // sufficient — see main.dart CleonaAppState.onRemoteVideoFrame docs.
       appState.onRemoteVideoFrame = updateRemoteFrame;
       appState.onLocalVideoFrame = updateLocalFrame;
+      _wirePeerVideoState(appState.service);
     }
   }
+
+  /// Subscribes to peer video-off-reason updates when [service] is the
+  /// in-process `CleonaService` — see the field doc on
+  /// [_voiceCapableService] for why this is conditional.
+  void _wirePeerVideoState(ICleonaService? service) {
+    if (service is! CleonaService) return;
+    if (identical(_voiceCapableService, service)) return;
+    _voiceCapableService = service;
+    service.onPeerCallMediaStateChanged = _onPeerCallMediaStateChanged;
+    // The callback only fires on a *change* (cleona_service.dart), so any
+    // state the peer already announced before this screen subscribed has to
+    // be read explicitly here.
+    final known = service.peerCallMediaState(_activeCallIdHex, _activePeerUserIdHex);
+    if (known != null && mounted) {
+      setState(() => _peerVideoState = known);
+    }
+  }
+
+  void _onPeerCallMediaStateChanged(PeerCallMediaState state) {
+    if (state.callIdHex != _activeCallIdHex) return;
+    if (!mounted) return;
+    setState(() => _peerVideoState = state);
+  }
+
+  /// Call id of the active/starting call, hex — `CallInfo.callId` is already
+  /// hex-encoded (`CallSession.callIdHex`, `call_manager.dart`).
+  String get _activeCallIdHex =>
+      _appStateRef?.service?.currentCall?.callId ?? widget.callInfo.callId;
+
+  /// For a 1:1 call the peer's user id equals `peerNodeIdHex`
+  /// (`call_manager.dart:412`: "frame.senderUserId is the inviter's
+  /// user-id (== peerNodeIdHex here...)").
+  String get _activePeerUserIdHex =>
+      _appStateRef?.service?.currentCall?.peerNodeIdHex ??
+      widget.callInfo.peerNodeIdHex;
 
   void _startDurationTimer() {
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -83,6 +137,11 @@ class _CallScreenState extends State<CallScreen> {
       if (appState.onLocalVideoFrame == updateLocalFrame) {
         appState.onLocalVideoFrame = null;
       }
+    }
+    if (_voiceCapableService != null &&
+        _voiceCapableService!.onPeerCallMediaStateChanged ==
+            _onPeerCallMediaStateChanged) {
+      _voiceCapableService!.onPeerCallMediaStateChanged = null;
     }
     _durationTimer?.cancel();
     _remoteVideoFrame?.dispose();
@@ -138,37 +197,46 @@ class _CallScreenState extends State<CallScreen> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Remote video (fullscreen)
+          // Remote video (fullscreen).
+          //
+          // §10.6/E2: a peer-announced "not sending" takes priority over any
+          // stale frame or the plain avatar placeholder — three distinct
+          // displays (userDisabled / bandwidthInsufficient / unspecified),
+          // never one. `null` (no state heard yet) falls through to the
+          // pre-existing frame-or-avatar behaviour unchanged — silence is
+          // not "video off" (see `peerCallMediaState()`'s doc comment).
           Positioned.fill(
-            child: _remoteVideoFrame != null
-                ? RawImage(
-                    image: _remoteVideoFrame,
-                    fit: BoxFit.contain,
-                  )
-                : Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircleAvatar(
-                          radius: 48,
-                          backgroundColor: Colors.grey[800],
-                          child: Text(
-                            widget.peerDisplayName.isNotEmpty
-                                ? widget.peerDisplayName[0].toUpperCase()
-                                : '?',
-                            style: const TextStyle(
-                                fontSize: 40, color: Colors.white),
-                          ),
+            child: (_peerVideoState != null && !_peerVideoState!.sendingVideo)
+                ? PeerVideoOffOverlay(reason: _peerVideoState!.videoOffReason)
+                : (_remoteVideoFrame != null
+                    ? RawImage(
+                        image: _remoteVideoFrame,
+                        fit: BoxFit.contain,
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircleAvatar(
+                              radius: 48,
+                              backgroundColor: Colors.grey[800],
+                              child: Text(
+                                widget.peerDisplayName.isNotEmpty
+                                    ? widget.peerDisplayName[0].toUpperCase()
+                                    : '?',
+                                style: const TextStyle(
+                                    fontSize: 40, color: Colors.white),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              widget.peerDisplayName,
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 20),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 16),
-                        Text(
-                          widget.peerDisplayName,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 20),
-                        ),
-                      ],
-                    ),
-                  ),
+                      )),
           ),
 
           // Top bar: duration + encryption

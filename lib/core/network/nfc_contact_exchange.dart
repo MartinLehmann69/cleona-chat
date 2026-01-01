@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:cleona/core/services/contact_manager.dart';
+import 'package:cleona/core/services/contact_manager.dart'
+    show Contact, ContactStatus, VerificationLevel;
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 
 // ---------------------------------------------------------------------------

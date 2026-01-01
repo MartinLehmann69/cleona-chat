@@ -2768,7 +2768,7 @@ class CleonaNode {
       final closest = routingTable.findClosestPeers(targetId, count: 20);
       final response = proto.DhtFindNodeResponse();
       for (final peer in closest) {
-        response.closestPeers.add(peer.toProto(gossipFilter: true));
+        response.closestPeers.add(peer.toProto(slim: true, gossipFilter: true));
       }
       _sendInfra(
         messageType: proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE,
@@ -3106,13 +3106,13 @@ class CleonaNode {
         _outstandingPeerListWants[bytesToHex(senderDeviceId)] = DateTime.now();
       }
 
-      // Push peers they need (cap at 50 to avoid fragmentation storm).
+      // Push peers they need. Deckel: maxGossipPeersPerPush (abgeleitet, siehe dort).
       if (wantedByThem.isNotEmpty) {
         final pushData = proto.PeerListPush();
-        for (final id in wantedByThem.take(50)) {
+        for (final id in wantedByThem.take(maxGossipPeersPerPush)) {
           final peer = routingTable.getPeer(id);
           if (peer != null) {
-            pushData.peers.add(peer.toProto(gossipFilter: true));
+            pushData.peers.add(peer.toProto(slim: true, gossipFilter: true));
           }
         }
         _sendInfra(
@@ -3133,7 +3133,7 @@ class CleonaNode {
       final pushData = proto.PeerListPush();
       // Cap at 50 entries to avoid giant PUSH responses (defense-in-depth
       // against old nodes or malicious WANTs with 100+ entries).
-      final wantedIds = want.wantedNodeIds.take(50);
+      final wantedIds = want.wantedNodeIds.take(maxGossipPeersPerPush);
       for (final wantedId in wantedIds) {
         final id = Uint8List.fromList(wantedId);
         final peer = routingTable.getPeer(id);
@@ -3166,7 +3166,7 @@ class CleonaNode {
           }
         }
 
-        pushData.peers.add(isSelf ? peer.toProto() : peer.toProto(gossipFilter: true));
+        pushData.peers.add(peer.toProto(slim: true, gossipFilter: !isSelf));
         pushData.hopsFromSender.add(isSelf ? 0 : route!.hopCount);
         pushData.costFromSender.add(isSelf ? 0 : route!.cost);
       }
@@ -4046,18 +4046,40 @@ class CleonaNode {
   /// device hex actually used (destHex for direct sends, relay-hop hex for
   /// relay sends, null for loopback). The service layer passes `viaHopHex`
   /// to [AckTracker.trackSend] for surgical Route-DOWN on timeout.
+  ///
+  /// `usedAddresses` carries the addresses the winning [_sendV3ViaHop]
+  /// attempt actually wrote to the wire (Befund 5, §5.8). The service layer
+  /// hands them to [AckTracker.trackSend] so a missing DELIVERY_RECEIPT
+  /// penalises the address that was used instead of every reachable address
+  /// of the hop (which is what `onResolveAddresses` returns). Empty when
+  /// nothing left the machine or on loopback.
+  ///
   /// No ACK tracking here — that lives in the service layer alongside
-  /// inner ApplicationFrame state. Returns `(ok: false, viaHopHex: null)`
-  /// when the cascade is exhausted; callers (cleona_service.sendToUser)
-  /// own S&F orchestration. Callers that do not need the hop use the
-  /// [sendToDevice] wrapper.
-  Future<({bool ok, String? viaHopHex})> sendToDeviceTracked(
+  /// inner ApplicationFrame state. Returns
+  /// `(ok: false, viaHopHex: null, usedAddresses: [])` when the cascade is
+  /// exhausted; callers (cleona_service.sendToUser) own S&F orchestration.
+  /// Callers that do not need the hop use the [sendToDevice] wrapper.
+  ///
+  /// [messageType] is the inner ApplicationFrame's message type when the
+  /// caller knows it. It exists for exactly one reason (§10.3.1, I8): the
+  /// four live-media types are exempt from TLS escalation and from
+  /// fragment-NACK retry, and that classification cannot be recovered from
+  /// the outer packet — the inner frame of ordinary traffic is KEM
+  /// ciphertext. Guessing from wire size or from `paced`/`expectsReply`
+  /// would be wrong: call SIGNALING (INVITE/ANSWER/RTT_*/…) is also sent
+  /// unpaced and unACK'd, but is ordinary, reliably-delivered traffic.
+  /// `null` therefore means "not live media" and keeps every existing
+  /// caller on exactly its current behaviour.
+  Future<({bool ok, String? viaHopHex, List<PeerAddress> usedAddresses})>
+      sendToDeviceTracked(
       proto.NetworkPacketV3 packet, Uint8List deviceId,
       {String? excludeNextHopHex,
       bool isRelay = false,
       bool expectsReply = true,
       bool? allowNeighborSpray,
-      bool paced = true}) async {
+      bool paced = true,
+      proto.MessageTypeV3? messageType}) async {
+    final liveMedia = isLiveMediaType(messageType);
     // Defaults to `expectsReply` so every existing caller keeps its current
     // behaviour; only callers that pass it explicitly decouple the two.
     final spray = allowNeighborSpray ?? expectsReply;
@@ -4087,7 +4109,8 @@ class CleonaNode {
       );
       onApplicationFramePayload?.call(
           packet, InternetAddress('0.0.0.0'), 0, loopbackSnapshot);
-      return (ok: true, viaHopHex: null);
+      // Loopback never touched the wire — no address to attribute.
+      return (ok: true, viaHopHex: null, usedAddresses: const <PeerAddress>[]);
     }
 
     // §5.10.4 — wire-bound send: bump the unACK'd counter and check whether
@@ -4144,11 +4167,12 @@ class CleonaNode {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: DV route #$attempts '
           'via hop=${bytesToHex(hopId).substring(0, 8)} '
           '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
-      final ok = await _sendV3ViaHop(packet, hopId, paced: paced);
-      if (ok) {
+      final res = await _sendV3ViaHop(packet, hopId, paced: paced, liveMedia: liveMedia);
+      if (res.ok) {
         return (
           ok: true,
           viaHopHex: route.isDirect ? destHex : bytesToHex(hopId),
+          usedAddresses: res.used,
         );
       }
     }
@@ -4165,7 +4189,10 @@ class CleonaNode {
         isPeerConfirmed(destHex)) {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'confirmed neighbor — direct + relay cascade');
-      await _sendV3ViaHop(packet, deviceId, paced: paced);
+      // Deliberately fire-and-forget: the cascade continues regardless, so
+      // this attempt is not the one the receipt gets attributed to and its
+      // `used` list has no consumer.
+      await _sendV3ViaHop(packet, deviceId, paced: paced, liveMedia: liveMedia);
     }
 
     // §8.1.1 Direct-target attempt: the target is in the routing table
@@ -4211,7 +4238,7 @@ class CleonaNode {
       _log.warn('sendToDevice ${destHex.substring(0, 8)}: relay cascade '
           'exhausted (routes=${dvRouting.routesTo(destHex).length}), '
           'skipping neighbor spray for relayed packet');
-      return (ok: false, viaHopHex: null);
+      return (ok: false, viaHopHex: null, usedAddresses: const <PeerAddress>[]);
     }
 
     // §4.7 Relay-Candidate Reachability Filter (Part 1):
@@ -4254,8 +4281,10 @@ class CleonaNode {
           _noteGatewayUsability(gwHex, true, null);
           _log.info('sendToDevice ${destHex.substring(0, 8)}: '
               'fall through to default-GW ${gwHex.substring(0, 8)}');
-          final ok = await _sendV3ViaHop(packet, gwBytes, paced: paced);
-          if (ok) return (ok: true, viaHopHex: gwHex);
+          final res = await _sendV3ViaHop(packet, gwBytes, paced: paced, liveMedia: liveMedia);
+          if (res.ok) {
+            return (ok: true, viaHopHex: gwHex, usedAddresses: res.used);
+          }
         }
       }
     }
@@ -4271,7 +4300,7 @@ class CleonaNode {
       // property of the message type, not of this destination.
       _log.trace('sendToDevice ${destHex.substring(0, 8)}: fire-and-forget '
           '— skipping neighbor relay spray');
-      return (ok: false, viaHopHex: null);
+      return (ok: false, viaHopHex: null, usedAddresses: const <PeerAddress>[]);
     }
 
     // Last-resort neighbor relay: try up to _kMaxNeighborSpray eligible
@@ -4305,13 +4334,15 @@ class CleonaNode {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'trying neighbor ${neighborHex.substring(0, 8)} as relay '
           '($neighborsTried/$kMaxNeighborSpray)');
-      final ok = await _sendV3ViaHop(packet, nBytes, paced: paced);
-      if (ok) return (ok: true, viaHopHex: neighborHex);
+      final res = await _sendV3ViaHop(packet, nBytes, paced: paced, liveMedia: liveMedia);
+      if (res.ok) {
+        return (ok: true, viaHopHex: neighborHex, usedAddresses: res.used);
+      }
     }
 
     _log.warn('sendToDevice ${destHex.substring(0, 8)}: cascade exhausted '
         '(routes=${routes.length}, neighbors=$neighborsTried/$kMaxNeighborSpray)');
-    return (ok: false, viaHopHex: null);
+    return (ok: false, viaHopHex: null, usedAddresses: const <PeerAddress>[]);
   }
 
   /// Backwards-compatible wrapper around [sendToDeviceTracked] for callers
@@ -4322,14 +4353,79 @@ class CleonaNode {
           bool isRelay = false,
           bool expectsReply = true,
           bool? allowNeighborSpray,
-          bool paced = true}) async =>
+          bool paced = true,
+          proto.MessageTypeV3? messageType}) async =>
       (await sendToDeviceTracked(packet, deviceId,
               excludeNextHopHex: excludeNextHopHex,
               isRelay: isRelay,
               expectsReply: expectsReply,
               allowNeighborSpray: allowNeighborSpray,
-              paced: paced))
+              paced: paced,
+              messageType: messageType))
           .ok;
+
+  // ── §10.3.1 / I8 + I9: Live-Media-Transport ───────────────────────────
+
+  /// The four message types that are **live media** in the sense of
+  /// Architecture §10.3.1: plain UDP, AES-encrypted, fire-and-forget, with a
+  /// 20-33 ms deadline.
+  ///
+  /// Deliberately an explicit enumeration and not a prefix test on
+  /// `MTV3_CALL_*`: everything else in the 70-86 block —
+  /// INVITE/ANSWER/REJECT/HANGUP/REJOIN/GROUP_LEAVE/GROUP_KEY_ROTATE/
+  /// RTT_PING/RTT_PONG/TREE_UPDATE/KEYFRAME_REQUEST/GROUP_SENDER_KEY — is
+  /// ordinary call SIGNALING that must keep TLS escalation and NACK retry.
+  /// Losing a `CALL_INVITE` loses the call; losing one video frame loses one
+  /// frame.
+  static bool isLiveMediaType(proto.MessageTypeV3? t) =>
+      t == proto.MessageTypeV3.MTV3_CALL_AUDIO ||
+      t == proto.MessageTypeV3.MTV3_CALL_VIDEO ||
+      t == proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO ||
+      t == proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO;
+
+  /// §4.1.1 — should this send prefer a fresh TCP+TLS connection over UDP
+  /// fragmentation?
+  ///
+  /// Extracted from `_sendV3ViaHop` so the I8 exemption is checkable without
+  /// a live node, socket or routing table (same reason
+  /// [partitionSprayTargets] is visible: a decision that only exists inside
+  /// an async send path is a decision no test ever sees).
+  ///
+  /// I8: live media is exempt unconditionally. `sendBulkViaTLS` opens a
+  /// fresh connection per payload (connect → write → flush → close); the
+  /// handshake alone outlives the frame's deadline, and TCP head-of-line
+  /// blocking is exactly what live media exists to avoid.
+  static bool preferTlsForSend(
+      {required int wireSize, required bool liveMedia}) {
+    if (liveMedia) return false;
+    if (wireSize <= maxFragmentPacketSize) return false;
+    return (wireSize / maxFragmentPacketSize).ceil() > _preferTlsFragmentCount;
+  }
+
+  /// §4.1.1 fragment count above which a payload prefers TLS. Unchanged
+  /// value, only given a name — Erratum E4 (§13 of the rework spec) records
+  /// that these ten are an escalation heuristic without a measurement basis
+  /// and therefore explicitly NOT an admissible reference for the
+  /// live-media delivery envelope.
+  static const int _preferTlsFragmentCount = 10;
+
+  /// §10.3.1 / I9 — the plain-UDP delivery envelope for ONE live-media
+  /// frame, in bytes. Consumed by V1.17 to bound the encoder preset ladder.
+  ///
+  /// Forwards to [UdpFragmenter.liveMediaMaxFrameBytes], which is the single
+  /// definition; this node-level getter exists so the encoder side does not
+  /// have to reach into the fragmenter, not to keep a second copy.
+  static int get liveMediaMaxFrameBytes => UdpFragmenter.liveMediaMaxFrameBytes;
+
+  /// Live-media frames refused because they exceeded
+  /// [liveMediaMaxFrameBytes].
+  ///
+  /// **Defect counter (Erratum E1).** In the field this is 0. A value above
+  /// zero means the encoder side produced a frame the plain-UDP path cannot
+  /// carry, i.e. the preset ladder (V1.17) failed to scale down or to shut
+  /// video off with a reason. It is never normal operation, and it is never
+  /// silent: see the WARN in [_sendV3ViaHop].
+  int liveMediaFramesDroppedOversize = 0;
 
   /// Internal: emit [packet] to the address(es) of the hop identified by
   /// [hopDeviceId]. Protocol Escalation per §4.1: UDP (auto-fragments
@@ -4356,6 +4452,43 @@ class CleonaNode {
   /// the first place — which §2.3.1 `senderDataPort` and the address-prune
   /// fix address at the source.
   static const int _maxSprayTargets = 3;
+
+  /// Deckel fuer Fremdeintraege in einer Gossip-Antwort (§4.5.x).
+  ///
+  /// Abgeleitet, nicht geraten: mit slim-Serialisierung (~450 B pro Eintrag)
+  /// und `maxFragmentPacketSize` = 1200 B bleiben 26 Eintraege bei 11.700 B =
+  /// 10 Fragmenten. Zehn ist die Schwelle, ab der dieser Knoten selbst TLS
+  /// bevorzugt (`preferTls = fragmentCount > 10`, siehe _sendV3ViaHop) —
+  /// darunter traegt der UDP-Pfad mit Fragment-NACK, darueber beginnt die
+  /// Payload-Klasse, die auf Android ohne TLS-Eskalation nicht zustellbar ist.
+  ///
+  /// Der frueher hier stehende Deckel von 50 war gegen das falsche Mass
+  /// gewaehlt. Sein Kommentar sagte "cap at 50 to avoid fragmentation storm",
+  /// aber bei vollen PeerInfoProto (~8.800 B, §4.2) sind 50 Eintraege
+  /// 440.000 B = 367 Fragmente — UEBER dem harten Deckel von 255
+  /// (udp_fragmenter.dart:45). Die Antwort war im Vollfall nicht
+  /// zusammensetzbar, nicht bloss unzuverlaessig.
+  static const int maxGossipPeersPerPush = 26;
+
+  /// Teilt die Sendeziele in (primary, fallback) — Arbeitsregel 5 / §4.6.
+  ///
+  /// Fragmentierte Payloads gehen an EIN Ziel pro Versuch: `sendUdpSerialized`
+  /// fragmentiert pro Ziel neu und wiederholt bei >8 Fragmenten zusaetzlich
+  /// Fragment 0, drei Ziele verdreifachen also die PAKETzahl. Der Zustellbeweis
+  /// leistet das DELIVERY_RECEIPT (§5.3), nicht der Spray.
+  ///
+  /// Sichtbar fuer Tests, und zwar wegen einer Invariante, die beim Bauen
+  /// dieses Deckels genau einmal gebrochen war: **primary + fallback muessen
+  /// zusammen ALLE Ziele in unveraenderter Reihenfolge ergeben.** Ein
+  /// Fallback, der einen anderen Offset ueberspringt als der Deckel nimmt,
+  /// verliert Ziele still — siehe smoke_spray_cap.
+  static (List<PeerAddress>, List<PeerAddress>) partitionSprayTargets(
+    List<PeerAddress> targets, {
+    required bool isLargePayload,
+  }) {
+    final cap = isLargePayload ? 1 : _maxSprayTargets;
+    return (targets.take(cap).toList(), targets.skip(cap).toList());
+  }
 
   /// Count of InfrastructureFrames dropped for a missing Device-KEM record,
   /// keyed by message type name. Diagnostic only — see the drop site in
@@ -4389,9 +4522,34 @@ class CleonaNode {
     }
   }
 
-  Future<bool> _sendV3ViaHop(
+  /// Emit [packet] to the hop's address(es) and report WHICH addresses the
+  /// packet was actually handed to.
+  ///
+  /// Befund 5 (§5.8): the return type used to be a bare `bool`, so no caller
+  /// could know the address a send went out on. `AckTracker.trackSend` was
+  /// therefore fed `const <PeerAddress>[]` by every production caller, and
+  /// `_handleTimeout` fell back to `onResolveAddresses` — which returns ALL
+  /// reachable addresses of the hop. One missing DELIVERY_RECEIPT then
+  /// penalised every address of the peer instead of the one that was used,
+  /// so address-level scoring could not converge on the working address.
+  ///
+  /// `used` therefore lists exactly the addresses this call wrote to the
+  /// wire (UDP or TLS). Only those are the negative candidates if the receipt
+  /// never arrives. `used` is empty whenever nothing left the machine
+  /// (pacing budget, no reachable target, all sends failed) — in that case
+  /// there is no address to blame, and `_handleTimeout`'s hop-fallback stays
+  /// the sole source.
+  ///
+  /// [liveMedia] carries the §10.3.1 / I8 exemption down from
+  /// [sendToDeviceTracked]: no TLS escalation (neither the size-based
+  /// TLS-first branch nor the unconfirmed-peer TLS fallback), and the UDP
+  /// fragmentation below uses the FEC-protected CFRL framing instead of the
+  /// NACK-retried CFRA framing.
+  Future<({bool ok, List<PeerAddress> used})> _sendV3ViaHop(
       proto.NetworkPacketV3 packet, Uint8List hopDeviceId,
-      {bool paced = true}) async {
+      {bool paced = true, bool liveMedia = false}) async {
+    /// Addresses this send actually reached the socket layer with.
+    final used = <PeerAddress>[];
     // packet.nextHopDeviceId is set by the caller (sendToDevice) to the final
     // destination, not to hopDeviceId. This ensures relay nodes forward the
     // packet rather than delivering it locally. Do NOT overwrite it here.
@@ -4412,7 +4570,7 @@ class CleonaNode {
       if (budget.count >= _hopSendBudgetLimit) {
         _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: sender-side hop '
             'budget exhausted (${budget.count}/$_hopSendBudgetLimit in 10s)');
-        return false;
+        return (ok: false, used: used);
       }
       _hopSendBudget[hopHex] =
           (count: budget.count + 1, windowStart: budget.windowStart);
@@ -4429,7 +4587,7 @@ class CleonaNode {
     }
     if (hopPeer == null) {
       _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: peer not found in routing table');
-      return false;
+      return (ok: false, used: used);
     }
     // §4.6 (V3.1.72): direct-confirmed is NOT a send gate. This is the
     // per-hop best-effort send primitive; the sendToDevice cascade decides
@@ -4451,7 +4609,7 @@ class CleonaNode {
       _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: no reachable targets '
           '(all=${allTargets.map((a) => "${a.ip}:${a.port}").toList()}, '
           'backoff=$backoffList, unreach=$unreachList)');
-      return false;
+      return (ok: false, used: used);
     }
 
     // §4.1 Protocol Escalation: always try UDP first (Transport.sendUdp
@@ -4461,30 +4619,81 @@ class CleonaNode {
     final serialized = transport.serializeWithTag(packet);
     final wireSize = serialized.length;
     final isLargePayload = wireSize > maxFragmentPacketSize;
+
+    // §10.3.1 / I9 — the encoder must keep a live-media frame inside the
+    // plain-UDP delivery envelope. If it did not, the frame cannot be sent:
+    // it has no TLS fallback (I8) and does not fit the fragment index.
+    //
+    // Erratum E1: this is a DEFECT, and it is loud. Counting without a log
+    // line would hide it in a stats screen nobody reads; a log line per
+    // frame would drown the ring buffer at 50 frames/s. So: always count,
+    // log the first occurrence and then every 100th, and report the running
+    // total in every one of those lines. A bare `return` is not permitted.
+    if (liveMedia && wireSize > UdpFragmenter.liveMediaMaxFrameBytes) {
+      liveMediaFramesDroppedOversize++;
+      if (liveMediaFramesDroppedOversize == 1 ||
+          liveMediaFramesDroppedOversize % 100 == 0) {
+        _log.warn('_sendV3ViaHop ${hopHex.substring(0, 8)}: LIVE-MEDIA FRAME '
+            'DROPPED — ${wireSize}B exceeds the plain-UDP delivery envelope '
+            'of ${UdpFragmenter.liveMediaMaxFrameBytes}B (I9). This is a '
+            'defect: the encoder preset ladder must scale down or shut video '
+            'off with a reason instead of producing an undeliverable frame. '
+            'Total dropped: $liveMediaFramesDroppedOversize');
+      }
+      return (ok: false, used: used);
+    }
+
     // §4.1.1 Size-based TLS preference: payloads that need many UDP
     // fragments (>10) are unreliable through CGNAT — carrier NAT drops
     // large bursts silently and zero fragments arrive (no NACK possible).
     // TLS (TCP) handles segmentation + retransmission reliably. Try TLS
     // first for these payloads; fall through to UDP if TLS unavailable.
+    //
+    // §10.3.1 / I8: live media never takes this branch. `sendBulkViaTLS`
+    // opens a fresh TCP+TLS connection per payload; the handshake alone
+    // outlives a 20-33 ms frame deadline, and TCP head-of-line blocking is
+    // precisely what live media exists to avoid.
     final fragmentCount = isLargePayload
         ? (wireSize / maxFragmentPacketSize).ceil()
         : 0;
-    final preferTls = fragmentCount > 10;
+    final preferTls = preferTlsForSend(wireSize: wireSize, liveMedia: liveMedia);
     _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: wireSize=$wireSize '
-        'large=$isLargePayload${preferTls ? " preferTls=true frags=$fragmentCount" : ""} '
+        'large=$isLargePayload${preferTls ? " preferTls=true frags=$fragmentCount" : ""}'
+        '${liveMedia ? " live=true frags=$fragmentCount (no TLS, no NACK)" : ""} '
         'confirmed=$isConfirmed '
         'targets=${targets.map((a) => "${a.ip}:${a.port}").join(",")}');
     if (preferTls) {
       for (final addr in targets) {
-        if (!transport.tlsBulkCapable(InternetAddress(addr.ip), addr.port)) continue;
+        if (!transport.tlsBulkCapable(InternetAddress(addr.ip), addr.port)) {
+          // Befund 3: dieser `continue` war STILL. Die einzige TLS-first-Zeile
+          // im Log entsteht im `catch` unten — und `sendBulkViaTLS` wirft per
+          // Vertrag nie (transport.dart:1521-1522, eigenes catch :1566-1569).
+          // Der TLS-first-Fehlschlagzaehler war damit konstruktionsbedingt 0
+          // auf JEDER Plattform, auch auf Desktops mit funktionierendem TLS
+          // (gemessen: 0 Fehlschlaege bei 1009 echten `sendBulkViaTLS:`
+          // -Versuchen). Stufe 3 der Protocol Escalation (§4.1) war dadurch
+          // nicht beobachtbar: "TLS uebersprungen" (kein Context / Peer im
+          // Capability-Cooldown) und "TLS versucht und gescheitert" sahen im
+          // Log identisch aus. `ctxUnavailable` trennt die beiden Ursachen —
+          // true = auf dieser Instanz gibt es ueberhaupt kein TLS (z.B.
+          // Android ohne openssl), false = per-Ziel-Cooldown im
+          // Capability-Cache. Rein additives Logging, kein Verhaltenswechsel.
+          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
+              'TLS-first skipped for ${addr.ip}:${addr.port} '
+              '(not bulk-capable, ctxUnavailable=${transport.tlsContextUnavailable})');
+          continue;
+        }
         try {
           final ok = await transport.sendBulkViaTLS(
               packet, InternetAddress(addr.ip), addr.port);
           if (ok) {
             addr.recordSuccess();
+            // §5.8: TLS delivered on this address — it is the one and only
+            // negative candidate should the DELIVERY_RECEIPT never arrive.
+            used.add(addr);
             _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
                 'TLS-first ${wireSize}B → ${addr.ip}:${addr.port} OK');
-            return true;
+            return (ok: true, used: used);
           }
         } catch (e) {
           _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
@@ -4512,10 +4721,19 @@ class CleonaNode {
     Future<void> sendTo(Iterable<PeerAddress> addrs) async {
       for (final addr in addrs) {
         try {
+          // §10.3.1 / I8: `liveMedia` selects CFRL framing with FEC parity
+          // instead of CFRA framing with NACK retry.
           final ok = await transport.sendUdpSerialized(
-              serialized, InternetAddress(addr.ip), addr.port);
+              serialized, InternetAddress(addr.ip), addr.port,
+              liveMedia: liveMedia);
           if (ok) {
             udpSentAny = true;
+            // §5.8 Befund 5: record the address the packet actually went out
+            // on. Only these are the negative candidates when the
+            // DELIVERY_RECEIPT stays away — NOT every reachable address of
+            // the hop, which is what the `onResolveAddresses` fallback in
+            // `AckTracker._handleTimeout` had to guess with.
+            used.add(addr);
             // Confirmed peers with recent bidirectional proof: early-return
             // on the first proven address — skip remaining targets.
             if (isConfirmed && addr.lastReceivedAt != null &&
@@ -4532,7 +4750,27 @@ class CleonaNode {
       }
     }
 
-    final primary = targets.take(_maxSprayTargets).toList();
+    // Arbeitsregel 5 / §4.6 — Spray-Deckel: fuer fragmentierte Payloads EIN
+    // Ziel pro Versuch. Der Deckel auf _maxSprayTargets ist damit begruendet,
+    // dass eine funktionierende Adresse "by construction" oben steht
+    // (allConnectionTargets sortiert nach priority ASC, §4.6). Das
+    // rechtfertigt, drei statt fuenfzehn Ziele zu nehmen — es rechtfertigt
+    // nicht, an alle drei zu senden, obwohl das erste Ziel den Kernel-Accept
+    // schon hat.
+    //
+    // Bei einem fragmentierten Payload wird daraus der Faktor drei auf der
+    // PAKETzahl, denn sendUdpSerialized fragmentiert pro Ziel neu
+    // (transport.dart:1084) und wiederholt bei >8 Fragmenten zusaetzlich
+    // Fragment 0 (:1129). Eine 90-Fragment-Nachricht ging so als 3 x 91 = 273
+    // Pakete raus — genau der Burst, den dieser Sendepfad ueberleben soll.
+    // Belegt im Feld-Log: `frags=14 confirmed=false targets=<7 Ziele>`.
+    //
+    // Der Zustellbeweis leistet ohnehin nicht der Spray, sondern das
+    // DELIVERY_RECEIPT (§5.3). Faellt das aus, laeuft die Kaskade weiter — der
+    // Fallback unten bedient die uebersprungenen Ziele, es geht keine
+    // Erreichbarkeit verloren, sie kommt nur nach dem ACK-Timeout statt sofort.
+    final (primary, sprayFallback) =
+        partitionSprayTargets(targets, isLargePayload: isLargePayload);
     await sendTo(primary);
     if (udpSentAny) {
       // Never silently truncate coverage — say what was skipped.
@@ -4544,7 +4782,12 @@ class CleonaNode {
       _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: top '
           '${primary.length} targets unusable — falling back to the '
           'remaining ${targets.length - primary.length}');
-      await sendTo(targets.skip(_maxSprayTargets));
+      // Aus derselben Partition wie `primary` — ein hartkodiertes
+      // skip(_maxSprayTargets) haette bei Deckel 1 die Ziele 2 und 3 still aus
+      // dem Fallback fallen lassen, also genau den Erreichbarkeitsverlust
+      // erzeugt, den der Fallback verhindern soll. Die Vollstaendigkeit der
+      // Partition ist in smoke_spray_cap als Eigenschaft zugesichert.
+      await sendTo(sprayFallback);
     }
 
     // Confirmed peer + UDP sent = success. DELIVERY_RECEIPT (RUDP-Light)
@@ -4555,7 +4798,7 @@ class CleonaNode {
     // 72h direct-confirmed TTL (§4.6) and the "no timer-based expiry"
     // principle (§5.3).
     if (udpSentAny && isConfirmed) {
-      return true;
+      return (ok: true, used: used);
     }
 
     // §4.6 (V3.1.72): for peers we are not direct-confirmed for (CGNAT,
@@ -4563,21 +4806,35 @@ class CleonaNode {
     // may be black-holed. Try TLS on all targets (real delivery feedback);
     // otherwise return false so the cascade continues to relay routes, and
     // RUDP-Light (DELIVERY_RECEIPT) confirms actual delivery.
+    //
+    // §10.3.1 / I8: `!liveMedia` guards this branch too. The exemption is
+    // from TLS escalation as such, not only from the size-based TLS-first
+    // branch above — a live-media frame to an unconfirmed peer would land
+    // here otherwise and pay the same per-payload handshake. Live media
+    // gets its delivery evidence from the call session, never from a
+    // receipt (`expectsReply: false`, §10.3.1).
     if (!isConfirmed) {
-      for (final addr in targets) {
+      for (final addr in liveMedia ? const <PeerAddress>[] : targets) {
         final ia = InternetAddress(addr.ip);
         if (!transport.tlsBulkCapable(ia, addr.port)) continue;
         try {
           final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
           if (ok) {
             addr.recordSuccess();
-            return true;
+            // §5.8: see the TLS-first branch above — same reasoning.
+            used.add(addr);
+            return (ok: true, used: used);
           }
         } catch (e) {
           _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
         }
       }
-      return false;
+      // Unconfirmed hop, no TLS delivery: the cascade continues, so this send
+      // is NOT the one the receipt will be attributed to. `used` may hold UDP
+      // addresses from the spray above — they are reported regardless of the
+      // `ok: false`, because a UDP write that the kernel accepted is exactly
+      // the "maybe black-holed" case §5.8 wants scored on a missing receipt.
+      return (ok: false, used: used);
     }
 
     // Only reachable for confirmed peers when ALL UDP sends threw socket
@@ -4589,7 +4846,7 @@ class CleonaNode {
       _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: all ${targets.length} targets failed '
           '(${targets.map((a) => "${a.ip}:${a.port} cf=${a.consecutiveFailures}").join(", ")})');
     }
-    return false;
+    return (ok: false, used: used);
   }
 
   // ── Welle 5: INFRASTRUCTURE_FRAME sender helpers (§2.3.5 + §2.4.1) ─
@@ -6496,7 +6753,7 @@ class CleonaNode {
       if (routingTable.isLocalNode(peer.nodeId)) continue;
       final route = dvRouting.bestRouteTo(peer.nodeIdHex);
       if (route == null || !route.isAlive) continue;
-      pushData.peers.add(peer.toProto(gossipFilter: true));
+      pushData.peers.add(peer.toProto(slim: true, gossipFilter: true));
       pushData.hopsFromSender.add(route.hopCount);
       pushData.costFromSender.add(route.cost);
       count++;

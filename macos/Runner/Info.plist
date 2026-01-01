@@ -34,6 +34,14 @@
 	     on first launch. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Cleona sucht andere Cleona-Nodes im lokalen Netzwerk per Broadcast und Multicast — nur so findet dein Gerät ohne zentralen Server einen Einstiegspunkt ins P2P-Netz.</string>
+	<!-- Required since macOS 10.14 for any app that touches an input device.
+	     Without this key the system kills the process at the first
+	     AudioUnitInitialize/AudioQueue access — no prompt, no recoverable
+	     error. Cleona runs unsandboxed (see DebugProfile.entitlements), so
+	     the TCC usage string is the only gate that applies; there is no
+	     sandbox entitlement to add instead (BUILD_REQUEST_V1.3.md §3). -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Cleona braucht das Mikrofon fuer Sprach- und Videoanrufe.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

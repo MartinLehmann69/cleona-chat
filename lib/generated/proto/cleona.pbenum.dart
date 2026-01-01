@@ -97,6 +97,44 @@ class ConnectionTypeProto extends $pb.ProtobufEnum {
   const ConnectionTypeProto._($core.int v, $core.String n) : super(v, n);
 }
 
+///  ── Own-video state (§10.6, Spec-Erratum E2) ──────────────────────────
+///
+///  Why a sender is currently not sending video. Meaningful ONLY while
+///  CallMediaState.sending_video == false.
+///
+///  Invariante I12 — this is a statement about the SENDER'S OWN transmission.
+///  It is not an instruction to the peer and grants no control over the peer's
+///  camera. No value here may ever mean "switch your video off"; a message with
+///  that meaning does not exist in this protocol and must not be added.
+///
+///  OPEN enumeration. The extension rule is binding for every future change:
+///    * a new reason gets a NEW number. Existing numbers are never reused,
+///      never renumbered, never redefined.
+///    * a receiver that does not recognise a value MUST fall back to
+///      VIDEO_OFF_REASON_UNSPECIFIED — "no picture, and this build does not
+///      know why" — and MUST NOT map it onto a reason it does know. Folding an
+///      unknown reason into USER_DISABLED would state the peer's intent as a
+///      fact without evidence, which is the exact confusion E2 exists to
+///      remove.
+///  proto3 open-enum decoding already yields that fallback: an unrecognised
+///  value is kept in the unknown fields and the getter returns 0.
+class VideoOffReason extends $pb.ProtobufEnum {
+  static const VideoOffReason VIDEO_OFF_REASON_UNSPECIFIED = VideoOffReason._(0, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_UNSPECIFIED');
+  static const VideoOffReason VIDEO_OFF_REASON_USER_DISABLED = VideoOffReason._(1, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_USER_DISABLED');
+  static const VideoOffReason VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT = VideoOffReason._(2, _omitEnumNames ? '' : 'VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT');
+
+  static const $core.List<VideoOffReason> values = <VideoOffReason> [
+    VIDEO_OFF_REASON_UNSPECIFIED,
+    VIDEO_OFF_REASON_USER_DISABLED,
+    VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT,
+  ];
+
+  static final $core.Map<$core.int, VideoOffReason> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static VideoOffReason? valueOf($core.int value) => _byValue[value];
+
+  const VideoOffReason._($core.int v, $core.String n) : super(v, n);
+}
+
 class TwinSyncType extends $pb.ProtobufEnum {
   static const TwinSyncType CONTACT_ADDED = TwinSyncType._(0, _omitEnumNames ? '' : 'CONTACT_ADDED');
   static const TwinSyncType CONTACT_DELETED = TwinSyncType._(1, _omitEnumNames ? '' : 'CONTACT_DELETED');
@@ -390,6 +428,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_CALL_TREE_UPDATE = MessageTypeV3._(84, _omitEnumNames ? '' : 'MTV3_CALL_TREE_UPDATE');
   static const MessageTypeV3 MTV3_CALL_KEYFRAME_REQUEST = MessageTypeV3._(85, _omitEnumNames ? '' : 'MTV3_CALL_KEYFRAME_REQUEST');
   static const MessageTypeV3 MTV3_CALL_GROUP_SENDER_KEY = MessageTypeV3._(86, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_SENDER_KEY');
+  static const MessageTypeV3 MTV3_CALL_MEDIA_STATE = MessageTypeV3._(87, _omitEnumNames ? '' : 'MTV3_CALL_MEDIA_STATE');
   static const MessageTypeV3 MTV3_CHANNEL_INDEX_EXCHANGE = MessageTypeV3._(90, _omitEnumNames ? '' : 'MTV3_CHANNEL_INDEX_EXCHANGE');
   static const MessageTypeV3 MTV3_CHANNEL_JOIN_REQUEST = MessageTypeV3._(91, _omitEnumNames ? '' : 'MTV3_CHANNEL_JOIN_REQUEST');
   static const MessageTypeV3 MTV3_CHANNEL_REPORT = MessageTypeV3._(92, _omitEnumNames ? '' : 'MTV3_CHANNEL_REPORT');
@@ -529,6 +568,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_CALL_TREE_UPDATE,
     MTV3_CALL_KEYFRAME_REQUEST,
     MTV3_CALL_GROUP_SENDER_KEY,
+    MTV3_CALL_MEDIA_STATE,
     MTV3_CHANNEL_INDEX_EXCHANGE,
     MTV3_CHANNEL_JOIN_REQUEST,
     MTV3_CHANNEL_REPORT,

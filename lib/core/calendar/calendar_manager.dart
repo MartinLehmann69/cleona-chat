@@ -7,7 +7,11 @@ import 'package:cleona/core/network/clogger.dart';
 /// CalendarManager — local calendar CRUD, multi-identity merge, persistence.
 ///
 /// Each identity has its own CalendarManager instance (same pattern as
-/// ContactManager). Events are stored as encrypted JSON, keyed by eventId.
+/// PollManager). Events are stored as encrypted JSON, keyed by eventId.
+///
+/// The comparison used to name ContactManager. That was wrong twice over: the
+/// class was removed in S290, and it wrote PLAINTEXT — it was never an example
+/// of encrypted persistence. PollManager is (`FileEncryption`, poll_manager.dart).
 class CalendarManager {
   final String profileDir;
   final String identityId;

@@ -626,6 +626,27 @@ class Route {
   /// Used by sendEnvelope cascade: if direct route is ackConfirmed, skip relay.
   bool ackConfirmed;
 
+  /// True sobald `DvRoutingTable.markRouteDown` diese Route wegen 3x
+  /// ausgebliebenem DELIVERY_RECEIPT auf cost=infinity gesetzt hat (RUDP
+  /// Light, Architektur §5.3/§5.8).
+  ///
+  /// Zweck: eingehende Pakete duerfen eine so gefallene Route NICHT
+  /// wiederbeleben. `cleona_node.dart:1887-1890` kodifiziert dieselbe Regel
+  /// bereits fuer `confirmRoute` ("Inbound packets prove receive-path only,
+  /// NOT outbound reachability") — `addDirectNeighbor` lief aber daran
+  /// vorbei: dort greift der Guard `existingDirect.isAlive` gerade *nicht*,
+  /// wenn die Route tot ist, also wurde ein frisches Route-Objekt
+  /// (consecutiveFailures=0, endlicher Cost) gebaut und ersetzte den
+  /// DOWN-Eintrag. Bei asymmetrischer Erreichbarkeit (Empfang intakt, Senden
+  /// blackholed — z.B. CGNAT) belebte damit jedes eingehende Paket die tote
+  /// Sendroute in jedem Maintenance-Intervall neu, und Route-DOWN war
+  /// wirkungslos.
+  ///
+  /// Geloescht wird das Flag ausschliesslich durch AUSGEHENDE Evidenz:
+  /// `confirmRoute` (DELIVERY_RECEIPT / DHT_PONG / PEER_STORE_ACK). Ansonsten
+  /// bleibt die Route DOWN, bis `pruneExpiredRoutes` sie entfernt.
+  bool downedByAck = false;
+
   /// True while this route is in the soft-reset "stale" window after a network
   /// change (Architektur §2.7.2 / §7.6). Stale routes still appear in lookups
   /// but at +5 cost, so freshly revalidated routes are preferred. Routes that
@@ -696,6 +717,16 @@ class Route {
   /// persisted — `DvRoutingTable.loadFromJson` re-marks every loaded route
   /// stale via `markAllRoutesStale`, mirroring the soft-reset semantics in
   /// `cleona_node.dart:onNetworkChanged` (§2.7.2).
+  ///
+  /// [downedByAck] wird bewusst NICHT serialisiert: das Flag bildet den
+  /// Zustand des laufenden AckTrackers ab (3x Timeout auf genau dieser
+  /// Route). Nach einem Neustart ist dieser Zustand ungueltig — die
+  /// Pending-ACK-Tabelle ist leer, Adressen und NAT-Bindings koennen sich
+  /// geaendert haben. Ein persistiertes `downedByAck=true` wuerde eine Route
+  /// dauerhaft gegen `addDirectNeighbor` sperren, ohne dass es noch einen
+  /// ausgehenden Fehlversuch gaebe, der es rechtfertigt. Nach dem Laden gilt
+  /// also wieder "unbewiesen, aber wiederbelebbar" — den Beweis liefert der
+  /// naechste ACK-Zyklus.
   Map<String, dynamic> toJson() => {
         'destination': _bytesToHex(destination),
         if (nextHop != null) 'nextHop': _bytesToHex(nextHop!),
@@ -1304,7 +1335,39 @@ class PeerInfo {
     for (final addr in addresses) {
       if (gossipFilter && addr.lastSuccess == null && addr.successCount == 0 &&
           addr.lastReceivedAt == null) {
-        continue;
+        // §4.6 IPv6-First: eine globale IPv6, die WIR nicht einmal versuchen
+        // koennen, kann niemals einen Erfolg ansammeln — der Filter ist fuer
+        // diese Adressfamilie nicht "unbewiesen", sondern UNERFUELLBAR.
+        // isReachableFromCurrentNetwork (:457-463, :506-512) verwirft eine
+        // ipv6Global-Adresse, solange dieser Knoten keine eigene globale IPv6
+        // hat; sie wird also nie angesprochen (kein lastSuccess, kein
+        // successCount) und empfaengt darauf nichts (kein lastReceivedAt).
+        //
+        // Folge ohne diese Ausnahme: lernen zwei DS-Lite-Geraete einander ueber
+        // einen IPv4-only-Relay oder den Bootstrap kennen — der einzige Weg,
+        // wenn sie sich nicht schon direkt gesehen haben —, erreicht die
+        // IPv6-Adresse des einen den anderen nie. Beide sehen voneinander nur
+        // die CGNAT-IPv4 auf Prioritaet 4, und §4.6 verlangt fuer diese
+        // Konstellation einen Relay, waehrend der NAT-freie Pfad, den
+        // "IPv6-First" verspricht, von der Propagation zerstoert wird, bevor
+        // die Adresswahl ihn ueberhaupt sieht.
+        //
+        // Das eigene fehlende Beobachten als Aussage UEBER die Adresse zu
+        // lesen widerspricht ausserdem dem Grundsatz aus :112-120, dass
+        // Erfolgszaehler rein lokale Epistemik sind. Unbewiesen weitergeben;
+        // der Empfaenger wendet seinen eigenen Erreichbarkeitsfilter und sein
+        // eigenes Scoring an.
+        // Klassifiziert aus dem IP-String, NICHT aus `addr.type`: der
+        // PeerAddress-Konstruktor defaultet `type` auf ipv4Public (:46) und
+        // klassifiziert nicht, das Feld kann fuer eine Doppelpunkt-Adresse also
+        // falsch sein. isReachableFromCurrentNetwork faengt genau das mit einem
+        // eigenen defensiven Zweig ab (:470-478, "IPv4 enum value but colon in
+        // IP string"); hier dieselbe Vorsicht, sonst haengt die Ausnahme an
+        // einem Feld, das je nach Entstehungsweg stimmt oder nicht.
+        final unverifiable = addr.ip.contains(':') &&
+            PeerAddress.classifyIp(addr.ip) == PeerAddressType.ipv6Global &&
+            !PeerAddress.hasGlobalIpv6();
+        if (!unverifiable) continue;
       }
       p.addresses.add(addr.toProto());
     }

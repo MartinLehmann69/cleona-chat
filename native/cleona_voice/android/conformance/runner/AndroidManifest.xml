@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Test-only host for the cleona_voice conformance harness (work package V1.2).
+
+  Separate from the Cleona application on purpose: the harness must not be part
+  of any shipped APK, and a separate package keeps the RECORD_AUDIO grant of the
+  conformance run from being confused with the app's own permission state.
+
+  No resources are referenced anywhere in here, so the APK needs no resource
+  compilation step — see conformance/run_conformance.sh.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="chat.cleona.voiceconformance">
+
+    <!-- The backend opens AudioRecord with source VOICE_COMMUNICATION and puts
+         the device into MODE_IN_COMMUNICATION; both permissions are required
+         for the run to certify what production actually does. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <application
+        android:label="Cleona Voice Conformance"
+        android:debuggable="true"
+        android:allowBackup="false">
+
+        <activity
+            android:name="chat.cleona.voiceconformance.ConformanceActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

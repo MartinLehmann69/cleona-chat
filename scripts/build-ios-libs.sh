@@ -545,6 +545,28 @@ PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
+# cleona_voice / cleona_video are deliberately NOT in this list yet.
+# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) +
+# native/cleona_voice/BUILD_REQUEST.md §4, native/cleona_video/BUILD_REQUEST.md §5.
+# The Apple backends are V1.3 (voice, VoiceProcessingIO, shared iOS+macOS) and
+# V1.15 (video). Only the hardware-free mocks exist today, and the mock must
+# never enter a shipped iOS archive (both BUILD_REQUESTs) — there is nothing
+# real to statically link in yet.
+#
+# When V1.3/V1.15 land: add a `build_cleona_voice`/`build_cleona_video` function
+# (CLEONA_IOS_STATIC=ON / CLEONA_VIDEO_STATIC=ON, per native/cleona_voice/CMakeLists.txt
+# and native/cleona_video/CMakeLists.txt), add it to this array and to the `case "$t"`
+# dispatch below, add a `make_xcfw` call in the second dispatch loop further down,
+# and add its install subdir (`cleona_voice/lib`, `cleona_video/lib`) to the static
+# merge loop near the end of this file (search this file for "sodium/lib" to find
+# it — spelling the loop's own opening words out here would confuse
+# preflight.sh Check 12, which greps this file for exactly that phrase and takes
+# the FIRST match; a comment mentioning it earlier in the file would shadow the
+# real loop and make the check parse a sentence instead of the merge list).
+# Check 12 derives its lists straight from this file at runtime, so once those
+# three spots are consistent the gate needs no separate edit — but all three
+# must land in the same commit, or Check 12 (A) fails immediately (built but
+# not merged).
 ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio cleona_pow vpx cleona_vpx)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then

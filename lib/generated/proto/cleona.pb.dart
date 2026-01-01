@@ -1320,11 +1320,11 @@ class DhtPong extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   $core.List<$core.List<$core.int>> get additionalNodeIds => $_getList(4);
 
-  /// §5.10.2 — present only when the ping carried want_kem_record AND arrived on
-  /// the BOOT path. Self-authenticating (§4.3): verified against the claimed
-  /// user master Ed25519 key exactly like a DHT-fetched record, and cached in
-  /// the same replica cache. Absent on the KEM path, where the sender provably
-  /// already had the key.
+  /// §5.10.2 — present only when the ping carried want_kem_record.
+  /// Self-authenticating (§4.3): verified against the claimed user master
+  /// Ed25519 key exactly like a DHT-fetched record, and cached in the same
+  /// replica cache. No transport condition is needed: DHT_PING is in the BOOT
+  /// allow-list and is therefore always plaintext.
   @$pb.TagNumber(6)
   DeviceKemRecordV3 get kemRecord => $_getN(5);
   @$pb.TagNumber(6)
@@ -5247,6 +5247,11 @@ class CallInvite extends $pb.GeneratedMessage {
     $core.bool? isGroupCall,
     $core.List<$core.int>? groupId,
     $core.List<$core.int>? groupCallKey,
+    $core.int? callerAppMajorMinor,
+    $core.int? callerAudioFormatMin,
+    $core.int? callerAudioFormatMax,
+    $core.int? callerVideoFormatMin,
+    $core.int? callerVideoFormatMax,
   }) {
     final $result = create();
     if (callId != null) {
@@ -5270,6 +5275,21 @@ class CallInvite extends $pb.GeneratedMessage {
     if (groupCallKey != null) {
       $result.groupCallKey = groupCallKey;
     }
+    if (callerAppMajorMinor != null) {
+      $result.callerAppMajorMinor = callerAppMajorMinor;
+    }
+    if (callerAudioFormatMin != null) {
+      $result.callerAudioFormatMin = callerAudioFormatMin;
+    }
+    if (callerAudioFormatMax != null) {
+      $result.callerAudioFormatMax = callerAudioFormatMax;
+    }
+    if (callerVideoFormatMin != null) {
+      $result.callerVideoFormatMin = callerVideoFormatMin;
+    }
+    if (callerVideoFormatMax != null) {
+      $result.callerVideoFormatMax = callerVideoFormatMax;
+    }
     return $result;
   }
   CallInvite._() : super();
@@ -5284,6 +5304,11 @@ class CallInvite extends $pb.GeneratedMessage {
     ..aOB(5, _omitFieldNames ? '' : 'isGroupCall')
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'groupCallKey', $pb.PbFieldType.OY)
+    ..a<$core.int>(8, _omitFieldNames ? '' : 'callerAppMajorMinor', $pb.PbFieldType.OU3)
+    ..a<$core.int>(9, _omitFieldNames ? '' : 'callerAudioFormatMin', $pb.PbFieldType.OU3)
+    ..a<$core.int>(10, _omitFieldNames ? '' : 'callerAudioFormatMax', $pb.PbFieldType.OU3)
+    ..a<$core.int>(11, _omitFieldNames ? '' : 'callerVideoFormatMin', $pb.PbFieldType.OU3)
+    ..a<$core.int>(12, _omitFieldNames ? '' : 'callerVideoFormatMax', $pb.PbFieldType.OU3)
     ..hasRequiredFields = false
   ;
 
@@ -5370,6 +5395,158 @@ class CallInvite extends $pb.GeneratedMessage {
   $core.bool hasGroupCallKey() => $_has(6);
   @$pb.TagNumber(7)
   void clearGroupCallKey() => clearField(7);
+
+  ///  ── Versionsgate (§10.4, Spec-Erratum E5) ────────────────────────────
+  ///
+  ///  Die App-Version des Anrufers, kodiert als `major * 1000 + minor`.
+  ///  3.1.x -> 3001, 3.2.0 -> 3002, 4.0.0 -> 4000. Monoton ueber jeden
+  ///  Versionssprung hinweg, auch ueber einen Major-Wechsel.
+  ///
+  ///  WOZU. §10.4 legt fest, dass Abtastrate, Codec und Frame-Format sich mit
+  ///  3.2.0 alle drei aendern und ein 3.1.x-Client mit einem 3.2.x-Client
+  ///  deshalb keinen Call halten kann. Der Empfaenger braucht dafuer eine
+  ///  Aussage darueber, welchen Voice-Stack der Anrufer spricht.
+  ///
+  ///  EIN FEHLENDES FELD IST EINE AUSSAGE, KEINE LUECKE. proto3 liefert 0, und
+  ///  0 ist kleiner als jede reale Version — es heisst definiert "Sender aelter
+  ///  als 3.2.0, abgeloester Voice-Stack". Jeder Sender ab 3.2.0 setzt das Feld.
+  ///  Ein Empfaenger darf aus dem Fehlen deshalb NICHT "unbekannt, also wohl in
+  ///  Ordnung" ableiten, sondern behandelt es wie jede zu alte Version.
+  ///
+  ///  WARUM major+minor UND NICHT NUR DER MINOR. §10.4 formuliert das Gate als
+  ///  `minor >= 2`. Der Minor allein ueberlebt keinen Major-Sprung: 4.0.0 hat
+  ///  Minor 0, und eine Pruefung `minor >= 2` wuerde jeden 4.0-Client abweisen,
+  ///  obwohl er den neueren Stack hat. Das Feld traegt deshalb beides. Damit ist
+  ///  sowohl die woertliche Regel aus §10.4 bildbar (`(v % 1000) >= 2`) als auch
+  ///  eine rollover-feste (`v >= 3002`) — die Wahl zwischen beiden ist eine
+  ///  Entscheidung ueber die Auswertung, nicht ueber das Wire-Format, und faellt
+  ///  damit nicht hier. Siehe Befund zu §10.4 im Paketbericht V1.12.
+  ///
+  ///  WARUM OHNE PATCH. Ein Patch-Release aendert den Voice-Stack nicht (semver),
+  ///  und der Patch-Zaehler dieses Projekts laeuft bis weit ueber 99 (v3.1.160).
+  ///  Jede Kodierung, die ihn in eine feste Stelle packt, waere darueber
+  ///  uebergelaufen und haette 3.1.160 groesser als 3.2.0 aussehen lassen.
+  ///  Kappung: minor < 1000.
+  ///
+  ///  DIE PRUEFUNG SELBST LIEGT NICHT HIER. Sie gehoert zu V2.1
+  ///  (`call_service.dart`, `handleCallInviteV3`), zusammen mit dem fuer den
+  ///  Nutzer sichtbaren Ablehnungsgrund und dessen Uebersetzung. §10.4: ein
+  ///  Call zwischen inkompatiblen Versionen wird ausdruecklich abgelehnt,
+  ///  "never allowed to fail silently".
+  @$pb.TagNumber(8)
+  $core.int get callerAppMajorMinor => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set callerAppMajorMinor($core.int v) { $_setUnsignedInt32(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasCallerAppMajorMinor() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCallerAppMajorMinor() => clearField(8);
+
+  ///  ── Medienformat-Aushandlung (§10.3.1/§10.4/§10.6, V1.18) ────────────
+  ///
+  ///  Die Spanne der Medienformate, die der Anrufer sprechen kann. Getrennt
+  ///  fuer Audio und Video, weil beide getrennte ABIs (`cleona_voice.h`,
+  ///  `cleona_video.h`), getrennte Codecs und getrennte Stufenplaene haben —
+  ///  §10.4 Stufe 5 tauscht den Audio-Codec (Opus), §10.6 Stufe 4/5 den
+  ///  Video-Codec, unabhaengig voneinander. Ein gemeinsamer Zaehler wuerde
+  ///  eine Video-Aenderung zwingen, Audio mit abzuwerten, obwohl sich am
+  ///  Audioformat nichts geaendert hat.
+  ///
+  ///  WAS EIN ZAEHLER UMFASST. Fuer seine Mediengattung: die Wire-Rahmung der
+  ///  Medien-Nachricht, den Codec samt Parametern, das Frame-Layout und die
+  ///  AEAD-Konstruktion auf dieser Nutzlast. Diese vier aendern sich in diesem
+  ///  Projekt gemeinsam, nicht einzeln: §10.4 aendert mit 3.2.0 Abtastrate,
+  ///  Codec UND Frame-Format und nennt das EINE Inkompatibilitaet. Vier
+  ///  getrennte Zaehler wuerden Kombinationen beschreibbar machen, die kein
+  ///  Build je erzeugt und die niemand testen kann.
+  ///
+  ///  WOZU — UND WOZU AUSDRUECKLICH NICHT. Zu 3.1 gibt es keine
+  ///  Rueckwaertskompatibilitaet, das bleibt so (§10.4 "Compatibility: none,
+  ///  by decision"). Diese Felder stellen sie nicht her. Sie existieren fuer
+  ///  den umgekehrten Fall: damit eine KUENFTIGE Version (3.3, 4.0, ...) mit
+  ///  3.2 noch sprechen kann, statt einen zweiten harten Schnitt zu erzwingen.
+  ///
+  ///  VERHAELTNIS ZU FELD 8. Feld 8 ist ein einseitiger Boden ("ist der Peer
+  ///  mindestens 3.2.0") und wird nicht ausgehandelt. Er kann nicht
+  ///  ausdruecken, was die Gegenseite spricht, und ein heute ausgelieferter
+  ///  3.2-Client traegt `>= 3002` einbetoniert: er nimmt jede kuenftige
+  ///  Version bedingungslos an und kann nie lernen, dass 3.4-Medien fuer ihn
+  ///  undekodierbar sind. Genau diese Luecke schliessen diese Felder. Die
+  ///  beiden ueberschneiden sich nicht — Feld 8 beantwortet "koennen wir
+  ///  ueberhaupt reden", diese Felder "in welchem Dialekt", und sie wirken
+  ///  ausschliesslich oberhalb des Bodens von Feld 8.
+  ///
+  ///  EIN FEHLENDES FELD IST EINE AUSSAGE, KEINE LUECKE. proto3 liefert 0.
+  ///  Weglassen kann diese Felder nur ein Build ab 3.2.0, der vor V1.18
+  ///  entstanden ist — und der spricht genau das Basisformat 1. 0 heisst hier
+  ///  deshalb definiert "Spanne [1,1], nur das 3.2.0-Basisformat", nicht
+  ///  "unbekannt, also wohl in Ordnung". Das ist bewusst die ANDERE Folgerung
+  ///  als bei Feld 8, wo 0 zur Ablehnung fuehrt: dort stammt die 0 von einem
+  ///  3.1.x-Client, der ueberhaupt keinen Call halten kann, hier von einem
+  ///  3.2.0-Client, der es kann. Gleiche Regel, verschiedene Sachlage — die
+  ///  Folgerung ist abgeleitet, nicht gewaehlt.
+  ///
+  ///  WARUM SPANNE UND NICHT NUR EIN MAXIMUM. Alte Formate werden fallen
+  ///  gelassen, nicht ewig mitgeschleppt: `PerMessageKem.acceptKemVersions`
+  ///  ist von {1} auf {2} gewechselt (v1 in V3.1.72 entfernt). Ohne das
+  ///  Minimum koennte der Angerufene ein Format waehlen, das der Anrufer
+  ///  laengst nicht mehr spricht; der Abbruch faende erst eine Runde spaeter
+  ///  beim Anrufer statt, mit schlechterem Grund. Eine zusammenhaengende
+  ///  Spanne genuegt — die Akzeptanzmenge dieses Projekts war immer
+  ///  zusammenhaengend.
+  ///
+  ///  WARUM NICHT PRO FRAME. Ein Feld in jedem Audio-Frame kostet bei 50
+  ///  Frames/s dauerhaft rund 100 B/s je Richtung, gegen das Opus-Ziel von
+  ///  24-32 kbps (§10.4) also ~2,7 % — fuer eine Eigenschaft, die sich
+  ///  waehrend der Session nie aendert. Arbeitsregel 5 und die harten
+  ///  Groessenschranken aus §10.3.1/I9 verbieten wiederkehrende Kosten ohne
+  ///  Gegenwert. Was sich mitten im Call sehr wohl aendert, ist Aufloesung
+  ///  und Bitrate (V1.17); die stehen bereits in `VideoFrame.width/height`
+  ///  und sind ein Preset, kein Format. Ein Wechsel des Formats selbst
+  ///  erfordert einen Neuaufbau (`MTV3_CALL_REJOIN`), der neu aushandelt.
+  ///  Die Aushandlung ist verlaesslich: `CALL_INVITE`/`CALL_ANSWER` sind
+  ///  Setup-Frames mit ML-DSA, zstd und der normalen Zustellkaskade, nicht
+  ///  Live-Media — sie koennen nicht still verlorengehen.
+  ///
+  ///  DIE AUSWERTUNG LIEGT NICHT HIER. Die Aushandlungsregel steht in
+  ///  `lib/core/calls/media_format_version.dart`; die Verdrahtung in
+  ///  `call_service.dart` samt sichtbarem Ablehnungsgrund gehoert V2.1
+  ///  (BUILD_REQUEST_V1.18.md).
+  @$pb.TagNumber(9)
+  $core.int get callerAudioFormatMin => $_getIZ(8);
+  @$pb.TagNumber(9)
+  set callerAudioFormatMin($core.int v) { $_setUnsignedInt32(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasCallerAudioFormatMin() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearCallerAudioFormatMin() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.int get callerAudioFormatMax => $_getIZ(9);
+  @$pb.TagNumber(10)
+  set callerAudioFormatMax($core.int v) { $_setUnsignedInt32(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasCallerAudioFormatMax() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearCallerAudioFormatMax() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.int get callerVideoFormatMin => $_getIZ(10);
+  @$pb.TagNumber(11)
+  set callerVideoFormatMin($core.int v) { $_setUnsignedInt32(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasCallerVideoFormatMin() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearCallerVideoFormatMin() => clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.int get callerVideoFormatMax => $_getIZ(11);
+  @$pb.TagNumber(12)
+  set callerVideoFormatMax($core.int v) { $_setUnsignedInt32(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasCallerVideoFormatMax() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearCallerVideoFormatMax() => clearField(12);
 }
 
 class CallAnswer extends $pb.GeneratedMessage {
@@ -5377,6 +5554,8 @@ class CallAnswer extends $pb.GeneratedMessage {
     $core.List<$core.int>? callId,
     $core.List<$core.int>? calleeEphX25519Pk,
     $core.List<$core.int>? calleeKemCiphertext,
+    $core.int? selectedAudioFormat,
+    $core.int? selectedVideoFormat,
   }) {
     final $result = create();
     if (callId != null) {
@@ -5388,6 +5567,12 @@ class CallAnswer extends $pb.GeneratedMessage {
     if (calleeKemCiphertext != null) {
       $result.calleeKemCiphertext = calleeKemCiphertext;
     }
+    if (selectedAudioFormat != null) {
+      $result.selectedAudioFormat = selectedAudioFormat;
+    }
+    if (selectedVideoFormat != null) {
+      $result.selectedVideoFormat = selectedVideoFormat;
+    }
     return $result;
   }
   CallAnswer._() : super();
@@ -5398,6 +5583,8 @@ class CallAnswer extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'callId', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'calleeEphX25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'calleeKemCiphertext', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'selectedAudioFormat', $pb.PbFieldType.OU3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'selectedVideoFormat', $pb.PbFieldType.OU3)
     ..hasRequiredFields = false
   ;
 
@@ -5448,6 +5635,41 @@ class CallAnswer extends $pb.GeneratedMessage {
   $core.bool hasCalleeKemCiphertext() => $_has(2);
   @$pb.TagNumber(3)
   void clearCalleeKemCiphertext() => clearField(3);
+
+  ///  ── Medienformat-Aushandlung, Ergebnis (§10.4, V1.18) ────────────────
+  ///
+  ///  Das vom Angerufenen GEWAEHLTE Format je Mediengattung — das hoechste,
+  ///  das beide Seiten sprechen. Vor V1.18 trug `CallAnswer` ueberhaupt keine
+  ///  Versionsinformation (Felder 1-3), die Faehigkeiten des Angerufenen
+  ///  erreichten den Anrufer also nie. Ohne diesen Rueckkanal kann der Anrufer
+  ///  nicht herunterschalten, und "kuenftige Abwaertskompatibilitaet" bleibt
+  ///  unerreichbar — unabhaengig davon, wie das Format kodiert wird.
+  ///
+  ///  Der Anrufer prueft den Wert gegen die eigene Spanne und gegen das, was
+  ///  er selbst angeboten hat, und bricht bei Abweichung mit sichtbarem Grund
+  ///  ab. Ein defekter oder boeswilliger Peer kann so kein Format erzwingen,
+  ///  das der Anrufer nie angeboten hat.
+  ///
+  ///  Fehlt das Feld (0), gilt dieselbe Regel wie bei `CallInvite`: der
+  ///  Angerufene ist ein 3.2.0-Build vor V1.18 und hat damit das Basisformat 1
+  ///  gewaehlt. Eine Aussage, keine Luecke.
+  @$pb.TagNumber(4)
+  $core.int get selectedAudioFormat => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set selectedAudioFormat($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasSelectedAudioFormat() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSelectedAudioFormat() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get selectedVideoFormat => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set selectedVideoFormat($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasSelectedVideoFormat() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSelectedVideoFormat() => clearField(5);
 }
 
 class CallReject extends $pb.GeneratedMessage {
@@ -10289,6 +10511,111 @@ class KeyframeRequest extends $pb.GeneratedMessage {
   $core.bool hasCallId() => $_has(0);
   @$pb.TagNumber(1)
   void clearCallId() => clearField(1);
+}
+
+/// The sender's own media state inside a call (§10.6). Sent whenever the
+/// sender's own video starts or stops, and never on the peer's behalf (I12).
+class CallMediaState extends $pb.GeneratedMessage {
+  factory CallMediaState({
+    $core.List<$core.int>? callId,
+    $core.bool? sendingVideo,
+    VideoOffReason? videoOffReason,
+    $fixnum.Int64? stateSeq,
+  }) {
+    final $result = create();
+    if (callId != null) {
+      $result.callId = callId;
+    }
+    if (sendingVideo != null) {
+      $result.sendingVideo = sendingVideo;
+    }
+    if (videoOffReason != null) {
+      $result.videoOffReason = videoOffReason;
+    }
+    if (stateSeq != null) {
+      $result.stateSeq = stateSeq;
+    }
+    return $result;
+  }
+  CallMediaState._() : super();
+  factory CallMediaState.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CallMediaState.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CallMediaState', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'callId', $pb.PbFieldType.OY)
+    ..aOB(2, _omitFieldNames ? '' : 'sendingVideo')
+    ..e<VideoOffReason>(3, _omitFieldNames ? '' : 'videoOffReason', $pb.PbFieldType.OE, defaultOrMaker: VideoOffReason.VIDEO_OFF_REASON_UNSPECIFIED, valueOf: VideoOffReason.valueOf, enumValues: VideoOffReason.values)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'stateSeq', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CallMediaState clone() => CallMediaState()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CallMediaState copyWith(void Function(CallMediaState) updates) => super.copyWith((message) => updates(message as CallMediaState)) as CallMediaState;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallMediaState create() => CallMediaState._();
+  CallMediaState createEmptyInstance() => create();
+  static $pb.PbList<CallMediaState> createRepeated() => $pb.PbList<CallMediaState>();
+  @$core.pragma('dart2js:noInline')
+  static CallMediaState getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CallMediaState>(create);
+  static CallMediaState? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get callId => $_getN(0);
+  @$pb.TagNumber(1)
+  set callId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => clearField(1);
+
+  /// "I am sending video." False means the peer should render the state in
+  /// video_off_reason instead of the last received frame — the frozen picture
+  /// is what this message exists to prevent.
+  @$pb.TagNumber(2)
+  $core.bool get sendingVideo => $_getBF(1);
+  @$pb.TagNumber(2)
+  set sendingVideo($core.bool v) { $_setBool(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSendingVideo() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSendingVideo() => clearField(2);
+
+  /// Only meaningful while sending_video == false. Senders set
+  /// VIDEO_OFF_REASON_UNSPECIFIED while sending_video == true, and receivers
+  /// ignore the field in that case.
+  @$pb.TagNumber(3)
+  VideoOffReason get videoOffReason => $_getN(2);
+  @$pb.TagNumber(3)
+  set videoOffReason(VideoOffReason v) { setField(3, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasVideoOffReason() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearVideoOffReason() => clearField(3);
+
+  /// Monotonic per (call_id, sender), starting at 1. The state travels over an
+  /// unordered datagram network, so a reordered older frame would otherwise
+  /// reinstate a stale "video off" while frames are arriving — precisely the
+  /// wrong picture. Receivers accept strictly greater values only. Same role
+  /// as GroupCallKeyRotate.key_version and CallTreeUpdate.version.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get stateSeq => $_getI64(3);
+  @$pb.TagNumber(4)
+  set stateSeq($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasStateSeq() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearStateSeq() => clearField(4);
 }
 
 class GroupCallAudio extends $pb.GeneratedMessage {

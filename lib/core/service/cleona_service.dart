@@ -126,7 +126,83 @@ const Set<proto.MessageTypeV3> _liveMediaFastPathTypes = {
   proto.MessageTypeV3.MTV3_CALL_VIDEO,
   proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
   proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO,
+  // MTV3_CALL_MEDIA_STATE (87) is deliberately absent: it is signaling, not
+  // media. It has no frame deadline, it must arrive, and it carries the
+  // ordinary end-to-end authenticity. See proto/cleona.proto, §10.6 / V1.12.
 };
+
+/// Why a peer is not sending video right now (§10.6, Spec-Erratum E2).
+///
+/// The Dart-side mirror of the wire enum `VideoOffReason`. It exists so that
+/// nothing above the protocol layer has to import the generated protobuf —
+/// `lib/ui/` imports none today and should not start here.
+///
+/// **Invariante I12.** Every value describes the *sender's own* transmission.
+/// None of them is an instruction, a permission or a prohibition aimed at the
+/// peer, and no such value may be added: Cleona has no message with which one
+/// side can switch the other side's camera off.
+enum CallVideoOffReason {
+  /// No reason was given, or the peer sent a reason this build does not know.
+  ///
+  /// Treated as "no picture, and we cannot say why". It is deliberately **not**
+  /// folded into [userDisabled]: claiming the peer chose this, when the wire
+  /// said something we could not read, would state intent as fact. Forward
+  /// compatibility depends on this staying distinct — see the extension rule
+  /// in `proto/cleona.proto`.
+  unspecified,
+
+  /// The peer switched their own video off. A deliberate act, not a fault.
+  userDisabled,
+
+  /// The peer cannot send: no supported encoder step produces frames that fit
+  /// under the current per-frame ceiling. Wire form of
+  /// `CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE` (`native/cleona_video/cleona_video.h`,
+  /// Spec-Erratum E1), raised by the rate control of V1.17.
+  ///
+  /// The display for this must differ from [userDisabled] — that difference is
+  /// the entire point of E2.
+  bandwidthInsufficient,
+}
+
+/// What a peer last told us about **its own** video in a call (§10.6, V1.12).
+///
+/// Immutable on purpose. It is a report about the far side, never a lever on
+/// the near side: holding one of these must not change what this device sends
+/// (I12).
+class PeerCallMediaState {
+  const PeerCallMediaState({
+    required this.callIdHex,
+    required this.peerUserIdHex,
+    required this.sendingVideo,
+    required this.videoOffReason,
+    required this.stateSeq,
+    required this.receivedAt,
+  });
+
+  /// Call this state belongs to (hex of the 16-byte call id).
+  final String callIdHex;
+
+  /// The peer that announced it (hex of its 32-byte user id).
+  final String peerUserIdHex;
+
+  /// True while the peer says it is sending video.
+  final bool sendingVideo;
+
+  /// Only meaningful while [sendingVideo] is false;
+  /// `CallVideoOffReason.unspecified` otherwise.
+  final CallVideoOffReason videoOffReason;
+
+  /// Monotonic per (call, peer). Kept so a caller can tell a fresh state from
+  /// a repeat.
+  final int stateSeq;
+
+  final DateTime receivedAt;
+
+  @override
+  String toString() => 'PeerCallMediaState(call=${callIdHex.length >= 8 ? callIdHex.substring(0, 8) : callIdHex}, '
+      'peer=${peerUserIdHex.length >= 8 ? peerUserIdHex.substring(0, 8) : peerUserIdHex}, '
+      'sendingVideo=$sendingVideo, reason=${videoOffReason.name}, seq=$stateSeq)';
+}
 
 /// Central orchestrator: wires node, contacts, messaging, and manages state.
 /// Now takes a shared CleonaNode + IdentityContext instead of creating its own node.
@@ -402,6 +478,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Keeps retrying forever so eventually-online contacts still get through,
   // but at low frequency after the initial burst (~10 attempts in 20min).
   final Map<String, int> _crRetryCountPerContact = {};
+  // §5.1 CR-Kante: letzte kantengetriggerte Backoff-Verkuerzung pro Kontakt
+  // (nodeIdHex -> timestamp). Eigene Drosselung, weil `peer-came-online` pro
+  // neu bestaetigtem Peer feuert — ohne Gate wuerde ein Knoten, der beim Start
+  // dreissig Peers bestaetigt, dreissig CR-Sends nachziehen (Arbeitsregel 5).
+  final Map<String, DateTime> _crEdgeShortenAt = {};
   // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
   // Contacts for which the sender-side stale warning has already been written
   // into the conversation. Prevents duplicate warnings; cleared on the next
@@ -480,7 +561,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.160';
+  static const String kCurrentAppVersion = '3.2.0';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -532,6 +613,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // inbound frame arrives while entries for that sender are parked.
   final Map<String, DateTime> _outboxInboundFlushAt = {};
   static const Duration _outboxInboundFlushGate = Duration(seconds: 60);
+  /// §5.1 CR-Kante: Mindestabstand zwischen zwei kantengetriggerten
+  /// Backoff-Verkuerzungen fuer denselben Kontakt. Bewusst derselbe Wert wie
+  /// [_outboxInboundFlushGate] — dieselbe Aufgabe (eine haeufig feuernde Kante
+  /// darf keinen Send-Strom erzeugen), deshalb dieselbe Groessenordnung.
+  static const Duration _crEdgeShortenGate = Duration(seconds: 60);
 
   // §5.8 extension: pending membership update resends.
   // When _broadcastGroupUpdate / _broadcastChannelUpdate fails for a member
@@ -1055,6 +1141,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     node.onContactEndpointConfirmed = (contactUserIdHex) {
       prevEndpointConfirmed?.call(contactUserIdHex);
       unawaited(_flushOutbox(trigger: 'contact-endpoint-confirmed'));
+      // §5.1 — dieselbe Kante fuer die First-CR: sie liegt nicht in der Outbox
+      // und haengt allein am zeitgesteuerten Retry.
+      shortenCrBackoffOnEdge('contact-endpoint-confirmed');
     };
 
     // §5.4 V3.1.138: when a peer transitions to confirmed, re-arm proactive
@@ -1497,6 +1586,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final nowDt = DateTime.now();
     _lastNotifiedAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 1);
     _lastCrRetryPerContact.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
+    _crEdgeShortenAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
     _peerStoreRateLog.removeWhere((_, log) => log.isEmpty ||
         log.every((ts) => nowDt.difference(ts).inHours > 1));
     _resyncRequestedAtEpoch.removeWhere((_, epoch) => epoch > 0 &&
@@ -1772,6 +1862,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Sender side: flush parked outbox entries — the recipient (or a relay
     // toward it) just came online, so L1/L2/L3 may now succeed.
     unawaited(_flushOutbox(trigger: 'peer-came-online'));
+    // §5.1 — dieselbe Kante fuer die First-CR. Diese Kante feuert pro neu
+    // bestaetigtem Peer, deshalb ist die Drosselung in
+    // shortenCrBackoffOnEdge hier tragend und nicht kosmetisch.
+    shortenCrBackoffOnEdge('peer-came-online');
 
     // Store-host side: proactively push S&F messages to the newly confirmed
     // peer (they may be the intended recipient).
@@ -4612,7 +4706,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       unawaited(node.ackTracker.trackSend(
         firstCrMsgIdHex,
         recipientUserIdHex,
-        const <PeerAddress>[],
+        // Befund 5 (§5.8): the addresses the winning cascade attempt actually
+        // wrote to. Previously `const <PeerAddress>[]`, which made
+        // `_handleTimeout` fall back to `onResolveAddresses` and penalise
+        // EVERY reachable address of the hop on one missing receipt.
+        sendResult.usedAddresses,
         AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientDeviceId),
             hopCount: wasRelay ? 2 : 1),
         viaNextHopHex: sendResult.viaHopHex,
@@ -5243,6 +5341,80 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── CR Retry ───────────────────────────────────────────────────────
 
+  /// §5.8 CR-Retry-Backoff in Sekunden fuer [attemptCount] bisherige Versuche.
+  ///
+  /// Herausgezogen, damit die Kurve testbar ist — ohne das waere die
+  /// Verkuerzung aus [shortenCrBackoffOnEdge] unbewacht.
+  ///
+  /// Kurve: 10s, 20s, 40s, 80s, 160s, 320s, 640s, danach gedeckelt auf 600s
+  /// (Seed) bzw. 1200s (seedless — der DHT-Re-Resolve ist pro Versuch
+  /// billiger, dafuer laengerer Schwanz; §8.1.1 und §5.8 halten beide Deckel
+  /// normativ fest).
+  ///
+  /// Die shift-Grenze folgt dem jeweiligen Deckel. Bis S290 war sie fuer beide
+  /// Faelle 6, damit war der ungedeckelte Wert maximal 10 * (1 << 6) = 640s —
+  /// der Seed-Deckel 600 griff dadurch, der seedless-Deckel 1200 aber NIE. Der
+  /// dokumentierte Unterschied von Faktor zwei schrumpfte auf 7 % (600 gegen
+  /// 640), und die 1200 waren toter Code. Vermutlich wurde die Grenze zusammen
+  /// mit dem Seed-Deckel gewaehlt (640 ist der erste Wert darueber) und beim
+  /// spaeteren Hinzufuegen des seedless-Falls nicht mitgezogen.
+  static int crRetryBackoffSeconds(int attemptCount, {required bool isSeedless}) {
+    final maxShift = isSeedless ? 7 : 6;
+    final shift = attemptCount > maxShift ? maxShift : attemptCount;
+    final capSec = isSeedless ? 1200 : 600;
+    final uncapped = 10 * (1 << shift);
+    return uncapped > capSec ? capSec : uncapped;
+  }
+
+  /// §5.1 CR-Kante: darf fuer diesen Kontakt jetzt verkuerzt werden?
+  ///
+  /// Sichtbar fuer Tests. [lastShorten] ist der Zeitstempel der letzten
+  /// Verkuerzung oder `null`, wenn noch keine stattfand.
+  static bool crEdgeShortenAllowed(DateTime? lastShorten, DateTime now) =>
+      lastShorten == null ||
+      now.difference(lastShorten) >= _crEdgeShortenGate;
+
+  /// §5.1 — verkuerzt die Wartezeit des CR-Retrys auf einer Kante, die fuer
+  /// gewoehnliche Nachrichten einen Outbox-Flush ausloest.
+  ///
+  /// Warum das noetig ist: der CR-Retry ist rein zeitgesteuert (Backoff bis
+  /// 600s/1200s, siehe [crRetryBackoffSeconds]) und wurde von keinem
+  /// Konnektivitaetsereignis verkuerzt — `_lastCrRetryPerContact` wird sonst
+  /// nirgends kantengetriggert geleert. Kommt das Netz zurueck, waehrend ein
+  /// Kontakt tief im Backoff sitzt, blieb die First-CR bis zu zwanzig Minuten
+  /// liegen, obwohl die Bedingung, die den letzten Versuch scheitern liess,
+  /// sich nachweislich geaendert hat.
+  ///
+  /// Zurueckgesetzt wird NUR der Zeitstempel, nicht der Zaehler in
+  /// `_crRetryCountPerContact`: die Backoff-Kurve bleibt erhalten, gekuerzt
+  /// wird ausschliesslich die aktuell laufende Wartezeit. Sonst haette eine
+  /// haeufig feuernde Kante den Backoff dauerhaft auf 10s gehalten.
+  ///
+  /// Layer 3 bleibt unberuehrt: §5.5b (FIRST_CR_STORE an Protected Seeds) ist
+  /// und bleibt alleiniger Layer-3-Eigentuemer der First-CR. Diese Kante zieht
+  /// einen bereits geplanten L1/L2-Send vor, sie erzeugt keinen neuen Pfad.
+  void shortenCrBackoffOnEdge(String trigger, {String? onlyUserHex}) {
+    final now = DateTime.now();
+    var shortened = 0;
+    for (final entry in _contacts.entries) {
+      if (entry.value.status != 'pending_outgoing') continue;
+      if (onlyUserHex != null && entry.key != onlyUserHex) continue;
+      // Noch kein Versuch gelaufen -> es gibt keine Wartezeit zu kuerzen.
+      if (!_lastCrRetryPerContact.containsKey(entry.key)) continue;
+      if (!crEdgeShortenAllowed(_crEdgeShortenAt[entry.key], now)) continue;
+      _crEdgeShortenAt[entry.key] = now;
+      _lastCrRetryPerContact.remove(entry.key);
+      shortened++;
+    }
+    if (shortened > 0) {
+      // Der 24h-Stopp ueber `lastAckedAt` bleibt im Retry-Loop vorgeschaltet;
+      // ein bereits quittierter Kontakt wird also weiterhin nicht behelligt,
+      // auch wenn hier sein Zeitstempel fiel.
+      _log.info('§5.1 CR-Kante ($trigger): Backoff fuer $shortened Kontakt(e) '
+          'verkuerzt — naechster Retry-Tick sendet (<=30s)');
+    }
+  }
+
   void _retryPendingContactRequests() {
     final now = DateTime.now();
     final pending = _contacts.entries
@@ -5275,10 +5447,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Exponential backoff: 10s, 20s, 40s, …, capped at 600s (seed) or
       // 1200s (seedless DHT re-resolve — cheaper per attempt, longer tail).
       final count = _crRetryCountPerContact[entry.key] ?? 0;
-      final shift = count > 6 ? 6 : count;
-      final capSec = isSeedless ? 1200 : 600;
-      final uncapped = 10 * (1 << shift);
-      final backoffSec = uncapped > capSec ? capSec : uncapped;
+      final backoffSec =
+          crRetryBackoffSeconds(count, isSeedless: isSeedless);
       final lastRetry = _lastCrRetryPerContact[entry.key];
       if (lastRetry != null && now.difference(lastRetry).inSeconds < backoffSec) continue;
 
@@ -7295,6 +7465,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // onNetworkChanged event (= a real network interface transition), NOT
     // periodically.
     unawaited(_flushOutbox(trigger: 'network-change'));
+    // §5.1 — dieselbe Kante fuer die First-CR.
+    shortenCrBackoffOnEdge('network-change');
     unawaited(_flushPendingMembershipResends());
   }
 
@@ -12839,6 +13011,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // tracks the route of the first leg that actually left the machine.
     String? firstOkViaHopHex;
     String? firstOkDestDevHex;
+    // Befund 5 (§5.8): the addresses that first leg was written to. Tracked
+    // together with the hop for the same reason — the single AckTracker entry
+    // belongs to that leg, so its address scoring must use that leg's
+    // addresses, not the union of every address of the recipient.
+    List<PeerAddress> firstOkUsedAddresses = const <PeerAddress>[];
     for (final deviceId in deviceIds) {
       try {
         final inner = proto.ApplicationFrameV3()
@@ -12893,6 +13070,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           if (firstOkDestDevHex == null) {
             firstOkViaHopHex = res.viaHopHex;
             firstOkDestDevHex = bytesToHex(deviceId);
+            firstOkUsedAddresses = res.usedAddresses;
           }
         }
       } catch (e) {
@@ -12930,7 +13108,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       unawaited(node.ackTracker.trackSend(
         messageIdHex,
         recipientHex,
-        const <PeerAddress>[],
+        // Befund 5 (§5.8): real address list of the first successful leg.
+        firstOkUsedAddresses,
         timeout,
         viaNextHopHex: firstOkViaHopHex,
         // S281: direct/relay discriminator for address scoring in
@@ -13786,6 +13965,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // the one case the sender-side edges (network-change, first-peer,
     // endpoint-confirmed) cannot see.
     _maybeFlushOutboxForSender(senderUserHex);
+    // §5.1 F3' — dieselbe Kante fuer die First-CR, aber SEPARAT aufgerufen:
+    // _maybeFlushOutboxForSender steigt frueh aus, wenn keine Outbox-Eintraege
+    // fuer diesen Sender geparkt sind (:7595) — und fuer eine First-CR gibt es
+    // per Konstruktion keine. Ein Hook innerhalb der Funktion waere deshalb
+    // genau im relevanten Fall unerreichbar.
+    shortenCrBackoffOnEdge('verified-inbound', onlyUserHex: senderUserHex);
 
     // A5: any verified ApplicationFrame proves contact liveness
     if (senderContact != null && senderContact.status == 'accepted') {
@@ -13959,6 +14144,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         break;
       case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
         _calls.onKeyframeRequested?.call();
+        break;
+      // §10.6 / V1.12 — handled here, not in CallService: the state is a
+      // protocol fact about the peer, and CallService (V2.1) is not touched
+      // during wave 1 of the audio/video rebuild.
+      case proto.MessageTypeV3.MTV3_CALL_MEDIA_STATE:
+        handleCallMediaStateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO:
         _calls.handleCallGroupAudioV3(frame, senderDeviceId, snapshot);
@@ -17057,6 +17248,180 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.error('DEVICE_REVOKED processing failed: $e');
     }
   }
+  // ─────────────── CALL_MEDIA_STATE — own video on/off (§10.6, V1.12) ───────
+  //
+  // Scope of this block, deliberately narrow: encode our own state, decode the
+  // peer's, keep the latest per (call, peer), and hand it out. It renders
+  // nothing and it starts and stops no camera. The display belongs to V1.6
+  // (`call_screen.dart`) and V2.3 (`video_engine.dart`), the send call site to
+  // V2.1 (`call_service.dart`) — see `BUILD_REQUEST_V1.12.md`.
+  //
+  // Invariante I12 runs through the whole block: a received state is a report
+  // about the far side. Nothing here may act on the local capture session, and
+  // nothing here may be given a code path that would let it.
+
+  /// Fires whenever a peer's own-video state changes (§10.6).
+  ///
+  /// Only on an actual change or a fresher sequence — a repeated identical
+  /// state does not fire, so a UI may rebuild on every call.
+  void Function(PeerCallMediaState state)? onPeerCallMediaStateChanged;
+
+  /// Latest state, keyed by `callIdHex` + `/` + `peerUserIdHex`.
+  final Map<String, PeerCallMediaState> _peerCallMediaStates = {};
+
+  /// Our own `state_seq` per callIdHex. Monotonic, starts at 1.
+  final Map<String, int> _ownCallMediaSeq = {};
+
+  static String _mediaStateKey(String callIdHex, String peerUserIdHex) =>
+      '$callIdHex/$peerUserIdHex';
+
+  /// What [peerUserIdHex] last said about its own video in [callIdHex], or
+  /// null if it has said nothing yet.
+  ///
+  /// "Nothing yet" is not "video off". A caller must not turn the absence of a
+  /// state into a claim about the peer.
+  PeerCallMediaState? peerCallMediaState(String callIdHex, String peerUserIdHex) =>
+      _peerCallMediaStates[_mediaStateKey(callIdHex, peerUserIdHex)];
+
+  /// Drops every remembered peer state for a call. To be called when the call
+  /// ends, so a later call with a recycled id cannot inherit stale state.
+  void clearCallMediaStates(String callIdHex) {
+    _peerCallMediaStates.removeWhere((k, _) => k.startsWith('$callIdHex/'));
+    _ownCallMediaSeq.remove(callIdHex);
+  }
+
+  /// Builds the `MTV3_CALL_MEDIA_STATE` payload announcing **our own** video
+  /// state in [callId] (§10.6).
+  ///
+  /// Owns the monotonic `state_seq` so no call site has to; every invocation
+  /// yields the next one for that call. [reason] is ignored — and sent as
+  /// unspecified — when [sendingVideo] is true, because a reason for not
+  /// sending makes no sense while we are sending.
+  ///
+  /// I12: there is no parameter for the peer's video, and none may be added.
+  Uint8List buildCallMediaStatePayload({
+    required Uint8List callId,
+    required bool sendingVideo,
+    CallVideoOffReason reason = CallVideoOffReason.unspecified,
+  }) {
+    final callIdHex = bytesToHex(callId);
+    final seq = (_ownCallMediaSeq[callIdHex] ?? 0) + 1;
+    _ownCallMediaSeq[callIdHex] = seq;
+
+    final msg = proto.CallMediaState()
+      ..callId = callId
+      ..sendingVideo = sendingVideo
+      ..videoOffReason = sendingVideo
+          ? proto.VideoOffReason.VIDEO_OFF_REASON_UNSPECIFIED
+          : _toWireVideoOffReason(reason)
+      ..stateSeq = Int64(seq);
+
+    return msg.writeToBuffer();
+  }
+
+  static proto.VideoOffReason _toWireVideoOffReason(CallVideoOffReason r) {
+    switch (r) {
+      case CallVideoOffReason.userDisabled:
+        return proto.VideoOffReason.VIDEO_OFF_REASON_USER_DISABLED;
+      case CallVideoOffReason.bandwidthInsufficient:
+        return proto.VideoOffReason.VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT;
+      case CallVideoOffReason.unspecified:
+        return proto.VideoOffReason.VIDEO_OFF_REASON_UNSPECIFIED;
+    }
+  }
+
+  /// Maps a wire reason onto [CallVideoOffReason].
+  ///
+  /// Anything this build does not know becomes
+  /// `CallVideoOffReason.unspecified` — never a known reason. proto3
+  /// open-enum decoding already
+  /// hands us 0 for an unrecognised number; the explicit default here is the
+  /// second lock, so that adding a value to the wire enum without updating
+  /// this switch degrades to "reason unknown" instead of a wrong claim.
+  static CallVideoOffReason _fromWireVideoOffReason(proto.VideoOffReason r) {
+    if (r == proto.VideoOffReason.VIDEO_OFF_REASON_USER_DISABLED) {
+      return CallVideoOffReason.userDisabled;
+    }
+    if (r == proto.VideoOffReason.VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT) {
+      return CallVideoOffReason.bandwidthInsufficient;
+    }
+    return CallVideoOffReason.unspecified;
+  }
+
+  /// Handles an incoming `MTV3_CALL_MEDIA_STATE` (§10.6, V1.12).
+  ///
+  /// The frame is already decrypted and its user signature verified by the V3
+  /// pipeline, so the sender identity in [proto.ApplicationFrameV3.senderUserId]
+  /// is authenticated and is what the state is keyed by.
+  ///
+  /// Drops, in order: unparseable payloads, malformed call ids, and states that
+  /// are not strictly newer than what that peer already told us for that call.
+  /// The last one matters because this travels over an unordered datagram
+  /// network: a reordered older frame would otherwise reinstate "video off"
+  /// while frames are arriving, which is the very picture V1.12 exists to
+  /// prevent.
+  void handleCallMediaStateV3(proto.ApplicationFrameV3 frame,
+      Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    proto.CallMediaState msg;
+    try {
+      msg = proto.CallMediaState.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('CALL_MEDIA_STATE parse failed: $e');
+      return;
+    }
+
+    if (msg.callId.length != 16) {
+      _log.warn('CALL_MEDIA_STATE dropped: call_id is '
+          '${msg.callId.length} bytes, expected 16');
+      return;
+    }
+
+    final callIdHex = bytesToHex(Uint8List.fromList(msg.callId));
+    final peerHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+    final key = _mediaStateKey(callIdHex, peerHex);
+    final seq = msg.stateSeq.toInt();
+
+    final previous = _peerCallMediaStates[key];
+    if (previous != null && seq <= previous.stateSeq) {
+      _log.debug('CALL_MEDIA_STATE from ${_shortHex(peerHex)} ignored: '
+          'seq $seq is not newer than ${previous.stateSeq}');
+      return;
+    }
+
+    // A reason alongside "I am sending" is meaningless; drop it here rather
+    // than let a UI render "video off because ..." next to a live picture.
+    final reason = msg.sendingVideo
+        ? CallVideoOffReason.unspecified
+        : _fromWireVideoOffReason(msg.videoOffReason);
+
+    final state = PeerCallMediaState(
+      callIdHex: callIdHex,
+      peerUserIdHex: peerHex,
+      sendingVideo: msg.sendingVideo,
+      videoOffReason: reason,
+      stateSeq: seq,
+      receivedAt: snapshot.receivedAt,
+    );
+    _peerCallMediaStates[key] = state;
+
+    if (previous != null &&
+        previous.sendingVideo == state.sendingVideo &&
+        previous.videoOffReason == state.videoOffReason) {
+      // Fresher sequence, same content — remembered, but nothing to redraw.
+      return;
+    }
+
+    _log.info('CALL_MEDIA_STATE from ${_shortHex(peerHex)} in call '
+        '${_shortHex(callIdHex)}: sendingVideo=${state.sendingVideo}'
+        '${state.sendingVideo ? '' : ', reason=${state.videoOffReason.name}'} '
+        '(seq $seq)');
+
+    onPeerCallMediaStateChanged?.call(state);
+  }
+
+  static String _shortHex(String hex) =>
+      hex.length >= 8 ? hex.substring(0, 8) : hex;
+
   // ──────────────────────────── V3 Helpers ────────────────────────────
 
   /// Short hex prefix for log lines (8 chars / 4 bytes).

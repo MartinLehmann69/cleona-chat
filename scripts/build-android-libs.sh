@@ -2,9 +2,9 @@
 ###############################################################################
 # build-android-libs.sh — Cross-compile native libs for Android
 #
-# Baut libsodium, liboqs, libzstd, whisper.cpp (inkl. libggml) und den
-# libcleona_vpx-Shim (libvpx statisch eingebunden, nur VP8) mit 16KB
-# Page-Alignment (Android 15+).
+# Baut libsodium, liboqs, libzstd, libopus, whisper.cpp (inkl. libggml), den
+# libcleona_vpx-Shim (libvpx statisch eingebunden, nur VP8) und das
+# libcleona_voice Android-Backend (V1.2) mit 16KB Page-Alignment (Android 15+).
 # Ergebnis landet in android/app/src/main/jniLibs/<ABI>/
 #
 # Voraussetzungen: Android NDK (28.x), git, cmake, ninja-build, autoconf,
@@ -17,6 +17,7 @@
 #   ./scripts/build-android-libs.sh --arch x86_64 sodium   # Nur libsodium x86_64
 #   ./scripts/build-android-libs.sh whisper                # Nur whisper.cpp arm64
 #   ./scripts/build-android-libs.sh vpx                    # Nur libcleona_vpx arm64
+#   ./scripts/build-android-libs.sh voice                  # Nur libcleona_voice arm64
 ###############################################################################
 set -euo pipefail
 
@@ -59,6 +60,12 @@ WHISPER_VERSION="v1.8.4"
 # version; bump both together after re-validating offsets/ABI numbers
 # against the new vpx/vpx_encoder.h + vpx/vpx_decoder.h.
 LIBVPX_VERSION="v1.14.1"
+
+# Pin libopus version — MUST match scripts/build-ios-libs.sh and
+# scripts/build-macos-libs.sh (V1.9's opus_ffi.dart talks to whichever backend
+# a peer shipped; a version drift between platforms is a wire-format risk the
+# same way an oqs/sodium drift would be).
+LIBOPUS_VERSION="1.5.2"
 
 setup_arch() {
     local arch="$1"
@@ -261,6 +268,12 @@ build_libcleona_audio() {
     "$STRIP" "$JNILIBS/libcleona_audio.so"
     verify_alignment "$JNILIBS/libcleona_audio.so"
     echo "  → $JNILIBS/libcleona_audio.so ($(du -h "$JNILIBS/libcleona_audio.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # mtimes are meaningless in git worktrees (checkout order, not content,
+    # decides them) — the stamp lets that check compare source hash instead.
+    sha256sum "$SRC/cleona_audio.c" | cut -d' ' -f1 > "$JNILIBS/libcleona_audio.so.srchash"
+    echo "  → $JNILIBS/libcleona_audio.so.srchash ($(cat "$JNILIBS/libcleona_audio.so.srchash"))"
 }
 
 build_libzstd() {
@@ -302,6 +315,49 @@ build_libzstd() {
     "$STRIP" "$JNILIBS/libzstd.so"
     verify_alignment "$JNILIBS/libzstd.so"
     echo "  → $JNILIBS/libzstd.so ($(du -h "$JNILIBS/libzstd.so" | cut -f1))"
+}
+
+build_libopus() {
+    echo "=== libopus bauen ==="
+    local SRC="$BUILD_DIR/opus"
+
+    if [ -d "$SRC" ]; then
+        local cached_tag
+        cached_tag=$(git -C "$SRC" describe --tags --exact-match 2>/dev/null || echo "unknown")
+        if [ "$cached_tag" != "v$LIBOPUS_VERSION" ]; then
+            echo "  Cached opus is $cached_tag, need v$LIBOPUS_VERSION — re-cloning"
+            rm -rf "$SRC"
+        fi
+    fi
+    if [ ! -d "$SRC" ]; then
+        echo "  Klone opus (v$LIBOPUS_VERSION)..."
+        git clone --depth 1 --branch "v$LIBOPUS_VERSION" https://github.com/xiph/opus.git "$SRC"
+    fi
+
+    cd "$SRC"
+    make distclean 2>/dev/null || true
+    ./autogen.sh
+
+    ./configure \
+        --host="$CONFIGURE_HOST" \
+        --prefix="$BUILD_DIR/install/opus" \
+        --disable-static \
+        --enable-shared \
+        --disable-doc --disable-extra-programs \
+        CC="$CC" \
+        AR="$AR" \
+        RANLIB="$RANLIB" \
+        CFLAGS="-O2 -fPIC" \
+        LDFLAGS="$PAGE_SIZE_FLAG"
+
+    make -j"$(nproc)" clean 2>/dev/null || true
+    make -j"$(nproc)"
+    make install
+
+    cp "$BUILD_DIR/install/opus/lib/libopus.so" "$JNILIBS/libopus.so"
+    "$STRIP" "$JNILIBS/libopus.so"
+    verify_alignment "$JNILIBS/libopus.so"
+    echo "  → $JNILIBS/libopus.so ($(du -h "$JNILIBS/libopus.so" | cut -f1))"
 }
 
 build_libvpx() {
@@ -432,6 +488,12 @@ build_libcleona_pow() {
     "$STRIP" "$JNILIBS/libcleona_pow.so"
     verify_alignment "$JNILIBS/libcleona_pow.so"
     echo "  → $JNILIBS/libcleona_pow.so ($(du -h "$JNILIBS/libcleona_pow.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # mtimes are meaningless in git worktrees (checkout order, not content,
+    # decides them) — the stamp lets that check compare source hash instead.
+    sha256sum "$SRC/cleona_pow.c" | cut -d' ' -f1 > "$JNILIBS/libcleona_pow.so.srchash"
+    echo "  → $JNILIBS/libcleona_pow.so.srchash ($(cat "$JNILIBS/libcleona_pow.so.srchash"))"
 }
 
 build_libcleona_net() {
@@ -456,7 +518,96 @@ build_libcleona_net() {
     "$STRIP" "$JNILIBS/libcleona_net.so"
     verify_alignment "$JNILIBS/libcleona_net.so"
     echo "  → $JNILIBS/libcleona_net.so ($(du -h "$JNILIBS/libcleona_net.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # mtimes are meaningless in git worktrees (checkout order, not content,
+    # decides them) — the stamp lets that check compare source hash instead.
+    # Note: unlike cleona_audio/cleona_pow, cleona_net's source lives under
+    # src/ (native/cleona_net/src/cleona_net.c), not directly in native/cleona_net/.
+    sha256sum "$SRC/src/cleona_net.c" | cut -d' ' -f1 > "$JNILIBS/libcleona_net.so.srchash"
+    echo "  → $JNILIBS/libcleona_net.so.srchash ($(cat "$JNILIBS/libcleona_net.so.srchash"))"
 }
+
+build_libcleona_voice() {
+    echo "=== libcleona_voice bauen (Android-Backend, V1.2) ==="
+    local SRC="$PROJECT_DIR/native/cleona_voice"
+    local BUILD="$BUILD_DIR/cleona_voice"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    # MOCK=OFF and SMOKE=OFF are not optional. CLEONA_VOICE_BUILD_MOCK
+    # defaults ON (native/cleona_voice/CMakeLists.txt) and would also emit
+    # libcleona_voice_mock.so into the same build tree — both libraries export
+    # the identical twelve symbols, and voice_session.dart states the rule "a
+    # process must never load both". Shipping the mock alongside the real
+    # backend also puts wire value 100 (CLEONA_VOICE_BACKEND_MOCK) within
+    # reach of a release build, exactly what preflight.sh Check 15 ("Mock
+    # voice/video backend not in production build wiring") exists to prevent
+    # (native/cleona_voice/BUILD_REQUEST.md §7). CLEONA_VOICE_ANDROID_CONFORMANCE
+    # stays at its default OFF — the on-device conformance harness is test-only,
+    # built via native/cleona_voice/android/conformance/run_conformance.sh, not
+    # via this script.
+    cmake -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
+        -DANDROID_ABI="$CMAKE_ABI" \
+        -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
+        -DCLEONA_VOICE_BUILD_MOCK=OFF \
+        -DCLEONA_VOICE_BUILD_SMOKE=OFF \
+        "$SRC"
+
+    ninja -j"$(nproc)"
+
+    # native/cleona_voice/CMakeLists.txt adds the platform backend as a
+    # subdirectory, so the artefact lands under android/ in the build tree.
+    cp android/libcleona_voice.so "$JNILIBS/libcleona_voice.so"
+    "$STRIP" "$JNILIBS/libcleona_voice.so"
+    verify_alignment "$JNILIBS/libcleona_voice.so"
+    echo "  → $JNILIBS/libcleona_voice.so ($(du -h "$JNILIBS/libcleona_voice.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # cleona_voice is a header-only-ABI package (sources live per-platform
+    # under mock/, linux/, android/, apple/, windows/, not at a single
+    # native/cleona_voice/cleona_voice.c) — the formula below MUST match
+    # preflight.sh Check 5's cleona_voice branch exactly (path-relative-to-
+    # PROJECT_DIR + content hash, NOT the absolute path — see that check's
+    # comment for why an absolute path in the hash makes a .so built in one
+    # worktree read as stale in every other one, measured cross-worktree),
+    # or the two disagree about what "current" means. It hashes every
+    # tracked *.c/*.h under native/cleona_voice/ except test/ and smoke/
+    # (neither ships in the .so), plus VoiceSession.kt: the JNI facade
+    # cleona_voice_android.c is a thin shell around it, so a rate-ladder or
+    # effect change there changes no .c file at all and would otherwise
+    # leave a stale stamp looking current.
+    { find "$SRC" \( -name '*.c' -o -name '*.h' \) \
+        -not -path '*/test/*' -not -path '*/smoke/*' -print0 | sort -z
+      printf '%s\0' "$PROJECT_DIR/android/app/src/main/kotlin/chat/cleona/cleona/VoiceSession.kt"
+    } | while IFS= read -r -d '' _bv_f; do
+        printf '%s %s\n' "${_bv_f#"$PROJECT_DIR"/}" "$(sha256sum "$_bv_f" | cut -d' ' -f1)"
+      done | sha256sum | cut -d' ' -f1 > "$JNILIBS/libcleona_voice.so.srchash"
+    echo "  → $JNILIBS/libcleona_voice.so.srchash ($(cat "$JNILIBS/libcleona_voice.so.srchash"))"
+}
+
+# --- cleona_video — nothing to build yet, deliberately ---
+# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) +
+# native/cleona_video/BUILD_REQUEST.md §4.
+#
+# The Android backend is V1.14. It does not exist yet — only the hardware-free
+# mock under native/cleona_video/mock, which must never reach an APK (a mock
+# answers every call with a synthetic bitstream, indistinguishable from
+# success). Adding a `build_libcleona_video` target here before the backend
+# exists would have nothing real to compile.
+#
+# When V1.14 lands, add a `build_libcleona_video` function following
+# `build_libcleona_voice` above (same shape: NDK toolchain, install into
+# jniLibs/<abi>/, write a .srchash matching preflight.sh Check 5's
+# cleona_video branch), add it to the `case "$TARGET"` dispatch and the `all)`
+# branch below, and — in the SAME commit, not before — add
+# `libcleona_video.so` to BOTH `ARM64_LIBS` and `X86_64_LIBS` in
+# scripts/preflight.sh Check 8 (see the comment there for why "same commit"
+# matters).
 
 # --- Main ---
 # Every remaining argument is a target. This used to be `TARGET="${1:-all}"`,
@@ -475,17 +626,21 @@ build_target() {
         sodium)        build_libsodium ;;
         oqs)           build_liboqs ;;
         zstd)          build_libzstd ;;
+        opus)          build_libopus ;;
         whisper)       build_libwhisper ;;
         cleona_audio)  build_libcleona_audio ;;
         vpx)           build_libcleona_vpx ;;
         pow)           build_libcleona_pow ;;
         net)           build_libcleona_net ;;
+        voice)         build_libcleona_voice ;;
         all)
             build_libsodium
             echo ""
             build_liboqs
             echo ""
             build_libzstd
+            echo ""
+            build_libopus
             echo ""
             build_libcleona_audio
             echo ""
@@ -495,10 +650,12 @@ build_target() {
             echo ""
             build_libcleona_net
             echo ""
+            build_libcleona_voice
+            echo ""
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|vpx|pow|net|all]"
+            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|opus|whisper|cleona_audio|vpx|pow|net|voice|all]"
             exit 1
             ;;
     esac

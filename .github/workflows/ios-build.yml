@@ -221,6 +221,17 @@ jobs:
       - name: Verify FFI symbols in iOS export list
         run: bash scripts/check_ios_exports.sh --ci
 
+      # cleona_voice / cleona_video are not built for iOS yet (V1.3 / V1.15,
+      # docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 + native/cleona_voice/BUILD_REQUEST.md §5,
+      # native/cleona_video/BUILD_REQUEST.md §5): scripts/build-ios-libs.sh does
+      # not build either target (see the comment there), so libcleona_all.a
+      # cannot contain cleona_voice_mock/cleona_video_mock symbols today, and
+      # scripts/preflight.sh Check 15 keeps that file from ever wiring the mock
+      # in. When V1.3/V1.15 land, extend "Verify native archives" below with an
+      # `nm -g ios/CleonaNative/libcleona_all_device.a | grep cleona_voice_mock_`
+      # (resp. cleona_video_mock_) assertion that fails the job if either
+      # matches — the mock must never enter a signed IPA.
+
       - name: Install distribution certificate
         # VERIFY runs build unsigned — see "Build IPA" below.
         if: env.IS_RELEASE == 'true'

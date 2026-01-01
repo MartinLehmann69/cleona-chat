@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:fecc664bd892, 2026-07-30). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:46dec5fc022d, 2026-07-30). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1350,7 +1350,7 @@ Cleona uses a Kademlia DHT as the backbone for peer discovery, mailbox lookup, e
 
 **DHT address space**: 256-bit, identical key space as DeviceIDs and Mailbox IDs.
 
-**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with 200 entries per bucket. Standard Kademlia uses k=20, designed for networks with millions of nodes. Cleona operates in the 10–500 node range, where SHA-256-based Node-IDs cause ~50% of peers to land in bucket 255 — a k=20 bucket overflows at just ~40 peers, causing routing-table rejections and DV-routing desync (3,400+ failed sends/day observed on a mobile node, 2026-06-20). k=200 eliminates this failure mode with negligible memory overhead (~200 PeerInfo × ~1KB ≈ 200KB per bucket worst case). **FIND_NODE response count**: 20 (standard Kademlia K), not the bucket capacity — each PeerInfoProto with PQ key material is ~8,800B; returning 200 peers would produce ~1.76MB, far exceeding the 255-fragment UDP limit (306KB). The iterative lookup merges multiple 20-peer responses to converge on the true K-closest set.
+**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with 200 entries per bucket. Standard Kademlia uses k=20, designed for networks with millions of nodes. Cleona operates in the 10–500 node range, where SHA-256-based Node-IDs cause ~50% of peers to land in bucket 255 — a k=20 bucket overflows at just ~40 peers, causing routing-table rejections and DV-routing desync (3,400+ failed sends/day observed on a mobile node, 2026-06-20). k=200 eliminates this failure mode with negligible memory overhead (~200 PeerInfo × ~1KB ≈ 200KB per bucket worst case). **FIND_NODE response count**: 20 (standard Kademlia K), not the bucket capacity. The bound was originally sized against a full `PeerInfoProto` (~8,800 B with PQ key material): 200 peers would have produced ~1.76 MB, far exceeding the 255-fragment UDP limit (306 KB). With slim serialisation (§4.5.x, ~450 B per entry) a 20-peer response is ~9 KB instead of ~176 KB and no longer near that limit; **K remains 20 on Kademlia grounds, not size grounds** — raising it is a separate decision about lookup convergence, not a consequence of the smaller payload. The iterative lookup merges multiple 20-peer responses to converge on the true K-closest set.
 
 **Closed Network authentication**: every DHT operation is authenticated by the HMAC in the outer frame (§4.10). Nodes without the `network_secret` can neither perform DHT operations nor interpret responses.
 
@@ -1711,11 +1711,15 @@ The replacement is not a 1:1 mapping — the old 120 s tick produced ~30 `PEER_L
 
 **Slim PEER_LIST_PUSH and on-demand PQ-key fetch** (V3.1.71):
 
-All `PEER_LIST_PUSH` paths (new-neighbor, address-update, safety-net, `_pushSelfToPeer`) now serialize `PeerInfoProto` in **slim** mode: the five PQ key/signature fields (`ml_dsa_pk` 1952 B, `ml_kem_pk` 1184 B, `x25519_pk` 32 B, `device_ml_dsa_pk` 1952 B, `ml_dsa_sig` 3309 B) are omitted. Instead, a `key_fingerprint` field (32 B, `SHA-256(ed25519_pk ‖ ml_dsa_pk ‖ x25519_pk ‖ ml_kem_pk ‖ device_ed25519_pk ‖ device_ml_dsa_pk)`) is included so the receiver can detect key changes without the full material.
+All `PEER_LIST_PUSH` paths serialize `PeerInfoProto` in **slim** mode — the self-broadcast paths (new-neighbor, address-update, safety-net, `_pushSelfToPeer`) as well as the **third-party** entries in the `PEER_LIST_SUMMARY` and `PEER_LIST_WANT` response paths, which bundle up to N foreign peers and are therefore the larger payloads: the five PQ key/signature fields (`ml_dsa_pk` 1952 B, `ml_kem_pk` 1184 B, `x25519_pk` 32 B, `device_ml_dsa_pk` 1952 B, `ml_dsa_sig` 3309 B) are omitted. Instead, a `key_fingerprint` field (32 B, `SHA-256(ed25519_pk ‖ ml_dsa_pk ‖ x25519_pk ‖ ml_kem_pk ‖ device_ed25519_pk ‖ device_ml_dsa_pk)`) is included so the receiver can detect key changes without the full material.
 
 Result: a slim PeerInfoProto is ~450 B — fits in a single UDP datagram (MTU 1200 B) without app-level fragmentation. The previous full PeerInfoProto was ~8,800 B = 8 UDP fragments per push. Under congestion (e.g. 20-node simultaneous startup), fragment-loss triggered NACK-retransmit spirals.
 
 **On-demand PQ-key fetch**: when the receiver processes a slim `PEER_LIST_PUSH` and detects that the sender's PQ keys are missing from its cache **or** the received `key_fingerprint` differs from the locally computed fingerprint, it sends a `PEER_KEY_REQUEST` (empty payload, BOOT path) to the sender. The sender responds with a `PEER_KEY_RESPONSE` carrying the full `PeerInfoProto` (including all PQ keys) for each hosted identity. Cooldown: max 1 request per peer per 60 s.
+
+For **third-party** entries this fetch does not apply to the gossiper: `PEER_KEY_REQUEST` is empty by construction and answers with the responder's *own* hosted identities, so a gossiper cannot be asked for a foreign peer's keys. A receiver therefore holds a gossiped peer without PQ key material until that peer speaks for itself — and the acquisition path is the receive-side self-heal in the outer-signature step: when a packet arrives whose sender has a cached `device_ed25519_pk` but no `device_ml_dsa_pk`, Ed25519 alone decides `outerSigStatus` for that one packet and a `PEER_KEY_REQUEST` goes to **that sender directly**, so every following packet gets full hybrid verification. Note that `device_ed25519_pk` and `key_fingerprint` are part of the slim field set — only the ML-DSA half of the hybrid is deferred, and only until the peer's first own packet.
+
+This is consistent with the provenance model rather than a gap: a `thirdParty` PK may never overwrite a `firstParty` one, missing keys inherit from the local record on merge, and §5.10.5 makes a `firstParty` self-broadcast the sole rotation-heal path — a gossiped foreign key is usable only when no key is held at all, and is superseded the moment the peer is heard from directly. Carrying ~8,800 B of it per entry buys a warm start that the rules then forbid relying on.
 
 **Push jitter**: both `_pushSelfToNeighborsExcept` and `_broadcastAddressUpdate` filter to confirmed peers (§4.4), shuffle the list, and space sends at 200 ms per peer. Combined with the 0–3 s cold-start jitter (§4.5), this limits the peak burst rate even when many nodes join simultaneously. Additionally, `_pushSelfToNeighborsExcept` is **globally throttled to at most once per 30 seconds** — the new-neighbor event that triggers it can fire repeatedly during revalidation bursts (e.g. after `onNetworkChanged`), and without throttling each revalidation would fire a full mesh broadcast.
 
@@ -3886,6 +3890,8 @@ Cleona's group features cover three closely related layers: invitation-only **Pr
 
 Private Channels are invitation-only broadcast channels with a clear role hierarchy. They enable one-to-many communication (announcements, communities, interest groups) while maintaining full E2E encryption.
 
+**Member identification invariant:** Groups and channels are user-level constructs. The `members` map is keyed exclusively by `userIdHex` (the stable, device-independent identity anchor from §3.1), never by `deviceNodeIdHex`. This applies to the in-memory map, persisted JSON, and the `node_id` field in `GroupMemberV3` / `ChannelInvite` on the wire. All lookups — role checks, management permissions, post authorization (§9.1.5), leave/join, ownership transfer — resolve against `userIdHex`.
+
 #### 9.1.2 Role Model
 
 Groups and channels share a similar but distinct role hierarchy:
@@ -4511,11 +4517,15 @@ A 1:1 call between two users consists of two phases:
 1. **Setup phase** — `CALL_INVITE` and `CALL_ANSWER` are exchanged as ordinary `ApplicationFrame`s via `sendToUser(userId)`. They run through the full layered encryption pipeline (§2.4), including per-message KEM and full hybrid Ed25519 + ML-DSA-65 signatures. This is where authenticity for the entire call is established.
 2. **Live-media phase** — `CALL_AUDIO` and `CALL_VIDEO` frames are sent device-to-device via `sendToDevice(deviceId)` against the resolved peer device, encrypted under the negotiated `call_key`, and bypass two of the standard frame steps (see §10.3 below).
 
-Video uses **libvpx VP8** for compression with adaptive bitrate; audio is uncompressed PCM (see §10.4). Both audio and video frames are passed through a **JitterBuffer** on the receive side to absorb network reordering and short bursts of loss before playback.
+Video uses the **platform hardware codec** (§10.6); audio uses Opus through the native voice session (§10.4). Both audio and video frames pass through a **JitterBuffer** on the receive side to absorb network reordering and short bursts of loss before playback. Until the §10.6 staging plan lands, video still runs on libvpx VP8 in software — and only where a video engine exists at all, which excludes the daemon platforms (see §10.6).
 
-**Camera Rotation (Mobile):** CameraX (Android) and AVFoundation (iOS) deliver I420 frames in sensor orientation (typically 90° CW on portrait phones). The `chat.cleona/camera` MethodChannel includes `rotationDegrees` alongside frame data. The Dart `cam.onFrame` callback applies `VideoEngine.rotateI420()` (0/90/180/270° CW) before VP8 encoding, so the sent frame is upright. The local preview additionally applies `VideoEngine.mirrorI420Horizontal()` for the expected selfie-mirror effect; the outgoing frame is NOT mirrored.
+**Camera orientation.** Handled entirely in the platform layer (§10.6). Rotation and selfie-mirroring are properties of the capture session, not of a Dart callback: the camera writes into a platform surface with the correct transform applied, and the encoder reads that surface. Dart never sees pixels, so `rotateI420()` / `mirrorI420Horizontal()` disappear together with the Dart-side pixel path.
 
-**Call UI Controls:** The `CallScreen` toggles for Mute and Speaker update both local UI state and the service layer (`toggleMute()` / `toggleSpeaker()`), which respectively gate the Capture Isolate's frame submission and the Main Isolate's `playFrame()` path.
+The superseded Dart path had a latent defect worth recording: the encoder was created for `preset.width × preset.height` (640×480) while `rotateI420()` returned a portrait frame (480×640). Byte count is identical, so the size check in `vpx_ffi.dart:205` never fired and the encoder mis-read the row stride.
+
+**Call UI Controls:** `CallScreen` exposes microphone mute, output mute, speakerphone / output-device selection and — in a video call — **own video on/off**. The audio controls follow the normative semantics in §10.4 (streams stay open, silence is rendered rather than the pipeline blocked). Own video on/off follows §10.6: the capture session is stopped, and the peer is informed via `CALL_MEDIA_STATE` so it can show "video off" instead of a frozen last frame.
+
+There is deliberately **no** control for switching off the *peer's* video (decision by the project owner, 2026-07-30). A participant who does not want to see the incoming picture can stop rendering it locally; that saves no bandwidth, and no signal asks the sender to stop.
 
 #### 10.1.1 Call Key Negotiation
 
@@ -4642,60 +4652,296 @@ The optimisation only removes the redundant outer post-quantum signature on per-
 
 **Receiver-side PoW handling:** Live-media frames carry `pow=0`. The receiver cannot classify them by messageType before KEM decap, so acceptance is bound to the call session: on call establishment both endpoints register the peer's device ID(s) in the PoW live-media allowlist (§13.1.2 exemption #4); teardown unregisters. Frames from non-allowlisted, non-LAN, non-relay sources without valid PoW are dropped before decryption — exactly as ordinary application traffic.
 
-### 10.4 Cross-Platform Audio Stack
+#### 10.3.1 Transport treatment — the exemption extends below the ACK layer
 
-Audio capture and playback are platform-agnostic and routed through **`libcleona_audio.so`**, a thin C shim that wraps two vendored native libraries:
+Live media is **plain UDP, AES-encrypted, fire-and-forget**. That is normative at *every* layer, not only at the acknowledgement layer. Concretely, a live-media frame is exempt from:
 
-| Layer | Library | Version | Role |
-|-------|---------|---------|------|
-| Backend | **miniaudio** | 0.11.21 | Auto-selects the best native audio API per platform |
-| DSP | **speexdsp** | 1.2.1 | Acoustic Echo Cancellation (AEC) + Noise Suppression (NS) |
+| Mechanism | Status for live media | Where |
+|---|---|---|
+| DELIVERY_RECEIPT / RUDP light | exempt — `expectsReply: false` | `call_service.dart:583-591` |
+| Per-hop send budget (150 pkt / 10 s) | exempt — `paced: false` | `cleona_node.dart:4342-4346` |
+| PoW | exempt — `skipPoW: true` + receiver allowlist | §13.1.2 exemption #4 |
+| ML-DSA inner signature, zstd probe | exempt | §10.3 above |
+| **Protocol Escalation to TLS (§4.1)** | **must be exempt** | see below |
+| **Retransmission-based fragment recovery (CFNK NACK)** | **must be exempt** | see below |
 
-**Backend matrix (miniaudio auto-detect):**
+The last two are the part that matters for large frames. `sendBulkViaTLS` establishes a **fresh TCP+TLS connection per payload** — `connect → write length-prefix + payload → flush → close` (`transport.dart:1519-1527`). For a frame with a 20-33 ms deadline that is the wrong instrument: the handshake alone exceeds the budget, and TCP head-of-line blocking is precisely what live media exists to avoid. A fragment NACK is equally unsuitable — its first retry fires after 500 ms (`udp_fragmenter.dart:204`), by which time the frame is long stale.
 
-| Platform | Capture / Playback Backend | Notes |
-|----------|---------------------------|-------|
-| Linux | PulseAudio (preferred) → ALSA (fallback) | PipeWire is reachable through the PulseAudio shim |
-| Android | AAudio (API 26+) → OpenSL ES (legacy) | Streams are declared `usage=VOICE_COMMUNICATION` / `inputPreset=VOICE_COMMUNICATION` (OpenSL: `streamType=voice` / `recordingPreset=voice_communication`) so the HAL applies its hardware-aligned echo canceller and the stream joins Android's communication routing (AudioManager device selection, in-call volume). **Not** the AAudio fast path: that requires the device-native rate (48 kHz on current hardware) while Cleona runs 16 kHz — measured on a Pixel 8 Pro, the resampled mixer path costs 60 ms output latency versus 20 ms on the fast path. |
-| Windows | WASAPI | Shared mode |
-| macOS | Core Audio | Build-infra not yet wired in repo |
-| iOS | Core Audio (AVAudioSession) | Build-infra not yet wired in repo |
+**The consequence is a constraint on the encoder, not on the transport.** A live-media frame must *fit* the plain-UDP delivery envelope: bound the fragment count through the resolution/bitrate preset, spread a keyframe across several send intervals, or protect it with **forward error correction**. Never retransmit, never escalate.
 
-**speexdsp stays enabled on every platform, including Android (measured, S281).** Declaring the capture stream `VOICE_COMMUNICATION` makes the HAL cancel echo before Cleona sees a sample, which raised the question whether the software canceller then merely adds a second, redundant stage — two cancellers in series can damage near-end speech, because the second one adapts against a reference whose echo is already gone.
+**Gap on record (2026-07-30): the code does not implement this.** `_sendV3ViaHop` applies `preferTls` to any payload above ten fragments without inspecting the message type (`cleona_node.dart:4472`), and the fragmenter's NACK retry covers every fragmented payload (`udp_fragmenter.dart:14-15`). A `CALL_VIDEO` keyframe (20-60 kB at 640×480, i.e. 17-50 fragments) therefore qualifies for both. On Android and iOS the TLS branch never engages regardless — the TLS context is built by invoking `openssl` as an external process, Android ships no such binary and iOS cannot spawn processes at all — so those keyframes go out as large UDP bursts instead. Closing this gap is stage 1a of §10.6.
 
-The question is pure DSP and was measured offline, without hardware, by driving `cleona_audio_process_frame_for_test` — which runs the *same* chain as the live capture callback (`native/cleona_audio/test/test_aec.c`, part of the default `ctest` run):
+### 10.4 Native Voice Session (OS voice processing, per platform)
 
-| Scenario | Result |
+> **Implementation status — 2026-07-30: design approved, code NOT written.**
+> `native/cleona_audio/` and `lib/core/calls/audio_engine*.dart` still contain the
+> superseded stack (miniaudio + speexdsp) documented under *Superseded stack* below.
+> Nothing in this section is deployed. The staging plan is at the end of §10.4.
+> This marker must be removed stage by stage, never wholesale.
+
+Cleona performs **no audio DSP of its own**. Echo cancellation, noise suppression
+and automatic gain control come from the operating system's voice-communication
+chain — the same chain a telephony call uses on the device. Cleona captures
+already-processed PCM, encrypts it, ships it, and hands received PCM back to the
+same OS session.
+
+This is not a convenience decision. On four of five platforms the OS chains were
+**unreachable** through the previous cross-platform shim (evidence under
+*Superseded stack*), which is why four successive rounds of echo fixes (S252,
+S268, S278, S281) never converged.
+
+**One ABI, five native implementations.** `native/cleona_voice/cleona_voice.h` is
+the only boundary. Behind it each platform uses the API that actually reaches its
+voice chain; in front of it there is exactly one Dart binding and one policy
+layer.
+
+```
+CallService → VoiceSession (Dart binding) → RoutePolicy (platform-independent, once)
+                          │
+                    cleona_voice.h   (C ABI, identical on all five platforms)
+                          │
+   ┌─────────┬──────────┬────────────────┬───────────┐
+   │ Android │ Apple    │ Windows        │ Linux     │
+   │ JNI +   │ VPIO     │ WASAPI duplex  │ PipeWire  │
+   │ Kotlin  │ AudioUnit│ Communications │ duplex    │
+   └─────────┴──────────┴────────────────┴───────────┘
+```
+
+"No special paths" means one ABI, one semantic, one verification report, one route
+policy. The implementations differ deliberately, because the OS chains are
+addressed differently.
+
+**Frame contract.** Everything above the ABI computes with the values the platform
+*reports*, never with constants.
+
+| Property | Rule | Rationale |
+|---|---|---|
+| Format | 16-bit signed PCM, mono, interleaved | the only format all five chains deliver without conversion |
+| Sample rate | **whatever the platform reports**; `cleona_voice_open()` returns it | forcing 16 kHz excludes Android's fast path (Pixel 8 Pro: 48 kHz native, resampled mixer path costs 60 ms vs 20 ms) and fights Apple's VPIO, which works at the hardware rate |
+| Frame duration | 20 ms, sample count = rate / 50 | matches Opus and all four callback models |
+| Frame size | **guaranteed by the platform layer**, which buffers internally | the previous stack *assumed* a constant callback frame count; miniaudio explicitly does not guarantee one (`miniaudio.h:6812-6815`) |
+| Playback pacing | the output device, normatively — never a Dart timer | a Dart timer cannot hold 50 Hz under call-time UI load |
+| Duplex | **mandatory**: capture and playback live in *one* OS voice session | without it there is no AEC. Enforced by the platform, not by a ring buffer of ours |
+
+**Platform matrix.**
+
+| Platform | AEC | NS | AGC | Provided by | API |
+|---|---|---|---|---|---|
+| Android | HAL + `AcousticEchoCanceler` | HAL + `NoiseSuppressor` | `AutomaticGainControl` | OS | Kotlin `AudioRecord` (source `VOICE_COMMUNICATION`) + `AudioTrack` (`USAGE_VOICE_COMMUNICATION`), effects attached to the record session id, JNI ring, Dart via FFI |
+| iOS | VPIO | VPIO | VPIO | OS | `kAudioUnitSubType_VoiceProcessingIO`; `AVAudioSession` category `playAndRecord`, **mode `voiceChat`** |
+| macOS | VPIO | VPIO | VPIO | OS | same AudioUnit, one shared implementation with iOS |
+| Windows | endpoint effects, else Voice Capture DSP | same | same | OS / driver | WASAPI, `IAudioClient2::SetClientProperties` with `eCategory = AudioCategory_Communications`, device role `eCommunications` |
+| Linux | AEC3 via `libpipewire-module-echo-cancel`, else linked WebRTC APM | same | same | OS when present, otherwise us | PipeWire duplex, role `Communication` |
+
+The Java API is mandatory on Android: only `AudioRecord` exposes a session id, and
+only with a session id can the effects be attached **and** read back. AAudio
+streams carry `AAUDIO_SESSION_ID_NONE` and are therefore neither attachable nor
+verifiable.
+
+Linux is the only platform without a guaranteed OS chain, so it is regulated
+explicitly rather than left silently worse: prefer the PipeWire echo-cancel filter
+(internally WebRTC AEC3 including NS and AGC); if absent, link WebRTC APM
+directly — **not** speexdsp, which has neither a delay estimator nor a residual
+suppressor (measured: ERLE collapses to +14.7 dB at a 300 ms echo path). The
+verification report states which of the two is active.
+
+**Verification report — normative part of the ABI.** The superseded stack could
+not answer "is the AEC running?" even in principle. The replacement must, or the
+same mistake repeats: a gate derived from the same assumption as the thing it
+checks is worthless.
+
+`cleona_voice_get_report()` returns, per session, logged once per call and
+assertable in E2E:
+
+- negotiated sample rate, actual frame size, channel count
+- per effect (AEC / NS / AGC): `unavailable | available_off | enabled`, **and** the
+  origin of the chain (HAL, VPIO, driver endpoint, PipeWire filter, linked APM)
+- active input and output route, plus the set of available routes
+- backend name, duplex yes/no
+- underrun and overrun counters
+
+`not_determinable` is a permitted value and is reported as such — never guessed as
+`enabled`.
+
+**Superseded stack (miniaudio 0.11.21 + speexdsp 1.2.1), and why it is replaced.**
+Kept as a record so the next attempt does not re-tread it. Each row is
+code-evidenced against the state at 2026-07-30:
+
+| # | Defect of the old stack | Evidence |
+|---|---|---|
+| 1 | The AEC reference was not a continuous stream. Two independent `ma_device` instances on two clocks communicated through a capacity-1 ring with consuming reads: ring empty → a **zero** reference frame was injected while the speaker was playing (that frame passes 100 % of its echo); ring full → the reference jumped 20 ms and forced re-convergence | `cleona_audio.c:69`, `:162-167`; `cleona_audio_ring.c:110-118`, `:88-94` |
+| 2 | The S281 offline measurement could not see defect 1 — `cleona_audio_process_frame_for_test` `memcpy`s the reference and bypasses the ring. Its result (+42.6 / +33.3 / +14.7 dB ERLE, and 1.0 dB near-end cost on echo-free input) remains valid **for the DSP kernel** and says nothing about the shipped delivery path | `cleona_audio.c:181-196`; `test/test_aec.c:121` |
+| 3 | Apple's voice processing was unreachable: miniaudio uses `RemoteIO` / `HALOutput`, never `kAudioUnitSubType_VoiceProcessingIO`, and never sets `mode = voiceChat` | `miniaudio.h:33263`, `:34948-34950`; grep `VoiceProcessingIO` = 0; grep `setMode` = 0 |
+| 4 | Windows never declared the stream as Communications, so the driver's endpoint AEC never engaged | `miniaudio.h:20290` (*"miniaudio is only caring about Other"*), `:22090` |
+| 5 | Android: no session id on AAudio streams, so effects were neither attachable nor verifiable; additionally `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` was requested unconditionally | grep `SessionId` = 0; `miniaudio.h:37719`, `:4312` |
+| 6 | AGC was never switched on at all — `setAgc` was bound but had no call site anywhere in `lib/` | `cleona_audio.c:90`; `audio_engine_shim.dart:201` |
+| 7 | A constant callback frame count was assumed; deviation silently dropped the capture frame or emitted silence | `cleona_audio.c:151`, `:202` against `miniaudio.h:6812-6815` |
+| 8 | Audio focus, interruption handling, proximity and call integration were entirely absent | grep `requestAudioFocus`/`AudioFocus`/`proximity`/`CallKit`/`CXProvider`/`ConnectionService`/`TelecomManager` = 0 |
+
+Rows 3, 4 and 5 are the reason for a rewrite rather than a repair: the OS chains
+were not misconfigured, they were **unreachable across the library boundary**. No
+amount of speexdsp tuning could have fixed that.
+
+**Clean cut — removed without a compatibility path.** Deliberate decision by the
+project owner (2026-07-30): the audio and video stacks never worked in the field,
+so no backward compatibility is maintained.
+
+| Removed entirely | Size |
 |---|---|
-| Echo at 20 ms (Pixel 8 Pro fast path) | ERLE **+42.6 dB** |
-| Echo at 60 ms (resampled mixer path) | ERLE **+33.3 dB** |
-| Echo at 300 ms (beyond the 250 ms tail) | ERLE **+14.7 dB** — the tail limit is observable but not a cliff |
-| **Echo already removed, near-end speech only** | near-end attenuation **+1.0 dB** |
+| `native/cleona_audio/` including vendored `speexdsp` | ~400 lines C + ~8,700 vendored |
+| `lib/core/calls/audio_engine.dart` | 448 lines |
+| `lib/core/calls/audio_engine_shim.dart` | 205 lines |
+| `lib/core/calls/audio_mixer.dart` — rebuilt on the new ABI | 458 lines |
+| `android_audio_diagnostics*.dart` (3 files) — absorbed into the verification report | 115 lines |
+| the two-isolate arrangement with an engine pointer shared across the isolate boundary | — |
+| every AEC parameter: tail length, `far_end_ring`, ring capacity, the mute-drain trick | — |
 
-The decisive row is the last one: with an echo-free input — exactly what a working HAL canceller delivers — speexdsp costs 1 dB of near-end level and nothing else. The "double compensation damages the signal" hypothesis is **not supported**, so the runtime switch `cleona_audio_set_aec()` stays unused in production and no platform-dependent AEC policy is introduced.
+Unchanged: `call_manager.dart`, signaling, handshake, the `call_service.dart` send
+path, `jitter_buffer.dart`, `bandwidth_estimator.dart`, `overlay_tree.dart`,
+`media_relay.dart`, `rtt_measurement.dart`, `lan_multicast.dart`, and
+`group_call_manager.dart` — its logic stays, only the audio attachment changes.
 
-**Limits of that measurement, stated explicitly:** it covers the linear, adaptive behaviour on synthetic signals. It does *not* cover loudspeaker non-linearity, nor the interaction between speexdsp's residual-echo suppressor and a HAL-side one — both are plausible sources of real-world artefacts and need a device test. What the measurement does settle is that there is no *inherent* reason to disable the software canceller.
+**Group calls.** The OS delivers **one** duplex stream, so N-way mixing remains
+Cleona's job: decode the participant streams, mix, hand one PCM stream to the
+platform layer. The principle of `audio_mixer.dart` survives, the wiring does not —
+no shared engine pointer, no AEC of our own. Group calls are broken between the
+first and the group-mixer stage; that is a consequence of the clean cut and must
+not reach a release.
 
-**Whether the HAL canceller engages at all was, until S281, not observable.** `AudioDiagnostics` (Android) reports device capability and routing state once per call, so a single real call answers it from the log.
+**In-call controls.** Each of the four has a trap, so the semantics are normative,
+not just the names.
 
-**Build reproducibility:** speexdsp 1.2.1 is **vendored as full source** under `native/cleona_audio/vendor/speexdsp/` (tarball SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`) and statically linked into `libcleona_audio.so`. miniaudio is a single-header library committed at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. Building no longer needs internet access or distro packages — `linux/cleona_audio/`, `android/.../jniLibs/`, and the Windows native build all reference the vendored sources directly.
+*Microphone mute.* The capture stream **stays open and keeps running**; frames are
+zeroed, or the platform's own input-mute property is used. Stopping the stream
+diverges the adaptive filter and produces about a second of echo on unmute — the
+superseded C code already knew this and kept draining the reference while muted
+(`cleona_audio.c:152-156`); the insight must survive the rewrite. Nothing is sent
+on the wire while muted; with Opus DTX that is the natural state and the receiver
+generates comfort noise. The mute state survives route changes.
 
-**Audio parameters (constant across platforms):**
+*Output mute ("sound off"), distinct from speakerphone.* The playback stream stays
+open and renders **silence**; received frames are still decrypted and discarded and
+the jitter buffer keeps running normally. Tearing the stream down would lose AEC
+convergence. The superseded implementation did the opposite: `_drainJitterBuffer`
+returned early while the speaker was off (`audio_engine.dart:353`), so the buffer
+filled to its cap and produced a backlog burst on re-enable.
 
-| Parameter | Value |
-|-----------|-------|
-| Sample rate | 16 kHz |
-| Channels | 1 (mono) |
-| Frame size | 320 samples = 20 ms = **640 bytes** raw PCM (S16LE) |
-| Encoding | Raw PCM, AES-256-GCM per frame (no Opus, no codec compression) |
-| Speex AEC tail | 4000 samples = 250 ms @ 16 kHz |
-| Defaults | AEC: on, NS: on, AGC: off |
+*Speakerphone.* Android `AudioManager.setCommunicationDevice()` between
+`TYPE_BUILTIN_SPEAKER` and `TYPE_BUILTIN_EARPIECE` (API 31+, `setSpeakerphoneOn`
+below that); iOS `AVAudioSession.overrideOutputAudioPort(.speaker / .none)`. macOS,
+Windows and Linux have no earpiece — there "speaker" is not a toggle but an output
+device selection, and the UI shows a device chooser rather than a button that does
+nothing.
 
-The 250 ms AEC tail covers typical headset and integrated-laptop-mic echo paths. AGC is intentionally off — gain swings introduced by AGC are perceptually worse than a slightly-low input level on the kinds of devices Cleona targets.
+*Headset detection and route switching.* Event-driven, never polled:
+Android `OnCommunicationDeviceChangedListener` (API 31+) / `AudioDeviceCallback`
+(API 23+); iOS `AVAudioSession.routeChangeNotification` with reasons
+`newDeviceAvailable` / `oldDeviceUnavailable`; macOS a CoreAudio property listener
+on the default communication device; Windows `IMMNotificationClient::OnDefaultDeviceChanged`
+for role `eCommunications`; Linux PipeWire node events on the default source/sink.
 
-**Shared-engine Capture-Isolate pattern:** Both capture and playback run on a **single** `cleona_audio_engine_t` instance created with `cleona_audio_start_directed(engine, 0)` (direction=0, both devices). The Main Isolate creates and owns the engine and writes decrypted PCM into the playback ring (`playbackWrite`). The Capture Isolate receives the engine pointer address (native heap, same process) and reads captured frames from the capture ring (`captureRead`), encrypts them with AES-256-GCM under the Call Session Key (§10.1.1), and returns ciphertext to the main isolate via `SendPort`. Sharing a single engine is mandatory for AEC: the `far_end_ring` inside the engine connects the playback callback's output to the capture callback's echo-cancellation reference — with separate engines the AEC reference was always silence. **The ring holds exactly one frame.** The capture callback consumes the oldest entry, so a deeper ring hands the canceller a reference that is up to (capacity−1) frames stale — and the staleness jumps by a whole frame whenever an entry is overwritten. An adaptive filter models a constant echo-path delay; a delay that shifts in 20 ms steps forces continuous re-convergence, during which echo passes uncancelled. Capacity 1 with overwrite semantics gives the capture thread the newest played frame, deterministically. For the same reason the receive-side `JitterBuffer` only **reorders and de-duplicates** — the pacing is done by the native playback device, the only clock in the system bound to the actual sample rate. Draining it from a Dart timer cannot hold a 50 Hz cadence under call-time UI load: the buffer fills to its cap and adds that much permanent playout latency on top of the network delay (depth 2, cap 6 = 120 ms). The SPSC ring buffers use C11 atomics and are safe for cross-isolate access (each ring has exactly one producer thread and one consumer thread). Shutdown order: `cleona_audio_stop()` (closes rings, unblocks `captureRead` → isolate exits) → `Isolate.kill` (belt-and-suspenders) → `cleona_audio_destroy()`.
+The **policy lives once, in Dart** (`RoutePolicy`), not five times natively:
 
-**Why no codec:** With 16 kHz mono PCM at 640 bytes/frame, the on-wire bandwidth before AES-GCM overhead is ~256 kbps per direction. This is well within consumer broadband and 4G/5G mobile budgets, and the simplicity buys the project (a) a single ciphertext path, (b) no codec licensing concerns, (c) trivial AEC reference signal (the same PCM that goes to playback). A codec layer (Opus) can be added later behind the shim if metered-data deployments need it.
+1. a headset or Bluetooth headset appears → switch to it immediately
+2. the active route disappears → fall back to the **earpiece, not the speaker**. A
+   phone does not blast the room when headphones are unplugged
+3. a manual speakerphone choice by the user wins over the automation — until the
+   device set changes, at which point rule 1 applies again
+4. every switch without tearing the stream down, so the AEC stays converged. Where
+   a platform forces a rebuild, the convergence time is documented as a known
+   property
+
+**Session behaviour.** Absent in the superseded stack (row 8 above), normative here:
+
+| Concern | Requirement |
+|---|---|
+| Audio focus | Android `AudioFocusRequest` with `AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE`, loss handled; Apple interruption notifications plus `duckOthers`. Without it, media from other apps keeps playing through the call |
+| Interruption | a cellular call, Siri or another VoIP call takes the session; Cleona releases it cleanly and reclaims it afterwards. Without this the audio stays gone after the foreign call ends |
+| Proximity | screen off if and only if the active route is the earpiece. Android `PROXIMITY_SCREEN_OFF_WAKE_LOCK`, iOS `isProximityMonitoringEnabled` |
+| Call integration | CallKit (Apple) and a self-managed `ConnectionService` (Android) — a **later stage**, deliberately after the two layers above. Otherwise the call sounds right and behaves wrong |
+
+**Codec: Opus.** With the OS owning the AEC, the justification for raw PCM is gone.
+The superseded text argued for PCM partly because it made the AEC reference trivial
+("the same PCM that goes to playback") — once the reference lives inside the OS
+session, that argument no longer applies.
+
+| | Superseded | This design |
+|---|---|---|
+| Codec | raw PCM (S16LE) | Opus, 20 ms, device rate |
+| Payload per frame | 672 B (4 seq + 12 nonce + 640 PCM + 16 tag) | ~60-80 B |
+| Bitrate per direction | ~256 kbps | ~30 kbps (target 24-32 kbps) |
+| Silence / pauses | full bitrate | DTX |
+| Packet loss | frame lost | in-band FEC |
+
+Encryption is unchanged: AES-256-GCM per frame under the Call Session Key
+(§10.1.1), applied to the Opus payload instead of the PCM payload.
+
+**Build state of libopus, stated accurately (checked 2026-07-30):** built for
+**iOS and macOS only**. `scripts/build-android-libs.sh` does not know it (zero
+matches), it is absent from both jniLibs target lists in `scripts/preflight.sh`,
+and no artefact exists locally. Adopting Opus therefore means build integration for
+Android, Linux and Windows — not reuse. `opus_ffi.dart` (352 lines) exists and has
+no call site anywhere in `lib/`; the binding is reusable but must be reviewed
+before it is trusted.**Jitter buffer — the one rule carried over unchanged.** The receive-side
+`JitterBuffer` **reorders and de-duplicates only**. Pacing is done by the output
+device, the sole clock in the system bound to the real sample rate. Draining the
+buffer from a Dart timer cannot hold a 50 Hz cadence under call-time UI load: the
+buffer fills to its cap and adds exactly that much permanent playout latency on top
+of the network delay (depth 2, cap 6 = 120 ms). This was learned the hard way in
+S278 and is normative for the new platform layer as well.
+
+**Compatibility: none, by decision.** Sample rate, codec and frame format all
+change, so a 3.1.x client and a 3.2.x client cannot hold a call. The version is
+therefore raised to **3.2.0** (`pubspec.yaml` **and** `kCurrentAppVersion` in
+`cleona_service.dart` — the preflight hook checks the pair), and the bump happens
+*before* the first build of the new stack exists, so no 3.1.x build can ever claim
+to speak the new protocol.
+
+`CALL_INVITE` carries a version gate. A call between incompatible versions is
+**explicitly rejected** with a user-visible reason — never allowed to fail
+silently, which would reproduce exactly the field symptoms this rewrite removes.
+
+The gate compares the **whole version**, not the minor alone. `CallInvite`
+carries `caller_app_major_minor` (`uint32`, field 8) encoded as
+`major * 1000 + minor`; the receiver accepts from `>= 3002`, i.e. from 3.2.0
+onwards. An absent field decodes to proto3's 0 under every reader and therefore
+states "sender older than 3.2.0" — it is a claim, not a gap, and it is rejected
+rather than waved through as "unknown, so probably fine".
+
+The earlier wording of this gate was `minor >= 2`, which carries a rollover
+defect: 4.0.0 has minor 0, so `0 >= 2` is false and the literal rule would
+reject a client speaking the **newer** stack. That failure is not a refused
+connection but the very thing this paragraph forbids — a rejection whose stated
+reason asserts something untrue about the peer. The patch level is deliberately
+absent from the encoding: this project's patch counter runs into the hundreds
+(v3.1.160), so folding it in would have made 3.1.160 sort above 3.2.0. Per
+semver a patch never changes the voice stack, so it carries no information the
+gate needs. Decision by the project owner, 2026-07-30; wire field in work
+package V1.12, evaluation and the user-visible reason (i18n across all 34
+locales) in V2.1.
+
+**None of this restores backward compatibility** — that stays excluded, as
+stated above. The gate does not make old and new interoperate; it makes the
+incompatibility *visible* instead of letting it fail silently.
+
+**Staging plan.** Stage 0 comes first because the verification report is what makes
+every later stage checkable instead of merely claimable.
+
+| Stage | Content | Outcome |
+|---|---|---|
+| 0 | `cleona_voice.h` ABI, Dart binding, verification report, Linux implementation | measurable on the dev machine, E2E-capable |
+| 1 | Android + Apple | the platforms this is about — echo field test becomes possible |
+| 2 | Windows | all five platforms complete |
+| 3 | `RoutePolicy`, mute, output mute, speakerphone, headset switching | the in-call controls |
+| 4 | audio focus, interruption, proximity | behaves like a telephony call |
+| 5 | Opus including the build for Android, Linux, Windows | 256 → ~30 kbps |
+| 6 | group mixer on the new ABI | group calls restored |
+| 7 | CallKit / `ConnectionService` | system integration |
+
+Video is a separate matter and is covered by **§10.6**. The audio of a video call
+is fully covered here: `_startAudioEngine` runs for every call, `_startVideoEngine`
+only when `session.isVideo` (`call_service.dart:90-91`, `:441`), so both call types
+share one audio path.
 
 #### 10.4.1 Per-Call-Session Route Cache
 
@@ -4848,7 +5094,7 @@ A participant can share their screen (or a specific window) with all call member
 Screen Capture (platform-specific)
   │
   ▼
-Frame Encoder (VP8, same as video)
+Frame Encoder (platform hardware codec, same as video — §10.6)
   │
   ▼
 Encrypt (AES-256-GCM, call key)
@@ -4860,7 +5106,7 @@ Overlay Multicast Tree (same as video stream)
 Remote participants: Decrypt → Decode → Display
 ```
 
-Screen sharing reuses the entire video pipeline (§10, VP8 encoding, Overlay Multicast Tree) but captures from the screen instead of the camera. It is treated as a second video stream alongside the camera feed.
+Screen sharing reuses the entire video pipeline (§10.6 hardware codec, Overlay Multicast Tree) but captures from the screen instead of the camera. It is treated as a second video stream alongside the camera feed, and it moves to the new codec path in stage 6 of the §10.6 staging plan.
 
 ##### 10.5.4.2 Capture Sources
 
@@ -4944,6 +5190,71 @@ The following ApplicationFrame types carry in-call collaboration payloads. All t
 | `CALL_CHAT` | 215 | Ephemeral in-call text message (NOT persisted) |
 
 All frames are encrypted with the call key and distributed via the Overlay Multicast Tree.
+
+---
+
+### 10.6 Native Video Stack
+
+> **Implementation status — 2026-07-30: design approved for the direction, code NOT written.** `lib/core/calls/video_engine.dart`, `vpx_ffi.dart` and `native/cleona_vpx/` still contain the superseded stack. The staging plan is at the end of this section, and stage 1 is **not a video change at all** — see *Prerequisite*.
+
+Video follows the same principle as §10.4: the platform captures, the platform's hardware codec encodes and decodes, and Cleona handles only the encrypted bitstream. Cleona performs **no pixel processing**.
+
+**Prerequisite — the transport comes first.** The field symptom is *audio works, no picture at all* (Android to Android). Its cause is not in the video stack: on Android the TLS escalation is permanently dead, because the TLS context is obtained by invoking `openssl` as an external process and Android ships no such binary. `_tlsContextUnavailable` latches (`transport.dart:558-561`, field doc `:175-181`), `tlsBulkCapable()` therefore returns false for every address (`:1503`), and `_sendV3ViaHop` skips every target without attempting a single TLS send (`cleona_node.dart:4477-4479`). Everything above ~12 kB falls back to a UDP fragment burst which the same file documents as undeliverable through CGNAT — "carrier NAT drops large bursts silently and zero fragments arrive (no NACK possible)" (`:4464-4466`). A NACK needs at least one received fragment to know the group exists.
+
+Measured on a Pixel 8 Pro, log of 2026-07-29: **1226** `preferTls=true` events, **zero** successful TLS sends, **zero** per-address TLS attempts, 1228 fallbacks to UDP fragmentation, fragment counts 14 to 90. Confirmed on the device: `which openssl` → not present; log line `openssl execution failed: ProcessException: No such file or directory`.
+
+A VP8 keyframe at 640×480 falls squarely in that size class, and `processReceivedFrame` discards every P-frame until a keyframe has been decoded (`video_engine.dart:403-406`), then requests a new one — equally large. The result is a loop in which **no frame is ever decoded**, while audio (a single ~920 B packet per frame) is unaffected. **Hardware codecs do not fix this**: H.264 IDR frames are no smaller than VP8 keyframes.
+
+**Two independent problems, and only the first one blocks video.** They were initially conflated; separating them is what §10.3.1 records:
+
+1. **Live media is being handed to mechanisms it is exempt from.** A keyframe qualifies for TLS escalation and for fragment-NACK retry, both of which are wrong for a frame with a 20-33 ms deadline (§10.3.1). The fix is *not* to make TLS work for video — it is to keep live media off the bulk path and to make frames fit the plain-UDP envelope: lower default preset, bounded fragment count, keyframe spread across send intervals, forward error correction instead of retransmission. This is stage 1a and it is the actual video blocker.
+2. **Non-live payloads above ~12 kB are undeliverable on Android**, because the escalation path they legitimately *should* use is dead. This affects two-stage media, large DHT responses and update-manifest fragments — not video. Here burst pacing and a group-level acknowledgement are the appropriate instruments, and they are appropriate precisely because these payloads have no frame deadline. This is stage 1b, independent of everything else in this section.
+
+**Platform matrix.**
+
+| Platform | Capture | Encode / Decode |
+|---|---|---|
+| Android | CameraX (already real, `CameraXHandler.kt`) | MediaCodec |
+| iOS | AVCaptureSession | VideoToolbox |
+| macOS | AVCaptureSession | VideoToolbox |
+| Windows | Media Foundation `IMFSourceReader` | Media Foundation Transform (hardware MFT) |
+| Linux | V4L2; PipeWire camera portal under Wayland | VA-API, else V4L2 M2M |
+
+**Two formats, and only one of them crosses platforms.**
+
+*On the wire:* **H.264 Constrained Baseline** as the mandatory interop level, with HEVC / AV1 / VP9 negotiated when both sides have hardware for them. It is the only codec with hardware encode **and** decode on all five platforms — Apple's VideoToolbox has no VP8/VP9 encoder at all, and Android's VP8 hardware support is device-dependent.
+
+*Internally: no conversion.* The camera writes into a platform surface (Android `Surface`/`ImageReader`, Apple `CVPixelBuffer`, Windows D3D11 texture, Linux DMA-BUF), the hardware encoder reads that surface directly, and Dart sees only the encoded bitstream. On receive the decoder writes into a texture which Flutter displays through a `Texture` widget with an external texture id. An NV12/I420 converter remains only as a fallback for devices whose capture format the encoder will not accept — native, never in Dart.
+
+This removes the following, all of which ran 30 times per second on the UI isolate: I420 rotation (`main.dart:2296`), preview mirroring (`:2298`), I420→RGBA for the local preview (`:2332`), I420→RGBA for the remote picture (`video_engine.dart:429`), and a `decodeImageFromPixels` call per frame with manual `dispose`.
+
+**Own video on/off.** `CALL_MEDIA_STATE` carries one flag — "I am sending video" — **and a reason** whenever that flag is false (project owner, 2026-07-30). Sender stops the capture session and sends the state; receiver shows "video off" rather than a frozen frame. The reason exists because two different situations produce the same missing picture and the user must be able to tell them apart: the sender switched their own video off, or the sender *cannot* send because the network does not carry it. The second case follows from the frame ceiling: the per-frame limit is derived from the measured available bandwidth and renegotiated during the call, the encoder scales down through the presets to stay under it, and only when no supported preset fits does video stop. The receiver then shows an explanatory text rather than a black screen. **Silently sending nothing is never the intended behaviour** — a frame discarded for overshooting the ceiling is a defect indicator, not normal operation. The superseded `toggleVideoMute()` (`call_service.dart:481`) paused locally only and signalled nothing (`grep VIDEO_ON|VIDEO_OFF|VIDEO_STATE` = 0 matches), so the peer saw the last frame freeze indefinitely. The reason is a statement about the sender's own transmission and confers no control over the peer's: switching the peer's video off is deliberately **not** provided.
+
+**Capture must not depend on `dart:ui`.** The superseded design put `VideoEngine` behind a factory that only the Flutter process wires up, so on Linux and Windows — where `CleonaService` runs in a separate daemon — `createVideoEngine` stays null and every video call silently degrades to audio-only. The code states this itself (`main.dart:2163-2171`). The platform layer of §10.6 sits below the ABI and has no `dart:ui` dependency, which removes the reason for that gap. Until then, desktop video calls remain audio-only.
+
+**Defaults.** The superseded default preset was 640×480 at 30 fps and **800 kbps** (`video_preset.dart:18`), i.e. ~3.3 kB per frame, three fragments per frame, 90 fragments per second, plus keyframe bursts. Rate control moves to the hardware encoder; Cleona's `bandwidth_estimator` only sets the target. The default is lowered as part of stage 1 and re-derived from measurement, not from taste.
+
+**Screen sharing** (§10.5.4) follows the same codec path — it is a second video stream from a different capture source, not a separate pipeline.
+
+**Staging plan.**
+
+| Stage | Content | Outcome |
+|---|---|---|
+| 1a | **Live-media transport (§10.3.1):** exempt live media from `preferTls` and from NACK retry, lower the default preset, bound the fragment count per frame, keyframe spread across send intervals, FEC instead of retransmission | the actual video blocker — a picture arrives at all |
+| 1b | **Bulk transport, unrelated to video:** burst pacing and group-level ACK for fragmented non-live payloads; the dead TLS escalation on Android | fixes two-stage media, large DHT responses, update-manifest fragments |
+| 2 | `CALL_MEDIA_STATE`, own video on/off | the requested control |
+| 3 | `cleona_video.h` ABI + Dart binding + verification report, one reference platform | measurable |
+| 4 | Android + Apple hardware codecs, H.264 interop | mobile video on the OS path |
+| 5 | Windows + Linux, capture without `dart:ui` | desktop video exists for the first time |
+| 6 | Screen sharing onto the new codec path | §10.5.4 consistent again |
+
+**Codec decision (project owner, 2026-07-30): H.264 Constrained Baseline is the mandatory interop level.** The reasoning, recorded so it is not re-opened without new facts:
+
+- It is the only codec with hardware encode **and** decode on all five platforms. Apple's VideoToolbox has no VP8/VP9 encoder at all, and no AV1 encoder either — choosing a royalty-free baseline would leave the Apple platforms on software encode, i.e. exactly the part of the superseded design that performs worst.
+- There is no option in which all five platforms get hardware encode *and* the mandatory level is royalty-free. The choice was therefore between accepting H.264 as the baseline and accepting that some device pairs cannot do video at all.
+- Patent position: Cleona does not implement or ship an H.264 codec; it calls the encoder the operating system provides, whose licence sits with the device manufacturer. This is the position every video-calling application takes. Noted explicitly: Cleona distributes its own binaries rather than shipping through an app store, and this assessment is an engineering judgement, not legal advice.
+
+AV1, HEVC and VP9 remain available through negotiation whenever both sides have hardware support; only the fallback level is fixed.
 
 ---
 
@@ -6562,8 +6873,8 @@ cp ggml/src/libggml*.so* ~/lib/
 
 **Struct-layout coupling.** whisper.cpp takes `whisper_full_params` by value, which Dart FFI cannot describe — so the params have to be filled in from the outside. Two mechanisms, in this order of preference:
 
-1. **Wrapper setters (preferred).** `libwhisper_wrapper` (`native/whisper_wrapper.c`, built by `scripts/build-whisper-wrapper.sh`) exports `whisper_params_set_language` and `whisper_params_set_n_threads`, where the C compiler resolves the field offsets against the very `whisper.h` the library was built from. Available on Linux/macOS/Windows desktop, where the wrapper is required anyway for the struct-by-value call.
-2. **Runtime layout probe (fallback).** Android ships no wrapper — ARM64's AAPCS passes large structs indirectly, so `whisper_full()` is called directly — and iOS links statically. There the Dart side writes by byte offset, and the version pin alone proved insufficient as a guarantee (see above), so `whisper_ffi.dart` probes the layout at runtime instead of trusting a constant: it identifies the `language` field structurally in a freshly-defaulted struct — a non-null, 8-byte-aligned pointer followed by the release-stable default triple `detect_language = false`, `suppress_blank = true`, `suppress_non_speech_tokens = false` — and never dereferences a candidate, because a wrong guess would kill the whole process rather than just the transcription worker isolate. The hardcoded offset survives only as a logged fallback. Writing the pointer at a wrong offset is silent, not loud: `language` keeps its `"en"` default (German recordings get transcribed as English) while three sampling flags and `temperature` take on arbitrary pointer bytes.
+1. **Wrapper setters (preferred).** `libwhisper_wrapper` (`native/whisper_wrapper.c`, built by `scripts/build-whisper-wrapper.sh`) exports `whisper_params_set_language` and `whisper_params_set_n_threads`, where the C compiler resolves the field offsets against the very `whisper.h` the library was built from. Available on Linux/macOS/Windows desktop and on iOS. On desktop the wrapper is required anyway for the struct-by-value call; for iOS `build_whisper_wrapper()` (`scripts/build-ios-libs.sh:415`) compiles it with the iOS toolchain and verifies both symbols with `nm -g` before installing the archive.
+2. **Runtime layout probe (fallback).** Android ships no wrapper — ARM64's AAPCS passes large structs indirectly, so `whisper_full()` is called directly. There the Dart side writes by byte offset, and the version pin alone proved insufficient as a guarantee (see above), so `whisper_ffi.dart` probes the layout at runtime instead of trusting a constant: it identifies the `language` field structurally in a freshly-defaulted struct — a non-null, 8-byte-aligned pointer followed by the release-stable default triple `detect_language = false`, `suppress_blank = true`, `suppress_non_speech_tokens = false` — and never dereferences a candidate, because a wrong guess would kill the whole process rather than just the transcription worker isolate. The hardcoded offset survives only as a logged fallback. Writing the pointer at a wrong offset is silent, not loud: `language` keeps its `"en"` default (German recordings get transcribed as English) while three sampling flags and `temperature` take on arbitrary pointer bytes.
 
 **Downloading the model:**
 ```bash
@@ -6687,7 +6998,7 @@ Mapping to wire layers:
 - IPC: TCP 127.0.0.1 + auth token (the Unix-socket equivalent on Win32 is not reliable enough for Cleona's use case)
 - Tray: native Win32 API via dart:ffi
 - Notifications: Windows Toast API
-- Audio: WASAPI via libcleona_audio (miniaudio)
+- Audio: WASAPI via `cleona_voice` (Communications category, endpoint effects — §10.4). Until stage 2 of the §10.4 staging plan lands, the superseded `libcleona_audio` (miniaudio) path is still what ships.
 - Single-Instance: machine-global flock+PID at `%USERPROFILE%\.cleona-daemon.lock` (cross-platform `RandomAccessFile.lock` → `LockFileEx` on Windows, `flock` on Linux at `$HOME/.cleona-daemon.lock`) — deterministic, profile-independent, sibling of the profile dir (§15.1)
 - Firewall: on first start, `netsh advfirewall` adds inbound-UDP rule for the daemon exe (marker file, graceful on non-admin)
 
@@ -6696,11 +7007,11 @@ Mapping to wire layers:
 - Multi-Identity dispatch mirrors the desktop daemon: `onApplicationFramePayload` implements the §2.4 step [9] KEM-Try-Loop (recency-ordered), `onInfrastructureFramePayload` implements service-routed InfraFrame dispatch (CR, Restore, Fragment-Store/Retrieve, etc.) — both wired in the GUI entry point (`main.dart`) rather than a separate daemon process
 - Foreground Service (canonical for background delivery, see §12.4 ADR Push Wake-Up Rejected): persistent notification, runs even when the Activity is closed
 - IPC: not required (in-process)
-- Camera: CameraX (delivers I420 + rotationDegrees; Dart-side rotation before VP8 encode)
+- Camera: CameraX into a platform surface, MediaCodec hardware encode (§10.6). Rotation and mirroring are capture-session properties; no Dart-side pixel handling. Until stage 4 of the §10.6 staging plan, the superseded path (I420 + `rotationDegrees` over the MethodChannel, Dart-side rotation, VP8 in software) is what ships.
 - Notifications: Android NotificationManager
 - Incoming Call Notification: channel `cleona_calls` (IMPORTANCE_HIGH, CATEGORY_CALL, `fullScreenIntent=true`) — launches Activity and routes to CallScreen even when backgrounded or screen-locked. Auto-cancels on accept/reject/hangup/60 s timeout. Sound via NotificationSoundService Dart loop (not notification channel sound).
 - Ringtone Looping: single native `MediaPlayer` with `isLooping=true` via `startLoopSound` MethodChannel; stopped immediately via `stopSound` MethodChannel (`mp.stop()` + `mp.release()`). Vibration loops 500 ms pulses at 1000 ms intervals until `stopRingtone()`.
-- Audio: libcleona_audio (miniaudio with AAudio/OpenSL ES backend)
+- Audio: Kotlin `AudioRecord`/`AudioTrack` with `VOICE_COMMUNICATION` and the HAL effects attached to the record session id, via `cleona_voice` (§10.4). Until stage 1 of the §10.4 staging plan lands, the superseded `libcleona_audio` (miniaudio, AAudio/OpenSL ES) path is still what ships.
 - Native libs: jniLibs for arm64-v8a + x86_64 (cross-compiled via `scripts/build-android-libs.sh`)
 
 **iOS**:
@@ -7690,10 +8001,10 @@ For environments where network-based distribution is compromised or unavailable.
 | **libzstd** | `compression.dart` | Zstandard compression/decompression | System package (`libzstd-dev`). All payloads compressed before encryption. |
 | **liberasurecode** | `reed_solomon.dart` | Reed-Solomon erasure coding (N=10, K=7) | System package. Pure Dart fallback on platforms without it. |
 | **libwhisper** | `whisper_ffi.dart` | On-device speech-to-text (whisper.cpp) | Built from source + GGML deps. Optional — voice messages work without it. |
-| **libopus** | `opus_ffi.dart` | Opus audio codec (legacy path) | Retained as a build artefact for the prior FFI binding; the live audio path uses raw PCM via `libcleona_audio` (see §10.4). May be reintroduced behind the shim later for metered links. |
-| **libvpx** | `vpx_ffi.dart` (via cleona_vpx shim) | VP8 video codec (I420/YUV 4:2:0, CBR, real-time) | For video calls. Adaptive bitrate. Error-resilient mode. |
-| **miniaudio** | via `libcleona_audio` C shim | Cross-platform audio capture + playback (PulseAudio/ALSA on Linux, AAudio/OpenSL on Android, WASAPI on Windows, Core Audio on macOS/iOS) | Single-header library, version 0.11.21, vendored at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. See §10.4. |
-| **speexdsp** | via `libcleona_audio` C shim | Acoustic Echo Cancellation + Noise Suppression for the audio capture path | Version 1.2.1, **vendored as full source** under `native/cleona_audio/vendor/speexdsp/` (SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`), statically linked. AEC tail = 250 ms @ 16 kHz. |
+| **libopus** | `opus_ffi.dart` | Opus audio codec — **the live audio codec from §10.4 stage 5 onward** | Build state checked 2026-07-30: compiled for **iOS and macOS only**. Not in `scripts/build-android-libs.sh` (zero matches), absent from both jniLibs target lists in `scripts/preflight.sh`, no local artefact. Android, Linux and Windows need build integration before stage 5. `opus_ffi.dart` (352 lines) currently has **no call site** in `lib/` — review before trusting it. |
+| **libvpx** | `vpx_ffi.dart` (via cleona_vpx shim) | VP8 video codec (I420/YUV 4:2:0, CBR, real-time) | **Being removed** — superseded by the platform hardware codecs (§10.6). Still shipping until stage 4/5 of that staging plan. Note `VpxFFI` holds separate encoder and decoder contexts (`vpx_ffi.dart:167-186`); sharing one `VpxFFI` object for both directions is correct and was never a defect. |
+| **miniaudio** | via `libcleona_audio` C shim | Cross-platform audio capture + playback | **Being removed** — superseded by the per-platform native voice session (§10.4). Still shipping until the §10.4 staging plan replaces it platform by platform. Single-header library, version 0.11.21, vendored at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. |
+| **speexdsp** | via `libcleona_audio` C shim | Acoustic Echo Cancellation + Noise Suppression for the audio capture path | **Being removed** — the OS voice chains replace it (§10.4); it survives only as the Linux fallback question, and there the choice is WebRTC APM, not speexdsp. Version 1.2.1, vendored under `native/cleona_audio/vendor/speexdsp/` (SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`), statically linked. AEC tail = 250 ms @ 16 kHz. |
 | **cleona_net** | `native_udp_sender.dart` via `libcleona_net` C shim (v1.3.0). On Android, `AndroidUdpSender` uses the fd-based variants (`cleona_udp_sendto_fd` / `cleona_udp_sendto_fd6`) to send on existing Dart socket fds. | Direct-syscall UDP send-path for IPv4 and IPv6. Wraps POSIX `sendto` on Linux and Win32 `WSASendTo` on Windows synchronously. `NativeUdpSender` (IPv4) + `NativeUdpSender6` (IPv6, `AF_INET6`/`IPV6_V6ONLY`). Required on both desktop platforms (no runtime fallback). See §4.5.2 for the architectural rationale and §20.3a below for the build details. |
 | **cleona_pow** | `proof_of_work.dart` (inline FFI) | PoW SHA-256 iteration loop in C — calls `crypto_hash_sha256` in a tight loop without per-iteration Dart↔C transitions | Links against libsodium. Build: `cmake -B build -S native/cleona_pow && cmake --build build`. Deployed on all five platforms. Graceful fallback: if the native symbol fails to load, the Dart-side iteration loop is used transparently. |
 
@@ -7730,7 +8041,7 @@ Das Script `scripts/build-ios-libs.sh` kompiliert alle neun Bibliotheken (libsod
 
 Jede Bibliothek wird fuer zwei Zielplattformen gebaut: `arm64-iphoneos` (echtes Geraet) und `arm64-iphonesimulator`. Die Ergebnisse werden als XCFrameworks verpackt (`xcodebuild -create-xcframework`).
 
-Besonderheit `libcleona_audio`: Verwendet miniaudio das auf Apple-Plattformen Objective-C-Header (AVFoundation) einbindet. Deshalb muss CMake mit `project(cleona_audio C OBJC)` konfiguriert werden und die Quelldatei `miniaudio_impl.c` als Objective-C kompiliert werden. Ausserdem baut CMakes Ninja-Generator auf iOS die vendored speexdsp-Objekte direkt in `libcleona_audio.a` ein (anders als auf anderen Plattformen wo speexdsp in die Shared Library eingebettet wird). Deshalb darf `speexdsp/lib` NICHT zusaetzlich in den Merge-Schritt.
+Besonderheit `libcleona_audio` (superseded, siehe §10.4 — gilt bis Stufe 1 des dortigen Stufenplans): Verwendet miniaudio das auf Apple-Plattformen Objective-C-Header (AVFoundation) einbindet. Deshalb muss CMake mit `project(cleona_audio C OBJC)` konfiguriert werden und die Quelldatei `miniaudio_impl.c` als Objective-C kompiliert werden. Ausserdem baut CMakes Ninja-Generator auf iOS die vendored speexdsp-Objekte direkt in `libcleona_audio.a` ein (anders als auf anderen Plattformen wo speexdsp in die Shared Library eingebettet wird). Deshalb darf `speexdsp/lib` NICHT zusaetzlich in den Merge-Schritt. Der Nachfolger `cleona_voice` braucht auf Apple denselben OBJC-Schalter, weil `VoiceProcessingIO` ueber AudioToolbox/AVFoundation angesprochen wird — die Merge-Besonderheit entfaellt mit speexdsp.
 
 #### Schritt 2: Alle Archive in eines zusammenfuehren
 
@@ -8575,6 +8886,12 @@ The ML-DSA sigs (user + device, hybrid) account for 83% of the wire size for a s
 ### B.2 Live Call Audio Frame (Onion-Taboo, Optimized)
 
 **Context**: Alice sends a 20 ms Opus audio frame to Bob during a live call.
+
+> **Status:** this example describes the target state of §10.4 (Opus from stage 5
+> onward). Until that stage lands, the shipped code sends **raw PCM**: 640 B payload,
+> 672 B after seq + nonce + tag, i.e. ~256 kbps per direction instead of the ~30 kbps
+> implied below. The example was inconsistent with the code before the §10.4 rewrite
+> and becomes accurate with it — do not read it as current behaviour.
 
 **Live-media optimizations**:
 - KEM replaced by `call_key` AES-GCM (per-session ephemeral)

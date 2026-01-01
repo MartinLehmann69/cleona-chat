@@ -9,12 +9,52 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/archive/archive_config.dart';
+import 'package:cleona/core/platform/process_runner.dart';
 
 /// Callback for upload/download progress: (bytesTransferred, totalBytes).
 typedef ProgressCallback = void Function(int bytesTransferred, int totalBytes);
 
 /// Abstract base for archive transport protocols.
 abstract class ArchiveTransport {
+  // --- Deadlines -----------------------------------------------------------
+  //
+  // Jede Share-Operation braucht eine Deadline: ein NAS, das die Verbindung
+  // annimmt und dann nicht mehr antwortet (eingefrorener SMB-Dienst,
+  // Spindown-NAS, Firewall die nach Session-Aufbau auf DROP geht), laesst
+  // smbclient/sftp/ssh/curl haengen — keines dieser Werkzeuge setzt per
+  // Default ein Zeitlimit. Ein PAUSCHALES Limit waere aber ein neuer Bug: es
+  // wuerde grosse Medien-Uploads abschneiden. Deshalb drei Klassen.
+
+  /// Verbindungsproben (`testConnectivity`): nur Erreichbarkeit, keine Daten.
+  static const Duration kProbeTimeout = Duration(seconds: 10);
+
+  /// Metadaten-Operationen (mkdir, ls, stat, rm): ein Round-Trip plus
+  /// Verbindungsaufbau, nutzlastunabhaengig.
+  static const Duration kMetadataTimeout = Duration(seconds: 30);
+
+  /// Groesstmoegliche Nutzlast, die je im Archiv landen kann — abgeleitet aus
+  /// dem Sende-Limit in `CleonaService.sendMediaMessage` (500 MB). Wird als
+  /// Deadline-Basis fuer Downloads gebraucht, weil dort die Groesse beim Start
+  /// der Operation noch unbekannt ist.
+  static const int kMaxArchivedFileBytes = 500 * 1024 * 1024;
+
+  /// Datentransfer ist groessenproportional. Ein pauschales Budget wuerde grosse
+  /// Medien-Uploads abschneiden, also wird die Deadline aus der Nutzlast
+  /// abgeleitet — Bodendurchsatz 256 KB/s (realistischer Worst Case: 2,4-GHz-WLAN
+  /// am Randbereich), 60 s Sockel fuer den Verbindungsaufbau, 2 h Decke, damit
+  /// ein stehender Transfer nie unbegrenzt haengt. ANNAHME ueber die Umgebung —
+  /// bei einem Feldbefund hier korrigieren, nicht neu erraten.
+  static Duration transferTimeout(int bytes) {
+    final sec = 60 + (bytes / (256 * 1024)).ceil();
+    return Duration(seconds: sec.clamp(60, 7200));
+  }
+
+  /// Deadline fuer Downloads. Die Nutzlastgroesse ist beim Start unbekannt
+  /// (der Share liefert sie erst mit den Headern oder gar nicht), deshalb wird
+  /// die groesstmoegliche Nutzlast angesetzt ([kMaxArchivedFileBytes]) —
+  /// ~34 min, bleibt unter der 2-h-Decke.
+  static Duration get downloadTimeout => transferTimeout(kMaxArchivedFileBytes);
+
   /// The protocol being used.
   ArchiveProtocol get protocol;
 
@@ -104,9 +144,9 @@ class SmbTransport extends ArchiveTransport {
 
   @override
   Future<bool> testConnectivity({Duration? timeout}) async {
-    final effectiveTimeout = timeout ?? const Duration(seconds: 5);
+    final effectiveTimeout = timeout ?? ArchiveTransport.kProbeTimeout;
     try {
-      final result = await Process.run(
+      final result = await ProcessRunner.run(
         'smbclient',
         [
           '//$_host/${_basePath.split('/').first}',
@@ -115,10 +155,10 @@ class SmbTransport extends ArchiveTransport {
           '-c', 'ls',
         ],
         environment: _password != null ? {'PASSWD': _password!} : null,
-      ).timeout(effectiveTimeout);
-      return result.exitCode == 0;
-    } on TimeoutException {
-      return false;
+        timeout: effectiveTimeout,
+      );
+      // null = Deadline abgelaufen (Kind wurde gekillt) oder Start fehlgeschlagen.
+      return result != null && result.exitCode == 0;
     } catch (_) {
       return false;
     }
@@ -157,7 +197,8 @@ class SmbTransport extends ArchiveTransport {
       }
       commands.writeln('put "${tmpFile.path}" "$fileName"');
 
-      final result = await Process.run(
+      final deadline = ArchiveTransport.transferTimeout(data.length);
+      final result = await ProcessRunner.run(
         'smbclient',
         [
           '//$_host/$share',
@@ -166,8 +207,13 @@ class SmbTransport extends ArchiveTransport {
           '-c', commands.toString(),
         ],
         environment: _password != null ? {'PASSWD': _password!} : null,
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('SMB upload timed out after '
+            '${deadline.inSeconds}s (${data.length} bytes)');
+      }
       if (result.exitCode != 0) {
         throw ArchiveTransportException('SMB upload failed: ${result.stderr}');
       }
@@ -185,7 +231,8 @@ class SmbTransport extends ArchiveTransport {
     final tmpFile = File('${Directory.systemTemp.path}/cleona_download_${DateTime.now().millisecondsSinceEpoch}');
     try {
       final share = _basePath.split('/').first;
-      final result = await Process.run(
+      final deadline = ArchiveTransport.downloadTimeout;
+      final result = await ProcessRunner.run(
         'smbclient',
         [
           '//$_host/$share',
@@ -194,8 +241,13 @@ class SmbTransport extends ArchiveTransport {
           '-c', 'get "$remotePath" "${tmpFile.path}"',
         ],
         environment: _password != null ? {'PASSWD': _password!} : null,
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('SMB download timed out after '
+            '${deadline.inSeconds}s ($remotePath)');
+      }
       if (result.exitCode != 0 || !tmpFile.existsSync()) {
         throw ArchiveTransportException('SMB download failed: ${result.stderr}');
       }
@@ -220,43 +272,50 @@ class SmbTransport extends ArchiveTransport {
       commands.writeln('mkdir "$current"');
     }
 
-    await Process.run(
+    // null (Deadline) wird wie ein Exit-Code != 0 behandelt: der Aufrufer
+    // erfaehrt den Fehlschlag am naechsten put/ls, genau wie bisher.
+    await ProcessRunner.run(
       'smbclient',
       ['//$_host/$share', if (_username != null) ...['-U', _username!], '-N', '-c', commands.toString()],
       environment: _password != null ? {'PASSWD': _password!} : null,
+      timeout: ArchiveTransport.kMetadataTimeout,
     );
   }
 
   @override
   Future<bool> fileExists(String remotePath) async {
     final share = _basePath.split('/').first;
-    final result = await Process.run(
+    final result = await ProcessRunner.run(
       'smbclient',
       ['//$_host/$share', if (_username != null) ...['-U', _username!], '-N', '-c', 'ls "$remotePath"'],
       environment: _password != null ? {'PASSWD': _password!} : null,
+      timeout: ArchiveTransport.kMetadataTimeout,
     );
+    if (result == null) return false; // Deadline == "nicht nachweisbar da"
     return result.exitCode == 0 && !(result.stdout as String).contains('NT_STATUS_NO_SUCH_FILE');
   }
 
   @override
   Future<void> deleteFile(String remotePath) async {
     final share = _basePath.split('/').first;
-    await Process.run(
+    await ProcessRunner.run(
       'smbclient',
       ['//$_host/$share', if (_username != null) ...['-U', _username!], '-N', '-c', 'rm "$remotePath"'],
       environment: _password != null ? {'PASSWD': _password!} : null,
+      timeout: ArchiveTransport.kMetadataTimeout,
     );
   }
 
   @override
   Future<List<String>> listDirectory(String remotePath) async {
     final share = _basePath.split('/').first;
-    final result = await Process.run(
+    final result = await ProcessRunner.run(
       'smbclient',
       ['//$_host/$share', if (_username != null) ...['-U', _username!], '-N', '-c', 'ls "$remotePath/*"'],
       environment: _password != null ? {'PASSWD': _password!} : null,
+      timeout: ArchiveTransport.kMetadataTimeout,
     );
-    if (result.exitCode != 0) return [];
+    if (result == null || result.exitCode != 0) return [];
     final lines = (result.stdout as String).split('\n');
     return lines
         .where((l) => l.trim().isNotEmpty && !l.contains('blocks'))
@@ -296,18 +355,17 @@ class SftpTransport extends ArchiveTransport {
 
   @override
   Future<bool> testConnectivity({Duration? timeout}) async {
-    final effectiveTimeout = timeout ?? const Duration(seconds: 5);
+    final effectiveTimeout = timeout ?? ArchiveTransport.kProbeTimeout;
     try {
       final target = _username != null ? '$_username@$_host' : _host;
-      final result = await Process.run(
+      final result = await ProcessRunner.run(
         'sftp',
         ['-P', '$_port', '-oBatchMode=yes', '-oConnectTimeout=3', target],
-        stdoutEncoding: SystemEncoding(),
-      ).timeout(effectiveTimeout);
+        timeout: effectiveTimeout,
+      );
+      if (result == null) return false;
       // sftp returns 0 on success, but even connection test counts
       return result.exitCode == 0 || result.exitCode == 1;
-    } on TimeoutException {
-      return false;
     } catch (_) {
       return false;
     }
@@ -336,11 +394,17 @@ class SftpTransport extends ArchiveTransport {
       await batchFile.writeAsString(commands.toString());
 
       final target = _username != null ? '$_username@$_host' : _host;
-      final result = await Process.run(
+      final deadline = ArchiveTransport.transferTimeout(data.length);
+      final result = await ProcessRunner.run(
         'sftp',
         ['-P', '$_port', '-b', batchFile.path, target],
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('SFTP upload timed out after '
+            '${deadline.inSeconds}s (${data.length} bytes)');
+      }
       if (result.exitCode != 0) {
         throw ArchiveTransportException('SFTP upload failed: ${result.stderr}');
       }
@@ -362,11 +426,17 @@ class SftpTransport extends ArchiveTransport {
       final target = _username != null ? '$_username@$_host' : _host;
       await batchFile.writeAsString('get $_basePath$remotePath ${tmpFile.path}\n');
 
-      final result = await Process.run(
+      final deadline = ArchiveTransport.downloadTimeout;
+      final result = await ProcessRunner.run(
         'sftp',
         ['-P', '$_port', '-b', batchFile.path, target],
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('SFTP download timed out after '
+            '${deadline.inSeconds}s ($remotePath)');
+      }
       if (result.exitCode != 0 || !tmpFile.existsSync()) {
         throw ArchiveTransportException('SFTP download failed: ${result.stderr}');
       }
@@ -380,30 +450,62 @@ class SftpTransport extends ArchiveTransport {
     }
   }
 
+  /// Build `ssh` args for a one-shot remote command.
+  ///
+  /// `BatchMode=yes` ist nicht Kosmetik: ohne die Option kann ssh auf eine
+  /// Passphrase- oder Host-Key-Bestaetigung warten, und ein solcher Prozess
+  /// laesst sich nur per SIGKILL beenden statt sauber. `ConnectTimeout=5`
+  /// begrenzt die TCP-Phase, damit die 30-s-Metadaten-Deadline dem eigentlichen
+  /// Kommando zugute kommt und nicht einem stummen Port.
+  List<String> _sshArgs(List<String> command) {
+    final target = _username != null ? '$_username@$_host' : _host;
+    return [
+      '-p', '$_port',
+      '-oBatchMode=yes',
+      '-oConnectTimeout=5',
+      target,
+      ...command,
+    ];
+  }
+
   @override
   Future<void> createDirectory(String remotePath) async {
-    final target = _username != null ? '$_username@$_host' : _host;
-    await Process.run('ssh', ['-p', '$_port', target, 'mkdir', '-p', '$_basePath$remotePath']);
+    // null (Deadline) wird wie ein Exit-Code != 0 behandelt — wie bisher wird
+    // der Exit-Code hier nicht ausgewertet.
+    await ProcessRunner.run(
+      'ssh',
+      _sshArgs(['mkdir', '-p', '$_basePath$remotePath']),
+      timeout: ArchiveTransport.kMetadataTimeout,
+    );
   }
 
   @override
   Future<bool> fileExists(String remotePath) async {
-    final target = _username != null ? '$_username@$_host' : _host;
-    final result = await Process.run('ssh', ['-p', '$_port', target, 'test', '-f', '$_basePath$remotePath']);
-    return result.exitCode == 0;
+    final result = await ProcessRunner.run(
+      'ssh',
+      _sshArgs(['test', '-f', '$_basePath$remotePath']),
+      timeout: ArchiveTransport.kMetadataTimeout,
+    );
+    return result != null && result.exitCode == 0;
   }
 
   @override
   Future<void> deleteFile(String remotePath) async {
-    final target = _username != null ? '$_username@$_host' : _host;
-    await Process.run('ssh', ['-p', '$_port', target, 'rm', '-f', '$_basePath$remotePath']);
+    await ProcessRunner.run(
+      'ssh',
+      _sshArgs(['rm', '-f', '$_basePath$remotePath']),
+      timeout: ArchiveTransport.kMetadataTimeout,
+    );
   }
 
   @override
   Future<List<String>> listDirectory(String remotePath) async {
-    final target = _username != null ? '$_username@$_host' : _host;
-    final result = await Process.run('ssh', ['-p', '$_port', target, 'ls', '$_basePath$remotePath']);
-    if (result.exitCode != 0) return [];
+    final result = await ProcessRunner.run(
+      'ssh',
+      _sshArgs(['ls', '$_basePath$remotePath']),
+      timeout: ArchiveTransport.kMetadataTimeout,
+    );
+    if (result == null || result.exitCode != 0) return [];
     return (result.stdout as String).split('\n').where((l) => l.trim().isNotEmpty).toList();
   }
 }
@@ -482,18 +584,17 @@ class FtpsTransport extends ArchiveTransport {
 
   @override
   Future<bool> testConnectivity({Duration? timeout}) async {
-    final effectiveTimeout = timeout ?? const Duration(seconds: 5);
+    final effectiveTimeout = timeout ?? ArchiveTransport.kProbeTimeout;
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      final result = await Process.run(
+      final result = await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '--list-only', '--connect-timeout', '3',
          'ftps://$_host:$_port/$_basePath']),
-      ).timeout(effectiveTimeout);
-      return result.exitCode == 0;
-    } on TimeoutException {
-      return false;
+        timeout: effectiveTimeout,
+      );
+      return result != null && result.exitCode == 0;
     } catch (_) {
       return false;
     } finally {
@@ -514,12 +615,18 @@ class FtpsTransport extends ArchiveTransport {
       onProgress?.call(0, data.length);
 
       netrc = _createNetrcFile();
-      final result = await Process.run(
+      final deadline = ArchiveTransport.transferTimeout(data.length);
+      final result = await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '-T', tmpFile.path, '--ftp-create-dirs',
          'ftps://$_host:$_port/$_basePath$remotePath']),
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('FTPS upload timed out after '
+            '${deadline.inSeconds}s (${data.length} bytes)');
+      }
       if (result.exitCode != 0) {
         throw ArchiveTransportException('FTPS upload failed: ${result.stderr}');
       }
@@ -539,12 +646,18 @@ class FtpsTransport extends ArchiveTransport {
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      final result = await Process.run(
+      final deadline = ArchiveTransport.downloadTimeout;
+      final result = await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '-o', tmpFile.path,
          'ftps://$_host:$_port/$_basePath$remotePath']),
+        timeout: deadline,
       );
 
+      if (result == null) {
+        throw ArchiveTransportException('FTPS download timed out after '
+            '${deadline.inSeconds}s ($remotePath)');
+      }
       if (result.exitCode != 0 || !tmpFile.existsSync()) {
         throw ArchiveTransportException('FTPS download failed: ${result.stderr}');
       }
@@ -563,10 +676,13 @@ class FtpsTransport extends ArchiveTransport {
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      await Process.run(
+      // null (Deadline) wird wie ein Exit-Code != 0 behandelt — wie bisher wird
+      // der Exit-Code hier nicht ausgewertet.
+      await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '-Q', 'MKD $remotePath',
          'ftps://$_host:$_port/$_basePath']),
+        timeout: ArchiveTransport.kMetadataTimeout,
       );
     } finally {
       _cleanupNetrc(netrc);
@@ -578,12 +694,13 @@ class FtpsTransport extends ArchiveTransport {
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      final result = await Process.run(
+      final result = await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '--head', '--silent',
          'ftps://$_host:$_port/$_basePath$remotePath']),
+        timeout: ArchiveTransport.kMetadataTimeout,
       );
-      return result.exitCode == 0;
+      return result != null && result.exitCode == 0;
     } finally {
       _cleanupNetrc(netrc);
     }
@@ -594,10 +711,11 @@ class FtpsTransport extends ArchiveTransport {
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      await Process.run(
+      await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '-Q', 'DELE $remotePath',
          'ftps://$_host:$_port/$_basePath']),
+        timeout: ArchiveTransport.kMetadataTimeout,
       );
     } finally {
       _cleanupNetrc(netrc);
@@ -609,12 +727,13 @@ class FtpsTransport extends ArchiveTransport {
     File? netrc;
     try {
       netrc = _createNetrcFile();
-      final result = await Process.run(
+      final result = await ProcessRunner.run(
         'curl',
         _curlArgs(netrc, ['--ssl-reqd', '--list-only',
          'ftps://$_host:$_port/$_basePath$remotePath/']),
+        timeout: ArchiveTransport.kMetadataTimeout,
       );
-      if (result.exitCode != 0) return [];
+      if (result == null || result.exitCode != 0) return [];
       return (result.stdout as String).split('\n').where((l) => l.trim().isNotEmpty).toList();
     } finally {
       _cleanupNetrc(netrc);
@@ -651,7 +770,7 @@ class HttpTransport extends ArchiveTransport {
 
   @override
   Future<bool> testConnectivity({Duration? timeout}) async {
-    final effectiveTimeout = timeout ?? const Duration(seconds: 5);
+    final effectiveTimeout = timeout ?? ArchiveTransport.kProbeTimeout;
     try {
       final client = HttpClient()
         ..connectionTimeout = effectiveTimeout;
@@ -677,7 +796,13 @@ class HttpTransport extends ArchiveTransport {
   }) async {
     onProgress?.call(0, data.length);
     final uri = Uri.parse('$_baseUrl$remotePath');
-    final client = HttpClient();
+    final deadline = ArchiveTransport.transferTimeout(data.length);
+    // connectionTimeout deckt nur die TCP/TLS-Phase ab; ein WebDAV-Server, der
+    // die Verbindung annimmt und dann stumm bleibt, braucht zusaetzlich eine
+    // Deadline auf request.close(). client.close(force: true) im finally reisst
+    // den Socket ab — das HTTP-Gegenstueck zum SIGKILL bei Kindprozessen.
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.putUrl(uri);
       if (_username != null) {
@@ -686,13 +811,16 @@ class HttpTransport extends ArchiveTransport {
       }
       request.headers.set('Content-Type', 'application/octet-stream');
       request.add(data);
-      final response = await request.close();
+      final response = await request.close().timeout(deadline);
       if (response.statusCode >= 400) {
         throw ArchiveTransportException(
             'HTTP upload failed: Status ${response.statusCode}');
       }
-      await response.drain<void>();
+      await response.drain<void>().timeout(ArchiveTransport.kMetadataTimeout);
       onProgress?.call(data.length, data.length);
+    } on TimeoutException {
+      throw ArchiveTransportException('HTTP upload timed out after '
+          '${deadline.inSeconds}s (${data.length} bytes)');
     } finally {
       client.close(force: true);
     }
@@ -704,25 +832,32 @@ class HttpTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     final uri = Uri.parse('$_baseUrl$remotePath');
-    final client = HttpClient();
+    final deadline = ArchiveTransport.downloadTimeout;
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.getUrl(uri);
       if (_username != null) {
         request.headers.set('Authorization',
             'Basic ${_basicAuth(_username!, _password ?? '')}');
       }
-      final response = await request.close();
+      final response = await request.close().timeout(deadline);
       if (response.statusCode >= 400) {
         throw ArchiveTransportException(
             'HTTP download failed: Status ${response.statusCode}');
       }
-      final chunks = <int>[];
-      await for (final chunk in response) {
-        chunks.addAll(chunk);
-      }
+      // Der Body-Lesevorgang braucht seine eigene Deadline: request.close()
+      // kehrt bereits nach den Response-Headern zurueck, der Hang eines
+      // stummen Servers passiert erst hier.
+      final chunks = await response
+          .fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk))
+          .timeout(deadline);
       final data = Uint8List.fromList(chunks);
       onProgress?.call(data.length, data.length);
       return data;
+    } on TimeoutException {
+      throw ArchiveTransportException('HTTP download timed out after '
+          '${deadline.inSeconds}s ($remotePath)');
     } finally {
       client.close(force: true);
     }
@@ -731,15 +866,20 @@ class HttpTransport extends ArchiveTransport {
   @override
   Future<void> createDirectory(String remotePath) async {
     final uri = Uri.parse('$_baseUrl$remotePath/');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.openUrl('MKCOL', uri);
       if (_username != null) {
         request.headers.set('Authorization',
             'Basic ${_basicAuth(_username!, _password ?? '')}');
       }
-      final response = await request.close();
-      await response.drain<void>();
+      final response =
+          await request.close().timeout(ArchiveTransport.kMetadataTimeout);
+      await response.drain<void>().timeout(ArchiveTransport.kMetadataTimeout);
+    } on TimeoutException {
+      // Wie ein Fehler-Status: der Exit dieser Operation wird — wie bisher —
+      // nicht ausgewertet, der Fehlschlag zeigt sich beim naechsten PUT.
     } finally {
       client.close(force: true);
     }
@@ -748,17 +888,20 @@ class HttpTransport extends ArchiveTransport {
   @override
   Future<bool> fileExists(String remotePath) async {
     final uri = Uri.parse('$_baseUrl$remotePath');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.headUrl(uri);
       if (_username != null) {
         request.headers.set('Authorization',
             'Basic ${_basicAuth(_username!, _password ?? '')}');
       }
-      final response = await request.close();
-      await response.drain<void>();
+      final response =
+          await request.close().timeout(ArchiveTransport.kMetadataTimeout);
+      await response.drain<void>().timeout(ArchiveTransport.kMetadataTimeout);
       return response.statusCode == 200;
     } catch (_) {
+      // Deckt TimeoutException mit ab: Deadline == "nicht nachweisbar da".
       return false;
     } finally {
       client.close(force: true);
@@ -768,15 +911,20 @@ class HttpTransport extends ArchiveTransport {
   @override
   Future<void> deleteFile(String remotePath) async {
     final uri = Uri.parse('$_baseUrl$remotePath');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.deleteUrl(uri);
       if (_username != null) {
         request.headers.set('Authorization',
             'Basic ${_basicAuth(_username!, _password ?? '')}');
       }
-      final response = await request.close();
-      await response.drain<void>();
+      final response =
+          await request.close().timeout(ArchiveTransport.kMetadataTimeout);
+      await response.drain<void>().timeout(ArchiveTransport.kMetadataTimeout);
+    } on TimeoutException {
+      // Wie ein Fehler-Status: der Exit dieser Operation wurde auch bisher
+      // nicht ausgewertet.
     } finally {
       client.close(force: true);
     }
@@ -786,7 +934,8 @@ class HttpTransport extends ArchiveTransport {
   Future<List<String>> listDirectory(String remotePath) async {
     // WebDAV PROPFIND or simple GET on directory.
     final uri = Uri.parse('$_baseUrl$remotePath/');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = ArchiveTransport.kProbeTimeout;
     try {
       final request = await client.openUrl('PROPFIND', uri);
       if (_username != null) {
@@ -794,8 +943,14 @@ class HttpTransport extends ArchiveTransport {
             'Basic ${_basicAuth(_username!, _password ?? '')}');
       }
       request.headers.set('Depth', '1');
-      final response = await request.close();
-      final body = await response.transform(SystemEncoding().decoder).join();
+      final response =
+          await request.close().timeout(ArchiveTransport.kMetadataTimeout);
+      // Auch der Body braucht eine eigene Deadline — request.close() kehrt
+      // schon nach den Headern zurueck.
+      final body = await response
+          .transform(SystemEncoding().decoder)
+          .join()
+          .timeout(ArchiveTransport.kMetadataTimeout);
       // Simple extraction of href entries from WebDAV XML.
       final hrefs = RegExp(r'<D:href>([^<]+)</D:href>').allMatches(body);
       return hrefs.map((m) => m.group(1)!.split('/').last).where((n) => n.isNotEmpty).toList();

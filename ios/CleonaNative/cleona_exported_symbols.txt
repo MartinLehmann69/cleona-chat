@@ -111,3 +111,15 @@ _cleona_ios_create_send_socket
 
 # libcleona_pow (native PoW)
 _cleona_pow_find_nonce
+
+# libcleona_voice — native OS voice session (ABI: native/cleona_voice/cleona_voice.h, §10.4)
+# Wildcard on purpose: preflight Check 12 part B iterates only over explicit
+# entries and would then demand that build-ios-libs.sh compiles whatever
+# native/**/*.c defines the symbol — which today is the mock backend. Shipping a
+# synthetic-tone backend in a release build is not the intent; the Apple backend
+# is package V1.3. Same pattern as _cleona_audio_* and _cleona_vpx_* above.
+_cleona_voice_*
+
+# libcleona_video — native video stack (ABI: native/cleona_video/cleona_video.h, §10.6)
+# Wildcard for the same reason; the Apple backend is package V1.15.
+_cleona_video_*
