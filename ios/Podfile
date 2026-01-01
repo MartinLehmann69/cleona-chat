@@ -45,39 +45,10 @@ target 'RunnerTests' do
 end
 
 post_install do |installer|
-  # dart:ffi loads native symbols at runtime via DynamicLibrary.process().
-  # The linker dead-strips them because nothing references them at compile
-  # time. -force_load on the Runner target ensures all symbols survive.
-  ffi_libs = %w[libsodium liboqs libzstd libopus libcleona_audio libwhisper libggml]
-  force_flags = []
-  cn_pod = installer.pod_targets.find { |t| t.name == 'CleonaNative' }
-  if cn_pod
-    cn_pod.file_accessors.each do |fa|
-      fa.vendored_frameworks.each do |fw|
-        name = File.basename(fw.to_s, '.xcframework')
-        next unless ffi_libs.include?(name)
-        # Xcode resolves the arch slice at build time; use the build-products path
-        lib_a = "#{fw}/ios-arm64/#{name}.a"
-        force_flags << "-force_load #{lib_a}" if File.exist?(lib_a)
-      end
-    end
-  end
-
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
-    end
-  end
-
-  # Apply -force_load to the main app target
-  if force_flags.any?
-    installer.aggregate_targets.each do |agg|
-      agg.xcconfigs.each do |config_name, config|
-        force_flags.each { |f| config.other_linker_flags[:simple] << f }
-        xcconfig_path = agg.xcconfig_path(config_name)
-        config.save_as(xcconfig_path)
-      end
     end
   end
 end

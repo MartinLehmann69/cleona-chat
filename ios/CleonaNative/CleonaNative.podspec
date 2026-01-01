@@ -5,9 +5,9 @@
 # XCFrameworks in build/ios-frameworks/. The CI workflow downloads them into
 # ios/CleonaNative/Frameworks/ before pod install.
 #
-# Locally: run ./scripts/build-ios-libs.sh, then:
-#   mkdir -p ios/CleonaNative/Frameworks
-#   cp -R build/ios-frameworks/*.xcframework ios/CleonaNative/Frameworks/
+# force_symbols.c references one symbol from each native lib so the linker
+# does not dead-strip them. dart:ffi loads them at runtime via
+# DynamicLibrary.process().
 #
 Pod::Spec.new do |s|
   s.name         = 'CleonaNative'
@@ -19,6 +19,8 @@ Pod::Spec.new do |s|
   s.source       = { :path => '.' }
   s.platform     = :ios, '15.5'
   s.static_framework = true
+
+  s.source_files = 'force_symbols.c'
 
   frameworks_dir = File.join(__dir__, 'Frameworks')
   xcframeworks = Dir.glob("#{frameworks_dir}/*.xcframework").map { |f|
