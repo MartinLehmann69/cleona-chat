@@ -2060,6 +2060,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         if (nav.canPop()) nav.pop();
         break;
 
+      case 'reset_donation_banner':
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('donation_banner_dismissed_until');
+        notifyListeners();
+        break;
+
       // ── NAT-Wizard test hooks (E2E gui-53, §27.9) ────────────────────
       case 'reset_nat_wizard_latch':
         // Test-only: bump the counter so HomeScreen clears its

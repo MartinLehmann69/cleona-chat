@@ -217,17 +217,21 @@ class V3FrameCodec {
     }
 
     // Sign over the canonical "outer minus sig/tag/mutable-relay" bytes.
-    // ttl + hopCount are excluded because relay nodes mutate them (§3.7.2).
+    // ttl, hopCount, visitedDeviceIds are excluded because relay nodes
+    // mutate them (§3.7.2, §5.3).
     packet.clearDeviceEd25519Sig();
     packet.clearDeviceMlDsaSig();
     packet.clearNetworkTag();
     final saveTtl = packet.ttl;
     final saveHop = packet.hopCount;
+    final saveVisited = List<List<int>>.from(packet.visitedDeviceIds);
     packet.clearTtl();
     packet.clearHopCount();
+    packet.visitedDeviceIds.clear();
     final unsigned = packet.writeToBuffer();
     packet.ttl = saveTtl;
     packet.hopCount = saveHop;
+    packet.visitedDeviceIds.addAll(saveVisited.map((e) => e));
     packet.deviceEd25519Sig = deviceKeys.signEd25519(unsigned);
     if (applicationFlavor) {
       packet.deviceMlDsaSig = deviceKeys.signMlDsa(unsigned);
@@ -258,16 +262,19 @@ class V3FrameCodec {
     packet.clearDeviceEd25519Sig();
     packet.clearDeviceMlDsaSig();
     packet.clearNetworkTag();
-    // Exclude mutable relay fields (ttl, hopCount) — relay nodes mutate
-    // them (§3.7.2), so they must not be part of the signed bytes.
+    // Exclude mutable relay fields (ttl, hopCount, visitedDeviceIds) —
+    // relay nodes mutate them (§3.7.2, §5.3).
     final saveTtl = packet.ttl;
     final saveHop = packet.hopCount;
+    final saveVisited = List<List<int>>.from(packet.visitedDeviceIds);
     packet.clearTtl();
     packet.clearHopCount();
+    packet.visitedDeviceIds.clear();
     final signedBytes = packet.writeToBuffer();
     // Restore for downstream readers.
     packet.ttl = saveTtl;
     packet.hopCount = saveHop;
+    packet.visitedDeviceIds.addAll(saveVisited.map((e) => e));
     packet.deviceEd25519Sig = edSig;
     if (mlSig.isNotEmpty) packet.deviceMlDsaSig = mlSig;
     if (tag.isNotEmpty) packet.networkTag = tag;

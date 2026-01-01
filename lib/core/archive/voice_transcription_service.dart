@@ -11,6 +11,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/archive/voice_transcription_config.dart';
@@ -240,7 +241,8 @@ class VoiceTranscriptionService {
     await _saveTranscriptions();
   }
 
-  /// Transcribe audio file (in isolate for non-blocking).
+  /// Transcribe audio file in a separate Isolate to avoid blocking the
+  /// main event loop (FFI whisper_full() is synchronous and can take seconds).
   Future<VoiceTranscription?> _transcribeFile(_TranscriptionJob job) async {
     final file = File(job.audioFilePath);
     if (!file.existsSync()) return null;
@@ -248,13 +250,10 @@ class VoiceTranscriptionService {
     final audioBytes = await file.readAsBytes();
     if (audioBytes.isEmpty) return null;
 
-    // Extract PCM data.
-    // Supported formats: WAV (direct), OGG/MP3 (via ffmpeg conversion).
     Float32List samples;
     if (job.audioFilePath.endsWith('.wav')) {
       samples = _extractWavSamples(audioBytes);
     } else {
-      // OGG/MP3/AAC: convert to WAV via ffmpeg.
       final wavData = await _convertToWav(job.audioFilePath);
       if (wavData == null) return null;
       samples = _extractWavSamples(wavData);
@@ -262,17 +261,26 @@ class VoiceTranscriptionService {
 
     if (samples.isEmpty) return null;
 
-    // Check duration (16kHz = 16000 samples/second).
     final durationSec = samples.length / 16000;
     if (durationSec > config.maxAudioDurationSec) return null;
 
-    // Transcription via whisper.cpp.
-    final result = _whisper!.transcribe(
-      samples,
-      language: job.language,
-    );
+    final modelFile = WhisperFFI.modelPath(config.modelSize);
+    if (!File(modelFile).existsSync()) return null;
 
-    if (result.isEmpty) return null;
+    // Run transcription in a fresh Isolate — FFI pointers cannot cross
+    // isolate boundaries, so we load the model inside the worker.
+    final result = await Isolate.run(() {
+      final w = WhisperFFI();
+      try {
+        w.loadModel(modelFile);
+        final r = w.transcribe(samples, language: job.language);
+        return (text: r.text, language: r.language, confidence: r.confidence);
+      } finally {
+        w.dispose();
+      }
+    });
+
+    if (result.text.isEmpty) return null;
     if (result.confidence < config.minConfidenceThreshold) return null;
 
     return VoiceTranscription(

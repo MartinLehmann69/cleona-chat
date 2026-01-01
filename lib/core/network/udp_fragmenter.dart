@@ -192,11 +192,11 @@ class FragmentReassembler {
   /// Timeout for incomplete reassemblies (hard limit).
   static const Duration reassemblyTimeout = Duration(seconds: 10);
 
-  /// Delay before sending NACK after last fragment received.
-  static const Duration nackDelay = Duration(milliseconds: 500);
+  /// Initial delay before sending first NACK after last fragment received.
+  static const Duration nackDelayInitial = Duration(milliseconds: 500);
 
-  /// Max NACKs per fragment group before giving up.
-  static const int maxNacks = 3;
+  /// Maximum NACK delay (backoff cap).
+  static const Duration nackDelayCap = Duration(milliseconds: 2000);
 
   /// Callback: (sourceIp, sourcePort, fragmentId, missingIndices)
   /// Transport wires this to send NACK packets back to the sender.
@@ -274,13 +274,25 @@ class FragmentReassembler {
     return null;
   }
 
+  /// Compute NACK delay with exponential backoff: 500ms, 750ms, 1000ms,
+  /// 1500ms, 2000ms, 2000ms, ... (cap at [nackDelayCap]).
+  Duration _nackDelayForRound(int nackCount) {
+    final ms = nackDelayInitial.inMilliseconds *
+        (1 << (nackCount < 3 ? nackCount : 2));
+    return Duration(milliseconds: ms.clamp(0, nackDelayCap.inMilliseconds));
+  }
+
   void _scheduleNack(String key, _ReassemblyBuffer buffer) {
-    if (buffer.nackCount >= maxNacks) return;
     buffer.nackTimer?.cancel();
-    buffer.nackTimer = Timer(nackDelay, () {
+    final delay = _nackDelayForRound(buffer.nackCount);
+    // Guard: cumulative NACK time must stay within the hard reassembly
+    // timeout. If the next NACK would fire after the buffer expires, stop.
+    final elapsed = DateTime.now().difference(buffer.createdAt);
+    if (elapsed + delay >= reassemblyTimeout) return;
+    buffer.nackTimer = Timer(delay, () {
       final current = _buffers[key];
-      if (current == null) return; // Already completed or expired
-      if (current.fragments.length == current.total) return; // Completed
+      if (current == null) return;
+      if (current.fragments.length == current.total) return;
 
       final missing = <int>[];
       for (var i = 0; i < current.total; i++) {
@@ -294,10 +306,6 @@ class FragmentReassembler {
             'missing=${missing.length}/${current.total} → '
             '${current.sourceIp}:${current.sourcePort}');
         onNack?.call(current.sourceIp, current.sourcePort, current.fragmentId, missing);
-        // Self-reschedule: fire up to maxNacks even without new fragments
-        // arriving. Previously NACKs only fired when addFragment() was called,
-        // so if the retransmitted fragments were also lost, the remaining
-        // NACK budget was never used — the buffer just expired silently.
         _scheduleNack(key, current);
       }
     });

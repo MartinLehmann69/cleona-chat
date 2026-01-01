@@ -423,7 +423,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.91';
+  static const String kCurrentAppVersion = '3.1.92';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -1083,6 +1083,14 @@ class CleonaService implements ICleonaService {
       _saveConversations();
       onStateChanged?.call();
     }
+
+    // Prune service-level cooldown maps to prevent unbounded growth.
+    final nowDt = DateTime.now();
+    _lastNotifiedAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 1);
+    _lastCrRetryPerContact.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
+    _contactLastAckedAt.removeWhere((_, ts) => nowDt.difference(ts).inDays > 1);
+    _resyncRequestedAtEpoch.removeWhere((_, epoch) => epoch > 0 &&
+        nowDt.millisecondsSinceEpoch ~/ 1000 - epoch > 86400);
   }
 
   /// FRAGMENT_STORE handler (Architecture §5.4 + §23.3 InfraFrame). Stores
@@ -1096,7 +1104,9 @@ class CleonaService implements ICleonaService {
     if (senderDeviceId.isNotEmpty &&
         !node.routingTable.isLocalNode(senderDeviceId)) {
       final senderPeer = node.routingTable.getPeer(senderDeviceId);
-      if (senderPeer != null && !senderPeer.idPowVerified) {
+      if (senderPeer != null &&
+          !senderPeer.idPowVerified &&
+          !senderPeer.isProtectedSeed) {
         _log.debug('D3: FRAGMENT_STORE from non-admitted '
             '${bytesToHex(senderDeviceId).substring(0, 8)} — rejected');
         return;
@@ -11934,7 +11944,10 @@ class CleonaService implements ICleonaService {
         recipientUserX25519Pk: contact.x25519Pk!,
         recipientUserMlKemPk: contact.mlKemPk!,
       );
+      final l3PowStart = DateTime.now();
       final l3Pow = await ProofOfWork.computeAsync(kemBytes);
+      final l3PowMs = DateTime.now().difference(l3PowStart).inMilliseconds;
+      _log.info('offlineDelivery: PoW done kemSize=${kemBytes.length} powMs=$l3PowMs');
       final outer = V3FrameCodec.buildOuter(
         nextHopDeviceId: recipientUserId,
         senderDeviceId: node.primaryIdentity.deviceNodeId,
@@ -12034,7 +12047,11 @@ class CleonaService implements ICleonaService {
         );
 
         // §13.1 PoW: compute async in isolate for ApplicationFrames.
+        final powStart = DateTime.now();
         final pow = await ProofOfWork.computeAsync(kemBytes);
+        final powMs = DateTime.now().difference(powStart).inMilliseconds;
+        _log.info('sendToUser: PoW done for ${_hexShort(deviceId)} '
+            'kemSize=${kemBytes.length} powMs=$powMs nonce=${pow.nonce}');
         final outer = V3FrameCodec.buildOuter(
           nextHopDeviceId: deviceId,
           senderDeviceId: myDeviceNodeId,

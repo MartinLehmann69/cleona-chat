@@ -82,13 +82,22 @@ class Transport {
   static const int pacingThreshold = 4;
 
   /// Minimum delay between successive fragment sends to one destination
-  /// when pacing is active. 1 ms × 29 fragments = ~28 ms added latency.
-  static const Duration interFragmentDelay = Duration(milliseconds: 1);
+  /// when pacing is active. 2 ms × 29 fragments = ~58 ms added latency.
+  static const Duration interFragmentDelay = Duration(milliseconds: 2);
+
+  /// §2.9.10: CGNAT burst size — max fragments per burst before pausing.
+  /// Empirically derived: DS-Lite CGNAT passes groups of ≤8 reliably,
+  /// drops larger bursts completely (zero fragments arrive).
+  static const int _cgnatBurstSize = 8;
+
+  /// Pause between fragment bursts for CGNAT-safe delivery.
+  static const Duration _cgnatInterGroupDelay = Duration(milliseconds: 50);
 
   /// Cache of recently sent fragments for NACK-based resend.
   /// Key: "destIp:fragmentId", Value: list of fragment packets.
-  /// Auto-expires after 30 seconds.
+  /// Auto-expires after 30 seconds; refreshed on each NACK receipt.
   final Map<String, List<Uint8List>> _sentFragmentCache = {};
+  final Map<String, Timer> _sentFragmentCacheTimers = {};
 
   // ── Hybrid Bulk Transport — TLS Capability Cache ─────────────────
   // docs/SPEC_HYBRID_BULK_TRANSPORT.md §5.3. Per-destination tristate so
@@ -734,34 +743,48 @@ class Transport {
         for (final frag in fragments) {
           wrappedFragments.add(NetworkSecret.wrapPacket(frag));
         }
-        // Pacing: insert `interFragmentDelay` between sends when more than
-        // `pacingThreshold` fragments go to one destination, to avoid burst
-        // loss at carrier-NAT egress (Architecture §2.9.10).
-        final pacingActive = fragments.length > pacingThreshold;
-        final pacing = fragments.length > 5
-            ? const Duration(milliseconds: 3)
+        // §2.9.10 CGNAT-safe fragment pacing: carrier NAT has per-flow
+        // burst limits (~8 packets). Sending >8 fragments in a tight burst
+        // causes total drop (zero fragments arrive → no NACK possible).
+        // Two measures:
+        //  1. Group-based sending: bursts of cgnatBurstSize with inter-group
+        //     pauses that let the NAT drain its token bucket.
+        //  2. Fragment-0 redundancy: re-send fragment 0 after all others so
+        //     the receiver can create the reassembly buffer and NACK the rest
+        //     even if the burst head was dropped.
+        final n = wrappedFragments.length;
+        final needsGroupPacing = n > _cgnatBurstSize;
+        final pacing = n > 5
+            ? const Duration(milliseconds: 4)
             : interFragmentDelay;
         var frag0Failed = false;
-        for (var i = 0; i < wrappedFragments.length; i++) {
+        for (var i = 0; i < n; i++) {
           final sent = _udpSendRaw(wrappedFragments[i], address, remotePort, socket);
           if (sent > 0) {
             anySent = true;
-            _log.debug('sendUdp: fragment $i/${wrappedFragments.length} OK ($sent B) '
+            _log.debug('sendUdp: fragment $i/$n OK ($sent B) '
                 'to ${address.address}:$remotePort');
           } else {
             if (i == 0) frag0Failed = true;
-            _log.debug('sendUdp: fragment $i/${wrappedFragments.length} returned $sent '
+            _log.debug('sendUdp: fragment $i/$n returned $sent '
                 'for ${address.address}:$remotePort');
           }
-          if (pacingActive && i < wrappedFragments.length - 1) {
-            await Future.delayed(pacing);
+          if (i < n - 1) {
+            if (needsGroupPacing && (i + 1) % _cgnatBurstSize == 0) {
+              await Future.delayed(_cgnatInterGroupDelay);
+            } else if (n > pacingThreshold) {
+              await Future.delayed(pacing);
+            }
           }
         }
-        if (frag0Failed && anySent) {
-          await Future.delayed(const Duration(milliseconds: 5));
+        // Fragment-0 redundancy: re-send after the full group so the
+        // receiver creates the buffer even if the burst head was dropped.
+        if (n > _cgnatBurstSize || frag0Failed) {
+          await Future.delayed(
+              needsGroupPacing ? _cgnatInterGroupDelay : const Duration(milliseconds: 5));
           final retry = _udpSendRaw(wrappedFragments[0], address, remotePort, socket);
           if (retry > 0) {
-            _log.debug('sendUdp: fragment-0 retry succeeded for ${address.address}:$remotePort');
+            _log.debug('sendUdp: fragment-0 redundancy OK for ${address.address}:$remotePort');
           }
         }
         if (anySent) {
@@ -773,7 +796,7 @@ class Transport {
           if (header != null) {
             final cacheKey = '${address.address}:${header.fragmentId}';
             _sentFragmentCache[cacheKey] = wrappedFragments;
-            Timer(const Duration(seconds: 30), () => _sentFragmentCache.remove(cacheKey));
+            _resetFragmentCacheTimer(cacheKey);
           }
         } else {
           _consecutiveZeroSends += wrappedFragments.length;
@@ -807,20 +830,31 @@ class Transport {
     }
   }
 
+  /// Reset (or start) the 30s expiry timer for a fragment cache entry.
+  /// Called on initial cache and on each NACK receipt to keep fragments
+  /// alive as long as the receiver is still requesting them.
+  void _resetFragmentCacheTimer(String cacheKey) {
+    _sentFragmentCacheTimers[cacheKey]?.cancel();
+    _sentFragmentCacheTimers[cacheKey] = Timer(const Duration(seconds: 30), () {
+      _sentFragmentCache.remove(cacheKey);
+      _sentFragmentCacheTimers.remove(cacheKey);
+    });
+  }
+
   /// Handle NACK: resend missing fragments from cache.
   Future<void> _handleFragmentNack(int fragmentId, List<int> missing, InternetAddress from, int fromPort) async {
-    // The NACK comes FROM the receiver — look up cache by receiver's address
-    // We stored with dest=receiver, so the key matches.
     final cacheKey = '${from.address}:$fragmentId';
     final cached = _sentFragmentCache[cacheKey];
     if (cached == null) {
-      _log.debug('Fragment NACK: no cache for id=$fragmentId from ${from.address}:$fromPort');
+      _log.info('Fragment NACK: cache expired for id=$fragmentId from ${from.address}:$fromPort');
       return;
     }
 
+    // Refresh cache TTL — receiver is still actively requesting fragments.
+    _resetFragmentCacheTimer(cacheKey);
+
     final socket = _socketFor(from);
     var resent = 0;
-    // Pacing: same threshold/delay as initial send (Architecture §2.9.10).
     final pacingActive = missing.length > pacingThreshold;
     for (var i = 0; i < missing.length; i++) {
       final idx = missing[i];
@@ -836,7 +870,7 @@ class Transport {
         }
       }
     }
-    _log.debug('Fragment NACK resend: id=$fragmentId resent=$resent/${missing.length} to ${from.address}:$fromPort');
+    _log.info('Fragment NACK resend: id=$fragmentId resent=$resent/${missing.length} to ${from.address}:$fromPort');
   }
 
   /// Send a CPRB port probe packet to a target address.

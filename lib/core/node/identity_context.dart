@@ -183,9 +183,10 @@ class IdentityContext {
   /// group member IDs, etc. — all of these are identity operations, not routing.
   Uint8List get nodeId => userId;
 
-  /// Base directory for shared resources.
-  /// Defaults to ~/.cleona (2 levels up from identities/identity-N/).
+  /// Base directory for shared daemon-global resources (device keys, db.key).
+  /// Always resolves to ~/.cleona regardless of profileDir.
   final String _baseDir;
+  String get baseDir => _baseDir;
 
   /// HD-Wallet derivation index (null = legacy random keys).
   final int? hdIndex;
@@ -296,7 +297,14 @@ class IdentityContext {
     // (§3.1, §3.5). Multi-Identity sharing: all IdentityContexts in this
     // daemon load the SAME DeviceKeysStore (single file in baseDir) and
     // therefore derive the SAME deviceNodeId.
-    final deviceBundle = DeviceKeysStore.loadOrCreate(baseDir: _baseDir, fileEnc: fileEnc);
+    // Device keys use the daemon-global SHARED encryption key (not the
+    // per-identity key) so that all identities and CleonaNode decrypt
+    // the same file with the same key.
+    final Uint8List? sharedFileEncKey = masterSeed != null
+        ? HdWallet.deriveSharedFileEncKey(masterSeed!)
+        : null;
+    final deviceFileEnc = FileEncryption(baseDir: _baseDir, key: sharedFileEncKey);
+    final deviceBundle = DeviceKeysStore.loadOrCreate(baseDir: _baseDir, fileEnc: deviceFileEnc);
     deviceNodeId = HdWallet.computeDeviceNodeId(
         deviceBundle.sig.ed25519PublicKey, NetworkSecret.secret);
 

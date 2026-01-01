@@ -1293,8 +1293,8 @@ class IpcServer {
             break;
           }
           final groupName = req.params['name'] as String?;
-          if (groupName == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: name'));
+          if (groupName == null || groupName.trim().isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing or empty param: name'));
             break;
           }
           final memberIds = (req.params['memberIds'] as List<dynamic>?)?.cast<String>() ?? <String>[];

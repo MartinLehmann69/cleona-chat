@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a71ae52ef524, 2026-06-15). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ee52d09dba80, 2026-06-16). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1683,7 +1683,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 |---|---|---|---|
 | **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by score (lastSeen recency × address priority §4.6). One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
 | **2 — LAN Discovery** | 3× burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76, TTL=4) + IPv6-Multicast, then silence. | Tier 1 exhausted (all stored peers unreachable or routing table empty) | 9 datagrams (3 × 3 channels) |
-| **3 — Bootstrap** | Unicast probe to cached bootstrap addresses. Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–2 PINGs |
+| **3 — Bootstrap** | Unicast probe to cached bootstrap addresses: stored peers with public WAN IPs are probed on both their stored port and the channel-default bootstrap port (8081 beta / 8080 live — §17.5). Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–4 PINGs |
 | **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Last resort. | Tier 3 exhausted (bootstrap unreachable) | ~65 000 probes over 130 s |
 
 **Discovery-complete gate**: the node-level flag `_discoveryComplete` is set when **any** tier produces a confirmed peer that delivers a `PEER_LIST_PUSH` with ≥1 entry. Once set:
@@ -2314,7 +2314,9 @@ Cleona's "Reliable UDP Light" — minimal overhead for ACK tracking, without TCP
 - The receiver collects fragments; the reassembly buffer is keyed by `(senderDeviceId, messageId)`
 - If after 500ms a fragment is missing: NACK with `missingFragmentIndices`
 - The sender resends the missing fragments
-- Max 3 NACK retries per fragment group (self-rescheduling)
+- NACKs continue with exponential backoff (500ms→750ms→1s→1.5s→2s cap) until reassembly completes or hard timeout (10s) expires — no fixed retry limit, but bounded by the hard timeout (V3.1.92+, previously capped at 3 retries)
+- Sender-side fragment cache (30s) is refreshed on each NACK receipt, staying alive as long as the receiver actively requests retransmissions
+- Inter-fragment pacing: 2ms (≤5 fragments), 4ms (>5 fragments) to reduce burst loss at receiver kernel buffers
 
 **App-level UDP fragmentation** (V3):
 - Payload >1200 bytes → fragments of ≤1200 bytes
@@ -2367,7 +2369,7 @@ The §5.1 Three-Layer Cascade describes the *happy path*. When sends to a peer f
 
 #### 5.10.2 Stage 2 — Stale-PK Recovery
 
-**Trigger**: an incoming packet from `senderDeviceId == X` fails Outer-Device-Sig verification against the cached `firstParty` Device-Sig PK for X (`PeerInfo.deviceEd25519PublicKey` / `deviceMlDsaPublicKey` per §3.5 Welle-3 layout), so the cache is likely stale because X rotated keys, not malice.
+**Trigger**: an incoming packet from `senderDeviceId == X` fails Outer-Device-Sig verification against the cached Device-Sig PK for X (`PeerInfo.deviceEd25519PublicKey` / `deviceMlDsaPublicKey` per §3.5 Welle-3 layout), regardless of whether the PK was learned `firstParty` (direct exchange) or `thirdParty` (gossip/relay). The HMAC already proves network membership; a sig mismatch on a peer with *any* cached PK almost always means key rotation (profile wipe, device restart, key regeneration), not malice.
 
 **Action** (single-shot per peer, 30 s cooldown):
 
@@ -5398,15 +5400,17 @@ V3.0's resilience strategy combines multi-layered DoS protection (§13.1, consol
 
 #### 13.1.2 Layer 1: Proof of Work
 
-Every chat-content message entering the network must carry a Proof of Work (PoW) solution in its outer `NetworkPacket`. PoW is a wire-level property — it sits in the outer frame so a node can verify and drop spam *before* spending CPU on KEM decryption of the inner `ApplicationFrame`. The algorithm is SHA-256 hashcash: the sender must find an 8-byte nonce that, combined with the packet hash, produces a SHA-256 output with at least N leading zero bits.
+Every chat-content message entering the network must carry a Proof of Work (PoW) solution in its outer `NetworkPacket`. PoW is a wire-level property — it sits in the outer frame so a node can verify and drop spam *before* spending CPU on KEM decryption of the inner `ApplicationFrame`. The algorithm is SHA-256 hashcash with pre-hashing: the sender first reduces the payload to a 32-byte digest via SHA-256, then finds an 8-byte nonce such that SHA-256(digest || nonce) has at least N leading zero bits.
 
 ```
 PoW Parameters:
-  Algorithm:           SHA-256(data || nonce_8byte_LE)
-  Default difficulty:  20 leading zero bits (~1M hashes, 50-100ms desktop, 0.5-2s mobile)
+  Algorithm:           SHA-256(SHA-256(data) || nonce_8byte_LE)
+  Default difficulty:  20 leading zero bits (~1M hashes, ~20ms regardless of payload size)
   Minimum accepted:    16 leading zero bits (transition period)
-  Verification:        Recompute hash, verify leading bits + hash match
+  Verification:        Pre-hash first, legacy full-data fallback; verify leading bits + hash match
 ```
+
+**Pre-Hash Rationale (V3.1.92):** The previous formula `SHA-256(data || nonce)` iterated over the full KEM-encrypted payload on every hash attempt — O(payload_size × 2^d). For a 131 KB inline image (137 KB after KEM encrypt), this produced ~136 GB of SHA-256 throughput (~66 s on ARM64), which caused Android to kill the PoW isolate (silent message loss). Pre-hashing reduces the per-iteration input to a fixed 40 bytes (32-byte digest + 8-byte nonce), making PoW time O(2^d) independent of payload size. Measured improvement: 131 KB payload from 66 000 ms to 17 ms (3 800×). Verify accepts both formats for backward compatibility with S&F-cached messages.
 
 **PoW Exemptions:** Three categories of packets are exempt:
 
@@ -5418,7 +5422,7 @@ PoW Parameters:
 
 Only **chat content messages** (TEXT, IMAGE, FILE, VOICE, CALL_*) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW.
 
-**Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
+**Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. Pre-hashing (§13.1.2) ensures iteration time is constant regardless of payload size — no risk of Android background-killing the isolate during long PoW grinds. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
 
 **Admission PoW (identity-bound, D3 — Phase 1 observe-only):** distinct from the per-message PoW above, the admission proof prices **ID minting** (insider-Sybil cost anchor, §13.1.8):
 
@@ -5434,7 +5438,7 @@ Admission PoW:
 - **Bound to the pubkey, not the Device-ID** — it survives secret rotation (Device-IDs change with the secret, the proof does not). The receiver additionally checks `SHA-256(network_secret || pk) == senderDeviceId`, binding the proof to the wire identity.
 - **Transport — no additional packets:** the proof travels alongside the device pubkey it certifies, as `PeerInfoProto.device_id_pow_nonce` (field 21) in self-broadcast `PEER_LIST_PUSH` and `PEER_KEY_RESPONSE`. The 8-byte nonce is part of the **slim** PEER_LIST_PUSH field set (§4.5.x slim mode). Legacy builds ignore the field; legacy gossipers drop it on re-serialization — the peer then simply stays non-admitted until direct contact (harmless in Phase 1).
 - **Verification:** on the key-learning path (`setSigningKeys`): two SHA-256 invocations per newly learned peer; result cached as `idPowVerified` in the PeerInfo and persisted with the routing table.
-- **Phase 2 semantics (V3.1.90+, hard break):** admission PoW is **required** for privileged network roles. Peers without verified admission proof are excluded from: (1) relay candidacy — not selected as relay hop in DV neighbor spray, (2) DV route acceptance — ROUTE_UPDATEs from non-admitted neighbors are silently dropped, (3) DHT fragment storage — FRAGMENT_STORE from non-admitted senders is rejected. **Exception (§8.1.1 bootstrap):** peers with `isProtectedSeed=true` (ContactSeed-derived, §8.1.1, max 5 per ContactSeed) are exempt from relay-candidacy and ROUTE_UPDATE gating. The §5.11 new-neighbor Self-Broadcast normally resolves admission within 1 RTT; the protected-seed exemption is the safety net for UDP loss, high-latency mobile paths, or timing races where the Self-Broadcast arrives after the CR send window. Protected seeds are bounded (≤5), ephemeral (pruned after contact success or aging timeout), and integrity-anchored via the ContactSeed (SHA-256 check, §8.1.1) — they are not a Sybil vector. Basic packet receive, self-broadcast, and message delivery are **never** gated — a non-admitted peer can still send and receive chat messages on direct paths; admission gates only trust-bearing infrastructure roles. The `minRequiredVersion` transition gate was removed — all pre-V3.1.90 builds are de-facto deprecated (beta distribution only, no external user base). The admission nonce is computed synchronously (awaited) during node startup to ensure the first self-broadcast carries the proof.
+- **Phase 2 semantics (V3.1.90+, hard break):** admission PoW is **required** for privileged network roles. Peers without verified admission proof are excluded from: (1) relay candidacy — not selected as relay hop in DV neighbor spray, (2) DV route acceptance — ROUTE_UPDATEs from non-admitted neighbors are silently dropped, (3) DHT fragment storage — FRAGMENT_STORE from non-admitted senders is rejected. **Exception (§8.1.1 bootstrap):** peers with `isProtectedSeed=true` (ContactSeed-derived, §8.1.1, max 5 per ContactSeed) are exempt from relay-candidacy, ROUTE_UPDATE gating, and FRAGMENT_STORE gating. The §5.11 new-neighbor Self-Broadcast normally resolves admission within 1 RTT; the protected-seed exemption is the safety net for UDP loss, high-latency mobile paths, or timing races where the Self-Broadcast arrives after the CR send window. Protected seeds are bounded (≤5), ephemeral (pruned after contact success or aging timeout), and integrity-anchored via the ContactSeed (SHA-256 check, §8.1.1) — they are not a Sybil vector. Basic packet receive, self-broadcast, and message delivery are **never** gated — a non-admitted peer can still send and receive chat messages on direct paths; admission gates only trust-bearing infrastructure roles. The `minRequiredVersion` transition gate was removed — all pre-V3.1.90 builds are de-facto deprecated (beta distribution only, no external user base). The admission nonce is computed synchronously (awaited) during node startup to ensure the first self-broadcast carries the proof.
 
 #### 13.1.3 Layer 2: Rate Limiting per Device
 
@@ -5539,7 +5543,7 @@ The DoS layers keyed on Device-IDs (Layer 2 rate limiting, Layer 3 reputation, L
 - **D3 — Admission PoW per device keypair.** A static, reusable proof — nonce such that `SHA-256("cleona-id-pow-v1" || ed25519_device_pk || nonce)` has ≥ N leading zero bits — computed once at device creation and carried **alongside the device pubkey it certifies** (`PeerInfoProto.device_id_pow_nonce`, PEER_LIST_PUSH / PEER_KEY_RESPONSE — no additional packets), verified and cached by receivers (two hashes). Bound to the **pubkey**, not the Device-ID, so it survives secret rotation. Legacy builds ignore the unknown field. This raises ID minting from free to CPU-bound; it is a cost factor, not a prevention. Spec: §13.1.2.
 - **D4 — Replicator/lookup diversity + publisher self-verify.** K-closest selection prefers IP-subnet diversity (binds eclipse to the genuinely scarce resource — addresses); the publisher verifies its own records with one self-lookup per publish cycle. Spec: §4.3 (*Replicator & lookup diversity* / *Publisher self-verify*).
 - **D5 — Collective quotas.** Non-admitted/unknown sources additionally share a collective fraction of the global budgets, so N minted IDs compete with each other instead of multiplying. Spec: §13.1.3 (*Collective quota for non-introduced sources*) + §5.3 (relay budget); fragments deliberately excluded (§13.1.5).
-- **Phase-2 enforcement (V3.1.90+, hard break):** role gating is **unconditionally active** — admission PoW required for relay candidacy, DV route acceptance, and fragment storage. **Protected-seed exception:** `isProtectedSeed` peers (ContactSeed-derived, §8.1.1) are exempt from relay and ROUTE_UPDATE gating — see §13.1.2 Phase 2 for rationale. The `minRequiredVersion` transition gate was removed (no external user base to protect). Basic packet receive is **never** dropped for missing admission — message delivery on direct paths remains unaffected. Default-gateway election (§4.4) additionally prefers admitted neighbors over non-admitted ones as the top-priority sort criterion.
+- **Phase-2 enforcement (V3.1.90+, hard break):** role gating is **unconditionally active** — admission PoW required for relay candidacy, DV route acceptance, and fragment storage. **Protected-seed exception:** `isProtectedSeed` peers (ContactSeed-derived, §8.1.1) are exempt from relay, ROUTE_UPDATE, and FRAGMENT_STORE gating — see §13.1.2 Phase 2 for rationale. The `minRequiredVersion` transition gate was removed (no external user base to protect). Basic packet receive is **never** dropped for missing admission — message delivery on direct paths remains unaffected. Default-gateway election (§4.4) additionally prefers admitted neighbors over non-admitted ones as the top-priority sort criterion.
 
 ### 13.2 Secret Rotation
 

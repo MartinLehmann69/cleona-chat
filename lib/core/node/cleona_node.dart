@@ -735,17 +735,20 @@ class CleonaNode {
     };
 
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
-    // §3.7: derive shared FileEncryption key from master seed for daemon-level files
+    // §3.7: derive shared FileEncryption key from master seed for daemon-level files.
+    // Device keys are daemon-global → use baseDir (~/.cleona), NOT profileDir
+    // (which may be a sub-directory like ~/.cleona/Bootstrap/).
+    final deviceKeysDir = primaryIdentity.baseDir;
     final masterSeed = primaryIdentity.masterSeed;
     final Uint8List? sharedFileEncKey = masterSeed != null
         ? HdWallet.deriveSharedFileEncKey(masterSeed)
         : null;
-    final identityFileEnc = FileEncryption(baseDir: profileDir, key: sharedFileEncKey);
+    final identityFileEnc = FileEncryption(baseDir: deviceKeysDir, key: sharedFileEncKey);
 
     // V3.0 Device-Sig keypair (§3.5). Loaded once per daemon, shared across
     // all hosted identities. Lazy-created on first start.
     _deviceKeys = DeviceKeysStore.loadOrCreate(
-      baseDir: profileDir,
+      baseDir: deviceKeysDir,
       fileEnc: identityFileEnc,
     );
     // D3 Phase 2 (§13.1.2): Admission-PoW-Nonce MUSS vor dem ersten
@@ -756,7 +759,7 @@ class CleonaNode {
       try {
         await DeviceKeysStore.ensureAdmissionNonce(
           bundle: _deviceKeys,
-          baseDir: profileDir,
+          baseDir: deviceKeysDir,
           fileEnc: identityFileEnc,
         );
         _log.info('D3: Admission-PoW-Nonce bereit '
@@ -1056,15 +1059,20 @@ class CleonaNode {
     // addresses so Mobilfunk/CGNAT nodes can reach Bootstrap via its WAN IP.
     var tier3Addrs = _isolatedNodeBootstrapAddrs.toList();
     if (tier3Addrs.isEmpty) {
+      final bsPort = NetworkSecret.channel.defaultBootstrapPort;
       for (final peer in stored) {
         for (final addr in peer.allConnectionTargets()) {
           if (addr.ip.isEmpty || addr.port <= 0) continue;
           if (_isPrivateIp(addr.ip)) continue;
           if (addr.ip.startsWith('fe80:') || addr.ip.startsWith('fd')) continue;
-          final formatted = addr.ip.contains(':')
-              ? '[${addr.ip}]:${addr.port}'
-              : '${addr.ip}:${addr.port}';
-          if (!tier3Addrs.contains(formatted)) tier3Addrs.add(formatted);
+          final fmt = addr.ip.contains(':') ? '[${addr.ip}]' : addr.ip;
+          final peerAddr = '$fmt:${addr.port}';
+          if (!tier3Addrs.contains(peerAddr)) tier3Addrs.add(peerAddr);
+          // §4.5 Tier 3: also probe channel-default bootstrap port (§17.5)
+          if (addr.port != bsPort) {
+            final bsAddr = '$fmt:$bsPort';
+            if (!tier3Addrs.contains(bsAddr)) tier3Addrs.add(bsAddr);
+          }
         }
       }
     }
@@ -1236,14 +1244,16 @@ class CleonaNode {
         // NOT block on this — Stage 2 is fire-and-forget; Stages 1/3/4/5 of
         // the cascade run in parallel on their own counters.
         if (senderPeer != null &&
-            senderPeer.pkSource == PkSource.firstParty &&
+            senderPeer.pkSource != PkSource.none &&
             !senderPeer.pkStale) {
           // §5.10.2 key-rotation path: fire refresh probe, but do NOT drop.
           // HMAC already proves network membership; sig failure on a known
-          // firstParty peer almost always means key rotation (e.g. profile
-          // wipe), not spoofing. The inner handler validates at its own trust
-          // level using outerStatus=skippedBootstrap. Dropping here would
-          // silently block the re-contact-request that carries the new key.
+          // peer (firstParty OR thirdParty/gossip-sourced) almost always
+          // means key rotation (e.g. profile wipe, device restart with
+          // regenerated keys), not spoofing. The inner handler validates at
+          // its own trust level using outerStatus=skippedBootstrap. Dropping
+          // here would silently block the re-contact-request that carries
+          // the new key.
           _triggerStalePkRecovery(senderPeer);
           outerStatus = OuterSigStatus.skippedBootstrap;
         } else if (senderPeer?.pkStale == true) {
@@ -1251,12 +1261,12 @@ class CleonaNode {
           // status; the probe's ≥30s throttle prevents probe storms.
           outerStatus = OuterSigStatus.skippedBootstrap;
         } else {
-          // No firstParty cache → unknown sender using a known device-id
-          // (or a thirdParty PK mismatch). Silent drop, NO reputation hit:
-          // a *failed* device-sig means `senderDeviceId` is exactly the
-          // unproven field — the HMAC proves only network membership. An
-          // insider could otherwise forge a frame with a victim's deviceId +
-          // valid HMAC + broken sig to frame the victim into a ban
+          // No PK cache at all (pkSource==none) OR unknown sender using a
+          // known device-id. Silent drop, NO reputation hit: a *failed*
+          // device-sig means `senderDeviceId` is exactly the unproven
+          // field — the HMAC proves only network membership. An insider
+          // could otherwise forge a frame with a victim's deviceId + valid
+          // HMAC + broken sig to frame the victim into a ban
           // (Ban-DoS-by-framing). See §13.1.4 attribution precondition.
           _log.debug('V3 drop: device-sig invalid from '
               '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
@@ -3410,9 +3420,39 @@ class CleonaNode {
     // auto-fragments payloads >1200B with CFRA + NACK retry).
     final wireSize = packet.writeToBuffer().length;
     final isLargePayload = wireSize > maxFragmentPacketSize;
+    // §4.1.1 Size-based TLS preference: payloads that need many UDP
+    // fragments (>10) are unreliable through CGNAT — carrier NAT drops
+    // large bursts silently and zero fragments arrive (no NACK possible).
+    // TLS (TCP) handles segmentation + retransmission reliably. Try TLS
+    // first for these payloads; fall through to UDP if TLS unavailable.
+    final fragmentCount = isLargePayload
+        ? (wireSize / maxFragmentPacketSize).ceil()
+        : 0;
+    final preferTls = fragmentCount > 10;
     _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: wireSize=$wireSize '
-        'large=$isLargePayload confirmed=$isConfirmed '
+        'large=$isLargePayload${preferTls ? " preferTls=true frags=$fragmentCount" : ""} '
+        'confirmed=$isConfirmed '
         'targets=${targets.map((a) => "${a.ip}:${a.port}").join(",")}');
+    if (preferTls) {
+      for (final addr in targets) {
+        if (!transport.tlsBulkCapable(InternetAddress(addr.ip), addr.port)) continue;
+        try {
+          final ok = await transport.sendBulkViaTLS(
+              packet, InternetAddress(addr.ip), addr.port);
+          if (ok) {
+            addr.recordSuccess();
+            _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
+                'TLS-first ${wireSize}B → ${addr.ip}:${addr.port} OK');
+            return true;
+          }
+        } catch (e) {
+          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
+              'TLS-first to ${addr.ip}:${addr.port} failed: $e');
+        }
+      }
+      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: '
+          'TLS-first failed on all targets, falling back to UDP fragmentation');
+    }
     var udpSentAny = false;
     for (final addr in targets) {
       try {
@@ -3434,7 +3474,15 @@ class CleonaNode {
         _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
       }
     }
-    if (udpSentAny && isConfirmed) return true;
+    // §4.6.1: UDP sent to a confirmed peer but NO address had recent
+    // bidirectional proof (the early-return at line 3468 above didn't fire).
+    // Don't trust OS-level UDP success — packets may be black-holed
+    // (e.g. CGNAT phone → Fritzbox:12136 without port-forward). Fall
+    // through to TLS and let the sendToDevice cascade try relay routes.
+    if (udpSentAny && isConfirmed) {
+      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: confirmed peer, '
+          'UDP sent but no address has recent bidirectional proof');
+    }
 
     // §4.6 (V3.1.72): for peers we are not direct-confirmed for (CGNAT,
     // first-contact), a UDP "ok" is only a local buffer write — the packet
@@ -4273,6 +4321,18 @@ class CleonaNode {
     if (staleAddrs > 0) {
       _log.info('Maintenance: removed $staleAddrs stale addresses');
     }
+
+    // Prune cooldown/tracker maps to prevent unbounded growth on long-running
+    // daemons. Each map has a documented TTL matching its operational window.
+    final now = DateTime.now();
+    _dvSeedWantCooldown.removeWhere((_, ts) => now.difference(ts).inMinutes > 15);
+    _outstandingPeerListWants.removeWhere((_, ts) => now.difference(ts) > _solicitedReplyWindow);
+    _peerKeyRequestCooldown.removeWhere((_, ts) => now.difference(ts).inMinutes > 5);
+    _lastStalePkProbe.removeWhere((_, ts) => now.difference(ts) > _stalePkProbeThrottle * 2);
+    _lastMeshRefresh.removeWhere((_, ts) => now.difference(ts) > _meshRefreshThrottle * 2);
+    _lastRouteEpochSentTo.removeWhere((hex, _) => routingTable.getPeer(hexToBytes(hex)) == null);
+    _unackedPacketsToPeer.removeWhere((hex, _) => routingTable.getPeer(hexToBytes(hex)) == null);
+    _confirmedPeers.removeWhere((_, ts) => now.difference(ts) > _confirmedPeerTtl);
 
     // §4.5: if pruning/eviction dropped us to zero peers mid-session, (re-)arm
     // the isolated-node retry — only when it is not already running, so the

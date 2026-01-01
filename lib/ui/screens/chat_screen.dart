@@ -2361,18 +2361,29 @@ class _AudioPlayerWidget extends StatefulWidget {
 }
 
 class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
-  // just_audio has no Linux/Windows desktop backend — registering a player
-  // there throws MissingPluginException on every call. Skip the platform-
-  // channel calls on those platforms and render an "unsupported" hint.
-  static final bool _supported = Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
-  late final AudioPlayer? _player = _supported ? AudioPlayer() : null;
+  static final bool _justAudioSupported = Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+  late final AudioPlayer? _player = _justAudioSupported ? AudioPlayer() : null;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
   bool _playing = false;
 
+  // Linux/Windows fallback: ffplay process-based player.
+  Process? _ffplayProcess;
+  Timer? _positionTimer;
+  DateTime? _playStartedAt;
+  Duration _playStartOffset = Duration.zero;
+
   @override
   void initState() {
     super.initState();
+    if (_justAudioSupported) {
+      _initJustAudio();
+    } else {
+      _probeDesktopDuration();
+    }
+  }
+
+  void _initJustAudio() {
     final player = _player;
     if (player == null) return;
     player.setFilePath(widget.filePath).then((duration) {
@@ -2392,9 +2403,69 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
     });
   }
 
+  Future<void> _probeDesktopDuration() async {
+    try {
+      final result = await Process.run('ffprobe', [
+        '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=nw=1:nk=1', widget.filePath,
+      ]);
+      if (!mounted) return;
+      final seconds = double.tryParse((result.stdout as String).trim());
+      if (seconds != null && seconds > 0) {
+        setState(() => _duration = Duration(milliseconds: (seconds * 1000).round()));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _desktopPlay() async {
+    await _desktopStop();
+    final ssArg = _playStartOffset.inMilliseconds > 0
+        ? ['-ss', '${_playStartOffset.inSeconds}.${(_playStartOffset.inMilliseconds % 1000).toString().padLeft(3, '0')}']
+        : <String>[];
+    try {
+      _ffplayProcess = await Process.start(
+        'ffplay', ['-nodisp', '-autoexit', '-loglevel', 'error', ...ssArg, widget.filePath],
+      );
+      _playStartedAt = DateTime.now();
+      setState(() => _playing = true);
+      _positionTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (!mounted || _playStartedAt == null) return;
+        final elapsed = DateTime.now().difference(_playStartedAt!) + _playStartOffset;
+        if (elapsed >= _duration && _duration > Duration.zero) {
+          _desktopStop();
+          setState(() { _position = Duration.zero; _playStartOffset = Duration.zero; });
+        } else {
+          setState(() => _position = elapsed);
+        }
+      });
+      _ffplayProcess!.exitCode.then((_) {
+        if (!mounted) return;
+        _positionTimer?.cancel();
+        if (_playing) setState(() { _playing = false; _position = Duration.zero; _playStartOffset = Duration.zero; });
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _desktopStop() async {
+    _positionTimer?.cancel();
+    _positionTimer = null;
+    final proc = _ffplayProcess;
+    _ffplayProcess = null;
+    if (proc != null) {
+      if (_playStartedAt != null) {
+        _playStartOffset = DateTime.now().difference(_playStartedAt!) + _playStartOffset;
+      }
+      proc.kill();
+    }
+    _playStartedAt = null;
+    if (mounted) setState(() => _playing = false);
+  }
+
   @override
   void dispose() {
     _player?.dispose();
+    _positionTimer?.cancel();
+    _ffplayProcess?.kill();
     super.dispose();
   }
 
@@ -2402,6 +2473,25 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$m:$s';
+  }
+
+  void _onPlayPause() {
+    if (_justAudioSupported) {
+      _playing ? _player?.pause() : _player?.play();
+    } else {
+      _playing ? _desktopStop() : _desktopPlay();
+    }
+  }
+
+  void _onSeek(double v) {
+    final target = Duration(milliseconds: (v * _duration.inMilliseconds).round());
+    if (_justAudioSupported) {
+      _player?.seek(target);
+    } else {
+      _playStartOffset = target;
+      setState(() => _position = target);
+      if (_playing) _desktopPlay();
+    }
   }
 
   @override
@@ -2414,9 +2504,7 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
           IconButton(
             icon: Icon(_playing ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 36),
             color: colorScheme.primary,
-            onPressed: _player == null
-                ? null
-                : () => _playing ? _player.pause() : _player.play(),
+            onPressed: _onPlayPause,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
           ),
@@ -2434,13 +2522,9 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
                   ),
                   child: Slider(
                     value: _duration.inMilliseconds > 0
-                        ? _position.inMilliseconds / _duration.inMilliseconds
+                        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
                         : 0,
-                    onChanged: _player == null
-                        ? null
-                        : (v) => _player.seek(Duration(
-                              milliseconds: (v * _duration.inMilliseconds).round(),
-                            )),
+                    onChanged: _onSeek,
                   ),
                 ),
                 Padding(
