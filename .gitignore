@@ -68,3 +68,7 @@ stage/
 
 # Superpowers brainstorming cache
 .superpowers/
+
+# Pipeline markers (sync/dry-run/approve workflow)
+.dry-run-passed
+.push-approved
