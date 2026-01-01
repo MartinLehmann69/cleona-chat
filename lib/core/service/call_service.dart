@@ -74,12 +74,13 @@ class CallService {
       contacts: _ctx.contacts,
       profileDir: _ctx.profileDir,
     );
-    callManager.sendViaUser = (recipientUserId, type, payload) =>
+    callManager.sendViaUser = (recipientUserId, type, payload, {outLegs}) =>
         _ctx.sendToUser(
           recipientUserId: recipientUserId,
           messageType: type,
           payload: payload,
           skipL3: true,
+          outLegs: outLegs,
         );
     callManager.onIncomingCall = (session) {
       onIncomingCall?.call(session.toCallInfo());
@@ -304,8 +305,9 @@ class CallService {
       _audioMixer!.onSpeakerToggle = (speaker) {
         onSetCallAudioModeAndroid?.call(speaker);
       };
-      await _audioMixer!.start();
+      // Mode before stream-open — see _startAudioEngine for the rationale.
       onSetCallAudioModeAndroid?.call(true);
+      await _audioMixer!.start();
       // Poll audio levels at 4 Hz for active speaker detection + mute inference.
       _audioLevelTimer?.cancel();
       _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
@@ -407,8 +409,12 @@ class CallService {
       _audioEngine!.onSpeakerToggle = (speaker) {
         onSetCallAudioModeAndroid?.call(speaker);
       };
-      await _audioEngine!.start();
+      // MODE_IN_COMMUNICATION must be active *before* the streams are opened
+      // — Android picks the route and the HAL effect chain at stream-open
+      // time, so switching the mode afterwards leaves the already-open
+      // streams on the mode that was active when they were created.
       onSetCallAudioModeAndroid?.call(true);
+      await _audioEngine!.start();
     } catch (e) {
       _log.error('Audio engine start failed: $e');
     }
@@ -591,7 +597,14 @@ class CallService {
     );
 
     // Fire-and-forget — no await, no ACK tracking for live media.
-    unawaited(_ctx.node.sendToDevice(outer, peer.nodeId));
+    // `paced: false`  — 50 frames/s must not be throttled by the per-hop
+    //                   mesh-maintenance budget (§4.6).
+    // `expectsReply: false` — live media is never ACK'd by design; counting
+    //                   it in `_unackedPacketsToPeer` would trip the §5.10.4
+    //                   Mesh-Refresh threshold (6) within ~120 ms of call
+    //                   audio and spray every frame over 5 relay neighbors.
+    unawaited(_ctx.node.sendToDevice(outer, peer.nodeId,
+        paced: false, expectsReply: false));
   }
 
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {

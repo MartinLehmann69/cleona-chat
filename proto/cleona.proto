@@ -25,6 +25,13 @@ message ContentMetadata {
   uint32 duration_ms = 4;       // audio/video duration
   bytes thumbnail = 5;          // compressed thumbnail, max 100KB
   bytes content_hash = 6;       // SHA-256 of the full content
+  // Source-Side-Transkript (§14.9). Inline-Voice traegt es zusaetzlich im
+  // VoicePayload; im Two-Stage-Pfad (>256KB) ist die Metadata der EINZIGE
+  // Traeger, weil MEDIA_ANNOUNCE keinen Payload hat und die Stage-2-Chunks
+  // rohe Dateibytes sind.
+  string transcript_text = 7;       // leer = kein Transkript vorhanden
+  string transcript_language = 8;   // erkannte Sprache ("de", "en", ...)
+  float transcript_confidence = 9;  // 0.0-1.0
 }
 
 // ── Link Preview (Sender-Side) ────────────────────────────────────────

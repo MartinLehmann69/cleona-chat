@@ -480,7 +480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.156';
+  static const String kCurrentAppVersion = '3.1.157';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -2013,6 +2013,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..filename = filename
       ..contentHash = contentHash;
     if (thumbnail != null) metadata.thumbnail = thumbnail;
+    // Transkript auch in die Metadata (§14.9). Inline traegt es zusaetzlich im
+    // VoicePayload; im Two-Stage-Pfad ist die Metadata der einzige Traeger,
+    // weil MEDIA_ANNOUNCE ohne Payload sendet und die Stage-2-Chunks rohe
+    // Dateibytes sind. Ohne das kam jede Sprachnachricht >256KB (~16s bei
+    // 128kbps AAC) beim Empfaenger ohne Text an.
+    if (senderTranscript != null) {
+      metadata.transcriptText = senderTranscript.text;
+      metadata.transcriptLanguage = senderTranscript.language;
+      metadata.transcriptConfidence = senderTranscript.confidence;
+    }
 
     final announcementBytes = metadata.writeToBuffer();
 
@@ -12215,6 +12225,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// [l3Result] is a single-element list used as an optional output parameter
   /// (Dart has no ref/out params).  Pass `[false]` and read index 0 after the
   /// call.  Existing callers that ignore L3 outcome can omit this parameter.
+  /// Call setup/teardown signaling (§10.1). These frames are latency-critical
+  /// — a delayed CALL_INVITE is a call that never rings — and they are few
+  /// (one per state transition, plus the §10.1 retry schedule). They are
+  /// therefore exempt from the §4.6 per-hop pacing budget, which exists to
+  /// bound *mesh-maintenance* bursts.
+  static bool _isCallSignalingV3(proto.MessageTypeV3 type) {
+    switch (type) {
+      case proto.MessageTypeV3.MTV3_CALL_INVITE:
+      case proto.MessageTypeV3.MTV3_CALL_ANSWER:
+      case proto.MessageTypeV3.MTV3_CALL_REJECT:
+      case proto.MessageTypeV3.MTV3_CALL_HANGUP:
+      case proto.MessageTypeV3.MTV3_CALL_REJOIN:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   @override
   Future<bool> sendToUser({
     required Uint8List recipientUserId,
@@ -12232,6 +12260,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     Uint8List? groupMembershipHash,
     Uint8List? targetDeviceId,
     bool skipL3 = false,
+    List<SendLeg>? outLegs,
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
@@ -12452,8 +12481,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         );
 
         canonicalPacket ??= outer;
+        outLegs?.add(SendLeg(deviceId, outer));
 
-        final res = await node.sendToDeviceTracked(outer, deviceId);
+        final res = await node.sendToDeviceTracked(outer, deviceId,
+            paced: !_isCallSignalingV3(messageType));
         if (res.ok) {
           dispatched++;
           if (firstOkDestDevHex == null) {
@@ -14126,6 +14157,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             }
           }
         } catch (_) {/* raw audio bytes */}
+        // Fallback: Transkript aus der Metadata. Aktuelle Sender fuellen beide
+        // Traeger; ein Sender der nur die Metadata fuellt, wird hier ebenfalls
+        // korrekt verstanden.
+        if (transcriptText == null && metadata.transcriptText.isNotEmpty) {
+          transcriptText = metadata.transcriptText;
+          transcriptLanguage = metadata.transcriptLanguage;
+          transcriptConfidence = metadata.transcriptConfidence.toDouble();
+        }
       }
 
       final mediaDir = Directory('$profileDir/media');
@@ -14238,6 +14277,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         thumbnailBase64: thumbnailB64,
         mediaState: MediaDownloadState.announced,
         membershipMismatch: isMembershipMismatch,
+        // Source-Side-Transkript reist in der Metadata mit — sichtbar bevor
+        // das Audio ueberhaupt heruntergeladen ist.
+        transcriptText:
+            metadata.transcriptText.isNotEmpty ? metadata.transcriptText : null,
+        transcriptLanguage: metadata.transcriptText.isNotEmpty
+            ? metadata.transcriptLanguage
+            : null,
+        transcriptConfidence: metadata.transcriptText.isNotEmpty
+            ? metadata.transcriptConfidence.toDouble()
+            : null,
       );
 
       final isGroup = _groups.containsKey(conversationId);
@@ -14472,6 +14521,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
         onStateChanged?.call();
         _saveConversations();
+
+        // Lokaler Transkriptions-Fallback fuer Voice ohne Sender-Transkript —
+        // Gegenstueck zu _handleMediaInlineV3. Greift, wenn der Sender eine
+        // aeltere Version faehrt (Metadata ohne Transkript-Felder) oder auf
+        // Sender-Seite kein Whisper-Modell vorhanden war.
+        if (msg.mimeType?.startsWith('audio/') == true &&
+            (msg.transcriptText == null || msg.transcriptText!.isEmpty)) {
+          _voiceTranscription?.enqueueTranscription(
+            messageId: mediaIdHex,
+            audioFilePath: savePath,
+          );
+        }
       }
 
       _log.info(

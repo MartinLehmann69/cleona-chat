@@ -894,8 +894,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> retryInstallPermission() async {
-    await ApkInstaller.openInstallPermissionSettings();
-    final hasPermission = await ApkInstaller.canInstallPackages();
+    final hasPermission = await ApkInstaller.requestInstallPermission();
     if (hasPermission) {
       _updateNeedsInstallPermission = false;
       notifyListeners();
@@ -964,8 +963,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       var hasPermission = await ApkInstaller.canInstallPackages();
       if (!hasPermission) {
-        await ApkInstaller.openInstallPermissionSettings();
-        hasPermission = await ApkInstaller.canInstallPackages();
+        hasPermission = await ApkInstaller.requestInstallPermission();
       }
       if (!hasPermission) {
         _updateNeedsInstallPermission = true;

@@ -54,7 +54,7 @@ LIBOQS_VERSION="0.15.0"
 LIBZSTD_VERSION="1.5.6"
 LIBERASURECODE_VERSION="1.6.2"
 LIBOPUS_VERSION="1.5.2"
-WHISPER_VERSION="v1.7.1"
+WHISPER_VERSION="v1.8.4"  # muss zu jniLibs/XCFrameworks passen — siehe build-android-libs.sh
 LIBVPX_VERSION="1.14.0"
 
 NPROC="$(sysctl -n hw.ncpu)"

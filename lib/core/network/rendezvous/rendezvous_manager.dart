@@ -165,7 +165,13 @@ class RendezvousManager {
     );
 
     var publishCount = 0;
+    var contactIndex = 0;
     for (final contact in _contacts) {
+      // Pace between contacts to avoid relay rate-limits (damus.io rejects
+      // bursts >~10 events/min on a single pooled connection).
+      if (contactIndex++ > 0) {
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
       final secret = derivePairwiseSecret(
         sk, contact.foundingEd25519Pk, ownId, contact.userIdHex);
 

@@ -3908,7 +3908,8 @@ class CleonaNode {
       proto.NetworkPacketV3 packet, Uint8List deviceId,
       {String? excludeNextHopHex,
       bool isRelay = false,
-      bool expectsReply = true}) async {
+      bool expectsReply = true,
+      bool paced = true}) async {
     final destHex = bytesToHex(deviceId);
     final myDeviceId = primaryIdentity.deviceNodeId;
     // §5.10.4 — bump the per-peer unACK'd counter BEFORE the send. Every
@@ -3992,7 +3993,7 @@ class CleonaNode {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: DV route #$attempts '
           'via hop=${bytesToHex(hopId).substring(0, 8)} '
           '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
-      final ok = await _sendV3ViaHop(packet, hopId);
+      final ok = await _sendV3ViaHop(packet, hopId, paced: paced);
       if (ok) {
         return (
           ok: true,
@@ -4013,7 +4014,7 @@ class CleonaNode {
         isPeerConfirmed(destHex)) {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'confirmed neighbor — direct + relay cascade');
-      await _sendV3ViaHop(packet, deviceId);
+      await _sendV3ViaHop(packet, deviceId, paced: paced);
     }
 
     // §8.1.1 Direct-target attempt: the target is in the routing table
@@ -4095,7 +4096,7 @@ class CleonaNode {
         } else {
           _log.info('sendToDevice ${destHex.substring(0, 8)}: '
               'fall through to default-GW ${gwHex.substring(0, 8)}');
-          final ok = await _sendV3ViaHop(packet, gwBytes);
+          final ok = await _sendV3ViaHop(packet, gwBytes, paced: paced);
           if (ok) return (ok: true, viaHopHex: gwHex);
         }
       }
@@ -4144,7 +4145,7 @@ class CleonaNode {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'trying neighbor ${neighborHex.substring(0, 8)} as relay '
           '($neighborsTried/$kMaxNeighborSpray)');
-      final ok = await _sendV3ViaHop(packet, nBytes);
+      final ok = await _sendV3ViaHop(packet, nBytes, paced: paced);
       if (ok) return (ok: true, viaHopHex: neighborHex);
     }
 
@@ -4159,11 +4160,13 @@ class CleonaNode {
           proto.NetworkPacketV3 packet, Uint8List deviceId,
           {String? excludeNextHopHex,
           bool isRelay = false,
-          bool expectsReply = true}) async =>
+          bool expectsReply = true,
+          bool paced = true}) async =>
       (await sendToDeviceTracked(packet, deviceId,
               excludeNextHopHex: excludeNextHopHex,
               isRelay: isRelay,
-              expectsReply: expectsReply))
+              expectsReply: expectsReply,
+              paced: paced))
           .ok;
 
   /// Internal: emit [packet] to the address(es) of the hop identified by
@@ -4173,12 +4176,19 @@ class CleonaNode {
   // S272 Befund 1: sender-side per-hop outbound pacing (150 pkt / 10s).
   // Without this, a startup burst relays 1200+ packets through a single hop,
   // exhausting the receiver's per-source rate-limit budget.
+  //
+  // S277: the budget covers *mesh-maintenance* traffic only. Real-time paths
+  // (live-media at 50 frames/s and call signaling) pass unpaced via
+  // `paced: false` — a call legitimately needs 500 packets per 10 s window to
+  // a single hop, and silently dropping 70 % of them (measured: 1719 drops on
+  // an idle phone in one day) destroys both audio and call setup.
   final Map<String, ({int count, DateTime windowStart})> _hopSendBudget = {};
   static const int _hopSendBudgetLimit = 150;
   static const Duration _hopSendBudgetWindow = Duration(seconds: 10);
 
   Future<bool> _sendV3ViaHop(
-      proto.NetworkPacketV3 packet, Uint8List hopDeviceId) async {
+      proto.NetworkPacketV3 packet, Uint8List hopDeviceId,
+      {bool paced = true}) async {
     // packet.nextHopDeviceId is set by the caller (sendToDevice) to the final
     // destination, not to hopDeviceId. This ensures relay nodes forward the
     // packet rather than delivering it locally. Do NOT overwrite it here.
@@ -4187,17 +4197,23 @@ class CleonaNode {
     // Sender-side per-hop pacing: drop if we already sent too many packets
     // to this hop in the current 10s window. Prevents relay amplification
     // when 200+ ghost peers route through a single neighbor at startup.
-    final now = DateTime.now();
-    var budget = _hopSendBudget[hopHex];
-    if (budget == null || now.difference(budget.windowStart) >= _hopSendBudgetWindow) {
-      budget = (count: 0, windowStart: now);
+    // Real-time traffic (paced: false) bypasses the budget entirely and is
+    // also not counted — a call must not consume the maintenance budget.
+    if (paced) {
+      final now = DateTime.now();
+      var budget = _hopSendBudget[hopHex];
+      if (budget == null ||
+          now.difference(budget.windowStart) >= _hopSendBudgetWindow) {
+        budget = (count: 0, windowStart: now);
+      }
+      if (budget.count >= _hopSendBudgetLimit) {
+        _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: sender-side hop '
+            'budget exhausted (${budget.count}/$_hopSendBudgetLimit in 10s)');
+        return false;
+      }
+      _hopSendBudget[hopHex] =
+          (count: budget.count + 1, windowStart: budget.windowStart);
     }
-    if (budget.count >= _hopSendBudgetLimit) {
-      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: sender-side hop '
-          'budget exhausted (${budget.count}/$_hopSendBudgetLimit in 10s)');
-      return false;
-    }
-    _hopSendBudget[hopHex] = (count: budget.count + 1, windowStart: budget.windowStart);
 
     var hopPeer = routingTable.getPeer(hopDeviceId);
     if (hopPeer == null) {

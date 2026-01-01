@@ -1,6 +1,33 @@
 import 'dart:typed_data';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
+import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+/// One built fan-out leg of a [ServiceContext.sendToUser] call: the outer
+/// packet as it was signed for exactly one recipient device.
+///
+/// Exported so ephemeral signaling with its own retry schedule (CALL_INVITE,
+/// §10.1) can re-dispatch the *identical* packet instead of re-running the
+/// full inner pipeline (KEM + Ed25519 + ML-DSA + PoW) per retry. Re-sending
+/// identical bytes is a plain retransmission: the receiver's §2.4 step [3b]
+/// duplicate-frame cache drops copies that actually arrive twice, and a copy
+/// whose predecessor was lost passes through normally. Callers MUST respect
+/// the ±60 s outer-timestamp replay window (§2.4 step [3]) and rebuild once
+/// [builtAt] is older than that — see [isReusable].
+class SendLeg {
+  final Uint8List deviceId;
+  final proto.NetworkPacketV3 packet;
+  final DateTime builtAt;
+
+  SendLeg(this.deviceId, this.packet) : builtAt = DateTime.now();
+
+  /// Safety margin against the receiver's ±60 s timestamp window: a leg is
+  /// only reused for the first 30 s so that in-flight time plus clock skew
+  /// cannot push an otherwise valid retransmission out of the window.
+  static const Duration reuseWindow = Duration(seconds: 30);
+
+  bool get isReusable => DateTime.now().difference(builtAt) < reuseWindow;
+}
 
 /// UI tag enum, decoupled from the wire layer; persisted by ordinal
 /// [wireValue]. V3 wire frames use `MessageTypeV3` exclusively — this enum

@@ -128,9 +128,17 @@ class AudioEngine {
   // Callback: speaker routing changed (for Android AudioManager)
   void Function(bool speaker)? onSpeakerToggle;
 
-  // Jitter buffer for reordering received frames before playback
-  final JitterBuffer _jitterBuffer = JitterBuffer(bufferDepth: 5, maxBufferSize: 30);
-  Timer? _playbackTimer;
+  // Jitter buffer for reordering received frames before playback.
+  //
+  // Reordering + duplicate rejection only — the *pacing* is done by the
+  // native playback device, which is the only clock in the system bound to
+  // the actual sample rate. An earlier revision drained this buffer from a
+  // Dart `Timer.periodic(20ms)` on the UI isolate; that timer cannot hold a
+  // 50 Hz cadence under call-time UI load, so the buffer grew to its cap and
+  // added up to `maxBufferSize * 20ms` of permanent playout latency on top
+  // of the network delay. Depth 2 / cap 6 bounds the buffer at 120 ms.
+  final JitterBuffer _jitterBuffer =
+      JitterBuffer(bufferDepth: 2, maxBufferSize: 6);
 
   // Audio parameters
   static const int sampleRate = 16000;
@@ -186,11 +194,6 @@ class AudioEngine {
       _playbackPcmPtr = null;
       return false;
     }
-
-    _playbackTimer = Timer.periodic(
-      const Duration(milliseconds: frameDurationMs),
-      (_) => _drainJitterBuffer(),
-    );
 
     _running = true;
     _log.info(
@@ -271,19 +274,23 @@ class AudioEngine {
     if (pcmData.length != frameSize) return;
 
     _jitterBuffer.push(AudioFrame(seqNum: seqNum, data: pcmData));
+    _drainJitterBuffer();
   }
 
+  /// Move every frame the buffer can release in order into the native
+  /// playback ring. Called on frame arrival — the ring (8 frames) plus the
+  /// playback device's own callback cadence do the pacing.
   void _drainJitterBuffer() {
     if (!_running || _engine == null || _playbackPcmPtr == null) return;
     if (!_speakerEnabled) return;
 
-    final frame = _jitterBuffer.pop();
-    if (frame == null) return;
-
     final byteView = _playbackPcmPtr!.cast<Uint8>().asTypedList(frameSize);
-    byteView.setAll(0, frame.data);
-
-    _shim.playbackWrite(_engine!, _playbackPcmPtr!, samplesPerFrame);
+    for (var frame = _jitterBuffer.pop();
+        frame != null;
+        frame = _jitterBuffer.pop()) {
+      byteView.setAll(0, frame.data);
+      _shim.playbackWrite(_engine!, _playbackPcmPtr!, samplesPerFrame);
+    }
   }
 
   /// Decrypt an audio frame packet.
@@ -307,8 +314,6 @@ class AudioEngine {
     if (!_running) return;
     _running = false;
 
-    _playbackTimer?.cancel();
-    _playbackTimer = null;
     _jitterBuffer.clear();
 
     _frameSubscription?.cancel();

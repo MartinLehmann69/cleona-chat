@@ -26,6 +26,17 @@ fi
 # These load Win32 APIs, Linux GTK/appindicator, V4L2, or Windows-only shims.
 EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|android_udp_sender\.dart|video_capture_linux\.dart|dpapi_ffi\.dart"
 
+# Symbols looked up behind a `providesSymbol()` guard, i.e. optional at
+# runtime, and deliberately NOT part of the iOS image. Listing them in the
+# exports file would claim a symbol the linker never sees.
+#   whisper_params_set_* — desktop-only libwhisper_wrapper setters
+#     (native/whisper_wrapper.c). iOS/Android fall back to the runtime struct
+#     layout probe in whisper_ffi.dart. See Architecture §14.9.2.1.
+OPTIONAL_SYMBOLS=(
+  whisper_params_set_language
+  whisper_params_set_n_threads
+)
+
 # Collect all FFI symbols from Dart code that runs on iOS.
 SYMBOLS=$(grep -rA1 "lookupFunction\|\.lookup<" "$LIB_DIR" --include="*.dart" \
   | grep -vE "$EXCLUDE_PATTERN" \
@@ -36,6 +47,13 @@ SYMBOLS=$(grep -rA1 "lookupFunction\|\.lookup<" "$LIB_DIR" --include="*.dart" \
 TOTAL=0
 MISSING=()
 for sym in $SYMBOLS; do
+  # Optional, guarded lookups are not expected in the iOS image.
+  skip=0
+  for opt in "${OPTIONAL_SYMBOLS[@]}"; do
+    [[ "$sym" == "$opt" ]] && skip=1 && break
+  done
+  [[ $skip -eq 1 ]] && continue
+
   TOTAL=$((TOTAL + 1))
 
   # Check exact match

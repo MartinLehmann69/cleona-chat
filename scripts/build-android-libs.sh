@@ -44,9 +44,15 @@ CMAKE_TOOLCHAIN="$NDK_DIR/build/cmake/android.toolchain.cmake"
 # 16KB Page-Alignment (Android 15 Requirement)
 PAGE_SIZE_FLAG="-Wl,-z,max-page-size=16384"
 
-# Pin whisper.cpp version — MUST match iOS/macOS scripts to keep struct layout
-# in sync with Dart FFI (whisper_ffi.dart hardcoded offsets).
-WHISPER_VERSION="v1.7.1"
+# Pin whisper.cpp version — MUST match iOS/macOS scripts.
+# Die ausgelieferten jniLibs/XCFrameworks sind 1.8.4 (Versions-String in der
+# Binary, plus whisper_vad_* und carry_initial_prompt, die es in v1.7.1 nicht
+# gibt) — der Pin stand trotzdem auf v1.7.1. Ein sauberer Rebuild haette damit
+# ein anderes whisper_full_params-Layout geliefert als die ausgelieferte
+# Binary: `language` liegt in v1.7.1 bei Offset 96, in 1.8.4 bei 104.
+# whisper_ffi.dart probed das Layout inzwischen zur Laufzeit, der Pin bleibt
+# trotzdem die Referenz und muss stimmen.
+WHISPER_VERSION="v1.8.4"
 
 # Pin libvpx version — offsets in native/vpx_shim.c (opaque-buffer field
 # offsets + ABI version constants) are only valid for this exact minor
@@ -388,13 +394,28 @@ build_libcleona_pow() {
     mkdir -p "$BUILD"
     cd "$BUILD"
 
+    # libsodium must be pointed at explicitly. The NDK toolchain file sets
+    # CMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY, so find_library() searches the
+    # NDK sysroot only and silently ignores CMAKE_PREFIX_PATH — the target
+    # then failed with "libsodium not found" and no Android build of
+    # libcleona_pow was ever produced (V3.1.156 shipped without it).
+    # SODIUM_LIB/SODIUM_INCLUDE are cache variables in the CMakeLists, so
+    # presetting them short-circuits the find_* calls entirely.
+    local SODIUM_PREFIX="$BUILD_DIR/install/sodium"
+    if [ ! -f "$SODIUM_PREFIX/lib/libsodium.so" ]; then
+        echo "FEHLER: libsodium fuer $ARCH fehlt ($SODIUM_PREFIX)."
+        echo "        Erst bauen: $0 --arch $ARCH sodium"
+        exit 1
+    fi
+
     cmake -GNinja \
         -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
         -DANDROID_ABI="$CMAKE_ABI" \
         -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
-        -DCMAKE_PREFIX_PATH="$BUILD_DIR/install/sodium" \
+        -DSODIUM_LIB="$SODIUM_PREFIX/lib/libsodium.so" \
+        -DSODIUM_INCLUDE="$SODIUM_PREFIX/include" \
         "$SRC"
 
     ninja -j"$(nproc)"

@@ -62,10 +62,29 @@ typedef _WhisperFullLangIdDart = int Function(Pointer<Void>);
 typedef _WhisperFullDefaultParamsNative = Pointer<Void> Function(Int32);
 typedef _WhisperFullDefaultParamsDart = Pointer<Void> Function(int);
 
+// void whisper_free_params(struct whisper_full_params * params)
+typedef _WhisperFreeParamsNative = Void Function(Pointer<Void>);
+typedef _WhisperFreeParamsDart = void Function(Pointer<Void>);
+
+// Wrapper setters (native/whisper_wrapper.c) — the C compiler computes the
+// struct offsets, so no Dart-side offset knowledge is needed at all.
+// void whisper_params_set_language(struct whisper_full_params *, const char *)
+typedef _WhisperSetLanguageNative = Void Function(Pointer<Void>, Pointer<Utf8>);
+typedef _WhisperSetLanguageDart = void Function(Pointer<Void>, Pointer<Utf8>);
+
+// void whisper_params_set_n_threads(struct whisper_full_params *, int)
+typedef _WhisperSetNThreadsNative = Void Function(Pointer<Void>, Int32);
+typedef _WhisperSetNThreadsDart = void Function(Pointer<Void>, int);
+
 // ── Sampling Strategy Enum ───────────────────────────────────────────────
 
 /// whisper_sampling_strategy: WHISPER_SAMPLING_GREEDY = 0.
 const int whisperSamplingGreedy = 0;
+
+/// whisper_sampling_strategy: WHISPER_SAMPLING_BEAM_SEARCH = 1.
+/// `whisper_full_default_params(1)` sets `beam_search.beam_size = 5` itself —
+/// we never touch that field, so no offset knowledge is needed for it.
+const int whisperSamplingBeamSearch = 1;
 
 // ── WhisperFFI Class ─────────────────────────────────────────────────────
 
@@ -94,6 +113,9 @@ class WhisperFFI {
   _WhisperFullLangIdDart? _langId;
   _WhisperLangStrDart? _langStr;
   _WhisperFullDefaultParamsDart? _defaultParams;
+  _WhisperFreeParamsDart? _freeParams;
+  _WhisperSetLanguageDart? _setLanguage;
+  _WhisperSetNThreadsDart? _setNThreads;
 
   /// Constructor: immediately loads the native library.
   /// Throws [WhisperNotAvailableException] if library cannot be loaded.
@@ -128,6 +150,9 @@ class WhisperFFI {
               'whisper_lang_str');
       _defaultParams = _lib!.lookupFunction<_WhisperFullDefaultParamsNative,
           _WhisperFullDefaultParamsDart>('whisper_full_default_params_by_ref');
+      _lookupFreeParams(_lib!);
+      // iOS links the wrapper source statically into the process image.
+      _lookupParamSetters(_lib!);
       return;
     }
 
@@ -230,6 +255,40 @@ class WhisperFFI {
             'whisper_lang_str');
     _defaultParams = _lib!.lookupFunction<_WhisperFullDefaultParamsNative,
         _WhisperFullDefaultParamsDart>('whisper_full_default_params_by_ref');
+    _lookupFreeParams(_lib!);
+    if (wrapperLib != null) _lookupParamSetters(wrapperLib);
+  }
+
+  /// `whisper_free_params` releases the struct handed out by
+  /// `whisper_full_default_params_by_ref`. Optional — older builds do not
+  /// export it, in which case the struct simply leaks (264 bytes per call).
+  void _lookupFreeParams(DynamicLibrary lib) {
+    if (!lib.providesSymbol('whisper_free_params')) return;
+    _freeParams = lib
+        .lookupFunction<_WhisperFreeParamsNative, _WhisperFreeParamsDart>(
+            'whisper_free_params');
+  }
+
+  /// Optional params setters from `libwhisper_wrapper` (see
+  /// `native/whisper_wrapper.c`). When present they replace all Dart-side
+  /// offset arithmetic, because the C compiler resolves the field positions
+  /// against the very `whisper.h` the library was built from. Absent on
+  /// Android, where no wrapper is shipped — there the runtime probe applies.
+  void _lookupParamSetters(DynamicLibrary lib) {
+    if (lib.providesSymbol('whisper_params_set_language')) {
+      _setLanguage = lib
+          .lookupFunction<_WhisperSetLanguageNative, _WhisperSetLanguageDart>(
+              'whisper_params_set_language');
+    }
+    if (lib.providesSymbol('whisper_params_set_n_threads')) {
+      _setNThreads = lib
+          .lookupFunction<_WhisperSetNThreadsNative, _WhisperSetNThreadsDart>(
+              'whisper_params_set_n_threads');
+    }
+    if (_setLanguage != null) {
+      _log.info('whisper wrapper params setters available — '
+          'no struct-offset arithmetic needed');
+    }
   }
 
   /// Returns (libName, wrapperName, ggmlLibs) with the correct extension
@@ -284,33 +343,49 @@ class WhisperFFI {
   /// [samples]: Float32 samples, mono, 16kHz.
   /// [language]: Target language ('auto' = automatic detection, 'de', 'en', etc.).
   /// [nThreads]: Number of CPU threads for inference.
+  /// [beamSearch]: Beam search (beam_size=5) instead of greedy sampling.
+  ///   Roughly doubles inference time and measurably improves accuracy —
+  ///   the upstream-recommended default for offline transcription.
   ///
   /// Returns [WhisperResult] with text, detected language and confidence.
   WhisperResult transcribe(
     Float32List samples, {
     String language = 'auto',
     int nThreads = 4,
+    bool beamSearch = true,
   }) {
     if (_ctx == null || _ctx == nullptr) {
       throw WhisperModelException('No model loaded');
     }
     if (_disposed) throw WhisperModelException('WhisperFFI already disposed');
 
-    // Get default parameters (Greedy Sampling)
-    final params = _defaultParams!(whisperSamplingGreedy);
+    final params = _defaultParams!(
+        beamSearch ? whisperSamplingBeamSearch : whisperSamplingGreedy);
     if (params == nullptr) {
       throw WhisperModelException('Could not create default parameters');
     }
 
-    // Set language on params struct (offset 104: const char* language).
-    // whisper.cpp default is "en" — we must set it explicitly.
+    // Set language on the params struct. whisper.cpp's default is "en", so
+    // without this every non-English recording is transcribed as English.
+    // Preferred path: the wrapper's setter, where the C compiler resolved the
+    // offset. Fallback (Android): probe the layout, never a bare constant.
     final langNative = language.toNativeUtf8();
-    Pointer<Pointer<Utf8>>.fromAddress(params.address + _kOffsetLanguage)
-        .value = langNative;
+    if (_setLanguage != null) {
+      _setLanguage!(params, langNative);
+    } else {
+      Pointer<Pointer<Utf8>>.fromAddress(
+              params.address + _resolveLanguageOffset(params))
+          .value = langNative;
+    }
 
-    // Set n_threads on params struct (offset 4: int n_threads).
-    Pointer<Int32>.fromAddress(params.address + _kOffsetNThreads)
-        .value = nThreads;
+    if (_setNThreads != null) {
+      _setNThreads!(params, nThreads);
+    } else {
+      // n_threads sits directly behind the 4-byte strategy enum and has not
+      // moved in any whisper.cpp release.
+      Pointer<Int32>.fromAddress(params.address + _kOffsetNThreads)
+          .value = nThreads;
+    }
 
     // Copy samples to native memory
     final nativeSamples = calloc<Float>(samples.length);
@@ -348,13 +423,75 @@ class WhisperFFI {
     } finally {
       calloc.free(nativeSamples);
       calloc.free(langNative);
+      _freeParams?.call(params);
     }
   }
 
-  // whisper_full_params struct field offsets (stable across x86_64 and ARM64).
-  // Verified via offsetof() against whisper.cpp include/whisper.h.
-  static const int _kOffsetNThreads = 4;   // int n_threads
-  static const int _kOffsetLanguage = 104;  // const char* language
+  // whisper_full_params struct field offsets (identical on x86_64 and ARM64,
+  // both LP64 with the same alignment rules).
+  //
+  // `n_threads` sits directly behind the 4-byte `strategy` enum and has not
+  // moved in any whisper.cpp release — safe as a constant.
+  //
+  // `language` is NOT safe as a constant: fields have been inserted ahead of
+  // it between releases. whisper.cpp 1.8.4 (the version shipped in
+  // `jniLibs/`) puts it at 104, v1.7.1 at 96 — a pointer written at the wrong
+  // offset lands on `detect_language`/`suppress_blank`/
+  // `suppress_non_speech_tokens`/`temperature` and leaves `language` at its
+  // default "en", i.e. German recordings get transcribed as English while
+  // three sampling flags take on arbitrary pointer bytes. Hence
+  // [_resolveLanguageOffset], which probes the actual layout at runtime;
+  // the constant is only the fallback.
+  static const int _kOffsetNThreads = 4;    // int n_threads
+  static const int _kOffsetLanguage = 104;  // const char* language (1.8.4)
+
+  /// Candidate offsets of `whisper_full_params.language`, newest layout first.
+  static const List<int> _kLanguageOffsetCandidates = [104, 96, 88];
+
+  /// Probed offset — resolved once per process, `null` until then.
+  static int? _resolvedLanguageOffset;
+
+  /// Determine the offset of `whisper_full_params.language` from a
+  /// freshly-defaulted params struct.
+  ///
+  /// Identification is purely structural — no candidate pointer is ever
+  /// dereferenced, because a wrong guess would segfault the whole process
+  /// rather than just the worker isolate. A candidate must satisfy:
+  ///
+  /// 1. the 8 bytes at the offset form a non-null, 8-byte-aligned value
+  ///    (`whisper_full_default_params` points `language` at the literal "en"),
+  /// 2. the three bytes right behind it are the documented defaults of
+  ///    `detect_language` = false, `suppress_blank` = true,
+  ///    `suppress_non_speech_tokens` = false — a (0, 1, 0) triple that has
+  ///    been stable across releases and does not occur at the wrong offsets.
+  ///
+  /// Falls back to [_kOffsetLanguage] with a warning if nothing matches, which
+  /// reproduces the previous hardcoded behaviour instead of silently skipping
+  /// the language setting.
+  static int _resolveLanguageOffset(Pointer<Void> params) {
+    final cached = _resolvedLanguageOffset;
+    if (cached != null) return cached;
+
+    final bytes = params.cast<Uint8>();
+    for (final candidate in _kLanguageOffsetCandidates) {
+      final ptrValue =
+          Pointer<Uint64>.fromAddress(params.address + candidate).value;
+      if (ptrValue == 0 || ptrValue % 8 != 0) continue;
+      if (bytes[candidate + 8] != 0) continue;  // detect_language == false
+      if (bytes[candidate + 9] != 1) continue;  // suppress_blank == true
+      if (bytes[candidate + 10] != 0) continue; // suppress_non_speech == false
+      _log.info('whisper_full_params.language probed at offset $candidate');
+      _resolvedLanguageOffset = candidate;
+      return candidate;
+    }
+
+    _log.warn('Could not probe whisper_full_params.language layout — '
+        'falling back to offset $_kOffsetLanguage. If transcription comes out '
+        'in the wrong language, the linked whisper.cpp changed its struct '
+        'layout and _kLanguageOffsetCandidates needs the new offset.');
+    _resolvedLanguageOffset = _kOffsetLanguage;
+    return _kOffsetLanguage;
+  }
 
   /// Whether a model is loaded.
   bool get isModelLoaded => _ctx != null && _ctx != nullptr && !_disposed;

@@ -129,11 +129,15 @@ class CallManager {
   /// `sendToUser` orchestrator (Architecture §2.6.2 / §10.1). Used for
   /// CALL_INVITE/ANSWER/REJECT/HANGUP. Returns true if at least one
   /// device-leg of the recipient fan-out dispatched.
+  /// [outLegs], when supplied, is filled with the per-device packets the
+  /// fan-out built — used by the CALL_INVITE retry schedule to retransmit
+  /// without rebuilding the crypto (see [_scheduleInviteRetry]).
   Future<bool> Function(
     Uint8List recipientUserId,
     proto.MessageTypeV3 type,
-    Uint8List payload,
-  )? sendViaUser;
+    Uint8List payload, {
+    List<SendLeg>? outLegs,
+  })? sendViaUser;
 
   // Temporarily holds caller's ephemeral PK until we accept
   Uint8List? _callerEphPk;
@@ -200,25 +204,51 @@ class CallManager {
     final inviteBytes = invite.writeToBuffer();
     final recipientId = hexToBytes(peerNodeIdHex);
 
+    // 60s Ringing Timeout — auto-hangup if not answered
+    _startRingingTimeout();
+
+    // The send is NOT awaited: `sendToUser` runs the full inner pipeline
+    // (KEM + Ed25519 + ML-DSA + PoW — seconds on mobile) followed by the
+    // whole L1/L2 route cascade. Blocking on it delayed the call UI by
+    // exactly that long. The session already exists in state `ringing`, so
+    // the caller can open the call screen immediately; failure surfaces
+    // through the ringing timeout / onCallEnded like any unanswered call.
+    unawaited(_sendInviteAndScheduleRetries(
+        recipientId, inviteBytes, peerNodeIdHex));
+
+    return session;
+  }
+
+  /// First CALL_INVITE dispatch plus the retry schedule (§10.1).
+  Future<void> _sendInviteAndScheduleRetries(
+      Uint8List recipientId, Uint8List inviteBytes, String peerNodeIdHex) async {
+    final legs = <SendLeg>[];
     final sent = await sendViaUser?.call(
           recipientId,
           proto.MessageTypeV3.MTV3_CALL_INVITE,
           inviteBytes,
+          outLegs: legs,
         ) ??
         false;
-    _log.info('Call invite sent to ${peerNodeIdHex.substring(0, 8)}: ${sent ? "OK" : "FAILED"}');
+    _log.info('Call invite sent to ${peerNodeIdHex.substring(0, 8)}: '
+        '${sent ? "OK" : "FAILED"} (${legs.length} leg(s) built)');
+
+    // The call may have been answered, rejected or hung up while the crypto
+    // pipeline was running — do not start a retry schedule for a call that
+    // is no longer ringing.
+    final call = _currentCall;
+    if (call == null ||
+        call.state != CallState.ringing ||
+        call.direction != CallDirection.outgoing) {
+      return;
+    }
 
     // UDP has no delivery guarantee — retry the CALL_INVITE every 3s for
     // the entire ringing duration (60s / 3s = 19 retries). Retries fire
     // regardless of the initial send result: cold routes may not have
     // converged yet, and a failed first attempt doesn't mean later ones
     // will fail too.
-    _scheduleInviteRetry(recipientId, inviteBytes, peerNodeIdHex, 19);
-
-    // 60s Ringing Timeout — auto-hangup if not answered
-    _startRingingTimeout();
-
-    return session;
+    _scheduleInviteRetry(recipientId, inviteBytes, peerNodeIdHex, 19, legs);
   }
 
   /// Accept an incoming call.
@@ -614,8 +644,16 @@ class CallManager {
 
   // ── CALL_INVITE Retry ──────────────────────────────────────────
 
-  void _scheduleInviteRetry(
-      Uint8List recipientId, Uint8List inviteBytes, String peerHex, int remaining) {
+  /// Retransmit the CALL_INVITE every 3 s while ringing.
+  ///
+  /// [legs] holds the packets built by the first dispatch. A retry re-sends
+  /// those identical bytes — a plain UDP retransmission that costs no crypto
+  /// at all, instead of re-running KEM + ML-DSA + PoW (2–4 s per leg on
+  /// mobile) 19 times over. Once the legs age past [SendLeg.reuseWindow] the
+  /// receiver's ±60 s replay window (§2.4 step [3]) would reject them, so one
+  /// full rebuild is done and the fresh legs carry the remaining retries.
+  void _scheduleInviteRetry(Uint8List recipientId, Uint8List inviteBytes,
+      String peerHex, int remaining, List<SendLeg> legs) {
     _inviteRetryTimer?.cancel();
     if (remaining <= 0) return;
     _inviteRetryTimer = Timer(const Duration(seconds: 3), () async {
@@ -624,9 +662,27 @@ class CallManager {
           call.direction != CallDirection.outgoing) {
         return;
       }
-      _log.info('CALL_INVITE retry ($remaining left) → ${peerHex.substring(0, 8)}');
-      await sendViaUser?.call(recipientId, proto.MessageTypeV3.MTV3_CALL_INVITE, inviteBytes);
-      _scheduleInviteRetry(recipientId, inviteBytes, peerHex, remaining - 1);
+      var nextLegs = legs;
+      final reusable = legs.isNotEmpty && legs.every((l) => l.isReusable);
+      if (reusable) {
+        _log.info('CALL_INVITE retry ($remaining left, cached) → '
+            '${peerHex.substring(0, 8)}');
+        for (final leg in legs) {
+          // Unpaced + not ACK-counted: same rationale as the first dispatch.
+          unawaited(node.sendToDevice(leg.packet, leg.deviceId,
+              paced: false, expectsReply: false));
+        }
+      } else {
+        _log.info('CALL_INVITE retry ($remaining left, rebuild) → '
+            '${peerHex.substring(0, 8)}');
+        nextLegs = <SendLeg>[];
+        await sendViaUser?.call(
+            recipientId, proto.MessageTypeV3.MTV3_CALL_INVITE, inviteBytes,
+            outLegs: nextLegs);
+        if (nextLegs.isEmpty) nextLegs = legs;
+      }
+      _scheduleInviteRetry(
+          recipientId, inviteBytes, peerHex, remaining - 1, nextLegs);
     });
   }
 

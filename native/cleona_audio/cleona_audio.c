@@ -28,7 +28,7 @@ struct cleona_audio_engine {
 
     SpeexEchoState*       aec;
     SpeexPreprocessState* preproc;
-    cleona_ring_t far_end_ring;     // playback writes, capture reads (1-frame cap, atomic via SPSC ring)
+    cleona_ring_t far_end_ring;     // playback writes newest, capture reads (1-frame cap, atomic via SPSC ring)
     int16_t* far_end_scratch;       // capture-thread-private scratch buffer for AEC
 
     _Atomic int32_t aec_enabled;  // 1 = on, 0 = off
@@ -58,7 +58,15 @@ CLEONA_AUDIO_API cleona_audio_engine_t* cleona_audio_create(
 
     if (cleona_ring_init(&e->capture_ring,  ring_capacity_frames, e->frame_bytes) != 0) goto fail_capture_ring;
     if (cleona_ring_init(&e->playback_ring, ring_capacity_frames, e->frame_bytes) != 0) goto fail_playback_ring;
-    if (cleona_ring_init(&e->far_end_ring, 4, e->frame_bytes) != 0) goto fail_far_end_ring;
+    // far_end_ring capacity MUST stay 1. The capture callback consumes the
+    // oldest entry, so a deeper ring hands the echo canceller a reference
+    // frame that is up to (capacity-1) frames stale — and the staleness
+    // *jumps* whenever cleona_ring_overwrite() discards an entry. An
+    // adaptive filter models a constant echo path delay; a delay that shifts
+    // by ±20 ms steps forces continuous re-convergence, during which the
+    // echo passes through uncancelled. Capacity 1 + overwrite semantics gives
+    // the capture thread the newest played frame, deterministically.
+    if (cleona_ring_init(&e->far_end_ring, 1, e->frame_bytes) != 0) goto fail_far_end_ring;
 
     // Speex AEC: tail = 250ms @ sample_rate
     int32_t tail_samples = (sample_rate * 250) / 1000; // 4000 @ 16kHz
@@ -199,6 +207,17 @@ CLEONA_AUDIO_API int32_t cleona_audio_start_directed(cleona_audio_engine_t* e, i
         cap_cfg.periodSizeInFrames = e->frame_samples;
         cap_cfg.dataCallback      = capture_callback;
         cap_cfg.pUserData         = e;
+#ifdef __ANDROID__
+        // Without an explicit preset, AAudio defaults the capture stream to
+        // VOICE_RECOGNITION, which tells the audio HAL to bypass the
+        // platform echo canceller / noise suppressor. Declaring the stream
+        // as VOICE_COMMUNICATION is what every telephony app does and is the
+        // only way to get the HAL-side, hardware-aligned AEC on Android —
+        // speexdsp alone runs against a fixed 250 ms tail that the
+        // non-fast-path 16 kHz route can exceed.
+        cap_cfg.aaudio.inputPreset     = ma_aaudio_input_preset_voice_communication;
+        cap_cfg.opensl.recordingPreset = ma_opensl_recording_preset_voice_communication;
+#endif
         if (ma_device_init(&e->context, &cap_cfg, &e->capture_dev) != MA_SUCCESS) {
             ma_context_uninit(&e->context); e->context_inited = 0; return -2;
         }
@@ -213,6 +232,17 @@ CLEONA_AUDIO_API int32_t cleona_audio_start_directed(cleona_audio_engine_t* e, i
         play_cfg.periodSizeInFrames = e->frame_samples;
         play_cfg.dataCallback       = playback_callback;
         play_cfg.pUserData          = e;
+#ifdef __ANDROID__
+        // Counterpart to the capture preset: a MEDIA-usage output stream is
+        // not part of Android's communication routing, so AudioManager's
+        // MODE_IN_COMMUNICATION / speakerphone selection does not apply to
+        // it and playback runs at media volume. VOICE_COMMUNICATION puts the
+        // stream on the call path (earpiece/speaker/BT switching works, in-
+        // call volume applies) and pairs it with the HAL echo canceller.
+        play_cfg.aaudio.usage       = ma_aaudio_usage_voice_communication;
+        play_cfg.aaudio.contentType = ma_aaudio_content_type_speech;
+        play_cfg.opensl.streamType  = ma_opensl_stream_type_voice;
+#endif
         if (ma_device_init(&e->context, &play_cfg, &e->playback_dev) != MA_SUCCESS) {
             if (want_capture) ma_device_uninit(&e->capture_dev);
             ma_context_uninit(&e->context); e->context_inited = 0; return -3;

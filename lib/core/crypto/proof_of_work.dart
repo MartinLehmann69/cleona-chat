@@ -96,6 +96,13 @@ _PowFindNonceDart? _loadNativePow() {
 class ProofOfWork {
   static const int defaultDifficulty = 20;
 
+  /// True when the native `cleona_pow_find_nonce` loop is available on this
+  /// platform. Exposed so startup can log which path is active: the Dart
+  /// fallback is ~2-4 s per message on mobile versus <10 ms native, and a
+  /// missing library is otherwise silent (V3.1.156 shipped the Android APK
+  /// without `libcleona_pow.so` and nothing surfaced it).
+  static bool get nativeLoopAvailable => _loadNativePow() != null;
+
   /// Minimum difficulty accepted during verification (transition period).
   static const int minAcceptedDifficulty = 16;
 

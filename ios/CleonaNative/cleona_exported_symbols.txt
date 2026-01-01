@@ -79,6 +79,9 @@ _whisper_full_get_segment_text*
 _whisper_full_lang_id*
 _whisper_lang_str*
 _whisper_full_default_params*
+_whisper_free_params
+_whisper_params_set_language
+_whisper_params_set_n_threads
 
 # libcleona_audio
 _cleona_audio_*

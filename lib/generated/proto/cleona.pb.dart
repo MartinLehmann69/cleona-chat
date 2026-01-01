@@ -26,6 +26,9 @@ class ContentMetadata extends $pb.GeneratedMessage {
     $core.int? durationMs,
     $core.List<$core.int>? thumbnail,
     $core.List<$core.int>? contentHash,
+    $core.String? transcriptText,
+    $core.String? transcriptLanguage,
+    $core.double? transcriptConfidence,
   }) {
     final $result = create();
     if (mimeType != null) {
@@ -46,6 +49,15 @@ class ContentMetadata extends $pb.GeneratedMessage {
     if (contentHash != null) {
       $result.contentHash = contentHash;
     }
+    if (transcriptText != null) {
+      $result.transcriptText = transcriptText;
+    }
+    if (transcriptLanguage != null) {
+      $result.transcriptLanguage = transcriptLanguage;
+    }
+    if (transcriptConfidence != null) {
+      $result.transcriptConfidence = transcriptConfidence;
+    }
     return $result;
   }
   ContentMetadata._() : super();
@@ -59,6 +71,9 @@ class ContentMetadata extends $pb.GeneratedMessage {
     ..a<$core.int>(4, _omitFieldNames ? '' : 'durationMs', $pb.PbFieldType.OU3)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'thumbnail', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'contentHash', $pb.PbFieldType.OY)
+    ..aOS(7, _omitFieldNames ? '' : 'transcriptText')
+    ..aOS(8, _omitFieldNames ? '' : 'transcriptLanguage')
+    ..a<$core.double>(9, _omitFieldNames ? '' : 'transcriptConfidence', $pb.PbFieldType.OF)
     ..hasRequiredFields = false
   ;
 
@@ -136,6 +151,37 @@ class ContentMetadata extends $pb.GeneratedMessage {
   $core.bool hasContentHash() => $_has(5);
   @$pb.TagNumber(6)
   void clearContentHash() => clearField(6);
+
+  /// Source-Side-Transkript (§14.9). Inline-Voice traegt es zusaetzlich im
+  /// VoicePayload; im Two-Stage-Pfad (>256KB) ist die Metadata der EINZIGE
+  /// Traeger, weil MEDIA_ANNOUNCE keinen Payload hat und die Stage-2-Chunks
+  /// rohe Dateibytes sind.
+  @$pb.TagNumber(7)
+  $core.String get transcriptText => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set transcriptText($core.String v) { $_setString(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasTranscriptText() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearTranscriptText() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.String get transcriptLanguage => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set transcriptLanguage($core.String v) { $_setString(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasTranscriptLanguage() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearTranscriptLanguage() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.double get transcriptConfidence => $_getN(8);
+  @$pb.TagNumber(9)
+  set transcriptConfidence($core.double v) { $_setFloat(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasTranscriptConfidence() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearTranscriptConfidence() => clearField(9);
 }
 
 class LinkPreview extends $pb.GeneratedMessage {
@@ -10579,6 +10625,8 @@ class GroupCallSenderKey extends $pb.GeneratedMessage {
   void clearKeyVersion() => clearField(4);
 }
 
+/// Whiteboard stroke data — real-time streaming via Overlay Multicast Tree.
+/// MTV3_WHITEBOARD_STROKE = 210
 class WhiteboardStroke extends $pb.GeneratedMessage {
   factory WhiteboardStroke({
     $core.List<$core.int>? strokeId,
@@ -10777,6 +10825,8 @@ class WhiteboardStroke extends $pb.GeneratedMessage {
   void clearPageIndex() => clearField(12);
 }
 
+/// Whiteboard page management — add/switch pages, snapshot for late joiners.
+/// MTV3_WHITEBOARD_PAGE = 211
 class WhiteboardPage extends $pb.GeneratedMessage {
   factory WhiteboardPage({
     $core.int? action,
@@ -10877,6 +10927,8 @@ class WhiteboardPage extends $pb.GeneratedMessage {
   void clearRequesterId() => clearField(5);
 }
 
+/// File sharing within a call — metadata announcement via Overlay Multicast Tree.
+/// MTV3_FILE_EXCHANGE = 212
 class CallFileShare extends $pb.GeneratedMessage {
   factory CallFileShare({
     $core.List<$core.int>? fileId,
@@ -11025,6 +11077,8 @@ class CallFileShare extends $pb.GeneratedMessage {
   void clearAction() => clearField(8);
 }
 
+/// Clipboard exchange within a call.
+/// MTV3_CLIPBOARD_EXCHANGE = 213
 class CallClipboardExchange extends $pb.GeneratedMessage {
   factory CallClipboardExchange({
     $core.List<$core.int>? senderId,
@@ -11145,6 +11199,8 @@ class CallClipboardExchange extends $pb.GeneratedMessage {
   void clearTimestamp() => clearField(6);
 }
 
+/// Screen share control — start/stop/quality negotiation.
+/// MTV3_SCREEN_SHARE_FRAME = 214
 class ScreenShareControl extends $pb.GeneratedMessage {
   factory ScreenShareControl({
     $core.bool? isSharing,
@@ -11265,6 +11321,8 @@ class ScreenShareControl extends $pb.GeneratedMessage {
   void clearSharerId() => clearField(6);
 }
 
+/// Ephemeral in-call chat message — NOT persisted after call ends.
+/// MTV3_CALL_CHAT = 215
 class CallChatMessage extends $pb.GeneratedMessage {
   factory CallChatMessage({
     $core.List<$core.int>? messageId,

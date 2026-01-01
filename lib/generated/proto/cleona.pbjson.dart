@@ -494,6 +494,9 @@ const ContentMetadata$json = {
     {'1': 'duration_ms', '3': 4, '4': 1, '5': 13, '10': 'durationMs'},
     {'1': 'thumbnail', '3': 5, '4': 1, '5': 12, '10': 'thumbnail'},
     {'1': 'content_hash', '3': 6, '4': 1, '5': 12, '10': 'contentHash'},
+    {'1': 'transcript_text', '3': 7, '4': 1, '5': 9, '10': 'transcriptText'},
+    {'1': 'transcript_language', '3': 8, '4': 1, '5': 9, '10': 'transcriptLanguage'},
+    {'1': 'transcript_confidence', '3': 9, '4': 1, '5': 2, '10': 'transcriptConfidence'},
   ],
 };
 
@@ -502,7 +505,10 @@ final $typed_data.Uint8List contentMetadataDescriptor = $convert.base64Decode(
     'Cg9Db250ZW50TWV0YWRhdGESGwoJbWltZV90eXBlGAEgASgJUghtaW1lVHlwZRIbCglmaWxlX3'
     'NpemUYAiABKARSCGZpbGVTaXplEhoKCGZpbGVuYW1lGAMgASgJUghmaWxlbmFtZRIfCgtkdXJh'
     'dGlvbl9tcxgEIAEoDVIKZHVyYXRpb25NcxIcCgl0aHVtYm5haWwYBSABKAxSCXRodW1ibmFpbB'
-    'IhCgxjb250ZW50X2hhc2gYBiABKAxSC2NvbnRlbnRIYXNo');
+    'IhCgxjb250ZW50X2hhc2gYBiABKAxSC2NvbnRlbnRIYXNoEicKD3RyYW5zY3JpcHRfdGV4dBgH'
+    'IAEoCVIOdHJhbnNjcmlwdFRleHQSLwoTdHJhbnNjcmlwdF9sYW5ndWFnZRgIIAEoCVISdHJhbn'
+    'NjcmlwdExhbmd1YWdlEjMKFXRyYW5zY3JpcHRfY29uZmlkZW5jZRgJIAEoAlIUdHJhbnNjcmlw'
+    'dENvbmZpZGVuY2U=');
 
 @$core.Deprecated('Use linkPreviewDescriptor instead')
 const LinkPreview$json = {
@@ -2473,7 +2479,14 @@ const WhiteboardStroke$json = {
 };
 
 /// Descriptor for `WhiteboardStroke`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List whiteboardStrokeDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List whiteboardStrokeDescriptor = $convert.base64Decode(
+    'ChBXaGl0ZWJvYXJkU3Ryb2tlEhsKCXN0cm9rZV9pZBgBIAEoDFIIc3Ryb2tlSWQSGwoJYXV0aG'
+    '9yX2lkGAIgASgMUghhdXRob3JJZBIfCgthdXRob3JfbmFtZRgDIAEoCVIKYXV0aG9yTmFtZRIS'
+    'CgR0b29sGAQgASgFUgR0b29sEhQKBWNvbG9yGAUgASgFUgVjb2xvchIhCgxzdHJva2Vfd2lkdG'
+    'gYBiABKAJSC3N0cm9rZVdpZHRoEhYKBnBvaW50cxgHIAMoAlIGcG9pbnRzEhIKBHRleHQYCCAB'
+    'KAlSBHRleHQSHQoKc2hhcGVfdHlwZRgJIAEoBVIJc2hhcGVUeXBlEhwKCXRpbWVzdGFtcBgKIA'
+    'EoA1IJdGltZXN0YW1wEh8KC2FjdGlvbl90eXBlGAsgASgFUgphY3Rpb25UeXBlEh0KCnBhZ2Vf'
+    'aW5kZXgYDCABKAVSCXBhZ2VJbmRleA==');
 
 @$core.Deprecated('Use whiteboardPageDescriptor instead')
 const WhiteboardPage$json = {
@@ -2488,7 +2501,11 @@ const WhiteboardPage$json = {
 };
 
 /// Descriptor for `WhiteboardPage`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List whiteboardPageDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List whiteboardPageDescriptor = $convert.base64Decode(
+    'Cg5XaGl0ZWJvYXJkUGFnZRIWCgZhY3Rpb24YASABKAVSBmFjdGlvbhIdCgpwYWdlX2luZGV4GA'
+    'IgASgFUglwYWdlSW5kZXgSHwoLdG90YWxfcGFnZXMYAyABKAVSCnRvdGFsUGFnZXMSMgoHc3Ry'
+    'b2tlcxgEIAMoCzIYLmNsZW9uYS5XaGl0ZWJvYXJkU3Ryb2tlUgdzdHJva2VzEiEKDHJlcXVlc3'
+    'Rlcl9pZBgFIAEoDFILcmVxdWVzdGVySWQ=');
 
 @$core.Deprecated('Use callFileShareDescriptor instead')
 const CallFileShare$json = {
@@ -2506,7 +2523,12 @@ const CallFileShare$json = {
 };
 
 /// Descriptor for `CallFileShare`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List callFileShareDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List callFileShareDescriptor = $convert.base64Decode(
+    'Cg1DYWxsRmlsZVNoYXJlEhcKB2ZpbGVfaWQYASABKAxSBmZpbGVJZBIbCglmaWxlX25hbWUYAi'
+    'ABKAlSCGZpbGVOYW1lEhsKCWZpbGVfc2l6ZRgDIAEoA1IIZmlsZVNpemUSGwoJbWltZV90eXBl'
+    'GAQgASgJUghtaW1lVHlwZRIlCg50aHVtYm5haWxfZGF0YRgFIAEoDFINdGh1bWJuYWlsRGF0YR'
+    'IbCglzaGFyZWRfYnkYBiABKAxSCHNoYXJlZEJ5EiQKDnNoYXJlZF9ieV9uYW1lGAcgASgJUgxz'
+    'aGFyZWRCeU5hbWUSFgoGYWN0aW9uGAggASgFUgZhY3Rpb24=');
 
 @$core.Deprecated('Use callClipboardExchangeDescriptor instead')
 const CallClipboardExchange$json = {
@@ -2522,7 +2544,11 @@ const CallClipboardExchange$json = {
 };
 
 /// Descriptor for `CallClipboardExchange`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List callClipboardExchangeDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List callClipboardExchangeDescriptor = $convert.base64Decode(
+    'ChVDYWxsQ2xpcGJvYXJkRXhjaGFuZ2USGwoJc2VuZGVyX2lkGAEgASgMUghzZW5kZXJJZBIfCg'
+    'tzZW5kZXJfbmFtZRgCIAEoCVIKc2VuZGVyTmFtZRIhCgx0ZXh0X2NvbnRlbnQYAyABKAlSC3Rl'
+    'eHRDb250ZW50Eh0KCmltYWdlX2RhdGEYBCABKAxSCWltYWdlRGF0YRIhCgxjb250ZW50X3R5cG'
+    'UYBSABKAlSC2NvbnRlbnRUeXBlEhwKCXRpbWVzdGFtcBgGIAEoA1IJdGltZXN0YW1w');
 
 @$core.Deprecated('Use screenShareControlDescriptor instead')
 const ScreenShareControl$json = {
@@ -2538,7 +2564,11 @@ const ScreenShareControl$json = {
 };
 
 /// Descriptor for `ScreenShareControl`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List screenShareControlDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List screenShareControlDescriptor = $convert.base64Decode(
+    'ChJTY3JlZW5TaGFyZUNvbnRyb2wSHQoKaXNfc2hhcmluZxgBIAEoCFIJaXNTaGFyaW5nEhQKBX'
+    'dpZHRoGAIgASgFUgV3aWR0aBIWCgZoZWlnaHQYAyABKAVSBmhlaWdodBIQCgNmcHMYBCABKAVS'
+    'A2ZwcxIqChFvcHRpbWl6ZV9mb3JfdGV4dBgFIAEoCFIPb3B0aW1pemVGb3JUZXh0EhsKCXNoYX'
+    'Jlcl9pZBgGIAEoDFIIc2hhcmVySWQ=');
 
 @$core.Deprecated('Use callChatMessageDescriptor instead')
 const CallChatMessage$json = {
@@ -2554,7 +2584,11 @@ const CallChatMessage$json = {
 };
 
 /// Descriptor for `CallChatMessage`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List callChatMessageDescriptor = $convert.base64Decode('');
+final $typed_data.Uint8List callChatMessageDescriptor = $convert.base64Decode(
+    'Cg9DYWxsQ2hhdE1lc3NhZ2USHQoKbWVzc2FnZV9pZBgBIAEoDFIJbWVzc2FnZUlkEhsKCXNlbm'
+    'Rlcl9pZBgCIAEoDFIIc2VuZGVySWQSHwoLc2VuZGVyX25hbWUYAyABKAlSCnNlbmRlck5hbWUS'
+    'EgoEdGV4dBgEIAEoCVIEdGV4dBIcCgl0aW1lc3RhbXAYBSABKANSCXRpbWVzdGFtcBIeCgtyZX'
+    'BseV90b19pZBgGIAEoDFIJcmVwbHlUb0lk');
 
 @$core.Deprecated('Use voicePayloadDescriptor instead')
 const VoicePayload$json = {

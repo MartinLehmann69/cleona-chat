@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:6e63ba2df649, 2026-07-24). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:034695af0f2d, 2026-07-26). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1865,7 +1865,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 **Single-success-return for confirmed peers** (V3.1.86): `_sendV3ViaHop` sends to the peer's known addresses in priority order. For **confirmed** peers (at least one prior successful exchange), the function returns immediately after the first successful UDP send — it does not continue to remaining addresses. For **unconfirmed** peers, all addresses are attempted (scatter-shot) to maximize first-contact probability, followed by a TLS fallback. Previously, large payloads (≥ 2 UDP fragments) were sent to ALL known addresses of a confirmed peer, causing 3–4× amplification per send (e.g. a 6-fragment route update sent to 4 addresses = 24 UDP packets instead of 6).
 
-**Sender-side per-hop outbound pacing** (V3.1.155): `_sendV3ViaHop` enforces a per-hop send budget of **150 packets / 10 s** per destination hop. If a hop's budget is exhausted, the send returns `false` without transmitting. The budget map is cleared on `onNetworkChanged()`. This complements the receiver-side rate limiter (§13.1.3) — the receiver protects itself, the hop-budget prevents the sender from flooding a single neighbor that serves as relay for many destinations (e.g. 200+ stale DV-route peers routed through one Bootstrap neighbor generating 1200+ relay sends in one startup burst).
+**Sender-side per-hop outbound pacing** (V3.1.155): `_sendV3ViaHop` enforces a per-hop send budget of **150 packets / 10 s** per destination hop. If a hop's budget is exhausted, the send returns `false` without transmitting. The budget map is cleared on `onNetworkChanged()`. This complements the receiver-side rate limiter (§13.1.3) — the receiver protects itself, the hop-budget prevents the sender from flooding a single neighbor that serves as relay for many destinations (e.g. 200+ stale DV-route peers routed through one Bootstrap neighbor generating 1200+ relay sends in one startup burst). **The budget covers mesh-maintenance traffic only.** Real-time paths — live-media frames (§10.3) and call signaling (§10.1) — are dispatched with `paced: false`: they are neither blocked by the budget nor counted towards it. Rationale: a 1:1 call emits 50 frames/s to a single hop, i.e. 500 packets per 10 s window against a 150-packet budget. Under the budget, call audio was dropped from the third second of every window onward, and every dropped frame additionally fell through the cascade into the default-GW and 5-neighbour relay spray — turning a throttle into an amplifier. Field evidence (V3.1.156, Pixel 8 Pro): 1719 budget drops in one day on an idle phone with no call active at all.
 
 ### 4.7 IPv6 Dual-Stack & CGNAT Bypass
 
@@ -2853,7 +2853,7 @@ After 3× ACK timeout on the cheapest route, the AckTracker marks that route DOW
 **Counter mechanics**:
 
 - `_unackedPacketsToPeer[deviceIdHex]` is the source of truth for the Stage 4 trigger.
-- Incremented in `sendToDevice` (and relay-forward via `_sendV3ViaHop`) per packet sent.
+- Incremented in `sendToDevice` (and relay-forward via `_sendV3ViaHop`) per packet sent, **except for sends marked `expectsReply: false`**. Live-media frames are never acknowledged by design; counting them made the threshold of 6 trip after ~120 ms of call audio, firing Mesh-Refresh continuously for the duration of every call.
 - Reset to 0 on any positive signal from this device: `DELIVERY_RECEIPT` (via `ackTracker.onAckReceived`), incoming `PONG`, incoming `PEER_LIST_PUSH`. Decrement is centralised in `_dispatchInfrastructureFrameLocal` so all infra reply types reset uniformly.
 - Persisted only in memory — survives no daemon restart (cold start runs §2.7.1 anyway).
 
@@ -4614,7 +4614,7 @@ Audio capture and playback are platform-agnostic and routed through **`libcleona
 | Platform | Capture / Playback Backend | Notes |
 |----------|---------------------------|-------|
 | Linux | PulseAudio (preferred) → ALSA (fallback) | PipeWire is reachable through the PulseAudio shim |
-| Android | AAudio (API 26+) → OpenSL ES (legacy) | Low-latency path |
+| Android | AAudio (API 26+) → OpenSL ES (legacy) | Streams are declared `usage=VOICE_COMMUNICATION` / `inputPreset=VOICE_COMMUNICATION` (OpenSL: `streamType=voice` / `recordingPreset=voice_communication`) so the HAL applies its hardware-aligned echo canceller and the stream joins Android's communication routing (AudioManager device selection, in-call volume). **Not** the AAudio fast path: that requires the device-native rate (48 kHz on current hardware) while Cleona runs 16 kHz — measured on a Pixel 8 Pro, the resampled mixer path costs 60 ms output latency versus 20 ms on the fast path. |
 | Windows | WASAPI | Shared mode |
 | macOS | Core Audio | Build-infra not yet wired in repo |
 | iOS | Core Audio (AVAudioSession) | Build-infra not yet wired in repo |
@@ -4634,7 +4634,7 @@ Audio capture and playback are platform-agnostic and routed through **`libcleona
 
 The 250 ms AEC tail covers typical headset and integrated-laptop-mic echo paths. AGC is intentionally off — gain swings introduced by AGC are perceptually worse than a slightly-low input level on the kinds of devices Cleona targets.
 
-**Shared-engine Capture-Isolate pattern:** Both capture and playback run on a **single** `cleona_audio_engine_t` instance created with `cleona_audio_start_directed(engine, 0)` (direction=0, both devices). The Main Isolate creates and owns the engine and writes decrypted PCM into the playback ring (`playbackWrite`). The Capture Isolate receives the engine pointer address (native heap, same process) and reads captured frames from the capture ring (`captureRead`), encrypts them with AES-256-GCM under the Call Session Key (§10.1.1), and returns ciphertext to the main isolate via `SendPort`. Sharing a single engine is mandatory for AEC: the `far_end_ring` inside the engine connects the playback callback's output to the capture callback's echo-cancellation reference — with separate engines the AEC reference was always silence. The SPSC ring buffers use C11 atomics and are safe for cross-isolate access (each ring has exactly one producer thread and one consumer thread). Shutdown order: `cleona_audio_stop()` (closes rings, unblocks `captureRead` → isolate exits) → `Isolate.kill` (belt-and-suspenders) → `cleona_audio_destroy()`.
+**Shared-engine Capture-Isolate pattern:** Both capture and playback run on a **single** `cleona_audio_engine_t` instance created with `cleona_audio_start_directed(engine, 0)` (direction=0, both devices). The Main Isolate creates and owns the engine and writes decrypted PCM into the playback ring (`playbackWrite`). The Capture Isolate receives the engine pointer address (native heap, same process) and reads captured frames from the capture ring (`captureRead`), encrypts them with AES-256-GCM under the Call Session Key (§10.1.1), and returns ciphertext to the main isolate via `SendPort`. Sharing a single engine is mandatory for AEC: the `far_end_ring` inside the engine connects the playback callback's output to the capture callback's echo-cancellation reference — with separate engines the AEC reference was always silence. **The ring holds exactly one frame.** The capture callback consumes the oldest entry, so a deeper ring hands the canceller a reference that is up to (capacity−1) frames stale — and the staleness jumps by a whole frame whenever an entry is overwritten. An adaptive filter models a constant echo-path delay; a delay that shifts in 20 ms steps forces continuous re-convergence, during which echo passes uncancelled. Capacity 1 with overwrite semantics gives the capture thread the newest played frame, deterministically. For the same reason the receive-side `JitterBuffer` only **reorders and de-duplicates** — the pacing is done by the native playback device, the only clock in the system bound to the actual sample rate. Draining it from a Dart timer cannot hold a 50 Hz cadence under call-time UI load: the buffer fills to its cap and adds that much permanent playout latency on top of the network delay (depth 2, cap 6 = 120 ms). The SPSC ring buffers use C11 atomics and are safe for cross-isolate access (each ring has exactly one producer thread and one consumer thread). Shutdown order: `cleona_audio_stop()` (closes rings, unblocks `captureRead` → isolate exits) → `Isolate.kill` (belt-and-suspenders) → `cleona_audio_destroy()`.
 
 **Why no codec:** With 16 kHz mono PCM at 640 bytes/frame, the on-wire bandwidth before AES-GCM overhead is ~256 kbps per direction. This is well within consumer broadband and 4G/5G mobile budgets, and the simplicity buys the project (a) a single ciphertext path, (b) no codec licensing concerns, (c) trivial AEC reference signal (the same PCM that goes to playback). A codec layer (Opus) can be added later behind the shim if metered-data deployments need it.
 
@@ -6086,7 +6086,7 @@ Excessive traffic from a single source is silently dropped. **Exemptions:** Rela
 
 **Rate limiting is throughput control, not a trust signal.** Packets dropped by the rate limiter do NOT generate `recordBad()` events. A legitimate peer (e.g. Bootstrap) can exceed burst limits during startup cascades while sending exclusively valid, HMAC-authenticated packets. Penalizing valid traffic would create a perverse incentive where high-activity nodes (Bootstrap, relay hubs) accumulate bad reputation purely from serving the network. The reputation system (§13.1.4) only records bad actions for semantically invalid behavior (failed signatures, malformed frames, unauthorized operations).
 
-**Sender-side outbound pacing (V3.1.155):** complementary to the receiver-side limits above, each node also paces its own *outgoing* traffic per next-hop: `_sendV3ViaHop` enforces **150 packets / 10 s** per hop Device-ID (see §4.6 for full description). This prevents relay amplification during startup cascades — when N stale DV routes point through a single neighbor, the sender would otherwise flood that neighbor with N× the per-peer startup traffic (PINGs, WANTs, route updates). The hop budget is a sender-side courtesy, not a security boundary; it protects relay neighbors from legitimate but bursty traffic without relying on the neighbor's own rate limiter to absorb the burst. The budget map is cleared on network-change events.
+**Sender-side outbound pacing (V3.1.155):** complementary to the receiver-side limits above, each node also paces its own *outgoing* traffic per next-hop: `_sendV3ViaHop` enforces **150 packets / 10 s** per hop Device-ID (see §4.6 for full description). This prevents relay amplification during startup cascades — when N stale DV routes point through a single neighbor, the sender would otherwise flood that neighbor with N× the per-peer startup traffic (PINGs, WANTs, route updates). The hop budget is a sender-side courtesy, not a security boundary; it protects relay neighbors from legitimate but bursty traffic without relying on the neighbor's own rate limiter to absorb the burst. It applies to mesh-maintenance traffic only — live-media and call signaling bypass it (§4.6), since a call's packet rate is user-intended, bounded by the call duration, and cannot be shaped without destroying the call. The budget map is cleared on network-change events.
 
 **Positive reputation from accepted traffic:** Every packet that passes the rate limiter generates a `recordGood` event for the sender's reputation score. This is critical because infrastructure messages (DHT, DV-Routing, PeerList, Relay) return early in the node-level switch-case and never reach the application-level handler. Without this, new peers doing normal bootstrap traffic could never build positive reputation.
 
@@ -6463,10 +6463,11 @@ Voice message received
 #### 14.9.2 Transcription Engine
 
 - **whisper.cpp** — runs fully on-device, no cloud dependency
-- Model: "tiny" or "base" (~40–75 MB), sufficient quality for voice messages
+- Model: `tiny`, `base` or `small` (~40 / 75 / 250 MB), selectable per identity in Settings. `base` is noticeably weaker for German than for English; `small` is the recommended setting wherever storage and CPU allow.
+- Sampling: beam search with `beam_size = 5` — obtained by asking whisper.cpp for `WHISPER_SAMPLING_BEAM_SEARCH` defaults, so no struct field beyond `language` and `n_threads` is ever written. Roughly doubles inference time for a measurable accuracy gain; `WhisperFFI.transcribe(beamSearch: false)` falls back to greedy.
 - Supported languages: `auto` (default — Whisper auto-detects from ~99 languages), plus explicit selection from DE, EN, ES, HU, SV in the Settings UI (`voice_transcription_config.dart`). The explicit selection list is narrower than Cleona's 33 UI locales — a deliberate config choice, not a Whisper limitation.
 - Automatic language detection or manual selection
-- **Source-Side Transcription:** Sender transcribes before sending; the transcript is embedded in the `VoicePayload` protobuf carried by the audio ApplicationFrame. Receivers use the sender's transcript directly. Fallback: receiver transcribes locally if no transcript was provided by the sender.
+- **Source-Side Transcription:** Sender transcribes before sending. The transcript travels in two carriers: the `VoicePayload` protobuf of an inline media frame (≤256 KB), and `ContentMetadata.transcript_text` / `_language` / `_confidence` on both the inline and the `MEDIA_ANNOUNCE` frame. The second carrier is mandatory, not redundant — voice messages above the 256 KB inline threshold (~16 s at the platform recorder defaults of 128 kbps AAC) take the two-stage path, whose announce frame carries an empty payload and whose stage-2 chunks are raw file bytes, so `ContentMetadata` is the only carrier that can reach the receiver on that path. Because the announce arrives before the audio, the receiver renders the transcript before the download completes. Fallback: the receiver transcribes locally when no transcript was provided — triggered both on the inline handler and on `MEDIA_COMPLETE`.
 
 ##### 14.9.2.1 Native Dependencies (Runtime)
 
@@ -6485,9 +6486,9 @@ Voice transcription requires the following native libraries and tools at runtime
 Library search paths (in order): system default, `/usr/lib/`, `/usr/local/lib/`, `$HOME/lib/`, `./build/`.
 Model path: `$HOME/.cleona/models/ggml-{tiny,base,small}.bin`.
 
-**Building whisper.cpp from source** (pinned to v1.7.1 — all platform build scripts use the same tag to guarantee ABI-compatible struct layouts across Linux, Android, iOS, macOS):
+**Building whisper.cpp from source** (pinned to v1.8.4 — all platform build scripts use the same tag to keep struct layouts ABI-compatible across Linux, Android, iOS, macOS). The pin read v1.7.1 until V3.1.157 while the binaries actually shipped in `jniLibs/` and the XCFrameworks were 1.8.4; a clean rebuild would therefore have produced a *different* `whisper_full_params` layout than the shipped one — `language` sits at offset 96 in v1.7.1 and at 104 in 1.8.4:
 ```bash
-git clone --depth 1 --branch v1.7.1 https://github.com/ggerganov/whisper.cpp.git
+git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp.git
 cd whisper.cpp && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON ..
 make -j$(nproc)
@@ -6499,6 +6500,11 @@ sudo ldconfig
 cp libwhisper.so* ~/lib/
 cp ggml/src/libggml*.so* ~/lib/
 ```
+
+**Struct-layout coupling.** whisper.cpp takes `whisper_full_params` by value, which Dart FFI cannot describe — so the params have to be filled in from the outside. Two mechanisms, in this order of preference:
+
+1. **Wrapper setters (preferred).** `libwhisper_wrapper` (`native/whisper_wrapper.c`, built by `scripts/build-whisper-wrapper.sh`) exports `whisper_params_set_language` and `whisper_params_set_n_threads`, where the C compiler resolves the field offsets against the very `whisper.h` the library was built from. Available on Linux/macOS/Windows desktop, where the wrapper is required anyway for the struct-by-value call.
+2. **Runtime layout probe (fallback).** Android ships no wrapper — ARM64's AAPCS passes large structs indirectly, so `whisper_full()` is called directly — and iOS links statically. There the Dart side writes by byte offset, and the version pin alone proved insufficient as a guarantee (see above), so `whisper_ffi.dart` probes the layout at runtime instead of trusting a constant: it identifies the `language` field structurally in a freshly-defaulted struct — a non-null, 8-byte-aligned pointer followed by the release-stable default triple `detect_language = false`, `suppress_blank = true`, `suppress_non_speech_tokens = false` — and never dereferences a candidate, because a wrong guess would kill the whole process rather than just the transcription worker isolate. The hardcoded offset survives only as a logged fallback. Writing the pointer at a wrong offset is silent, not loud: `language` keeps its `"en"` default (German recordings get transcribed as English) while three sampling flags and `temperature` take on arbitrary pointer bytes.
 
 **Downloading the model:**
 ```bash
@@ -6513,7 +6519,7 @@ wget -O ~/.cleona/models/ggml-base.bin \
 
 **Android:**
 
-On Android, `libwhisper.so` and `libggml*.so` must be cross-compiled for arm64-v8a with the Android NDK and bundled in `android/app/src/main/jniLibs/arm64-v8a/` (same as libsodium/liboqs/libzstd). **Critical:** GGML must be built with `-DGGML_OPENMP=OFF` — the NDK does not include `libomp.so`, and OpenMP is unnecessary since NEON SIMD provides the real speedup on mobile (whisper uses only 1–4 threads). Audio format conversion (AAC → WAV 16 kHz PCM) is handled by Android's `MediaCodec` via a `MethodChannel` (`chat.cleona/audio`), not ffmpeg. The GGML model is downloaded on first use via Settings → Transcription (Hugging Face CDN, ~75 MB for `ggml-base`).
+On Android, `libwhisper.so` and `libggml*.so` must be cross-compiled for arm64-v8a with the Android NDK and bundled in `android/app/src/main/jniLibs/arm64-v8a/` (same as libsodium/liboqs/libzstd). **Critical:** GGML must be built with `-DGGML_OPENMP=OFF` — the NDK does not include `libomp.so`, and OpenMP is unnecessary since NEON SIMD provides the real speedup on mobile (whisper uses only 1–4 threads). Audio format conversion (AAC → WAV 16 kHz PCM) is handled by Android's `MediaCodec` via a `MethodChannel` (`chat.cleona/audio`), not ffmpeg. `MediaCodec` decodes at the device-native rate (typically 44.1 or 48 kHz), so the conversion **must low-pass before decimating** to 16 kHz — a windowed-sinc FIR (Blackman, 79 taps, 6.8 kHz cutoff: flat to 6 kHz, −38 to −43 dB at the 8 kHz fold point). Without it everything above 8 kHz folds back into the speech band and measurably degrades recognition. ffmpeg performs this filtering implicitly on the desktop path; `MediaCodec` does not, which is why Android transcribed worse than desktop until V3.1.157. The GGML model is downloaded on first use via Settings → Transcription (Hugging Face CDN, ~75 MB for `ggml-base`).
 
 **Linux Packaging (deb/rpm):**
 
@@ -7541,7 +7547,7 @@ Users in high-threat environments should use the physical transfer path (§19.6.
 
 **iOS special case:** The web app can download an IPA, but iOS does not install it (no sideloading, except EU-DMA markets from iOS 17.4). The web app detects iOS and shows: "On iOS, Cleona is available through the App Store" + Store link.
 
-**Platform-specific installation (implemented, user-confirmed download → auto-install):** The user confirms the update by clicking the **Download** button in the update banner (§19.6.2 step 5). Once the download completes and SHA-256 + Ed25519 verification passes, `onUpdateStateChanged(ready)` triggers `applyUpdate()` automatically — no second tap required. The user's confirmation happens once (the download click); installation is the automatic consequence. RS fragment seeding runs fire-and-forget after the install fires, so the CPU-intensive encoding does not block the UI. Platform details: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it with the verified copy, writes an `update-pending.json` marker, and calls `exit(0)` for restart. **Android** — the Kotlin `installApk` handler copies the complete binary to `cacheDir/update.apk` on a background thread, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission); user consent is provided by the OS installer dialog. **Windows** — initial installation uses an Inno Setup installer (see §15 Windows Desktop); subsequent updates arrive as a ZIP bundle containing the EXE, DLLs, and Flutter data directory (not a new installer). A BAT script (`update-apply.bat`) handles the entire update-apply cycle: (1) wait 5s for graceful exit, then force-kill via PID file (`cleona.pid`) + WMIC fallback (`taskkill /IM` fails cross-session on Windows); (2) back up the app directory (`robocopy /E` to `.update-bak/`, abort on exit code ≥ 8); (3) clean the app directory (`Remove-Item -Recurse` to prevent stale files from previous versions); (4) extract the ZIP (`Expand-Archive -Force`); (5) on extraction failure, mirror-restore from backup (`robocopy /MIR`); (6) restart daemon + GUI. The BAT runs minimized (`start /MIN`), PowerShell windows are hidden (`-WindowStyle Hidden`). The daemon spawns the BAT as a detached process (`ProcessStartMode.detached`) and exits. On post-update crash (within 30s), the full directory is restored from the backup. After successful restart, the backup is deleted. This differs from the Linux single-binary flow because Windows bundles are multi-file — a partial rollback (EXE only) produces an incompatible mix of old runner and new DLLs. **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
+**Platform-specific installation (implemented, user-confirmed download → auto-install):** The user confirms the update by clicking the **Download** button in the update banner (§19.6.2 step 5). Once the download completes and SHA-256 + Ed25519 verification passes, `onUpdateStateChanged(ready)` triggers `applyUpdate()` automatically — no second tap required. The user's confirmation happens once (the download click); installation is the automatic consequence. RS fragment seeding runs fire-and-forget after the install fires, so the CPU-intensive encoding does not block the UI. Platform details: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it with the verified copy, writes an `update-pending.json` marker, and calls `exit(0)` for restart. **Android** — before installation, `requestInstallPermission` checks `canRequestPackageInstalls()`; if denied, an `ActivityResultLauncher` opens `ACTION_MANAGE_UNKNOWN_APP_SOURCES` and the Dart future suspends until the user returns from the settings screen — this eliminates the fire-and-forget timing window that Samsung's Auto-Blocker exploits (Samsung revokes `REQUEST_INSTALL_PACKAGES` ~30 min after grant). Once permission is confirmed, the Kotlin `installApk` handler copies the complete binary to `cacheDir/update.apk` on a background thread, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer; user consent is provided by the OS installer dialog. **Windows** — initial installation uses an Inno Setup installer (see §15 Windows Desktop); subsequent updates arrive as a ZIP bundle containing the EXE, DLLs, and Flutter data directory (not a new installer). A BAT script (`update-apply.bat`) handles the entire update-apply cycle: (1) wait 5s for graceful exit, then force-kill via PID file (`cleona.pid`) + WMIC fallback (`taskkill /IM` fails cross-session on Windows); (2) back up the app directory (`robocopy /E` to `.update-bak/`, abort on exit code ≥ 8); (3) clean the app directory (`Remove-Item -Recurse` to prevent stale files from previous versions); (4) extract the ZIP (`Expand-Archive -Force`); (5) on extraction failure, mirror-restore from backup (`robocopy /MIR`); (6) restart daemon + GUI. The BAT runs minimized (`start /MIN`), PowerShell windows are hidden (`-WindowStyle Hidden`). The daemon spawns the BAT as a detached process (`ProcessStartMode.detached`) and exits. On post-update crash (within 30s), the full directory is restored from the backup. After successful restart, the backup is deleted. This differs from the Linux single-binary flow because Windows bundles are multi-file — a partial rollback (EXE only) produces an incompatible mix of old runner and new DLLs. **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
 
 **No user-facing rollback (architectural decision, 2026-07-08).** Cleona does NOT offer a rollback/downgrade mechanism to the user, for three reasons: (1) **Forward-only database migrations.** Drift/SQLite schema migrations are irreversible — a newer version may alter tables that the older binary cannot read, causing data loss or crashes on downgrade. (2) **Cryptographic protocol evolution.** Newer versions may rotate KEM parameters, key formats, or message envelope fields. A rolled-back binary may fail to decrypt messages sent by peers who already upgraded, silently dropping traffic. (3) **Monotone sequence enforcement.** The `minMonotoneSeq` field in signed update manifests prevents downgrade attacks (§19.6.2). Accepting a rollback would require bypassing this security gate, weakening the update chain's integrity. Instead: if a release introduces a critical bug, the maintainer publishes a hotfix release (new version, forward migration) within the same distribution pipeline. The Beta cluster provides early detection; the 6h DHT manifest refresh cycle bounds worst-case exposure. Desktop nodes retain a `.bak` backup internally for crash recovery (auto-restore if the app fails within 30s of an update), but this is a safety net, not a user-facing feature — it does not survive across database migrations.
 
@@ -8006,7 +8012,7 @@ message ApplicationFrame {
   bytes       userMlDsaSig     = 11;  // ~3300 bytes, always for user frames
 
   // Optional metadata
-  ContentMetadata    contentMetadata    = 12;  // Reply-To, Quote, Attachments
+  ContentMetadata    contentMetadata    = 12;  // media: mime, size, filename, thumbnail, transcript
   EditMetadata       editMetadata       = 13;
   ExpiryMetadata     expiryMetadata     = 14;
   ErasureCodingMetadata erasureMetadata = 15;
@@ -8381,14 +8387,21 @@ message EditMetadata {
 }
 ```
 
-**ContentMetadata** (for REPLY, quotes, attachments):
+**ContentMetadata** (media description, carried on `MEDIA_INLINE` and `MEDIA_ANNOUNCE`):
 ```protobuf
 message ContentMetadata {
-  bytes  replyToMessageId   = 1;
-  string replyExcerpt       = 2;   // first ~100 chars for display
-  repeated bytes attachmentMessageIds = 3;
+  string mime_type            = 1;
+  uint64 file_size            = 2;
+  string filename             = 3;
+  uint32 duration_ms          = 4;   // audio/video duration
+  bytes  thumbnail            = 5;   // compressed thumbnail, max 100KB
+  bytes  content_hash         = 6;   // SHA-256 of the full content
+  string transcript_text      = 7;   // source-side voice transcript (§14.9.2)
+  string transcript_language  = 8;
+  float  transcript_confidence = 9;
 }
 ```
+Reply/quote metadata does **not** live here — V3 carries it inside the payload message itself (`TextMessageV3.reply_to_message_id` / `reply_to_snippet`, see below). Earlier revisions of this appendix described a V2-era `ContentMetadata` holding reply fields; that message no longer exists.
 
 **ErasureCodingMetadata** (for FRAGMENT_*):
 ```protobuf

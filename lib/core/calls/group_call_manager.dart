@@ -1230,8 +1230,10 @@ class GroupCallManager {
       applicationFlavor: false,
       skipPoW: true,
     );
+    // Live media: unpaced (§4.6 hop budget is for mesh maintenance) and
+    // not ACK-counted (§5.10.4 Mesh-Refresh trigger).
     // ignore: discarded_futures
-    node.sendToDevice(outer, peer.nodeId);
+    node.sendToDevice(outer, peer.nodeId, paced: false, expectsReply: false);
   }
 
   /// Send a live-media (or per-call ephemeral) frame to a participant
@@ -1277,6 +1279,8 @@ class GroupCallManager {
       payload: payload,
       applicationFlavor: false,
       skipPoW: true,
+      paced: false,
+      expectsReply: false,
     );
   }
 
@@ -1293,6 +1297,10 @@ class GroupCallManager {
     required Uint8List payload,
     required bool applicationFlavor,
     required bool skipPoW,
+    // Real-time frames bypass the §4.6 per-hop pacing budget and are not
+    // counted towards the §5.10.4 Mesh-Refresh trigger.
+    bool paced = false,
+    bool expectsReply = true,
   }) {
     try {
       final inner = proto.ApplicationFrameV3()
@@ -1320,7 +1328,8 @@ class GroupCallManager {
         skipPoW: skipPoW,
       );
       // ignore: discarded_futures
-      node.sendToDevice(outer, targetDeviceId);
+      node.sendToDevice(outer, targetDeviceId,
+          paced: paced, expectsReply: expectsReply);
     } catch (e) {
       _log.debug('V3 send build failed: $e');
     }

@@ -46,6 +46,10 @@ abstract class ServiceContext {
     // When true, skips Layer 3 offline delivery (S&F + Erasure). Used for
     // ephemeral signaling (call invites) that is useless when delayed.
     bool skipL3 = false,
+    // When non-null, receives one [SendLeg] per successfully built fan-out
+    // leg so the caller can retransmit the identical packet without
+    // re-running the inner crypto pipeline (see [SendLeg]).
+    List<SendLeg>? outLegs,
   });
 
   void saveChannels();
