@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:4894067179b2, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8a05c7113a05, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1663,15 +1663,17 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 **Address priority by type**:
 
-| Priority | Address type | Latency / reliability |
+| Priority | Address type | Rationale |
 |---|---|---|
-| 1 | Same-subnet LAN | < 1ms, very reliable |
-| 2 | Other-subnet LAN | < 5ms, reliable |
-| 3 | Public IPv6 (global) | 10–50ms, reliable |
-| 4 | Public IPv4 (UPnP) | 10–50ms, mostly reliable |
-| 5 | Hole-punched | 50–100ms, NAT-dependent |
-| 6 | Mobile-direct | 100–500ms, frequently CGNAT-blocked |
-| 7 | Relay | additive (sum of links) |
+| 1 | Same-subnet LAN (private IPv4 same /24, IPv6 link-local) | Direct L2 path, <1ms, no NAT, no routing, no cost |
+| 2 | Other-subnet LAN (private IPv4 other /24, IPv6 ULA/site-local) | Routed L3 path on private network, <5ms, no NAT, no cost. **Preferred over public addresses** even when the peer also has public addresses: a relay peer on the private network typically has a wired internet connection — the relay path via its private address is faster and cheaper than direct communication over mobile data. |
+| 3 | Public IPv6 (global) | End-to-end routable without NAT (DS-Lite/CGNAT bypass). Preferred over IPv4 because no port mapping required. |
+| 4 | Public IPv4 (port-mapped via UPnP/PCP/NAT-PMP) | Internet-routable with confirmed port forwarding |
+| 5 | Hole-punched IPv4 | Short-lived, NAT-dependent, requires keepalive |
+| 6 | CGNAT IPv4 (100.64.0.0/10) | Rarely directly reachable (carrier NAT); fallback candidate |
+| 7 | Relay (multi-hop via DV routing) | Additive latency (sum of individual links) |
+
+**Cost optimization for relay:** When a peer is reachable via both a private and a public address, the private address is preferred (priority 2 < priority 3/4). This is architecturally intentional: a relay peer on the private network (e.g. bootstrap) typically has a wired internet connection. The path Phone → (LAN) → Relay → (wired internet) → Target is cheaper and faster than Phone → (mobile data) → Target. Mobile devices benefit most because mobile data traffic incurs both financial cost and higher latency.
 
 **Backoff per address**: on failure, a specific address is deprioritized with exponential backoff (5s → 30s → 5min) — not the entire PeerInfo. Multi-address devices retain routing options through other addresses.
 
@@ -1724,6 +1726,9 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 **Bridging architecture** (dual-stack nodes as IPv4↔IPv6 bridges):
 - A node with both IPv4 and global IPv6 automatically becomes a bridge between IPv4-only and IPv6-only nodes.
 - When sender (IPv4-only) and receiver (IPv6-only) share mutual peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
+- **Invariant:** A dual-stack relay node MUST forward incoming packets on IPv6 to recipients on IPv4 (and vice versa). The relay-forward logic (`_sendV3ViaHop`) selects the best address of the next hop independent of the IP version of the incoming packet — the bridge function follows implicitly from address selection.
+
+<!-- TODO V3.1.x: 2026-06-04 finding: Phone sent CR-relay to Bootstrap IPv6 (2001:db8::...), Bootstrap received nothing. Either IPv6 reception on Bootstrap is broken (firewall, socket binding) or the phone's sendUdp to IPv6 fails silently (mobile-IPv6 → home-network-IPv6 routing). Needs investigation. -->
 
 **Bootstrap IPv6 reachability**: bootstrap nodes have a statically configured global IPv6 (e.g. via OPNsense VIP). This guarantees bootstrap reachability even in DS-Lite scenarios.
 
@@ -2652,6 +2657,26 @@ cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&dxk=<deviceX2
 | `a` | reachable addresses | `ip:port+ip:port+...` (`+` URL-encoded as `%2B`) | Bob's current addresses for direct send |
 | `s` | seed peers (≤5) | `nodeIdHex@ip:port+ip:port,...` | bootstrap routing helpers |
 
+**Seed-peer selection criteria** (V3.1.x):
+
+1. **At least 1 relay-capable peer** — a peer with confirmed port-mapping (`hasPortMapping` = true, i.e. UPnP/PCP/NAT-PMP has established a public IP:port). This peer is reachable from any network (internet, other subnet, mobile data) and serves as the relay entry point for scanners that cannot reach the QR emitter directly (AP isolation, different subnets, CGNAT). All known addresses of this peer are included (private IPv4 + IPv6 + public IPv4 + IPv6), so the scanner can choose the optimal address for its network position: private IP when on the same network (avoids mobile data costs), public IP when external.
+
+2. **Remaining slots (up to 4)** — selected by freshness (`lastSeen` < 30 min), address diversity (different subnets, max 2 LAN + rest public), and score. Each seed peer is included with all known addresses (private + public).
+
+3. **Fallback:** When no peer with confirmed port-mapping exists (e.g. all nodes behind CGNAT without UPnP), the 5 peers with the highest scores and greatest address diversity are chosen. The scanner will attempt to find a peer through discovery burst (LAN multicast/broadcast) + subnet scan.
+
+**Rationale:** Without a publicly reachable seed peer in the QR, a scanner in a different network segment (AP isolation, different subnet, mobile data) is permanently isolated — it cannot contact any of the seed peers and the relay cascade has no entry point. Guaranteeing a port-mapped peer as relay ensures at least one path into the mesh exists.
+
+**Mesh-convergence gate (cold-start protection):**
+
+After a daemon restart, the `_confirmedPeers` map is empty — no peer has been confirmed by a direct packet in the current session yet. A QR code generated in this window contains incomplete or no seed peers, rendering it useless for scanners on isolated networks. The QR screen therefore implements a **convergence gate**:
+
+- **State tracking:** A session-scoped flag `_hasSessionConfirmedPeers` starts `false` and flips to `true` when the first peer is confirmed by a direct packet (`hopCount == 0`) in the current daemon session. The `_confirmedPeers` map is additionally persisted to disk (via `saveNetworkState()`) and reloaded on start as a warm-start hint — but persisted timestamps do NOT satisfy the convergence gate (they may be stale after a network change).
+- **QR screen behavior:**
+  - While `_hasSessionConfirmedPeers == false`: the QR screen shows a **convergence indicator** (progress bar or percentage) with the text "Connecting to mesh — QR code will be ready shortly" (i18n). The progress reflects elapsed time since node start relative to typical convergence time (~10s LAN, ~30s cross-subnet). The QR code itself is NOT displayed.
+  - Once `_hasSessionConfirmedPeers == true`: the convergence indicator disappears and the QR code is displayed normally with confirmed seed peers.
+- **Rationale:** Displaying a QR code with stale or empty seed peers wastes the user's time (scanner cannot connect) and creates a confusing failure mode. The brief wait for mesh convergence is preferable. Persisted `_confirmedPeers` accelerate subsequent sessions where the network hasn't changed (warm start: first PONG arrives within 1-2s from a known peer).
+
 **No User-KEM-PK in the URI**, intentionally: Alice learns Bob's User-KEM-PK only from CONTACT_REQUEST_RESPONSE (and Bob's User-Sig-Pubkey is in the CR-payload itself). Until Bob accepts the CR, Alice has no authorization to encrypt anything to Bob's user identity. The Device-KEM-PK is sufficient for the bootstrap because the CR-payload itself is User-signed, and the Device-KEM acts purely as a transport tunnel for that signed payload.
 
 **Backward compatibility**: legacy URIs without `dxk`/`dmk` parse fine but cannot be used as the recipient for a First-CR. The First-CR sender then falls back to a synchronous "fetch DeviceKemRecord from 2D-DHT" lookup if Bob has already published one (§4.3 step 4b). If neither URI nor 2D-DHT yields a Device-KEM-PK, the CR cannot be sent and the user receives a clear error ("Bob's contact code is too old, please ask him to re-share").
@@ -2704,6 +2729,8 @@ This is the only place in V3.0 where the §2.3.5 InfrastructureFrame selector li
 ```
 
 After step 9, all subsequent traffic between Alice and Bob runs the regular ApplicationFrame path (§2.4 main pipeline). The InfrastructureFrame-wrap of CR is purely a bootstrap mechanism — never used after the first round-trip. CR-Retry (when the CR was sent but no response arrived) re-uses the same bootstrap path, since Alice still does not have Bob's User-KEM-PK. The retry timer checks peer reachability in this order: (a) recipientUserId in routing table, (b) userId secondary index via getPeerByUserId, (c) seedDeviceIdHex from the persisted ContactSeed bundle. Fallback (c) is necessary because the DV routing table only carries deviceNodeIds — the userId secondary index is often empty for first-CR contacts whose CR-Response has not yet arrived.
+
+**Post-CR peer discovery:** After a successful CR exchange (step 9), the scanner has a confirmed contact and at least one active relay peer (from the QR's seed peers). Through this relay peer, the normal mesh-refresh cycle runs automatically: `PEER_LIST_SUMMARY → PEER_LIST_WANT → PEER_LIST_PUSH` (§5.10.5). The scanner thereby learns the **private IP addresses** of all peers in the mesh — including the relay peer itself. From this point on, the relay peer's private address is preferred (§4.6 address priority: other-subnet LAN priority 2 < public IPv4/IPv6 priority 3/4), which switches the communication path from mobile data to the local network. This transition happens automatically through the address-scoring logic (PONG from private address → `lastReceivedAt` set → ranked higher) and requires no explicit network switch.
 
 ### 8.2 Anti-Spam & KEX Gate
 

@@ -242,8 +242,23 @@ class CleonaNode {
   /// that haven't sent a direct packet in [_confirmedPeerTtl] are no longer
   /// considered confirmed — UDP fire-and-forget to them returns false,
   /// enabling the relay/failure cascade.
+  ///
+  /// Persisted via [saveNetworkState] and reloaded on start as a warm-start
+  /// hint (accelerates re-confirmation of known peers). Persisted entries
+  /// do NOT satisfy [hasSessionConfirmedPeers] — that flag requires a fresh
+  /// direct packet in the current session.
   final Map<String, DateTime> _confirmedPeers = {};
   static const Duration _confirmedPeerTtl = Duration(hours: 1);
+
+  /// True once at least one peer has been confirmed by a direct packet
+  /// (hopCount==0) in the CURRENT daemon session. The QR convergence gate
+  /// (§8.1.1) uses this to distinguish "mesh converged" from "still warming
+  /// up with stale data". Persisted confirmed-peers do not flip this flag.
+  bool hasSessionConfirmedPeers = false;
+
+  /// Timestamp of the node start — used by the QR convergence indicator
+  /// to show progress relative to typical convergence time.
+  DateTime? nodeStartedAt;
   bool isPeerConfirmed(String hex) {
     final ts = _confirmedPeers[hex];
     if (ts == null) return false;
@@ -451,6 +466,7 @@ class CleonaNode {
     // resolvable as PeerInfos in `routingTable`, so the routing table loads
     // first, the topology second.
     _loadDvRouting();
+    _loadConfirmedPeers();
 
     // Init DHT RPC. V3-direct contract: sendFunction takes
     // `(MTV3, body, peer)` and we plumb that into the §2.3.5 InfraFrame
@@ -891,6 +907,7 @@ class CleonaNode {
     });
 
     _running = true;
+    nodeStartedAt = DateTime.now();
     _log.info('Node started. Peers: ${routingTable.peerCount}');
   }
 
@@ -1073,6 +1090,10 @@ class CleonaNode {
       final ct = connectionTypeFromPriority(addr.priority);
       final isNewNeighbor = dvRouting.addDirectNeighbor(senderDeviceId, ct);
       _confirmedPeers[senderHex] = DateTime.now();
+      if (!hasSessionConfirmedPeers) {
+        hasSessionConfirmedPeers = true;
+        _log.info('First session-confirmed peer: ${senderHex.substring(0, 8)}');
+      }
 
       // DV-3 bias fix: receiving a direct packet (hopCount=0) proves
       // bidirectional reachability — same as DELIVERY_RECEIPT. Without
@@ -4157,11 +4178,46 @@ class CleonaNode {
     }
   }
 
+  void _saveConfirmedPeers() {
+    try {
+      final data = <String, int>{};
+      for (final e in _confirmedPeers.entries) {
+        if (DateTime.now().difference(e.value) <= _confirmedPeerTtl) {
+          data[e.key] = e.value.millisecondsSinceEpoch;
+        }
+      }
+      final file = File('$profileDir/confirmed_peers.json');
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(jsonEncode(data));
+    } catch (e) {
+      _log.warn('Failed to save confirmed peers: $e');
+    }
+  }
+
+  void _loadConfirmedPeers() {
+    final file = File('$profileDir/confirmed_peers.json');
+    if (!file.existsSync()) return;
+    try {
+      final data = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      for (final e in data.entries) {
+        final ts = DateTime.fromMillisecondsSinceEpoch(e.value as int);
+        if (DateTime.now().difference(ts) <= _confirmedPeerTtl) {
+          _confirmedPeers[e.key] = ts;
+        }
+      }
+      _log.info('Loaded ${_confirmedPeers.length} confirmed peers from disk (warm-start hint)');
+    } catch (e) {
+      _log.warn('Failed to load confirmed peers: $e');
+    }
+  }
+
   /// Persist routing + DV tables NOW. Called from Android lifecycle (paused)
   /// so peer state survives process kills between maintenance ticks.
   void saveNetworkState() {
     _saveRoutingTable();
     _saveDvRouting();
+    _saveConfirmedPeers();
+    _saveConfirmedPeers();
   }
 
   void _debouncedNetworkStateSave() {
@@ -4381,6 +4437,10 @@ class CleonaNode {
     // Bidirectional reachability confirmed — mark as confirmed peer so
     // _sendV3ViaHop can stop after first successful send (no scatter-shot).
     _confirmedPeers[peerHex] = DateTime.now();
+    if (!hasSessionConfirmedPeers) {
+      hasSessionConfirmedPeers = true;
+      _log.info('First session-confirmed peer: ${peerHex.substring(0, 8)}');
+    }
 
     // Add/update punched address in peer's address list
     final peer = routingTable.getPeer(peerNodeId);

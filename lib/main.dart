@@ -35,6 +35,7 @@ import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/share_receiver.dart';
+import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
@@ -324,7 +325,7 @@ class _CleonaAppState extends State<CleonaApp> {
           } else if (appState.isInitialized) {
             home = const HomeScreen();
           } else if (appState.hasProfile) {
-            home = const _LoadingScreen();
+            home = _LoadingScreen(error: appState._initError);
           } else {
             home = const SetupScreen();
           }
@@ -361,7 +362,8 @@ class _CleonaAppState extends State<CleonaApp> {
 
 /// Loading screen while daemon starts / IPC connects.
 class _LoadingScreen extends StatelessWidget {
-  const _LoadingScreen();
+  const _LoadingScreen({this.error});
+  final String? error;
 
   @override
   Widget build(BuildContext context) {
@@ -371,17 +373,32 @@ class _LoadingScreen extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.lock_outline, size: 64,
-                  color: Theme.of(context).colorScheme.primary),
+              Icon(
+                error != null ? Icons.error_outline : Icons.lock_outline,
+                size: 64,
+                color: error != null
+                    ? Theme.of(context).colorScheme.error
+                    : Theme.of(context).colorScheme.primary,
+              ),
               const SizedBox(height: 24),
               Text('Cleona Chat',
                   style: Theme.of(context).textTheme.headlineLarge),
               const SizedBox(height: 16),
-              const CircularProgressIndicator(),
+              if (error == null) const CircularProgressIndicator(),
               const SizedBox(height: 16),
-              Text('Verbinde mit Dienst...',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: SelectableText(
+                    'Init failed:\n$error',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.error),
+                  ),
+                )
+              else
+                Text('Verbinde mit Dienst...',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant)),
             ],
           ),
         ),
@@ -395,6 +412,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   IpcClient? _ipcClient;
   bool _isInitialized = false;
   bool _hasProfile = false;
+  String? _initError;
   /// Sec H-5 (V3.1.72) / T13: true after the user clicked "open anyway
   /// (limited)" on the [UpdateRequiredScreen]. Per-session, not persisted.
   /// Propagated to every concrete [CleonaService] (Android in-process) and,
@@ -538,6 +556,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       if (_androidNode != null && _androidNode!.isRunning) {
         _androidNode!.saveNetworkState();
+      }
+      // S12.5: Schedule iOS background fetch when going to background.
+      // The BGTaskScheduler will wake the app periodically (earliest 15 min)
+      // to retrieve pending P2P messages.
+      if (Platform.isIOS) {
+        IosBackgroundFetch.scheduleBackgroundFetch();
       }
     } else if (isResumed) {
       // After Doze/background: network may have changed, re-discover peers.
@@ -733,6 +757,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<bool> _ensureDaemonRunning() async {
+    // iOS: always in-process, never a daemon. Skip all Process.runSync
+    // calls (kill, tasklist) which throw UnsupportedError in the iOS sandbox.
+    if (Platform.isIOS) return false;
+
     // Tray contract: daemon MUST have DISPLAY so tray icon is visible.
     // If a daemon is alive but has no DISPLAY → replace it so the tray works.
     if (_isDaemonProcessAlive()) {
@@ -1010,7 +1038,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // Signal that we have a profile (shows loading screen immediately)
       notifyListeners();
       // Schedule heavy init after the current frame completes
-      Future(() => _initAndroidInProcess());
+      Future(() async {
+        try {
+          await _initAndroidInProcess();
+        } catch (e, stack) {
+          debugPrint('[main] _initAndroidInProcess FAILED: $e\n$stack');
+          _logCrash('initAndroidInProcess', e, stack);
+          _initError = '$e';
+          notifyListeners();
+        }
+      });
       return;
     }
 
@@ -1085,6 +1122,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         service.onStateChanged?.call();
       }
     };
+
+    // S12.5: Initialize iOS background fetch MethodChannel handler.
+    // Must happen before startQuick so the native side can call into Dart
+    // during background wakeups.
+    if (Platform.isIOS) {
+      IosBackgroundFetch.init();
+    }
 
     // Start node (UDP listener active → messages can arrive)
     await node.startQuick();

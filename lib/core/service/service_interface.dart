@@ -38,6 +38,11 @@ abstract class ICleonaService {
   /// observed public address matches our port. Distinguishes "fully
   /// reachable (green Hulk)" from "behind-NAT outbound-only (yellow Hulk)".
   bool get hasPortMapping;
+  /// True once at least one peer has been confirmed by a direct packet in
+  /// the current daemon session. Used by the QR convergence gate (§8.1.1).
+  bool get hasSessionConfirmedPeers;
+  /// When the node started — used by the QR convergence indicator.
+  DateTime? get nodeStartedAt;
   /// User-initiated NAT-Wizard trigger (e.g. icon-tap). Same effect as the
   /// automatic trigger but bypasses the dismiss-until flag so the user can
   /// always re-open it. GUI's `_natWizardShown` latch is also reset.

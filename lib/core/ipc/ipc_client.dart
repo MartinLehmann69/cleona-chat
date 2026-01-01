@@ -797,6 +797,10 @@ class IpcClient implements ICleonaService {
   int get confirmedPeerCount => _confirmedPeerCount;
   @override
   bool get hasPortMapping => _hasPortMapping;
+  @override
+  bool get hasSessionConfirmedPeers => _confirmedPeerCount > 0;
+  @override
+  DateTime? get nodeStartedAt => null;
   bool get mobileFallbackActive => _mobileFallbackActive;
   @override
   int get fragmentCount => _fragmentCount;
@@ -1478,9 +1482,9 @@ class IpcClient implements ICleonaService {
     final resp = await _sendRequest('send_contact_request', params: {
       'recipientId': recipientUserIdHex,
       if (message.isNotEmpty) 'message': message,
-      if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
-      if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
-      if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
+      'seedDeviceIdHex': ?seedDeviceIdHex,
+      'seedDxkB64': ?seedDxkB64,
+      'seedDmkB64': ?seedDmkB64,
     });
     return resp.success;
   }
@@ -1513,9 +1517,9 @@ class IpcClient implements ICleonaService {
         'nodeIdHex': p.nodeIdHex,
         'addresses': p.addresses,
       }).toList(),
-      if (targetDeviceIdHex != null) 'targetDeviceIdHex': targetDeviceIdHex,
-      if (targetDxkB64 != null) 'targetDxkB64': targetDxkB64,
-      if (targetDmkB64 != null) 'targetDmkB64': targetDmkB64,
+      'targetDeviceIdHex': ?targetDeviceIdHex,
+      'targetDxkB64': ?targetDxkB64,
+      'targetDmkB64': ?targetDmkB64,
     });
   }
 

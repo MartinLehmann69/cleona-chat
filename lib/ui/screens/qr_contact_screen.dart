@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -12,13 +13,79 @@ import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/service/service_interface.dart';
 
 /// Screen showing own QR code for contact sharing.
-class QrShowScreen extends StatelessWidget {
+/// Implements a convergence gate (§8.1.1): shows a progress indicator until
+/// at least one peer is session-confirmed (fresh direct packet in this
+/// daemon session), then displays the QR code with reliable seed peers.
+class QrShowScreen extends StatefulWidget {
   final ICleonaService service;
   const QrShowScreen({super.key, required this.service});
 
   @override
+  State<QrShowScreen> createState() => _QrShowScreenState();
+}
+
+class _QrShowScreenState extends State<QrShowScreen> {
+  Timer? _pollTimer;
+  static const _typicalConvergenceSeconds = 15;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.service.hasSessionConfirmedPeers) {
+      _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (widget.service.hasSessionConfirmedPeers) {
+          _pollTimer?.cancel();
+          _pollTimer = null;
+        }
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final service = widget.service;
     final locale = AppLocale.read(context);
+
+    if (!service.hasSessionConfirmedPeers) {
+      final elapsed = service.nodeStartedAt != null
+          ? DateTime.now().difference(service.nodeStartedAt!).inSeconds
+          : 0;
+      final progress = (elapsed / _typicalConvergenceSeconds).clamp(0.0, 0.95);
+      return Scaffold(
+        appBar: AppBar(title: Text(locale.get('qr_my_code'))),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 120, height: 120,
+                  child: CircularProgressIndicator(
+                    value: progress,
+                    strokeWidth: 6,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text('${(progress * 100).toInt()}%',
+                    style: Theme.of(context).textTheme.headlineMedium),
+                const SizedBox(height: 12),
+                Text(locale.get('qr_mesh_converging'),
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
     // Use GUI-selected identity, not daemon IPC state.
     // When Alice-Tab is visible but daemon internally has AllyCat active,
@@ -29,26 +96,36 @@ class QrShowScreen extends StatelessWidget {
 
     // Build ContactSeed URI: own private + public addresses,
     // confirmed peers from various subnets.
-    // Deduplicate by address:port (same NAT endpoint = same routing value).
+    // §8.1.1 seed-peer selection: at least 1 relay-capable peer (has public
+    // IP = reachable from any network), rest by freshness/diversity.
     final freshCutoff = DateTime.now().subtract(const Duration(minutes: 30));
     final validPeers = service.peerSummaries
         .where((p) => p.address.isNotEmpty && p.port > 0 && p.lastSeen.isAfter(freshCutoff))
         .toList();
     final peers = <dynamic>[];
-    final seenEndpoints = <String>{};
-    // LAN peers from different /16 subnets (max 2)
-    for (final p in validPeers.where((p) => _isPrivateIp(p.address))) {
-      final endpoint = '${p.address}:${p.port}';
-      if (!seenEndpoints.add(endpoint)) continue;
-      peers.add(p);
-      if (peers.length >= 2) break;
+    final seenNodeIds = <String>{};
+    // Slot 1: guaranteed relay-capable peer (has public IP in allAddresses).
+    // This ensures scanners on different networks can reach at least one peer.
+    for (final p in validPeers) {
+      final hasPublic = p.allAddresses.any((a) {
+        final ip = a.contains('[') ? a.substring(1, a.indexOf(']')) : a.split(':').first;
+        return !_isPrivateIp(ip) && !ip.contains(':');
+      });
+      if (hasPublic && seenNodeIds.add(p.nodeIdHex)) {
+        peers.add(p);
+        break;
+      }
     }
-    // Public peers with unique endpoints (max 4 total, Architecture §6.1)
-    for (final p in validPeers.where((p) => !_isPrivateIp(p.address))) {
-      final endpoint = '${p.address}:${p.port}';
-      if (!seenEndpoints.add(endpoint)) continue;
+    // Remaining slots: LAN peers (max 2) + public peers (up to 5 total)
+    for (final p in validPeers.where((p) => _isPrivateIp(p.address))) {
+      if (!seenNodeIds.add(p.nodeIdHex)) continue;
       peers.add(p);
-      if (peers.length >= 4) break;
+      if (peers.length >= 3) break;
+    }
+    for (final p in validPeers.where((p) => !_isPrivateIp(p.address))) {
+      if (!seenNodeIds.add(p.nodeIdHex)) continue;
+      peers.add(p);
+      if (peers.length >= 5) break;
     }
     // Own addresses: up to 2 private + public IP (if confirmed)
     final ownAddrs = service.localIps.take(2).map((ip) => '$ip:${service.port}').toList();

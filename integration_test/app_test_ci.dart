@@ -5,16 +5,20 @@
 //   - App launch, Setup flow, Home screen, Settings navigation
 //
 // Phase 2: Network integration (runs when BOOTSTRAP_CONTACT_SEED is set)
-//   - ContactSeed import via Add-Contact dialog
+//   - Programmatic ContactSeed import via CleonaService API (no GUI taps)
 //   - Peer connection verification (peer count > 0)
 //
 // Run: flutter test integration_test/app_test_ci.dart -d macos
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:provider/provider.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
+import 'package:cleona/core/network/contact_seed.dart';
+import 'package:cleona/core/service/cleona_service.dart';
 
 import 'package:cleona/main.dart';
 
@@ -99,34 +103,60 @@ void main() {
   final contactSeedUri = Platform.environment['BOOTSTRAP_CONTACT_SEED'];
 
   final hasContactSeed = contactSeedUri != null && contactSeedUri.isNotEmpty;
-  // tester.tap() is unreliable on macOS desktop — skip until programmatic
-  // ContactSeed import (via CleonaService directly) is implemented.
-  final skipNetwork = !hasContactSeed || Platform.isMacOS;
+  final skipNetwork = !hasContactSeed;
 
   testWidgets('Phase 2: Network (ContactSeed)', skip: skipNetwork,
       (tester) async {
     // App is already running from Phase 1 — pump to settle
     await tester.pumpAndSettle(const Duration(seconds: 2));
 
-    // 2.1 Tap FAB (add contact) on Recent tab
-    final fab = find.byType(FloatingActionButton);
-    expect(fab, findsOneWidget, reason: '2.1 FAB sichtbar');
-    await tester.tap(fab);
-    await tester.pumpAndSettle(const Duration(seconds: 1));
+    // 2.1 Parse ContactSeed URI
+    final seed = ContactSeed.fromUri(contactSeedUri!);
+    expect(seed, isNotNull, reason: '2.1 ContactSeed URI parsed successfully');
 
-    // 2.2 Enter ContactSeed URI in the dialog TextField
-    final dialogTextField = find.byType(TextField);
-    expect(dialogTextField, findsOneWidget, reason: '2.2 Dialog-TextField sichtbar');
-    await tester.enterText(dialogTextField, contactSeedUri!);
-    await tester.pumpAndSettle();
+    // 2.2 Get the running CleonaAppState via Provider from the widget tree
+    final context = tester.element(find.byType(MaterialApp));
+    final appState = Provider.of<CleonaAppState>(context, listen: false);
+    expect(appState.service, isNotNull,
+        reason: '2.2 CleonaService is running');
 
-    // 2.3 Tap the confirm button (FilledButton in dialog)
-    final confirmButton = find.byType(FilledButton);
-    expect(confirmButton, findsOneWidget, reason: '2.3 Confirm-Button sichtbar');
-    await tester.tap(confirmButton);
-    await tester.pumpAndSettle(const Duration(seconds: 2));
+    // The app runs in-process on macOS CI — service is a concrete CleonaService
+    final service = appState.service! as CleonaService;
 
-    // 2.4 Wait for peer connection (§5.8: relay timeout ~16s, 60s total)
+    // 2.3 Add peers from ContactSeed programmatically (bypasses unreliable
+    // tester.tap on macOS desktop — the API is identical to what the GUI
+    // dialog invokes internally)
+    final seedPeers = seed!.seedPeers
+        .map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses))
+        .toList();
+
+    service.addPeersFromContactSeed(
+      seed.nodeIdHex,
+      seed.ownAddresses,
+      seedPeers,
+      targetDeviceIdHex: seed.deviceIdHex,
+      targetDxkB64: seed.deviceX25519Pk != null
+          ? base64.encode(seed.deviceX25519Pk!)
+          : null,
+      targetDmkB64: seed.deviceMlKemPk != null
+          ? base64.encode(seed.deviceMlKemPk!)
+          : null,
+    );
+
+    // 2.4 Send contact request so the remote side can respond
+    await service.sendContactRequest(
+      seed.nodeIdHex,
+      seedDeviceIdHex: seed.deviceIdHex,
+      seedDxkB64: seed.deviceX25519Pk != null
+          ? base64.encode(seed.deviceX25519Pk!)
+          : null,
+      seedDmkB64: seed.deviceMlKemPk != null
+          ? base64.encode(seed.deviceMlKemPk!)
+          : null,
+    );
+    await tester.pump(const Duration(seconds: 2));
+
+    // 2.5 Wait for peer connection (§5.8: relay timeout ~16s, 60s total)
     // The peer count is in the Badge label of the bar_chart IconButton.
     var peerConnected = false;
     for (var i = 0; i < 12; i++) {
@@ -147,6 +177,6 @@ void main() {
     }
 
     expect(peerConnected, isTrue,
-        reason: '2.4 Peer-Count > 0 nach ContactSeed-Import (60s Timeout)');
+        reason: '2.5 Peer-Count > 0 nach ContactSeed-Import (60s Timeout)');
   });
 }

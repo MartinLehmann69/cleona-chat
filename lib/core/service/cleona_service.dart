@@ -2995,7 +2995,9 @@ class CleonaService implements ICleonaService {
       final seedDevId = entry.value.seedDeviceIdHex;
       if (node.routingTable.getPeer(recipientUserId) == null &&
           node.routingTable.getPeerByUserId(recipientUserId) == null &&
-          (seedDevId == null || node.routingTable.getPeer(hexToBytes(seedDevId)) == null)) continue;
+          (seedDevId == null || node.routingTable.getPeer(hexToBytes(seedDevId)) == null)) {
+        continue;
+      }
 
       // Welle 5 Teil 4 Wave 2: First-CR retry replays sendContactRequest with
       // the persisted ContactSeed bundle (§8.1.1). Without seed (legacy
@@ -3046,7 +3048,9 @@ class CleonaService implements ICleonaService {
       if (contact.ed25519Pk == null) continue;
       // contact.nodeId is the USER nodeId; peer may be indexed under DEVICE nodeId
       if (node.routingTable.getPeer(contact.nodeId) == null &&
-          node.routingTable.getPeerByUserId(contact.nodeId) == null) continue;
+          node.routingTable.getPeerByUserId(contact.nodeId) == null) {
+        continue;
+      }
 
       // Stop retrying once delivery to this contact is ACK-confirmed.
       // Primary check: any DELIVERY_RECEIPT from this contact since acceptance
@@ -6618,6 +6622,12 @@ class CleonaService implements ICleonaService {
   int get confirmedPeerCount => node.confirmedPeerIds.length;
   @override
   bool get hasPortMapping => node.natTraversal.hasPortMapping;
+
+  @override
+  bool get hasSessionConfirmedPeers => node.hasSessionConfirmedPeers;
+
+  @override
+  DateTime? get nodeStartedAt => node.nodeStartedAt;
   @override
   List<String> get localIps => node.localIps.isNotEmpty ? node.localIps : ['127.0.0.1'];
   @override
@@ -6660,16 +6670,16 @@ class CleonaService implements ICleonaService {
         final key = '${p.publicIp}:${p.publicPort}';
         if (seen.add(key)) addrs.add(key);
       }
-      // Include public IPv4 + IPv6 global addresses from the multi-address list
-      // (covers addresses learned via IDENTITY_LIVE_PUBLISH, not just direct observation)
+      // Include ALL addresses from the multi-address list: private IPv4,
+      // public IPv4, IPv6 global. §8.1.1 seed-peer selection needs all
+      // addresses so the scanner can choose the optimal one for its network
+      // position (private when on same LAN, public when external).
       for (final addr in p.addresses) {
-        if (addr.type == PeerAddressType.ipv4Public ||
-            addr.type == PeerAddressType.ipv6Global) {
-          final key = addr.ip.contains(':')
-              ? '[${addr.ip}]:${addr.port}'
-              : '${addr.ip}:${addr.port}';
-          if (seen.add(key)) addrs.add(key);
-        }
+        if (addr.type == PeerAddressType.ipv6LinkLocal) continue;
+        final key = addr.ip.contains(':')
+            ? '[${addr.ip}]:${addr.port}'
+            : '${addr.ip}:${addr.port}';
+        if (seen.add(key)) addrs.add(key);
       }
       // Primary address: prefer IPv6 global > public IPv4 > local IPv4
       // Check both legacy publicIp field AND multi-address list for public IPv4

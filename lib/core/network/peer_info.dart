@@ -243,7 +243,11 @@ class PeerAddress {
     // IPv6
     if (ip.contains(':')) {
       if (ip.toLowerCase().startsWith('fe80:')) return 1; // Link-local = LAN
-      return 2; // Global IPv6 — better than public IPv4 (no NAT!)
+      final t = classifyIp(ip);
+      if (t == PeerAddressType.ipv6Ula || t == PeerAddressType.ipv6SiteLocal) {
+        return 2; // ULA/site-local = other-subnet private
+      }
+      return 3; // Global IPv6 — no NAT, but public (§4.6: behind other-subnet LAN)
     }
     // IPv4
     if (_isCgnat(ip)) return 4;
