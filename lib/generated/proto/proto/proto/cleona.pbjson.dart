@@ -300,7 +300,6 @@ const MessageTypeV3$json = {
     {'1': 'MTV3_GROUP_INVITE', '2': 51},
     {'1': 'MTV3_GROUP_LEAVE', '2': 52},
     {'1': 'MTV3_GROUP_KEY_UPDATE', '2': 53},
-    {'1': 'MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST', '2': 54},
     {'1': 'MTV3_CHANNEL_CREATE', '2': 60},
     {'1': 'MTV3_CHANNEL_POST', '2': 61},
     {'1': 'MTV3_CHANNEL_INVITE', '2': 62},
@@ -400,8 +399,6 @@ const MessageTypeV3$json = {
     {'1': 'MTV3_FIRST_CR_STORE', '2': 222},
     {'1': 'MTV3_FIRST_CR_STORE_ACK', '2': 223},
     {'1': 'MTV3_FIRST_CR_DELIVER', '2': 224},
-    {'1': 'MTV3_POLL_ANON_SUBMIT', '2': 225},
-    {'1': 'MTV3_POLL_ANON_SUBMIT_ACK', '2': 226},
   ],
 };
 
@@ -420,58 +417,56 @@ final $typed_data.Uint8List messageTypeV3Descriptor = $convert.base64Decode(
     'X1JFU1RPUkVfUkVRVUVTVBAkEiIKHk1UVjNfR1VBUkRJQU5fUkVTVE9SRV9SRVNQT05TRRAlEh'
     'gKFE1UVjNfQ09OVEFDVF9SRVFVRVNUECgSIQodTVRWM19DT05UQUNUX1JFUVVFU1RfUkVTUE9O'
     'U0UQKRIVChFNVFYzX0dST1VQX0NSRUFURRAyEhUKEU1UVjNfR1JPVVBfSU5WSVRFEDMSFAoQTV'
-    'RWM19HUk9VUF9MRUFWRRA0EhkKFU1UVjNfR1JPVVBfS0VZX1VQREFURRA1EigKJE1UVjNfR1JP'
-    'VVBfTUVNQkVSU0hJUF9SRVNZTkNfUkVRVUVTVBA2EhcKE01UVjNfQ0hBTk5FTF9DUkVBVEUQPB'
-    'IVChFNVFYzX0NIQU5ORUxfUE9TVBA9EhcKE01UVjNfQ0hBTk5FTF9JTlZJVEUQPhIWChJNVFYz'
-    'X0NIQU5ORUxfTEVBVkUQPxIcChhNVFYzX0NIQU5ORUxfUk9MRV9VUERBVEUQQBIhCh1NVFYzX0'
-    'NIQU5ORUxfQkFEX0JBREdFX1JFUE9SVBBBEhoKFk1UVjNfQ0hBTk5FTF9KVVJZX1ZPVEUQQhId'
-    'ChlNVFYzX0NIQU5ORUxfTU9EX0RFQ0lTSU9OEEMSIAocTVRWM19DSEFOTkVMX1NVQlNDUklCRV'
-    '9QUk9CRRBEEhQKEE1UVjNfQ0FMTF9JTlZJVEUQRhIUChBNVFYzX0NBTExfQU5TV0VSEEcSFAoQ'
-    'TVRWM19DQUxMX1JFSkVDVBBIEhQKEE1UVjNfQ0FMTF9IQU5HVVAQSRIWChJNVFYzX0lDRV9DQU'
-    '5ESURBVEUQShIUChBNVFYzX0NBTExfUkVKT0lOEEsSEwoPTVRWM19DQUxMX0FVRElPEEwSEwoP'
-    'TVRWM19DQUxMX1ZJREVPEE0SGQoVTVRWM19DQUxMX0dST1VQX0FVRElPEE4SGQoVTVRWM19DQU'
-    'xMX0dST1VQX1ZJREVPEE8SGQoVTVRWM19DQUxMX0dST1VQX0xFQVZFEFASHgoaTVRWM19DQUxM'
-    'X0dST1VQX0tFWV9ST1RBVEUQURIWChJNVFYzX0NBTExfUlRUX1BJTkcQUhIWChJNVFYzX0NBTE'
-    'xfUlRUX1BPTkcQUxIZChVNVFYzX0NBTExfVFJFRV9VUERBVEUQVBIeChpNVFYzX0NBTExfS0VZ'
-    'RlJBTUVfUkVRVUVTVBBVEh4KGk1UVjNfQ0FMTF9HUk9VUF9TRU5ERVJfS0VZEFYSHwobTVRWM1'
-    '9DSEFOTkVMX0lOREVYX0VYQ0hBTkdFEFoSHQoZTVRWM19DSEFOTkVMX0pPSU5fUkVRVUVTVBBb'
-    'EhcKE01UVjNfQ0hBTk5FTF9SRVBPUlQQXBIXChNNVFYzX1BFRVJfTElTVF9QVVNIEGQSGgoWTV'
-    'RWM19QRUVSX0xJU1RfU1VNTUFSWRBlEhcKE01UVjNfUEVFUl9MSVNUX1dBTlQQZhIZChVNVFYz'
-    'X1BFRVJfS0VZX1JFUVVFU1QQZxIaChZNVFYzX1BFRVJfS0VZX1JFU1BPTlNFEGgSEQoNTVRWM1'
-    '9ESFRfUElORxBuEhEKDU1UVjNfREhUX1BPTkcQbxIWChJNVFYzX0RIVF9GSU5EX05PREUQcBIf'
-    'ChtNVFYzX0RIVF9GSU5EX05PREVfUkVTUE9OU0UQcRISCg5NVFYzX0RIVF9TVE9SRRByEhsKF0'
-    '1UVjNfREhUX1NUT1JFX1JFU1BPTlNFEHMSFwoTTVRWM19ESFRfRklORF9WQUxVRRB0EiAKHE1U'
-    'VjNfREhUX0ZJTkRfVkFMVUVfUkVTUE9OU0UQdRIXChNNVFYzX0ZSQUdNRU5UX1NUT1JFEHgSGw'
-    'oXTVRWM19GUkFHTUVOVF9TVE9SRV9BQ0sQeRIaChZNVFYzX0ZSQUdNRU5UX1JFVFJJRVZFEHoS'
-    'IwofTVRWM19GUkFHTUVOVF9SRVRSSUVWRV9SRVNQT05TRRB7EhgKFE1UVjNfRlJBR01FTlRfRE'
-    'VMRVRFEHwSFAoPTVRWM19QRUVSX1NUT1JFEIIBEhgKE01UVjNfUEVFUl9TVE9SRV9BQ0sQgwES'
-    'FwoSTVRWM19QRUVSX1JFVFJJRVZFEIQBEiAKG01UVjNfUEVFUl9SRVRSSUVWRV9SRVNQT05TRR'
-    'CFARIcChdNVFYzX0NIQVRfQ09ORklHX1VQREFURRCMARIeChlNVFYzX0NIQVRfQ09ORklHX1JF'
-    'U1BPTlNFEI0BEhYKEU1UVjNfUk9VVEVfVVBEQVRFEJYBEhwKF01UVjNfUkVBQ0hBQklMSVRZX1'
-    'FVRVJZEJcBEh8KGk1UVjNfUkVBQ0hBQklMSVRZX1JFU1BPTlNFEJgBEhcKEk1UVjNfUkVMQVlf'
-    'Rk9SV0FSRBCZARITCg5NVFYzX1JFTEFZX0FDSxCaARIcChdNVFYzX0hPTEVfUFVOQ0hfUkVRVU'
-    'VTVBCgARIbChZNVFYzX0hPTEVfUFVOQ0hfTk9USUZZEKEBEhkKFE1UVjNfSE9MRV9QVU5DSF9Q'
-    'SU5HEKIBEhkKFE1UVjNfSE9MRV9QVU5DSF9QT05HEKMBEh8KGk1UVjNfSURFTlRJVFlfQVVUSF'
-    '9QVUJMSVNIEKoBEiAKG01UVjNfSURFTlRJVFlfQVVUSF9SRVRSSUVWRRCrARIgChtNVFYzX0lE'
-    'RU5USVRZX0FVVEhfUkVTUE9OU0UQrAESHwoaTVRWM19JREVOVElUWV9MSVZFX1BVQkxJU0gQrQ'
-    'ESIAobTVRWM19JREVOVElUWV9MSVZFX1JFVFJJRVZFEK4BEiAKG01UVjNfSURFTlRJVFlfTElW'
-    'RV9SRVNQT05TRRCvARIeChlNVFYzX0lERU5USVRZX0tFTV9QVUJMSVNIELABEh8KGk1UVjNfSU'
-    'RFTlRJVFlfS0VNX1JFVFJJRVZFELEBEh8KGk1UVjNfSURFTlRJVFlfS0VNX1JFU1BPTlNFELIB'
-    'EhMKDk1UVjNfVFdJTl9TWU5DELQBEh0KGE1UVjNfREVWSUNFX1BBSVJfUkVRVUVTVBC1ARIdCh'
-    'hNVFYzX0RFVklDRV9QQUlSX0FQUFJPVkUQtgESGwoWTVRWM19ERVZJQ0VfUkVWT0NBVElPThC3'
-    'ARIZChRNVFYzX0NBTEVOREFSX0lOVklURRC+ARIXChJNVFYzX0NBTEVOREFSX1JTVlAQvwESGQ'
-    'oUTVRWM19DQUxFTkRBUl9VUERBVEUQwAESGQoUTVRWM19DQUxFTkRBUl9ERUxFVEUQwQESGwoW'
-    'TVRWM19GUkVFX0JVU1lfUkVRVUVTVBDCARIcChdNVFYzX0ZSRUVfQlVTWV9SRVNQT05TRRDDAR'
-    'IVChBNVFYzX1BPTExfQ1JFQVRFEMgBEhMKDk1UVjNfUE9MTF9WT1RFEMkBEh0KGE1UVjNfUE9M'
-    'TF9WT1RFX0FOT05ZTU9VUxDKARIVChBNVFYzX1BPTExfVVBEQVRFEMsBEhcKEk1UVjNfUE9MTF'
-    '9TTkFQU0hPVBDMARIVChBNVFYzX1BPTExfUkVWT0tFEM0BEhsKFk1UVjNfV0hJVEVCT0FSRF9T'
-    'VFJPS0UQ0gESGQoUTVRWM19XSElURUJPQVJEX1BBR0UQ0wESFwoSTVRWM19GSUxFX0VYQ0hBTk'
-    'dFENQBEhwKF01UVjNfQ0xJUEJPQVJEX0VYQ0hBTkdFENUBEhwKF01UVjNfU0NSRUVOX1NIQVJF'
-    'X0ZSQU1FENYBEhMKDk1UVjNfQ0FMTF9DSEFUENcBEh4KGU1UVjNfUkVNT1RFX0NPTlRST0xfSU'
-    '5QVVQQ2AESHAoXTVRWM19ERVZJQ0VfS0VNX1JFUVVFU1QQ3AESGgoVTVRWM19ERVZJQ0VfS0VN'
-    'X09GRkVSEN0BEhgKE01UVjNfRklSU1RfQ1JfU1RPUkUQ3gESHAoXTVRWM19GSVJTVF9DUl9TVE'
-    '9SRV9BQ0sQ3wESGgoVTVRWM19GSVJTVF9DUl9ERUxJVkVSEOABEhoKFU1UVjNfUE9MTF9BTk9O'
-    'X1NVQk1JVBDhARIeChlNVFYzX1BPTExfQU5PTl9TVUJNSVRfQUNLEOIB');
+    'RWM19HUk9VUF9MRUFWRRA0EhkKFU1UVjNfR1JPVVBfS0VZX1VQREFURRA1EhcKE01UVjNfQ0hB'
+    'Tk5FTF9DUkVBVEUQPBIVChFNVFYzX0NIQU5ORUxfUE9TVBA9EhcKE01UVjNfQ0hBTk5FTF9JTl'
+    'ZJVEUQPhIWChJNVFYzX0NIQU5ORUxfTEVBVkUQPxIcChhNVFYzX0NIQU5ORUxfUk9MRV9VUERB'
+    'VEUQQBIhCh1NVFYzX0NIQU5ORUxfQkFEX0JBREdFX1JFUE9SVBBBEhoKFk1UVjNfQ0hBTk5FTF'
+    '9KVVJZX1ZPVEUQQhIdChlNVFYzX0NIQU5ORUxfTU9EX0RFQ0lTSU9OEEMSIAocTVRWM19DSEFO'
+    'TkVMX1NVQlNDUklCRV9QUk9CRRBEEhQKEE1UVjNfQ0FMTF9JTlZJVEUQRhIUChBNVFYzX0NBTE'
+    'xfQU5TV0VSEEcSFAoQTVRWM19DQUxMX1JFSkVDVBBIEhQKEE1UVjNfQ0FMTF9IQU5HVVAQSRIW'
+    'ChJNVFYzX0lDRV9DQU5ESURBVEUQShIUChBNVFYzX0NBTExfUkVKT0lOEEsSEwoPTVRWM19DQU'
+    'xMX0FVRElPEEwSEwoPTVRWM19DQUxMX1ZJREVPEE0SGQoVTVRWM19DQUxMX0dST1VQX0FVRElP'
+    'EE4SGQoVTVRWM19DQUxMX0dST1VQX1ZJREVPEE8SGQoVTVRWM19DQUxMX0dST1VQX0xFQVZFEF'
+    'ASHgoaTVRWM19DQUxMX0dST1VQX0tFWV9ST1RBVEUQURIWChJNVFYzX0NBTExfUlRUX1BJTkcQ'
+    'UhIWChJNVFYzX0NBTExfUlRUX1BPTkcQUxIZChVNVFYzX0NBTExfVFJFRV9VUERBVEUQVBIeCh'
+    'pNVFYzX0NBTExfS0VZRlJBTUVfUkVRVUVTVBBVEh4KGk1UVjNfQ0FMTF9HUk9VUF9TRU5ERVJf'
+    'S0VZEFYSHwobTVRWM19DSEFOTkVMX0lOREVYX0VYQ0hBTkdFEFoSHQoZTVRWM19DSEFOTkVMX0'
+    'pPSU5fUkVRVUVTVBBbEhcKE01UVjNfQ0hBTk5FTF9SRVBPUlQQXBIXChNNVFYzX1BFRVJfTElT'
+    'VF9QVVNIEGQSGgoWTVRWM19QRUVSX0xJU1RfU1VNTUFSWRBlEhcKE01UVjNfUEVFUl9MSVNUX1'
+    'dBTlQQZhIZChVNVFYzX1BFRVJfS0VZX1JFUVVFU1QQZxIaChZNVFYzX1BFRVJfS0VZX1JFU1BP'
+    'TlNFEGgSEQoNTVRWM19ESFRfUElORxBuEhEKDU1UVjNfREhUX1BPTkcQbxIWChJNVFYzX0RIVF'
+    '9GSU5EX05PREUQcBIfChtNVFYzX0RIVF9GSU5EX05PREVfUkVTUE9OU0UQcRISCg5NVFYzX0RI'
+    'VF9TVE9SRRByEhsKF01UVjNfREhUX1NUT1JFX1JFU1BPTlNFEHMSFwoTTVRWM19ESFRfRklORF'
+    '9WQUxVRRB0EiAKHE1UVjNfREhUX0ZJTkRfVkFMVUVfUkVTUE9OU0UQdRIXChNNVFYzX0ZSQUdN'
+    'RU5UX1NUT1JFEHgSGwoXTVRWM19GUkFHTUVOVF9TVE9SRV9BQ0sQeRIaChZNVFYzX0ZSQUdNRU'
+    '5UX1JFVFJJRVZFEHoSIwofTVRWM19GUkFHTUVOVF9SRVRSSUVWRV9SRVNQT05TRRB7EhgKFE1U'
+    'VjNfRlJBR01FTlRfREVMRVRFEHwSFAoPTVRWM19QRUVSX1NUT1JFEIIBEhgKE01UVjNfUEVFUl'
+    '9TVE9SRV9BQ0sQgwESFwoSTVRWM19QRUVSX1JFVFJJRVZFEIQBEiAKG01UVjNfUEVFUl9SRVRS'
+    'SUVWRV9SRVNQT05TRRCFARIcChdNVFYzX0NIQVRfQ09ORklHX1VQREFURRCMARIeChlNVFYzX0'
+    'NIQVRfQ09ORklHX1JFU1BPTlNFEI0BEhYKEU1UVjNfUk9VVEVfVVBEQVRFEJYBEhwKF01UVjNf'
+    'UkVBQ0hBQklMSVRZX1FVRVJZEJcBEh8KGk1UVjNfUkVBQ0hBQklMSVRZX1JFU1BPTlNFEJgBEh'
+    'cKEk1UVjNfUkVMQVlfRk9SV0FSRBCZARITCg5NVFYzX1JFTEFZX0FDSxCaARIcChdNVFYzX0hP'
+    'TEVfUFVOQ0hfUkVRVUVTVBCgARIbChZNVFYzX0hPTEVfUFVOQ0hfTk9USUZZEKEBEhkKFE1UVj'
+    'NfSE9MRV9QVU5DSF9QSU5HEKIBEhkKFE1UVjNfSE9MRV9QVU5DSF9QT05HEKMBEh8KGk1UVjNf'
+    'SURFTlRJVFlfQVVUSF9QVUJMSVNIEKoBEiAKG01UVjNfSURFTlRJVFlfQVVUSF9SRVRSSUVWRR'
+    'CrARIgChtNVFYzX0lERU5USVRZX0FVVEhfUkVTUE9OU0UQrAESHwoaTVRWM19JREVOVElUWV9M'
+    'SVZFX1BVQkxJU0gQrQESIAobTVRWM19JREVOVElUWV9MSVZFX1JFVFJJRVZFEK4BEiAKG01UVj'
+    'NfSURFTlRJVFlfTElWRV9SRVNQT05TRRCvARIeChlNVFYzX0lERU5USVRZX0tFTV9QVUJMSVNI'
+    'ELABEh8KGk1UVjNfSURFTlRJVFlfS0VNX1JFVFJJRVZFELEBEh8KGk1UVjNfSURFTlRJVFlfS0'
+    'VNX1JFU1BPTlNFELIBEhMKDk1UVjNfVFdJTl9TWU5DELQBEh0KGE1UVjNfREVWSUNFX1BBSVJf'
+    'UkVRVUVTVBC1ARIdChhNVFYzX0RFVklDRV9QQUlSX0FQUFJPVkUQtgESGwoWTVRWM19ERVZJQ0'
+    'VfUkVWT0NBVElPThC3ARIZChRNVFYzX0NBTEVOREFSX0lOVklURRC+ARIXChJNVFYzX0NBTEVO'
+    'REFSX1JTVlAQvwESGQoUTVRWM19DQUxFTkRBUl9VUERBVEUQwAESGQoUTVRWM19DQUxFTkRBUl'
+    '9ERUxFVEUQwQESGwoWTVRWM19GUkVFX0JVU1lfUkVRVUVTVBDCARIcChdNVFYzX0ZSRUVfQlVT'
+    'WV9SRVNQT05TRRDDARIVChBNVFYzX1BPTExfQ1JFQVRFEMgBEhMKDk1UVjNfUE9MTF9WT1RFEM'
+    'kBEh0KGE1UVjNfUE9MTF9WT1RFX0FOT05ZTU9VUxDKARIVChBNVFYzX1BPTExfVVBEQVRFEMsB'
+    'EhcKEk1UVjNfUE9MTF9TTkFQU0hPVBDMARIVChBNVFYzX1BPTExfUkVWT0tFEM0BEhsKFk1UVj'
+    'NfV0hJVEVCT0FSRF9TVFJPS0UQ0gESGQoUTVRWM19XSElURUJPQVJEX1BBR0UQ0wESFwoSTVRW'
+    'M19GSUxFX0VYQ0hBTkdFENQBEhwKF01UVjNfQ0xJUEJPQVJEX0VYQ0hBTkdFENUBEhwKF01UVj'
+    'NfU0NSRUVOX1NIQVJFX0ZSQU1FENYBEhMKDk1UVjNfQ0FMTF9DSEFUENcBEh4KGU1UVjNfUkVN'
+    'T1RFX0NPTlRST0xfSU5QVVQQ2AESHAoXTVRWM19ERVZJQ0VfS0VNX1JFUVVFU1QQ3AESGgoVTV'
+    'RWM19ERVZJQ0VfS0VNX09GRkVSEN0BEhgKE01UVjNfRklSU1RfQ1JfU1RPUkUQ3gESHAoXTVRW'
+    'M19GSVJTVF9DUl9TVE9SRV9BQ0sQ3wESGgoVTVRWM19GSVJTVF9DUl9ERUxJVkVSEOAB');
 
 @$core.Deprecated('Use contentMetadataDescriptor instead')
 const ContentMetadata$json = {
@@ -935,10 +930,6 @@ const GroupInviteV3$json = {
     {'1': 'members', '3': 4, '4': 3, '5': 11, '6': '.cleona.GroupMemberV3', '10': 'members'},
     {'1': 'group_picture', '3': 5, '4': 1, '5': 12, '10': 'groupPicture'},
     {'1': 'group_description', '3': 6, '4': 1, '5': 9, '10': 'groupDescription'},
-    {'1': 'membership_epoch', '3': 7, '4': 1, '5': 4, '10': 'membershipEpoch'},
-    {'1': 'membership_hash', '3': 8, '4': 1, '5': 12, '10': 'membershipHash'},
-    {'1': 'membership_sig_ed25519', '3': 9, '4': 1, '5': 12, '10': 'membershipSigEd25519'},
-    {'1': 'membership_sig_ml_dsa', '3': 10, '4': 1, '5': 12, '10': 'membershipSigMlDsa'},
   ],
 };
 
@@ -948,10 +939,7 @@ final $typed_data.Uint8List groupInviteV3Descriptor = $convert.base64Decode(
     'UYAiABKAlSCWdyb3VwTmFtZRIdCgppbnZpdGVyX2lkGAMgASgMUglpbnZpdGVySWQSLwoHbWVt'
     'YmVycxgEIAMoCzIVLmNsZW9uYS5Hcm91cE1lbWJlclYzUgdtZW1iZXJzEiMKDWdyb3VwX3BpY3'
     'R1cmUYBSABKAxSDGdyb3VwUGljdHVyZRIrChFncm91cF9kZXNjcmlwdGlvbhgGIAEoCVIQZ3Jv'
-    'dXBEZXNjcmlwdGlvbhIpChBtZW1iZXJzaGlwX2Vwb2NoGAcgASgEUg9tZW1iZXJzaGlwRXBvY2'
-    'gSJwoPbWVtYmVyc2hpcF9oYXNoGAggASgMUg5tZW1iZXJzaGlwSGFzaBI0ChZtZW1iZXJzaGlw'
-    'X3NpZ19lZDI1NTE5GAkgASgMUhRtZW1iZXJzaGlwU2lnRWQyNTUxORIxChVtZW1iZXJzaGlwX3'
-    'NpZ19tbF9kc2EYCiABKAxSEm1lbWJlcnNoaXBTaWdNbERzYQ==');
+    'dXBEZXNjcmlwdGlvbg==');
 
 @$core.Deprecated('Use groupMemberV3Descriptor instead')
 const GroupMemberV3$json = {
@@ -973,20 +961,6 @@ final $typed_data.Uint8List groupMemberV3Descriptor = $convert.base64Decode(
     'aWNfa2V5GAQgASgMUhBlZDI1NTE5UHVibGljS2V5EioKEXgyNTUxOV9wdWJsaWNfa2V5GAUgAS'
     'gMUg94MjU1MTlQdWJsaWNLZXkSKQoRbWxfa2VtX3B1YmxpY19rZXkYBiABKAxSDm1sS2VtUHVi'
     'bGljS2V5');
-
-@$core.Deprecated('Use groupMembershipResyncRequestDescriptor instead')
-const GroupMembershipResyncRequest$json = {
-  '1': 'GroupMembershipResyncRequest',
-  '2': [
-    {'1': 'group_id', '3': 1, '4': 1, '5': 12, '10': 'groupId'},
-    {'1': 'local_epoch', '3': 2, '4': 1, '5': 4, '10': 'localEpoch'},
-  ],
-};
-
-/// Descriptor for `GroupMembershipResyncRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List groupMembershipResyncRequestDescriptor = $convert.base64Decode(
-    'ChxHcm91cE1lbWJlcnNoaXBSZXN5bmNSZXF1ZXN0EhkKCGdyb3VwX2lkGAEgASgMUgdncm91cE'
-    'lkEh8KC2xvY2FsX2Vwb2NoGAIgASgEUgpsb2NhbEVwb2No');
 
 @$core.Deprecated('Use groupKeyUpdateDescriptor instead')
 const GroupKeyUpdate$json = {
@@ -1073,10 +1047,6 @@ const ChannelInvite$json = {
     {'1': 'is_public', '3': 9, '4': 1, '5': 8, '10': 'isPublic'},
     {'1': 'is_adult', '3': 10, '4': 1, '5': 8, '10': 'isAdult'},
     {'1': 'language', '3': 11, '4': 1, '5': 9, '10': 'language'},
-    {'1': 'membership_epoch', '3': 12, '4': 1, '5': 4, '10': 'membershipEpoch'},
-    {'1': 'membership_hash', '3': 13, '4': 1, '5': 12, '10': 'membershipHash'},
-    {'1': 'membership_sig_ed25519', '3': 14, '4': 1, '5': 12, '10': 'membershipSigEd25519'},
-    {'1': 'membership_sig_ml_dsa', '3': 15, '4': 1, '5': 12, '10': 'membershipSigMlDsa'},
   ],
 };
 
@@ -1089,10 +1059,7 @@ final $typed_data.Uint8List channelInviteDescriptor = $convert.base64Decode(
     'bmVsX2Rlc2NyaXB0aW9uGAcgASgJUhJjaGFubmVsRGVzY3JpcHRpb24SLwoHbWVtYmVycxgIIA'
     'MoCzIVLmNsZW9uYS5Hcm91cE1lbWJlclYzUgdtZW1iZXJzEhsKCWlzX3B1YmxpYxgJIAEoCFII'
     'aXNQdWJsaWMSGQoIaXNfYWR1bHQYCiABKAhSB2lzQWR1bHQSGgoIbGFuZ3VhZ2UYCyABKAlSCG'
-    'xhbmd1YWdlEikKEG1lbWJlcnNoaXBfZXBvY2gYDCABKARSD21lbWJlcnNoaXBFcG9jaBInCg9t'
-    'ZW1iZXJzaGlwX2hhc2gYDSABKAxSDm1lbWJlcnNoaXBIYXNoEjQKFm1lbWJlcnNoaXBfc2lnX2'
-    'VkMjU1MTkYDiABKAxSFG1lbWJlcnNoaXBTaWdFZDI1NTE5EjEKFW1lbWJlcnNoaXBfc2lnX21s'
-    'X2RzYRgPIAEoDFISbWVtYmVyc2hpcFNpZ01sRHNh');
+    'xhbmd1YWdl');
 
 @$core.Deprecated('Use channelRoleUpdateDescriptor instead')
 const ChannelRoleUpdate$json = {
@@ -1605,9 +1572,6 @@ const JuryRequestMsg$json = {
     {'1': 'report_description', '3': 6, '4': 1, '5': 9, '10': 'reportDescription'},
     {'1': 'channel_name', '3': 7, '4': 1, '5': 9, '10': 'channelName'},
     {'1': 'channel_language', '3': 8, '4': 1, '5': 9, '10': 'channelLanguage'},
-    {'1': 'epoch_day', '3': 9, '4': 1, '5': 13, '10': 'epochDay'},
-    {'1': 'jury_round', '3': 10, '4': 1, '5': 13, '10': 'juryRound'},
-    {'1': 'eligibility_snapshot_hash', '3': 11, '4': 1, '5': 12, '10': 'eligibilitySnapshotHash'},
   ],
 };
 
@@ -1618,9 +1582,7 @@ final $typed_data.Uint8List juryRequestMsgDescriptor = $convert.base64Decode(
     'cnkYBCABKA1SCGNhdGVnb3J5EioKEWV2aWRlbmNlX3Bvc3RfaWRzGAUgAygMUg9ldmlkZW5jZV'
     'Bvc3RJZHMSLQoScmVwb3J0X2Rlc2NyaXB0aW9uGAYgASgJUhFyZXBvcnREZXNjcmlwdGlvbhIh'
     'CgxjaGFubmVsX25hbWUYByABKAlSC2NoYW5uZWxOYW1lEikKEGNoYW5uZWxfbGFuZ3VhZ2UYCC'
-    'ABKAlSD2NoYW5uZWxMYW5ndWFnZRIbCgllcG9jaF9kYXkYCSABKA1SCGVwb2NoRGF5Eh0KCmp1'
-    'cnlfcm91bmQYCiABKA1SCWp1cnlSb3VuZBI6ChllbGlnaWJpbGl0eV9zbmFwc2hvdF9oYXNoGA'
-    'sgASgMUhdlbGlnaWJpbGl0eVNuYXBzaG90SGFzaA==');
+    'ABKAlSD2NoYW5uZWxMYW5ndWFnZQ==');
 
 @$core.Deprecated('Use juryVoteMsgDescriptor instead')
 const JuryVoteMsg$json = {
@@ -1630,20 +1592,13 @@ const JuryVoteMsg$json = {
     {'1': 'report_id', '3': 2, '4': 1, '5': 12, '10': 'reportId'},
     {'1': 'vote', '3': 3, '4': 1, '5': 13, '10': 'vote'},
     {'1': 'reason', '3': 4, '4': 1, '5': 9, '10': 'reason'},
-    {'1': 'sig_ed25519', '3': 5, '4': 1, '5': 12, '10': 'sigEd25519'},
-    {'1': 'sig_ml_dsa', '3': 6, '4': 1, '5': 12, '10': 'sigMlDsa'},
-    {'1': 'jury_round', '3': 7, '4': 1, '5': 13, '10': 'juryRound'},
-    {'1': 'epoch_day', '3': 8, '4': 1, '5': 13, '10': 'epochDay'},
   ],
 };
 
 /// Descriptor for `JuryVoteMsg`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List juryVoteMsgDescriptor = $convert.base64Decode(
     'CgtKdXJ5Vm90ZU1zZxIXCgdqdXJ5X2lkGAEgASgMUgZqdXJ5SWQSGwoJcmVwb3J0X2lkGAIgAS'
-    'gMUghyZXBvcnRJZBISCgR2b3RlGAMgASgNUgR2b3RlEhYKBnJlYXNvbhgEIAEoCVIGcmVhc29u'
-    'Eh8KC3NpZ19lZDI1NTE5GAUgASgMUgpzaWdFZDI1NTE5EhwKCnNpZ19tbF9kc2EYBiABKAxSCH'
-    'NpZ01sRHNhEh0KCmp1cnlfcm91bmQYByABKA1SCWp1cnlSb3VuZBIbCgllcG9jaF9kYXkYCCAB'
-    'KA1SCGVwb2NoRGF5');
+    'gMUghyZXBvcnRJZBISCgR2b3RlGAMgASgNUgR2b3RlEhYKBnJlYXNvbhgEIAEoCVIGcmVhc29u');
 
 @$core.Deprecated('Use juryResultMsgDescriptor instead')
 const JuryResultMsg$json = {
@@ -1657,10 +1612,6 @@ const JuryResultMsg$json = {
     {'1': 'votes_reject', '3': 6, '4': 1, '5': 13, '10': 'votesReject'},
     {'1': 'votes_abstain', '3': 7, '4': 1, '5': 13, '10': 'votesAbstain'},
     {'1': 'new_bad_badge_level', '3': 8, '4': 1, '5': 13, '10': 'newBadBadgeLevel'},
-    {'1': 'juror_sigs', '3': 9, '4': 3, '5': 11, '6': '.cleona.JurorVerdictSig', '10': 'jurorSigs'},
-    {'1': 'eligibility_snapshot_hash', '3': 10, '4': 1, '5': 12, '10': 'eligibilitySnapshotHash'},
-    {'1': 'epoch_day', '3': 11, '4': 1, '5': 13, '10': 'epochDay'},
-    {'1': 'jury_round', '3': 12, '4': 1, '5': 13, '10': 'juryRound'},
   ],
 };
 
@@ -1671,107 +1622,7 @@ final $typed_data.Uint8List juryResultMsgDescriptor = $convert.base64Decode(
     'ZW5jZRgEIAEoDVILY29uc2VxdWVuY2USIwoNdm90ZXNfYXBwcm92ZRgFIAEoDVIMdm90ZXNBcH'
     'Byb3ZlEiEKDHZvdGVzX3JlamVjdBgGIAEoDVILdm90ZXNSZWplY3QSIwoNdm90ZXNfYWJzdGFp'
     'bhgHIAEoDVIMdm90ZXNBYnN0YWluEi0KE25ld19iYWRfYmFkZ2VfbGV2ZWwYCCABKA1SEG5ld0'
-    'JhZEJhZGdlTGV2ZWwSNgoKanVyb3Jfc2lncxgJIAMoCzIXLmNsZW9uYS5KdXJvclZlcmRpY3RT'
-    'aWdSCWp1cm9yU2lncxI6ChllbGlnaWJpbGl0eV9zbmFwc2hvdF9oYXNoGAogASgMUhdlbGlnaW'
-    'JpbGl0eVNuYXBzaG90SGFzaBIbCgllcG9jaF9kYXkYCyABKA1SCGVwb2NoRGF5Eh0KCmp1cnlf'
-    'cm91bmQYDCABKA1SCWp1cnlSb3VuZA==');
-
-@$core.Deprecated('Use jurorVerdictSigDescriptor instead')
-const JurorVerdictSig$json = {
-  '1': 'JurorVerdictSig',
-  '2': [
-    {'1': 'juror_user_id', '3': 1, '4': 1, '5': 12, '10': 'jurorUserId'},
-    {'1': 'sig_ed25519', '3': 2, '4': 1, '5': 12, '10': 'sigEd25519'},
-    {'1': 'sig_ml_dsa', '3': 3, '4': 1, '5': 12, '10': 'sigMlDsa'},
-    {'1': 'vote', '3': 4, '4': 1, '5': 13, '10': 'vote'},
-  ],
-};
-
-/// Descriptor for `JurorVerdictSig`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List jurorVerdictSigDescriptor = $convert.base64Decode(
-    'Cg9KdXJvclZlcmRpY3RTaWcSIgoNanVyb3JfdXNlcl9pZBgBIAEoDFILanVyb3JVc2VySWQSHw'
-    'oLc2lnX2VkMjU1MTkYAiABKAxSCnNpZ0VkMjU1MTkSHAoKc2lnX21sX2RzYRgDIAEoDFIIc2ln'
-    'TWxEc2ESEgoEdm90ZRgEIAEoDVIEdm90ZQ==');
-
-@$core.Deprecated('Use jurorAvailabilityRecordDescriptor instead')
-const JurorAvailabilityRecord$json = {
-  '1': 'JurorAvailabilityRecord',
-  '2': [
-    {'1': 'user_pub_key_ed25519', '3': 1, '4': 1, '5': 12, '10': 'userPubKeyEd25519'},
-    {'1': 'user_pub_key_ml_dsa', '3': 2, '4': 1, '5': 12, '10': 'userPubKeyMlDsa'},
-    {'1': 'creation_epoch_ms', '3': 3, '4': 1, '5': 4, '10': 'creationEpochMs'},
-    {'1': 'self_sig_ed25519', '3': 4, '4': 1, '5': 12, '10': 'selfSigEd25519'},
-    {'1': 'self_sig_ml_dsa', '3': 5, '4': 1, '5': 12, '10': 'selfSigMlDsa'},
-    {'1': 'published_at_ms', '3': 6, '4': 1, '5': 4, '10': 'publishedAtMs'},
-  ],
-};
-
-/// Descriptor for `JurorAvailabilityRecord`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List jurorAvailabilityRecordDescriptor = $convert.base64Decode(
-    'ChdKdXJvckF2YWlsYWJpbGl0eVJlY29yZBIvChR1c2VyX3B1Yl9rZXlfZWQyNTUxORgBIAEoDF'
-    'IRdXNlclB1YktleUVkMjU1MTkSLAoTdXNlcl9wdWJfa2V5X21sX2RzYRgCIAEoDFIPdXNlclB1'
-    'YktleU1sRHNhEioKEWNyZWF0aW9uX2Vwb2NoX21zGAMgASgEUg9jcmVhdGlvbkVwb2NoTXMSKA'
-    'oQc2VsZl9zaWdfZWQyNTUxORgEIAEoDFIOc2VsZlNpZ0VkMjU1MTkSJQoPc2VsZl9zaWdfbWxf'
-    'ZHNhGAUgASgMUgxzZWxmU2lnTWxEc2ESJgoPcHVibGlzaGVkX2F0X21zGAYgASgEUg1wdWJsaX'
-    'NoZWRBdE1z');
-
-@$core.Deprecated('Use moderationProofRecordDescriptor instead')
-const ModerationProofRecord$json = {
-  '1': 'ModerationProofRecord',
-  '2': [
-    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
-    {'1': 'jury_id', '3': 2, '4': 1, '5': 12, '10': 'juryId'},
-    {'1': 'report_id', '3': 3, '4': 1, '5': 12, '10': 'reportId'},
-    {'1': 'consequence', '3': 4, '4': 1, '5': 13, '10': 'consequence'},
-    {'1': 'epoch_day', '3': 5, '4': 1, '5': 13, '10': 'epochDay'},
-    {'1': 'jury_round', '3': 6, '4': 1, '5': 13, '10': 'juryRound'},
-    {'1': 'juror_sigs', '3': 7, '4': 3, '5': 11, '6': '.cleona.JurorVerdictSig', '10': 'jurorSigs'},
-    {'1': 'eligibility_snapshot_hash', '3': 8, '4': 1, '5': 12, '10': 'eligibilitySnapshotHash'},
-  ],
-};
-
-/// Descriptor for `ModerationProofRecord`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List moderationProofRecordDescriptor = $convert.base64Decode(
-    'ChVNb2RlcmF0aW9uUHJvb2ZSZWNvcmQSHQoKY2hhbm5lbF9pZBgBIAEoDFIJY2hhbm5lbElkEh'
-    'cKB2p1cnlfaWQYAiABKAxSBmp1cnlJZBIbCglyZXBvcnRfaWQYAyABKAxSCHJlcG9ydElkEiAK'
-    'C2NvbnNlcXVlbmNlGAQgASgNUgtjb25zZXF1ZW5jZRIbCgllcG9jaF9kYXkYBSABKA1SCGVwb2'
-    'NoRGF5Eh0KCmp1cnlfcm91bmQYBiABKA1SCWp1cnlSb3VuZBI2CgpqdXJvcl9zaWdzGAcgAygL'
-    'MhcuY2xlb25hLkp1cm9yVmVyZGljdFNpZ1IJanVyb3JTaWdzEjoKGWVsaWdpYmlsaXR5X3NuYX'
-    'BzaG90X2hhc2gYCCABKAxSF2VsaWdpYmlsaXR5U25hcHNob3RIYXNo');
-
-@$core.Deprecated('Use csamReporterQuorumProofDescriptor instead')
-const CsamReporterQuorumProof$json = {
-  '1': 'CsamReporterQuorumProof',
-  '2': [
-    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
-    {'1': 'reporter_sigs', '3': 2, '4': 3, '5': 11, '6': '.cleona.CsamReportSig', '10': 'reporterSigs'},
-  ],
-};
-
-/// Descriptor for `CsamReporterQuorumProof`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List csamReporterQuorumProofDescriptor = $convert.base64Decode(
-    'ChdDc2FtUmVwb3J0ZXJRdW9ydW1Qcm9vZhIdCgpjaGFubmVsX2lkGAEgASgMUgljaGFubmVsSW'
-    'QSOgoNcmVwb3J0ZXJfc2lncxgCIAMoCzIVLmNsZW9uYS5Dc2FtUmVwb3J0U2lnUgxyZXBvcnRl'
-    'clNpZ3M=');
-
-@$core.Deprecated('Use csamReportSigDescriptor instead')
-const CsamReportSig$json = {
-  '1': 'CsamReportSig',
-  '2': [
-    {'1': 'reporter_user_id', '3': 1, '4': 1, '5': 12, '10': 'reporterUserId'},
-    {'1': 'sig_ed25519', '3': 2, '4': 1, '5': 12, '10': 'sigEd25519'},
-    {'1': 'sig_ml_dsa', '3': 3, '4': 1, '5': 12, '10': 'sigMlDsa'},
-    {'1': 'report_id', '3': 4, '4': 1, '5': 12, '10': 'reportId'},
-    {'1': 'reported_at_ms', '3': 5, '4': 1, '5': 4, '10': 'reportedAtMs'},
-  ],
-};
-
-/// Descriptor for `CsamReportSig`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List csamReportSigDescriptor = $convert.base64Decode(
-    'Cg1Dc2FtUmVwb3J0U2lnEigKEHJlcG9ydGVyX3VzZXJfaWQYASABKAxSDnJlcG9ydGVyVXNlck'
-    'lkEh8KC3NpZ19lZDI1NTE5GAIgASgMUgpzaWdFZDI1NTE5EhwKCnNpZ19tbF9kc2EYAyABKAxS'
-    'CHNpZ01sRHNhEhsKCXJlcG9ydF9pZBgEIAEoDFIIcmVwb3J0SWQSJAoOcmVwb3J0ZWRfYXRfbX'
-    'MYBSABKARSDHJlcG9ydGVkQXRNcw==');
+    'JhZEJhZGdlTGV2ZWw=');
 
 @$core.Deprecated('Use channelIndexEntryProtoDescriptor instead')
 const ChannelIndexEntryProto$json = {
@@ -1789,7 +1640,6 @@ const ChannelIndexEntryProto$json = {
     {'1': 'owner_node_id', '3': 10, '4': 1, '5': 12, '10': 'ownerNodeId'},
     {'1': 'created_at_ms', '3': 11, '4': 1, '5': 4, '10': 'createdAtMs'},
     {'1': 'owner_signature', '3': 12, '4': 1, '5': 12, '10': 'ownerSignature'},
-    {'1': 'moderation_proof_hash', '3': 13, '4': 1, '5': 12, '10': 'moderationProofHash'},
   ],
 };
 
@@ -1803,8 +1653,7 @@ final $typed_data.Uint8List channelIndexEntryProtoDescriptor = $convert.base64De
     'JhZEJhZGdlU2luY2VNcxIxChRjb3JyZWN0aW9uX3N1Ym1pdHRlZBgJIAEoCFITY29ycmVjdGlv'
     'blN1Ym1pdHRlZBIiCg1vd25lcl9ub2RlX2lkGAogASgMUgtvd25lck5vZGVJZBIiCg1jcmVhdG'
     'VkX2F0X21zGAsgASgEUgtjcmVhdGVkQXRNcxInCg9vd25lcl9zaWduYXR1cmUYDCABKAxSDm93'
-    'bmVyU2lnbmF0dXJlEjIKFW1vZGVyYXRpb25fcHJvb2ZfaGFzaBgNIAEoDFITbW9kZXJhdGlvbl'
-    'Byb29mSGFzaA==');
+    'bmVyU2lnbmF0dXJl');
 
 @$core.Deprecated('Use reachabilityCheckDescriptor instead')
 const ReachabilityCheck$json = {
@@ -2894,54 +2743,6 @@ final $typed_data.Uint8List pollVoteRevokeMsgDescriptor = $convert.base64Decode(
     'ZRIhCgxyaW5nX21lbWJlcnMYBCADKAxSC3JpbmdNZW1iZXJzEh0KCnJldm9rZWRfYXQYBSABKA'
     'NSCXJldm9rZWRBdA==');
 
-@$core.Deprecated('Use pollAnonSubmitEntryDescriptor instead')
-const PollAnonSubmitEntry$json = {
-  '1': 'PollAnonSubmitEntry',
-  '2': [
-    {'1': 'recipient_user_id', '3': 1, '4': 1, '5': 12, '10': 'recipientUserId'},
-    {'1': 'kem_blob', '3': 2, '4': 1, '5': 12, '10': 'kemBlob'},
-    {'1': 'device_ids', '3': 3, '4': 3, '5': 12, '10': 'deviceIds'},
-  ],
-};
-
-/// Descriptor for `PollAnonSubmitEntry`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List pollAnonSubmitEntryDescriptor = $convert.base64Decode(
-    'ChNQb2xsQW5vblN1Ym1pdEVudHJ5EioKEXJlY2lwaWVudF91c2VyX2lkGAEgASgMUg9yZWNpcG'
-    'llbnRVc2VySWQSGQoIa2VtX2Jsb2IYAiABKAxSB2tlbUJsb2ISHQoKZGV2aWNlX2lkcxgDIAMo'
-    'DFIJZGV2aWNlSWRz');
-
-@$core.Deprecated('Use pollAnonSubmitMsgDescriptor instead')
-const PollAnonSubmitMsg$json = {
-  '1': 'PollAnonSubmitMsg',
-  '2': [
-    {'1': 'poll_id', '3': 1, '4': 1, '5': 12, '10': 'pollId'},
-    {'1': 'entries', '3': 2, '4': 3, '5': 11, '6': '.cleona.PollAnonSubmitEntry', '10': 'entries'},
-    {'1': 'pow_nonce', '3': 3, '4': 1, '5': 4, '10': 'powNonce'},
-  ],
-};
-
-/// Descriptor for `PollAnonSubmitMsg`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List pollAnonSubmitMsgDescriptor = $convert.base64Decode(
-    'ChFQb2xsQW5vblN1Ym1pdE1zZxIXCgdwb2xsX2lkGAEgASgMUgZwb2xsSWQSNQoHZW50cmllcx'
-    'gCIAMoCzIbLmNsZW9uYS5Qb2xsQW5vblN1Ym1pdEVudHJ5UgdlbnRyaWVzEhsKCXBvd19ub25j'
-    'ZRgDIAEoBFIIcG93Tm9uY2U=');
-
-@$core.Deprecated('Use pollAnonSubmitAckMsgDescriptor instead')
-const PollAnonSubmitAckMsg$json = {
-  '1': 'PollAnonSubmitAckMsg',
-  '2': [
-    {'1': 'poll_id', '3': 1, '4': 1, '5': 12, '10': 'pollId'},
-    {'1': 'accepted', '3': 2, '4': 1, '5': 8, '10': 'accepted'},
-    {'1': 'reject_reason', '3': 3, '4': 1, '5': 9, '10': 'rejectReason'},
-  ],
-};
-
-/// Descriptor for `PollAnonSubmitAckMsg`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List pollAnonSubmitAckMsgDescriptor = $convert.base64Decode(
-    'ChRQb2xsQW5vblN1Ym1pdEFja01zZxIXCgdwb2xsX2lkGAEgASgMUgZwb2xsSWQSGgoIYWNjZX'
-    'B0ZWQYAiABKAhSCGFjY2VwdGVkEiMKDXJlamVjdF9yZWFzb24YAyABKAlSDHJlamVjdFJlYXNv'
-    'bg==');
-
 @$core.Deprecated('Use rotationChainLinkProtoDescriptor instead')
 const RotationChainLinkProto$json = {
   '1': 'RotationChainLinkProto',
@@ -3134,8 +2935,6 @@ const ApplicationFrameV3$json = {
     {'1': 'erasure_metadata', '3': 15, '4': 1, '5': 11, '6': '.cleona.ErasureCodingMetadata', '10': 'erasureMetadata'},
     {'1': 'compression', '3': 16, '4': 1, '5': 14, '6': '.cleona.CompressionType', '10': 'compression'},
     {'1': 'group_id', '3': 17, '4': 1, '5': 12, '10': 'groupId'},
-    {'1': 'group_membership_epoch', '3': 18, '4': 1, '5': 4, '10': 'groupMembershipEpoch'},
-    {'1': 'group_membership_hash', '3': 19, '4': 1, '5': 12, '10': 'groupMembershipHash'},
   ],
 };
 
@@ -3153,9 +2952,7 @@ final $typed_data.Uint8List applicationFrameV3Descriptor = $convert.base64Decode
     'RhZGF0YRgOIAEoCzIWLmNsZW9uYS5FeHBpcnlNZXRhZGF0YVIOZXhwaXJ5TWV0YWRhdGESSAoQ'
     'ZXJhc3VyZV9tZXRhZGF0YRgPIAEoCzIdLmNsZW9uYS5FcmFzdXJlQ29kaW5nTWV0YWRhdGFSD2'
     'VyYXN1cmVNZXRhZGF0YRI5Cgtjb21wcmVzc2lvbhgQIAEoDjIXLmNsZW9uYS5Db21wcmVzc2lv'
-    'blR5cGVSC2NvbXByZXNzaW9uEhkKCGdyb3VwX2lkGBEgASgMUgdncm91cElkEjQKFmdyb3VwX2'
-    '1lbWJlcnNoaXBfZXBvY2gYEiABKARSFGdyb3VwTWVtYmVyc2hpcEVwb2NoEjIKFWdyb3VwX21l'
-    'bWJlcnNoaXBfaGFzaBgTIAEoDFITZ3JvdXBNZW1iZXJzaGlwSGFzaA==');
+    'blR5cGVSC2NvbXByZXNzaW9uEhkKCGdyb3VwX2lkGBEgASgMUgdncm91cElk');
 
 @$core.Deprecated('Use perMessageKemV3Descriptor instead')
 const PerMessageKemV3$json = {
@@ -3425,51 +3222,4 @@ final $typed_data.Uint8List firstCrDeliverV3Descriptor = $convert.base64Decode(
     'ChBGaXJzdENyRGVsaXZlclYzEioKEWVuY3J5cHRlZF9jcl9ibG9iGAEgASgMUg9lbmNyeXB0ZW'
     'RDckJsb2ISKAoQc2VuZGVyX2RldmljZV9pZBgCIAEoDFIOc2VuZGVyRGV2aWNlSWQSIAoMc3Rv'
     'cmVkX2F0X21zGAMgASgEUgpzdG9yZWRBdE1z');
-
-@$core.Deprecated('Use devicePairRequestV3Descriptor instead')
-const DevicePairRequestV3$json = {
-  '1': 'DevicePairRequestV3',
-  '2': [
-    {'1': 'device_ed25519_pk', '3': 1, '4': 1, '5': 12, '10': 'deviceEd25519Pk'},
-    {'1': 'device_ml_dsa_pk', '3': 2, '4': 1, '5': 12, '10': 'deviceMlDsaPk'},
-    {'1': 'pair_token_signature', '3': 3, '4': 1, '5': 12, '10': 'pairTokenSignature'},
-    {'1': 'timestamp_ms', '3': 4, '4': 1, '5': 4, '10': 'timestampMs'},
-  ],
-};
-
-/// Descriptor for `DevicePairRequestV3`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List devicePairRequestV3Descriptor = $convert.base64Decode(
-    'ChNEZXZpY2VQYWlyUmVxdWVzdFYzEioKEWRldmljZV9lZDI1NTE5X3BrGAEgASgMUg9kZXZpY2'
-    'VFZDI1NTE5UGsSJwoQZGV2aWNlX21sX2RzYV9waxgCIAEoDFINZGV2aWNlTWxEc2FQaxIwChRw'
-    'YWlyX3Rva2VuX3NpZ25hdHVyZRgDIAEoDFIScGFpclRva2VuU2lnbmF0dXJlEiEKDHRpbWVzdG'
-    'FtcF9tcxgEIAEoBFILdGltZXN0YW1wTXM=');
-
-@$core.Deprecated('Use devicePairApproveV3Descriptor instead')
-const DevicePairApproveV3$json = {
-  '1': 'DevicePairApproveV3',
-  '2': [
-    {'1': 'delegated_ed25519_pk', '3': 1, '4': 1, '5': 12, '10': 'delegatedEd25519Pk'},
-    {'1': 'delegated_ed25519_sk', '3': 2, '4': 1, '5': 12, '10': 'delegatedEd25519Sk'},
-    {'1': 'delegated_ml_dsa_pk', '3': 3, '4': 1, '5': 12, '10': 'delegatedMlDsaPk'},
-    {'1': 'delegated_ml_dsa_sk', '3': 4, '4': 1, '5': 12, '10': 'delegatedMlDsaSk'},
-    {'1': 'user_x25519_sk', '3': 5, '4': 1, '5': 12, '10': 'userX25519Sk'},
-    {'1': 'user_ml_kem_sk', '3': 6, '4': 1, '5': 12, '10': 'userMlKemSk'},
-    {'1': 'delegation_cert', '3': 7, '4': 1, '5': 11, '6': '.cleona.DeviceDelegationCertProto', '10': 'delegationCert'},
-    {'1': 'user_id', '3': 8, '4': 1, '5': 12, '10': 'userId'},
-    {'1': 'display_name', '3': 9, '4': 1, '5': 9, '10': 'displayName'},
-    {'1': 'profile_picture', '3': 10, '4': 1, '5': 12, '10': 'profilePicture'},
-  ],
-};
-
-/// Descriptor for `DevicePairApproveV3`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List devicePairApproveV3Descriptor = $convert.base64Decode(
-    'ChNEZXZpY2VQYWlyQXBwcm92ZVYzEjAKFGRlbGVnYXRlZF9lZDI1NTE5X3BrGAEgASgMUhJkZW'
-    'xlZ2F0ZWRFZDI1NTE5UGsSMAoUZGVsZWdhdGVkX2VkMjU1MTlfc2sYAiABKAxSEmRlbGVnYXRl'
-    'ZEVkMjU1MTlTaxItChNkZWxlZ2F0ZWRfbWxfZHNhX3BrGAMgASgMUhBkZWxlZ2F0ZWRNbERzYV'
-    'BrEi0KE2RlbGVnYXRlZF9tbF9kc2Ffc2sYBCABKAxSEGRlbGVnYXRlZE1sRHNhU2sSJAoOdXNl'
-    'cl94MjU1MTlfc2sYBSABKAxSDHVzZXJYMjU1MTlTaxIjCg51c2VyX21sX2tlbV9zaxgGIAEoDF'
-    'ILdXNlck1sS2VtU2sSSgoPZGVsZWdhdGlvbl9jZXJ0GAcgASgLMiEuY2xlb25hLkRldmljZURl'
-    'bGVnYXRpb25DZXJ0UHJvdG9SDmRlbGVnYXRpb25DZXJ0EhcKB3VzZXJfaWQYCCABKAxSBnVzZX'
-    'JJZBIhCgxkaXNwbGF5X25hbWUYCSABKAlSC2Rpc3BsYXlOYW1lEicKD3Byb2ZpbGVfcGljdHVy'
-    'ZRgKIAEoDFIOcHJvZmlsZVBpY3R1cmU=');
 

@@ -1,6 +1,6 @@
 //
 //  Generated code. Do not modify.
-//  source: cleona.proto
+//  source: proto/cleona.proto
 //
 // @dart = 2.12
 
@@ -110,8 +110,6 @@ class TwinSyncType extends $pb.ProtobufEnum {
   static const TwinSyncType DEVICE_ANNOUNCE = TwinSyncType._(9, _omitEnumNames ? '' : 'DEVICE_ANNOUNCE');
   static const TwinSyncType DEVICE_RENAMED = TwinSyncType._(10, _omitEnumNames ? '' : 'DEVICE_RENAMED');
   static const TwinSyncType TWIN_DEVICE_REVOKED = TwinSyncType._(11, _omitEnumNames ? '' : 'TWIN_DEVICE_REVOKED');
-  static const TwinSyncType ROTATION_APPROVAL_REQUEST = TwinSyncType._(12, _omitEnumNames ? '' : 'ROTATION_APPROVAL_REQUEST');
-  static const TwinSyncType ROTATION_APPROVAL_RESPONSE = TwinSyncType._(13, _omitEnumNames ? '' : 'ROTATION_APPROVAL_RESPONSE');
 
   static const $core.List<TwinSyncType> values = <TwinSyncType> [
     CONTACT_ADDED,
@@ -126,8 +124,6 @@ class TwinSyncType extends $pb.ProtobufEnum {
     DEVICE_ANNOUNCE,
     DEVICE_RENAMED,
     TWIN_DEVICE_REVOKED,
-    ROTATION_APPROVAL_REQUEST,
-    ROTATION_APPROVAL_RESPONSE,
   ];
 
   static final $core.Map<$core.int, TwinSyncType> _byValue = $pb.ProtobufEnum.initByValue(values);
@@ -363,7 +359,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_GROUP_INVITE = MessageTypeV3._(51, _omitEnumNames ? '' : 'MTV3_GROUP_INVITE');
   static const MessageTypeV3 MTV3_GROUP_LEAVE = MessageTypeV3._(52, _omitEnumNames ? '' : 'MTV3_GROUP_LEAVE');
   static const MessageTypeV3 MTV3_GROUP_KEY_UPDATE = MessageTypeV3._(53, _omitEnumNames ? '' : 'MTV3_GROUP_KEY_UPDATE');
-  static const MessageTypeV3 MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = MessageTypeV3._(54, _omitEnumNames ? '' : 'MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST');
   static const MessageTypeV3 MTV3_CHANNEL_CREATE = MessageTypeV3._(60, _omitEnumNames ? '' : 'MTV3_CHANNEL_CREATE');
   static const MessageTypeV3 MTV3_CHANNEL_POST = MessageTypeV3._(61, _omitEnumNames ? '' : 'MTV3_CHANNEL_POST');
   static const MessageTypeV3 MTV3_CHANNEL_INVITE = MessageTypeV3._(62, _omitEnumNames ? '' : 'MTV3_CHANNEL_INVITE');
@@ -439,7 +434,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_DEVICE_PAIR_REQUEST = MessageTypeV3._(181, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_REQUEST');
   static const MessageTypeV3 MTV3_DEVICE_PAIR_APPROVE = MessageTypeV3._(182, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_APPROVE');
   static const MessageTypeV3 MTV3_DEVICE_REVOCATION = MessageTypeV3._(183, _omitEnumNames ? '' : 'MTV3_DEVICE_REVOCATION');
-  static const MessageTypeV3 MTV3_ROTATION_REJECTION_ALERT = MessageTypeV3._(184, _omitEnumNames ? '' : 'MTV3_ROTATION_REJECTION_ALERT');
   static const MessageTypeV3 MTV3_CALENDAR_INVITE = MessageTypeV3._(190, _omitEnumNames ? '' : 'MTV3_CALENDAR_INVITE');
   static const MessageTypeV3 MTV3_CALENDAR_RSVP = MessageTypeV3._(191, _omitEnumNames ? '' : 'MTV3_CALENDAR_RSVP');
   static const MessageTypeV3 MTV3_CALENDAR_UPDATE = MessageTypeV3._(192, _omitEnumNames ? '' : 'MTV3_CALENDAR_UPDATE');
@@ -464,8 +458,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_FIRST_CR_STORE = MessageTypeV3._(222, _omitEnumNames ? '' : 'MTV3_FIRST_CR_STORE');
   static const MessageTypeV3 MTV3_FIRST_CR_STORE_ACK = MessageTypeV3._(223, _omitEnumNames ? '' : 'MTV3_FIRST_CR_STORE_ACK');
   static const MessageTypeV3 MTV3_FIRST_CR_DELIVER = MessageTypeV3._(224, _omitEnumNames ? '' : 'MTV3_FIRST_CR_DELIVER');
-  static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT = MessageTypeV3._(225, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT');
-  static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT_ACK = MessageTypeV3._(226, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT_ACK');
 
   static const $core.List<MessageTypeV3> values = <MessageTypeV3> [
     MTV3_TEXT,
@@ -498,7 +490,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_GROUP_INVITE,
     MTV3_GROUP_LEAVE,
     MTV3_GROUP_KEY_UPDATE,
-    MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
     MTV3_CHANNEL_CREATE,
     MTV3_CHANNEL_POST,
     MTV3_CHANNEL_INVITE,
@@ -574,7 +565,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_DEVICE_PAIR_REQUEST,
     MTV3_DEVICE_PAIR_APPROVE,
     MTV3_DEVICE_REVOCATION,
-    MTV3_ROTATION_REJECTION_ALERT,
     MTV3_CALENDAR_INVITE,
     MTV3_CALENDAR_RSVP,
     MTV3_CALENDAR_UPDATE,
@@ -599,8 +589,6 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_FIRST_CR_STORE,
     MTV3_FIRST_CR_STORE_ACK,
     MTV3_FIRST_CR_DELIVER,
-    MTV3_POLL_ANON_SUBMIT,
-    MTV3_POLL_ANON_SUBMIT_ACK,
   ];
 
   static final $core.Map<$core.int, MessageTypeV3> _byValue = $pb.ProtobufEnum.initByValue(values);

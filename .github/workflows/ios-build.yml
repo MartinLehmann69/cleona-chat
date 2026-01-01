@@ -266,22 +266,6 @@ jobs:
         run: |
           gem install fastlane --no-document
 
-          # Validate key: decode base64 and check PEM structure
-          echo "--- Key validation ---"
-          echo -n "key_id length: "; echo -n "$APP_STORE_CONNECT_KEY_ID" | wc -c
-          echo -n "issuer_id length: "; echo -n "$APP_STORE_CONNECT_ISSUER" | wc -c
-          echo -n "key secret length: "; echo -n "$APP_STORE_CONNECT_KEY" | wc -c
-          DECODED=$(echo "$APP_STORE_CONNECT_KEY" | base64 -d 2>&1) && {
-            echo "base64 decode: OK"
-            echo -n "decoded length: "; echo -n "$DECODED" | wc -c
-            echo -n "starts with: "; echo "$DECODED" | head -1 | cut -c1-27
-            echo -n "ends with: "; echo "$DECODED" | tail -1 | cut -c1-25
-          } || {
-            echo "base64 decode: FAILED — secret is probably raw PEM, not base64"
-            echo "Trying raw PEM approach..."
-          }
-          echo "--- End validation ---"
-
           IPA=$(find build/ios -name "*.ipa" | head -1)
           if [ -z "$IPA" ]; then
             echo "No IPA found — skipping upload"

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/identity_resolution/device_delegation.dart';
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
+/// §7.1 LD-9/LD-10/LD-11: Cert status, renewal, soft migration.
 class DeviceManagementScreen extends StatefulWidget {
   final ICleonaService service;
   const DeviceManagementScreen({super.key, required this.service});
@@ -29,7 +31,6 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     setState(() {
       _devices = widget.service.devices;
       _localDeviceId = widget.service.localDeviceId;
-      // Sort: this device first, then by lastSeen descending
       _devices.sort((a, b) {
         if (a.deviceId == _localDeviceId) return -1;
         if (b.deviceId == _localDeviceId) return 1;
@@ -230,6 +231,210 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
+  /// §7.1 LD-10: soft migration confirmation dialog
+  void _showSoftMigrationDialog() {
+    final locale = AppLocale.read(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: Icon(Icons.link, color: Theme.of(ctx).colorScheme.primary, size: 48),
+        title: Text(locale.get('linked_device_request_pairing')),
+        content: Text(locale.get('linked_device_pair_request_body')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(locale.get('cancel')),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              final sent = await widget.service.sendDevicePairRequest();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(locale.get(
+                    sent ? 'linked_device_request_sent' : 'linked_device_rejected',
+                  ))),
+                );
+              }
+            },
+            child: Text(locale.get('linked_device_request_pairing')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _capabilityLabel(AppLocale locale, int cap) {
+    switch (cap) {
+      case DeviceDelegation.capSendMessages: return locale.get('linked_device_cap_send');
+      case DeviceDelegation.capManageContacts: return locale.get('linked_device_cap_contacts');
+      case DeviceDelegation.capManageGroups: return locale.get('linked_device_cap_groups');
+      case DeviceDelegation.capManageChannels: return locale.get('linked_device_cap_channels');
+      default: return '?';
+    }
+  }
+
+  Widget _buildLinkedDeviceStatusSection(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
+    final status = widget.service.linkedDeviceStatus;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                status.isLinkedDevice ? Icons.link : Icons.security,
+                color: status.isExpired
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  locale.get('linked_device_status_title'),
+                  style: theme.textTheme.titleSmall,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            locale.get(status.isLinkedDevice
+                ? 'linked_device_status_linked'
+                : 'linked_device_status_primary'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+
+          if (status.hasCert) ...[
+            const SizedBox(height: 12),
+
+            // Capabilities
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                for (final cap in [
+                  DeviceDelegation.capSendMessages,
+                  DeviceDelegation.capManageContacts,
+                  DeviceDelegation.capManageGroups,
+                  DeviceDelegation.capManageChannels,
+                ])
+                  Chip(
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      _capabilityLabel(locale, cap),
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    backgroundColor: status.capabilities & cap != 0
+                        ? theme.colorScheme.primaryContainer
+                        : theme.colorScheme.surfaceContainerHighest,
+                    side: BorderSide.none,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // Expiry
+            if (status.maxValidUntilMs > 0) ...[
+              Row(
+                children: [
+                  Icon(
+                    status.isExpired
+                        ? Icons.error_outline
+                        : status.expiresWithin7Days
+                            ? Icons.warning_amber_rounded
+                            : Icons.timer_outlined,
+                    size: 16,
+                    color: status.isExpired
+                        ? theme.colorScheme.error
+                        : status.expiresWithin7Days
+                            ? Colors.orange
+                            : theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    status.isExpired
+                        ? locale.get('linked_device_cert_expired')
+                        : locale.tr('linked_device_status_expires',
+                            {'date': status.expiryDate}),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: status.isExpired
+                          ? theme.colorScheme.error
+                          : status.expiresWithin7Days
+                              ? Colors.orange
+                              : theme.colorScheme.onSurfaceVariant,
+                      fontWeight: status.isExpired || status.expiresWithin7Days
+                          ? FontWeight.bold
+                          : null,
+                    ),
+                  ),
+                  if (!status.isExpired && status.daysRemaining >= 0) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      locale.tr('linked_device_days_remaining',
+                          {'days': '${status.daysRemaining}'}),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ] else
+              Text(
+                locale.get('linked_device_status_no_expiry'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+
+            // Renew button (visible when expiring soon or expired)
+            if (status.expiresWithin7Days || status.isExpired) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final ok = await widget.service.requestDelegationRenewal();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(locale.get(
+                        ok ? 'linked_device_renewal_sent' : 'linked_device_renewal_failed',
+                      ))),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.refresh, size: 16),
+                label: Text(locale.get('linked_device_renew_now')),
+              ),
+            ],
+          ],
+
+          // §7.1 LD-10: soft migration button (legacy twin → linked device)
+          if (!status.isLinkedDevice && _devices.length > 1) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _showSoftMigrationDialog,
+              icon: const Icon(Icons.link, size: 16),
+              label: Text(locale.get('linked_device_request_pairing')),
+            ),
+            Text(
+              locale.get('linked_device_request_pairing_subtitle'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -353,6 +558,10 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
                       style: theme.textTheme.bodyLarge),
                 ),
               ),
+
+            // §7.1 Linked-Device status (LD-9/LD-10/LD-11)
+            const Divider(height: 32),
+            _buildLinkedDeviceStatusSection(context),
 
             // Key Rotation section
             const Divider(height: 32),

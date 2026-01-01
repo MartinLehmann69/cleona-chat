@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:50ed8f8376f7, 2026-06-12). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:561a2e288767, 2026-06-13). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -920,7 +920,7 @@ This separation is the cryptographic foundation of the 2-Layer wire format from 
 userId = SHA-256(network_secret || ed25519_user_pubkey)    // 32 bytes, founding derivation
 ```
 
-The formula above is the **founding** derivation, computed once at identity creation. The UserID is thereafter a **stable anchor**: it is pinned to the founding Ed25519 pubkey and does **not** change when the underlying user keys change. Emergency Key Rotation (§7.4b / §26.6.2) replaces all user keys but preserves the UserID by carrying a dual-signed old→new key-continuity proof that contacts follow — so after a rotation `userId` no longer equals `SHA-256(network_secret || current_pubkey)`. (Onboarding a *new* contact to a rotated identity via ContactSeed, whose integrity check assumes `userId == SHA-256(secret || ep)`, is an open consistency item — see the security review.)
+The formula above is the **founding** derivation, computed once at identity creation. The UserID is thereafter a **stable anchor**: it is pinned to the founding Ed25519 pubkey and does **not** change when the underlying user keys change. Emergency Key Rotation (§7.4b / §26.6.2) replaces all user keys but preserves the UserID by carrying a dual-signed old→new key-continuity proof that contacts follow — so after a rotation `userId` no longer equals `SHA-256(network_secret || current_pubkey)`. Onboarding a *new* contact to a rotated identity via ContactSeed is handled by the optional `fp` (founding-pubkey) seed field (§8.1.1, SR-2): the seed's integrity check anchors on the founding key (`SHA-256(secret || fp) == userId`); the binding founding→current `ep` is proven by the rotation chain inside the D1-verified Auth-Manifest at first resolution (§4.3 path 2).
 
 UserID properties:
 - **Stable anchor**: persists across device changes, recovery, Multi-Device additions, **and Emergency Key Rotation** — the identifier outlives any individual key
@@ -1078,7 +1078,7 @@ Every user holds a **User-Sig-Keypair** that carries the authenticity of the Use
 
 **Key generation**: derived from the 24-word recovery seed via HD-Wallet-Derivation (§3.6).
 
-**Key rotation**: User-Keys do not rotate in normal operation. There are two explicit compromise responses: **(a) Hard re-identity** — new seed → new UserID, contacts re-verify (§7.4a); **(b) Emergency Key Rotation / Soft re-key** (§7.4b / §26.6.2) — new seed and new keys under the **same** UserID, authorized by a dual-signed old→new continuity proof, propagated to the user's own devices via Twin-Sync and to contacts via `KEY_ROTATION_BROADCAST`. The UserID is a stable anchor (§3.1); the dual-sig chain is the only sanctioned way to change user keys without abandoning the identity. Verification-level retention on re-verification: §3.9. (The rotation-authorization and ContactSeed-coherence weaknesses are tracked in the security review.)
+**Key rotation**: User-Keys do not rotate in normal operation. There are two explicit compromise responses: **(a) Hard re-identity** — new seed → new UserID, contacts re-verify (§7.4a); **(b) Emergency Key Rotation / Soft re-key** (§7.4b / §26.6.2) — new seed and new keys under the **same** UserID, authorized by a dual-signed old→new continuity proof, propagated to the user's own devices via Twin-Sync and to contacts via `KEY_ROTATION_BROADCAST`. The UserID is a stable anchor (§3.1); the dual-sig chain is the only sanctioned way to change user keys without abandoning the identity. Verification-level retention on re-verification: §3.9. (ContactSeed coherence after rotation is solved via the founding-pubkey seed field, §8.1.1 / SR-2. The rotation-**authorization** weakness — the old key alone authorizes, SR-1 — remains tracked in the security review.)
 
 ### 3.5 Device Identity Sigs (Ed25519+ML-DSA-65 hybrid)
 
@@ -1293,7 +1293,7 @@ For `verified` and `trusted`, Cleona stores a `verifiedKeyFingerprint` = SHA-256
 
 > ⚠ Bob's identity key has changed. This may be an identity reset or a man-in-the-middle attempt. Please verify the new key offline.
 
-The verification level is reset to `unverified` until the user actively re-verifies.
+The verification level is reset to `unverified` until the user actively re-verifies. **This path also covers Emergency Key Rotation (SR-1):** even though a soft re-key carries a valid dual-sig + rotation chain (§7.4b), the receiver does not follow it silently at full trust — it applies the new keys but runs the same key-change warning + verification reset, because a valid chain does not prove the rotation was authorized by the legitimate owner rather than a seed-holding thief (§7.4b rotation-authorization threat model). A `contact_identity_rotated` IPC event carries the warning to the UI. As of RC-1, Key-Change-Detection fires on all four overwrite paths: `RESTORE_BROADCAST`, `KEY_ROTATION`, `CONTACT_REQUEST` (re-contact), and `CONTACT_REQUEST_RESPONSE` (re-contact response).
 
 **KEX Gate (§8.2)**: ApplicationFrames received from **unknown** senders (no entry in the `Contact` store) are silently dropped. This prevents spam from random senders. Only explicit Contact-Requests (§8.1) are the permitted first contacts.
 
@@ -1497,6 +1497,10 @@ A manifest is **verified** iff (a) its hybrid signature validates against the **
 
 **Publisher self-store**: the publisher persists every Auth-Manifest / LivenessRecord / DeviceKemRecord it broadcasts into the local IdentityDhtHandler before sending to the K-closest replicators. Standard Kademlia convention publishes records to the K-closest peers including the publisher when it ranks among the K-closest; an explicit self-store makes this invariant uniform across small networks (where the publisher *always* ranks closest to its own dht-keys) and avoids the silent gap where a 2-node cluster has the records nowhere — the only candidate replicator (`findClosestPeers` returns the *other* peer, not self) is the publisher itself, but it never stored its own record.
 
+**Replicator & lookup diversity (D4 — eclipse cost binding):** the K-closest selection for identity-record replication and retrieval prefers **IP-subnet diversity**: at most 2 peers per IP group (IPv4 /16, IPv6 /32; private LAN addresses group by /24; address-less peers share a single group) are taken in XOR-distance order; remaining slots are filled with the closest skipped peers — the selection **never returns fewer peers than the undiversified one**, so single-subnet LANs and small networks keep full replication. The rule applies on **both sides** (publish in IdentityPublisher, retrieve in IdentityResolver) and to the other replicator selections of the same store/retrieve pattern (erasure offline-delivery, identity-registry store, guardian restore), so store-set and lookup-set converge on the same diverse neighbourhood. The DHT `FIND_NODE` *response* path stays distance-pure (protocol semantics — the asker merges and re-sorts). Rationale (§13.1.8): ID grinding lets an insider occupy a victim's K-closest set with minted IDs; post-D1 that only censors. Diversity binds censorship to the genuinely scarce resource — an attacker confined to one subnet holds at most 2 of K=10 replicator slots while ≥8 candidates from other groups exist; majority occupation now requires presence in ≥4 distinct IP groups instead of ≥6 cheap keypairs.
+
+**Publisher self-verify (D4):** after every Auth-Manifest publish cycle (start + 20h refresh) the publisher performs **one** delayed self-lookup (~10 s, lets the stores land): `IDENTITY_AUTH_RETRIEVE` fanned out to the current K-closest replicators, deliberately **bypassing the local self-store** (which would trivially succeed). Pass: at least one response carries the manifest at the just-published `seq`. Miss: warn-log plus exactly **one** re-publish to a freshly computed replicator set — edge-triggered, no retry timer. Honest limitation: a replicator that serves the publisher but censors third parties is indistinguishable from an honest one here; self-verify catches store failures and naive withholding, the structural defense against targeted censorship is the diversity rule above. Liveness/DeviceKem publishes are deliberately not self-verified per refresh (15-min cadence would triple identity traffic); they are protected by the same diverse selection. Observability: `idSelfVerifyOk` / `idSelfVerifyMiss` counters in network stats.
+
 **Liveness-publish receiver-side routability** (V3.0 Welle 5 — multi-device correctness): on receiving an `IDENTITY_LIVE_PUBLISH`, the node also seeds the routing table (`routingTable.addPeer`) and DV-routing (`dvRouting.addDirectNeighbor`) with the announced `(deviceNodeId, addresses)` tuple. Without this hop, a freshly-paired sibling device of a contact (e.g. Alice's newly-added phone joining her existing desktop) would resolve via the AuthManifest but have no routing path until the next Kademlia bucket-refresh. Seeding from the Liveness publish closes that gap immediately. (Note: in V3.0 Welle 5 this was incorrectly motivated by a multi-identity case — that motivation became obsolete with the Multi-Identity DeviceID refactor (§3.1), where all hosted identities of a daemon share one DeviceID.)
 
 **API contract** (V3.0):
@@ -1528,7 +1532,7 @@ class ResolvedDevice {
 
 **Threat model for Ed25519-only liveness**: the auth manifest carries identity authenticity (PQ-secure). Liveness is transient transport-only — a PQ forgery yields a wrong address, not an identity takeover. The sender detects forgery during the KEM-setup roundtrip with the user pubkey from the hybrid-signed auth manifest. The forgery window is bounded by the liveness TTL, at most 1 h.
 
-**Threat model for the trust anchor (D1):** Record forgery by replicators or any insider is excluded by the anchor — an eclipse of the K-closest set can now only **censor** (withhold records), not substitute identities (censorship resistance is addressed by replicator/lookup diversity, see the §13.1 insider addendum). Honest limitation: the userId anchors only the Ed25519 key; the ML-DSA pubkey is bound transitively through the hybrid-signed content. For **non-contact** resolution the anchor is therefore classical — a future quantum adversary could swap the ML-DSA key in a fresh manifest. Real first contact is unaffected (the ContactSeed carries both pubkeys out-of-band, §8.1.1; unknown senders are KEX-gated, §8.2). Hybrid-anchoring the userId itself is a §3.1 identity-format decision, out of scope here. The rotation-chain links are Ed25519-only today (`old_signature_ed25519`) — they inherit the SR-1/H-2 classical-link weakness tracked in the security review.
+**Threat model for the trust anchor (D1):** Record forgery by replicators or any insider is excluded by the anchor — an eclipse of the K-closest set can now only **censor** (withhold records), not substitute identities (censorship resistance: replicator/lookup diversity + publisher self-verify, see the D4 blocks above and the §13.1 insider addendum). Honest limitation: the userId anchors only the Ed25519 key; the ML-DSA pubkey is bound transitively through the hybrid-signed content. For **non-contact** resolution the anchor is therefore classical — a future quantum adversary could swap the ML-DSA key in a fresh manifest. Real first contact is unaffected (the ContactSeed carries both pubkeys out-of-band, §8.1.1; unknown senders are KEX-gated, §8.2). Hybrid-anchoring the userId itself is a §3.1 identity-format decision, out of scope here. The rotation-chain links are Ed25519-only today (`old_signature_ed25519`) — they inherit the SR-1/H-2 classical-link weakness tracked in the security review.
 
 **Storage**: replicator-side persistence in `~/.cleona/identity_dht_storage.json.enc` (FileEncryption, see §14.2). Crash recovery via `.tmp`/`.old` sidecars.
 
@@ -1694,9 +1698,11 @@ LAN-Discovery's send path on Linux and Windows desktop runs through a small C li
 
 **Security model.** The shim sees raw UDP datagrams that the rest of Cleona has already constructed — CLEO discovery probes (38 bytes including magic) for the LAN-Discovery send path, no other payload types. The shim performs no cryptography, validates no headers, and has no awareness of the Closed-Network HMAC framing (§4.10) — that wrapping happens above the FFI seam on the Dart side. The C source has no parsing, no allocation past the per-call buffer, and no state beyond the socket handle. The trusted native code surface introduced by this shim is therefore small and self-contained.
 
+**UDP receive buffer sizing (V3.1.85).** `Transport.start()` sets `SO_RCVBUF` to 2 MB on every bound socket (initial bind and `reconnectSockets()`). Dart's `setRawOption` requires raw `(SOL_SOCKET, SO_RCVBUF)` constants which differ by platform: Linux uses POSIX values (`SOL_SOCKET=1`, `SO_RCVBUF=8`), while Windows, macOS, and iOS use BSD values (`SOL_SOCKET=0xFFFF`, `SO_RCVBUF=0x1002`). Prior to V3.1.85 the code used Linux constants on all platforms, causing errno 10022 (`WSAEINVAL`) on Windows — the buffer remained at the OS default (~8 KB on Windows). The fix applies `Platform.isWindows || Platform.isMacOS || Platform.isIOS` to select the correct constant family. Failure to set the buffer is caught and logged but not fatal — the daemon continues with the OS default.
+
 **Build and deployment.** The C source lives under `native/cleona_net/` with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. Linux builds are bundled into the Flutter Linux release alongside `libcleona_audio.so`; Windows builds drop into `build/windows/x64/runner/Release/` next to `libsodium.dll`. Android and macOS desktop builds skip the shim entirely — those platforms continue to use Dart's `RawDatagramSocket` directly, with no functional regression observed. iOS uses a separate native send strategy described below.
 
-**iOS send path (IosUdpSender).** iOS exhibits the same symptom as Windows — Dart's `RawDatagramSocket.send()` returns 0 for all destinations — but the root cause differs: the kqueue-based I/O path reports errno 64 (EHOSTUNREACH) or 65 (ENETDOWN) silently as a zero return value. The fix follows a different strategy than `libcleona_net`: instead of opening a second socket, `IosUdpSender` (`ios_udp_sender.dart`) locates the Dart socket's existing file descriptor by scanning `/dev/fd` and calls native `sendto()` directly via FFI (`cleona_udp_ios.c`). This preserves the one-socket-per-port invariant — no second bound socket, no receive-path starvation risk. For the discovery port (41338), a separate send-only socket is created via `createSendOnly()` because iOS aggressively recycles the Dart discovery socket's fd (ENOTSOCK on reuse). The native library is statically linked into the Runner binary (`cleona_exported_symbols.txt` controls symbol visibility against the linker's `-dead_strip`).
+**iOS send path (IosUdpSender).** iOS exhibits the same symptom as Windows — Dart's `RawDatagramSocket.send()` returns 0 for all destinations — but the root cause differs: the kqueue-based I/O path reports errno 64 (EHOSTUNREACH) or 65 (ENETDOWN) silently as a zero return value. The fix follows a different strategy than `libcleona_net`: instead of opening a second socket, `IosUdpSender` (`ios_udp_sender.dart`) locates the Dart socket's existing file descriptors — one for IPv4 (`cleona_ios_find_udp_fd`) and one for IPv6 (`cleona_ios_find_udp6_fd`) — by scanning open fds for `AF_INET`/`AF_INET6` `SOCK_DGRAM` sockets bound to the transport port, and calls native `sendto()` / `sendto6()` directly via FFI (`cleona_udp_ios.c`). The dual-fd approach is required because DS-Lite mobile carriers (common in Germany) provide only global IPv6 for end-to-end connectivity; IPv4 is tunneled through CGNAT and unreliable. `send()` dispatches to the IPv4 fd, `send6()` to the IPv6 fd. This preserves the one-socket-per-protocol-family invariant — no additional bound sockets, no receive-path starvation risk. For the discovery port (41338), a separate send-only socket is created via `createSendOnly()` because iOS aggressively recycles the Dart discovery socket's fd (ENOTSOCK on reuse). The native library is statically linked into the Runner binary (`cleona_exported_symbols.txt` controls symbol visibility against the linker's `-dead_strip`).
 
 **Peer-list format** (carried in the PEER_LIST_PUSH application frame):
 
@@ -2085,7 +2091,7 @@ message RelayForward {
 
 **Hop limit**: at most 3 hops. Beyond 3 the packet is dropped — no unbounded cascade.
 
-**Relay budget** (§3.5 in v2.2 → in v3.0 under storage management): relays maintain a local storage budget for in-flight RelayForward packets. When exceeded, the relay drops new forwarding requests.
+**Relay throughput control (v3.0):** the V3 relay-forward path is bounded by the wire-layer rate limiter at the relay node — relayed packets carry the **originator's** Device-ID in the outer packet, so the per-source and global limits (§13.1.3) apply to the origin before any forward. (The v2.2 "in-flight storage budget" does not exist in the V3 forward path — doc-vs-code drift corrected in the D5 review; the legacy `RelayBudget` class is test-only.) **D5:** relay forwards for origins that are not *introduced* (§13.1.3 collective quota) additionally share a collective forward slice of **2 MB + 1,000 messages per minute**, so minted origin IDs cannot multiply relay amplification beyond that slice. Counter: `poolDropsRelay`.
 
 **Relay-Route-Learning (V3 — ACK-based)**:
 - The sender learns successful relay routes via RELAY_ACK
@@ -2506,7 +2512,9 @@ Security: An attacker would need to compromise 3 of 5 guardians simultaneously. 
 
 The Restore Broadcast is the mechanism that makes Cleona's recovery truly unique. After the user's key is recovered (via phrase or Social Recovery), the app emits a signed Restore Broadcast that fans out across the user's contact graph.
 
-**Frame layout (V3.0 Welle 6):** A Restore Broadcast is an `InfrastructureFrame` (§2.3.5) of type `RESTORE_BROADCAST`, KEM-encrypted under each contact's Device-KEM-PK (§3.5b). The recipient Device-KEM-PK is fetched from the local routing-table cache, otherwise via a 2D-DHT DeviceKemRecord lookup (§4.3 step 4b). The Outer NetworkPacket is signed under the recovering peer's freshly-generated **Device**-Sig-Keys — these are independent of User-Identity rotation, so receivers verify Outer-Sig regularly. The inner `RestoreBroadcast` body carries an old-Ed25519 signature over `(oldUserId, newUserId, newPubkeys, displayName, timestamp)` — the inner authenticity that proves the sender controls the old User-Sig-Key.
+**Frame layout (V3.0 Welle 6):** A Restore Broadcast is an `InfrastructureFrame` (§2.3.5) of type `RESTORE_BROADCAST`, KEM-encrypted under each contact's Device-KEM-PK (§3.5b). The recipient Device-KEM-PK is fetched from the local routing-table cache, otherwise via a 2D-DHT DeviceKemRecord lookup (§4.3 step 4b). The Outer NetworkPacket is signed under the recovering peer's freshly-generated **Device**-Sig-Keys — these are independent of User-Identity rotation, so receivers verify Outer-Sig regularly. The inner `RestoreBroadcast` body carries a **hybrid** signature (Ed25519 `signature` + ML-DSA-65 `signature_ml_dsa`) over `(oldUserId, newUserId, newPubkeys, displayName, timestamp)` — the inner authenticity that proves the sender controls the old User-Sig-Key.
+
+**Inner authenticity is hybrid (H-2):** the receiver verifies BOTH the old-Ed25519 signature against the contact's stored `ed25519Pk` AND the old-ML-DSA signature against the contact's stored `mlDsaPk` (the keys it already holds, *before* applying the broadcast's new keys). A classical-only forge — breaking or stealing just the contact's Ed25519 key — no longer suffices to forge a restore takeover and harvest the full chat history; the attacker must break both the classical and the PQ signature key. Because PQ keys are deterministically seed-derived (§3.6 / §6.3.5), a legitimate same-seed recovery regenerates the *identical* ML-DSA key, so the contact's stored `mlDsaPk` matches the signer — the hybrid check passes without any extra key exchange. **Transition:** broadcasts carrying only the Ed25519 signature (pre-H-2 senders, `signature_ml_dsa` absent) are accepted as legacy-classical until a Phase-2 enforcement gate (`minRequiredVersion`, §19.5.7), mirroring the D1/SR-2 legacy-record handling.
 
 `RESTORE_RESPONSE` is an `ApplicationFrame`, KEM-encrypted under the recovering peer's freshly-published User-KEM-PK (which the broadcast carried). All subsequent phases — manifests, fetch responses, payloads — use the standard encrypted `ApplicationFrame` (§3.3).
 
@@ -2524,7 +2532,7 @@ The Restore Broadcast is the mechanism that makes Cleona's recovery truly unique
 4. App emits a `RESTORE_BROADCAST` `InfrastructureFrame` per contact device, KEM-encrypted under the contact's Device-KEM-PK (§3.5b), Outer-signed under the recovering peer's fresh Device-Sig-Keys (rotation-stable per §3.5b). The body carries an old-Ed25519 signature for inner authenticity. The frame is additionally erasure-coded into the DHT (§5.4) so offline contacts pick it up via Mailbox-Pull when they come online — the encoded blob is the canonical NetworkPacket built for the contact's first-resolved device (per §5.4: InfraFrame KEM is device-PK-keyed, so one encoded copy reaches at most one device of the contact; further devices of the same contact pick up via subsequent Direct-Send retries or via S&F on Mutual Peers, §5.5).
 5. Every node that processes the broadcast checks: "Is this `userId` in my contact list?"
 6. If yes, the contact's app automatically responds with: their contact information (so the recovering user rebuilds their contact list), the encrypted chat history of their shared conversation, group memberships with member crypto keys and profile data.
-7. For anti-abuse protection: 3 of 5 recovery guardians must confirm the Restore Broadcast before contacts release their data. This prevents an attacker who stole the key from harvesting all chat histories.
+7. For anti-abuse protection the recovery is made **visible and authenticated**, not silently followed: the inner hybrid signature (H-2) binds the proof to both the contact's stored Ed25519 and ML-DSA keys, and a restore that actually changes the contact's identity key routes through §8.3 Key-Change-Detection (verification reset + warning, §6.3.5). (Guardian-quorum gating of data release is documented as an aspiration in §6.3.5 but is **not** cryptographically enforced — see there.)
 8. The recovering device collects all responses and progressively rebuilds its complete state.
 
 #### 6.3.2 Progressive Restoration (Manifest + Pull)
@@ -2561,9 +2569,11 @@ The Restore Broadcast mechanism serves as the bootstrap for multi-device support
 
 **Rate limiting:** A maximum of one Restore Broadcast is accepted per `userId` per 5 minutes (per sender). Additionally, `RESTORE_FETCH` frames from a recovering peer are rate-limited to 8/minute per source contact, and require a valid Restore Broadcast within the last 24h (otherwise silent drop).
 
-**Guardian confirmation:** 3 of 5 guardians must actively confirm the restore before contacts release chat data. This is the same Social Recovery threshold — the guardian confirmation serves double duty.
+**Inner hybrid signature (H-2):** the inner restore proof is hybrid-signed (Ed25519 + ML-DSA-65) and the receiver verifies both against the contact's stored keys before releasing any data (see §6.3 *Inner authenticity is hybrid*). A break/theft of a contact's classical key alone can no longer forge a restore takeover + history harvest.
 
-**Notification:** When a Restore Broadcast occurs, ALL contacts receive a visible notification: "[Name] has set up a new device." If the real user did not initiate this, they can immediately alert their contacts.
+**Key-change visibility (H-2, SR-1-consistent):** every accepted Restore Broadcast surfaces a `contact_restore_detected` IPC event so the contact's UI can show "[Name] has set up a new device" — if the real user did not initiate it they can alert their contacts. When the restore additionally *changes* the contact's identity key (i.e. a new-seed re-identity or a forge attempt, as opposed to a deterministic same-seed recovery where the keys are unchanged, §6.3.5 PQ-handling), it is routed through §8.3 Key-Change-Detection: the verification level is reset and a key-change warning is raised, exactly as for Emergency Key Rotation (§7.4b step 6). It is never followed silently at full trust.
+
+**Guardian confirmation (aspirational — NOT enforced):** the original design called for 3 of 5 guardians to confirm the restore before contacts release chat data. This is **not cryptographically enforced** and the current build does not gate data release on it: a contact cannot verify a guardian quorum because guardians are secret by design (§6.2) — a contact does not know who the recovering user's guardians are, so it has no key set to check a quorum token against. This is the same key-distribution wall as the SR-1 rotation co-authorization, and a verifiable guardian-quorum token is deferred to the linked-device / guardian-attestation redesign tracked in the security review. The realized anti-abuse protections are: rate-limiting (above), the inner hybrid signature, key-change visibility, and encrypted transfer (below).
 
 **Encrypted transfer:** All chat history sent in response to a Restore Broadcast is encrypted with Per-Message KEM (§3.3) using the recovering device's public key (the user-identity public key derived from the recovered seed). Exception: `RESTORE_BROADCAST` and `RESTORE_RESPONSE` themselves are signed only (not encrypted), since the recovering peer may not have the responding contact's current PQ public key.
 
@@ -2617,6 +2627,8 @@ deviceId = SHA-256(network_secret || ed25519_device_pubkey)
 
 Device keys are **not** derived from the recovery phrase — they are generated locally on the first daemon start. This makes device identity disposable (device loss = a new DeviceID on the replacement device, without any risk to the user identity).
 
+**Seed-distribution limitation (SR-1 / Multi-Device-Seed — resolved, LD-1 through LD-12):** the previous pairing flow transferred the **master seed** to each new device, so every paired device could derive the full User-Sig key. A stolen device therefore held the user identity itself, not just a disposable device key. **Resolved:** the linked-device model (§7.1.1–§7.1.3) replaces the seed-transfer with per-device **delegation**: linked devices receive a per-device HKDF-derived sig-subkey plus a user-signed `DeviceDelegationCert` authorizing that subkey to act for the identity with bounded capabilities, plus the User-KEM-SK for decryption — but **not** the master seed. The seed never leaves the Primary device; a stolen linked device can be revoked without touching the identity, and user-key rotation requires the actual seed. This resolves SR-1 (rotation authorization), the Multi-Device-Seed finding, and the Twin-PQ-divergence finding (delegation keys are deterministically derived per §7.1.1, so all devices share identical sig-material without independent random generation). Legacy twin-devices (seed on every device) can soft-migrate to the delegation model via §7.1.3.
+
 **Initial setup** (first device):
 1. The user generates the master seed (24-word phrase)
 2. HD-Wallet derives the user identities (§3.6)
@@ -2624,23 +2636,158 @@ Device keys are **not** derived from the recovery phrase — they are generated 
 4. The auth manifest is published with this single DeviceID as `authorizedDeviceIds[0]`
 5. Identity Registry entry (§6.4) with display name + profile picture
 
-**Pairing an additional device** (e.g. a new phone for an existing identity):
-1. On the old device (e.g. desktop): "Pair new device" action → shows a QR code with `{userId, masterPubkey, signedPairToken}`
-2. On the new device: QR scan → receives `signedPairToken`
-3. The new device generates its own Device-Sig keypair
-4. The new device sends `DEVICE_PAIR_REQUEST` (application frame) to the user's own devices (over the now-known UserID via `sendToUser`)
-5. Existing devices confirm via `DEVICE_PAIR_APPROVE` — the master seed is transferred (KEM-encrypted under the `signedPairToken` pubkey)
-6. The new device now holds the master seed and can regenerate the user keys
-7. The auth manifest is extended with the new DeviceID and re-published
+**Pairing an additional device** (linked-device delegation model, LD-1 through LD-12):
+1. On the new device: "Request Pairing" action in Settings → Devices → generates its own Device-Sig keypair, sends `MTV3_DEVICE_PAIR_REQUEST` to own userId via `sendToUser` (carries `deviceEd25519Pk` + `deviceMlDsaPk`)
+2. On the Primary device: receives the request, shows an approval dialog with the requesting device ID
+3. The Primary derives per-device delegation keys (§7.1.1) and builds a `DevicePairApproveV3` payload containing: `delegatedEd25519Pk/Sk`, `delegatedMlDsaPk/Sk`, `userX25519Sk`, `userMlKemSk`, `DeviceDelegationCert` (proto), `userId`, `displayName`
+4. The Primary sends `MTV3_DEVICE_PAIR_APPROVE` (KEM-encrypted to the new device) and adds the `DeviceDelegationCert` to the Auth-Manifest (field 11), re-publishes
+5. The new device receives the approval, verifies the delegation cert signature against its own User-PK copy, persists the delegation keys to `linked_device_keys.json.enc` (XSalsa20-Poly1305 via FileEncryption), and applies them — `identity.isLinkedDevice` becomes `true`, all Inner-Sigs switch to the delegated keys
+6. The master seed is **not** transferred — the new device holds only delegation material
+
+**What the Linked Device receives:**
+- **Delegated Sig-Keys** (Ed25519 + ML-DSA-65): deterministically derived from the Primary's seed + device ID via HKDF (§7.1.1). Used for all Inner-Sig operations. The receiver can verify them via the `DeviceDelegationCert` in the Auth-Manifest.
+- **User-KEM-SK** (X25519 + ML-KEM): the actual user decryption keys. Shared across all devices so every device can decrypt messages addressed to the UserID.
+- **DeviceDelegationCert**: a hybrid-signed (Ed25519+ML-DSA) certificate authorizing the delegated PK to act for the identity (§7.1.1).
+- **NOT the master seed**: the linked device cannot derive new keys, rotate the identity, or pair additional devices.
 
 **Pairing security**:
-- `signedPairToken` is user-signed, valid at most 5 minutes — prevents replay
-- Master-seed transfer KEM-encrypted via X25519+ML-KEM-768 hybrid (standard KEM, §3.3)
-- Both devices show a security code (hash of the exchanged pubkeys) for visual verification
+- Delegation cert is hybrid-signed by User-Key (Ed25519 + ML-DSA-65) — forging requires both keys
+- Approval payload KEM-encrypted via X25519+ML-KEM-768 hybrid (standard KEM, §3.3)
+- Cert verification on the Linked Device side: `delegationCert.verify(ownUserEd25519Pk, ownUserMlDsaPk)` — rejects invalid signatures before persisting
+- Dead-man-switch expiry (`maxValidUntilMs`) — delegation auto-expires if the Primary does not renew (default: 30 days, 0 = no expiry)
+- Max 5 devices per UserID (Auth-Manifest `authorizedDeviceIds` limit)
 
-**Pairing over NFC** (alternative): identical flow, but `signedPairToken` is conveyed via NFC pairing tap instead of QR.
+**Pairing over NFC** (alternative): identical delegation flow, but the initial contact between devices is conveyed via NFC pairing tap instead of QR.
+
+**Pairing from Settings** (soft migration, §7.1.3): existing twin-devices (legacy seed-on-every-device model) can initiate pairing from Settings → Devices → "Request Pairing". The Primary approves, the device receives delegation keys and transitions to `isLinkedDevice=true` — the seed remains on disk but is no longer used for signing.
 
 **Twin-Discovery**: after pairing, devices automatically discover each other via the 2D-DHT (each device publishes its own liveness; other devices see liveness records bearing the same UserID).
+
+#### 7.1.1 Linked-Device Key Derivation
+
+Delegation keys are **deterministically derived** from the Primary's master seed + the linked device's DeviceID, ensuring that re-pairing or recovery produces identical keys without transferring the seed.
+
+**Ed25519 delegation keypair:**
+```
+ikm   = HKDF-Extract(salt="", ikm=masterSeed)
+okm   = HKDF-Expand(prk=ikm, info="cleona-deleg-ed25519-v1" || deviceId, L=32)
+ed25519_sk = crypto_sign_seed_keypair(okm)   // libsodium deterministic keygen
+```
+
+**ML-DSA-65 delegation keypair:**
+```
+ikm   = HKDF-Extract(salt="", ikm=masterSeed)
+seed  = HKDF-Expand(prk=ikm, info="cleona-deleg-ml-dsa-v1" || deviceId, L=64)
+```
+liboqs SIG API has no `keypair_derand` (only KEM does). The implementation injects a seeded **SHA-256 counter-mode PRNG** via `OQS_randombytes_custom_algorithm` using a Dart `NativeCallable`, calls `OQS_SIG_keypair`, and immediately restores the system DRBG via `OQS_randombytes_switch_algorithm("system")`. Thread-safe because Dart is single-threaded per isolate and OQS keygen is synchronous. The PRNG produces `SHA-256(seed || counter)` blocks (counter starts at 0, increments per call), providing deterministic randomness for the ML-DSA key generation internals.
+
+**DeviceDelegationCert** (proto: `DeviceDelegationCertV3`, Auth-Manifest field 11):
+```
+message DeviceDelegationCertV3 {
+  bytes  deviceId            = 1;   // SHA-256(network_secret || device_ed25519_pk)
+  bytes  delegatedEd25519Pk  = 2;   // HKDF-derived delegation pubkey
+  bytes  delegatedMlDsaPk    = 3;   // HKDF-derived ML-DSA delegation pubkey
+  uint32 capabilities        = 4;   // bitmask (see below)
+  int64  issuedAtMs           = 5;   // milliseconds since epoch
+  int64  maxValidUntilMs      = 6;   // 0 = no expiry (dead-man-switch)
+  bytes  userEd25519Sig       = 7;   // User-Ed25519 signature over fields 1-6
+  bytes  userMlDsaSig         = 8;   // User-ML-DSA signature over fields 1-6
+}
+```
+
+**Capabilities bitmask** (standard = 0x0F):
+| Bit | Capability |
+|-----|------------|
+| 0   | `capSend` — send messages on behalf of the UserID |
+| 1   | `capReceive` — decrypt incoming messages |
+| 2   | `capSync` — participate in Twin-Sync |
+| 3   | `capRelay` — relay messages for other peers |
+
+**Cert verification**: hybrid — both Ed25519 AND ML-DSA signatures must verify against the User-PKs in the Auth-Manifest. Forging a delegation requires breaking both signature schemes. The signed payload is `deviceId || delegatedEd25519Pk || delegatedMlDsaPk || capabilities(LE32) || issuedAtMs(LE64) || maxValidUntilMs(LE64)`.
+
+**Expiry**: `maxValidUntilMs > 0 && now > maxValidUntilMs` → cert is expired. Default 30 days. The Primary must re-pair (renew the cert) before expiry; the linked device degrades to offline-only if the cert expires. `maxValidUntilMs == 0` means no expiry (permanent delegation).
+
+#### 7.1.2 Signing Key Indirection
+
+With the linked-device model, the **signing path** changes:
+
+- **Primary device**: `identity.signingEd25519Sk` returns the User-Key (unchanged behavior).
+- **Linked device**: `identity.signingEd25519Sk` returns the **delegated** Ed25519 SK from `linkedDeviceKeys`. Same for ML-DSA. The getter checks `linkedDeviceKeys != null` and returns the delegation key if present.
+
+**Sender side** (linked device signing a message):
+```
+V3FrameCodec.signApplicationFrameInner(
+  inner: inner,
+  senderUserEd25519Sk: identity.signingEd25519Sk,  // = delegated SK
+  senderUserMlDsaSk:   identity.signingMlDsaSk,    // = delegated ML-DSA SK
+)
+```
+The signature is over the same `ApplicationFrameV3` fields as before — only the key is different.
+
+**Receiver side** (verifying a delegated signature):
+`V3FrameCodec.decryptAndVerifyInner` first tries the User-PK (standard path). If that fails, it calls `lookupDelegatedKeys(senderUserId)` — a callback that returns the list of `(edPk, mlDsaPk)` tuples from the sender's Auth-Manifest delegation certs. If any tuple's Ed25519+ML-DSA verify the signature, the frame is accepted. Without the callback (old builds), delegated-key signatures are silently rejected — **wire-compatible**: old builds ignore Auth-Manifest field 11 (proto3 unknown field behavior) and reject the frame normally, no crash.
+
+**Auth-Manifest distribution**: the `DeviceDelegationCert` is embedded in Auth-Manifest field 11 (repeated). The IdentityPublisher adds it on approval; resolvers extract it in the D1 cascade. Contacts that have resolved the sender's Auth-Manifest use the embedded certs to populate `lookupDelegatedKeys`.
+
+#### 7.1.3 Soft Migration (Legacy Twin → Linked Device)
+
+Existing twin-devices (seed-on-every-device, pre-LD model) can migrate to the delegation model without re-pairing from scratch:
+
+1. On the legacy twin: Settings → Devices → "Request Pairing" sends `MTV3_DEVICE_PAIR_REQUEST` to own userId
+2. The Primary device (= the device the user designates as authoritative, typically the device that originally generated the seed) receives the request and shows the approval dialog
+3. On approval, the Primary derives delegation keys (§7.1.1) and sends `MTV3_DEVICE_PAIR_APPROVE`
+4. The twin receives the delegation, persists it to `linked_device_keys.json.enc`, and sets `identity.linkedDeviceKeys` — `isLinkedDevice` becomes `true`
+5. The master seed remains on disk (not wiped) but is no longer used for signing — all Inner-Sigs switch to the delegated keys
+
+**Non-destructive**: the seed is kept as a local backup. The user can explicitly wipe it later via a future "Destroy local seed" action (not yet implemented). The migration is one-way: once delegated, the device cannot self-promote back to Primary without the seed.
+
+**IPC**: `send_device_pair_request` (IPC command) → `CleonaService.sendDevicePairRequest()`. On Android (in-process): `service.sendDevicePairRequest()` directly. Status: `get_linked_device_status` returns `{isLinkedDevice, delegationCaps, expiresAtMs, deviceIdHex}`.
+
+**GUI**: Settings → Devices shows the linked-device status (Primary/Linked icon + capabilities + expiry). The "Request Pairing" button is only shown on non-linked devices.
+
+#### 7.1.4 Delegation Rotation (LD-8)
+
+When the Primary device performs an **emergency key rotation** (§7.4b variant b), linked devices must receive **new delegation keys** derived from the new master seed — but must **not** receive the new seed itself. This preserves the LD security boundary across rotations.
+
+**Sender (Primary, pre-rotation):** for each linked device (identified via `IdentityPublisher.delegations`), the Primary:
+1. Derives new delegation keys via HKDF from the **new** master seed + deviceId (§7.1.1 formulas, deterministic).
+2. Signs the new `DeviceDelegationCert` with the **old** User-Keys (the linked device can verify against its current User-PK reference).
+3. Sends a `TWIN_SYNC/SETTINGS_CHANGED` with `delegationRotation=true` payload containing: per-device delegation keys (Ed25519 + ML-DSA SK/PK), new User-PKs (Ed25519, ML-DSA, X25519, ML-KEM), new User-KEM-SK, and the signed delegation cert.
+4. Legacy twins (no delegation cert) still receive the `newEntropy` via the existing `emergencyRotation` path — they already hold the seed, so this does not weaken security.
+
+**Receiver (Linked Device):** on receiving `delegationRotation=true`:
+1. Checks `targetDeviceId` matches own Device-Node-ID (device-targeting; other devices silently ignore).
+2. Verifies the delegation cert against the **current** (pre-rotation) User-PKs.
+3. Appends a rotation chain link (old Ed25519 SK signs `newEd25519Pk || newMlDsaPk`) — the linked device still holds the seed-derived Ed25519-SK for this purpose.
+4. Updates: User-PKs, User-KEM-SK, delegation keys, keeps old KEM-SK as `previous` for 7-day transit-message grace.
+5. Persists new `LinkedDeviceKeys` to `linked_device_keys.json.enc`.
+6. Triggers Auth-Manifest republish + PeerInfo broadcast.
+
+**Defense-in-depth (LD-5):** if a linked device receives an `emergencyRotation` entropy payload (e.g. from a legacy sender or race condition), it rejects and logs a warning instead of deriving keys. The `rotateIdentityKeys()` entry point is also blocked on linked devices (seed required).
+
+**Cross-device key leakage:** the `TWIN_SYNC` fan-out sends all delegation-rotation messages to all devices (each device receives all per-device payloads). Since all devices share the User-KEM-SK, each device can decrypt payloads targeted at other devices. This is accepted as minor residual exposure — the shared KEM-SK model already implies that any device can decrypt any user-addressed message. Delegation key cross-visibility affects forensic attribution but does not expand the attack surface.
+
+#### 7.1.5 Cert Auto-Renewal (LD-9)
+
+Delegation certificates have a 30-day expiry (`maxValidUntilMs`). The linked device monitors expiry with a **1-hour periodic timer** (`_delegationRenewalTimer`). When the cert is within **7 days** of expiry (or already expired), the linked device automatically sends a `DEVICE_PAIR_REQUEST` to the Primary — reusing the existing pairing protocol.
+
+**Primary auto-approve:** when the Primary receives a `DEVICE_PAIR_REQUEST` from a device whose `deviceId` is already registered in `IdentityPublisher.delegations` (i.e., a known linked device), it **auto-approves** without user interaction. This issues a fresh `DeviceDelegationCert` with a new 30-day window and sends `DEVICE_PAIR_APPROVE` back. The linked device applies the new cert transparently.
+
+**Manual renewal:** the GUI exposes a "Renew now" button in Settings → Devices when the cert is within 7 days of expiry or already expired. This triggers `requestDelegationRenewal()` which calls `sendDevicePairRequest()`.
+
+**Degraded state:** if the cert expires without renewal (Primary offline for >30 days), the linked device's delegated signatures will fail verification by contacts who re-resolve the Auth-Manifest. The device can still receive and decrypt messages (shared User-KEM-SK) but cannot effectively send. Renewal restores full operation.
+
+#### 7.1.6 Device Status Screen (LD-11)
+
+Settings → Devices shows enhanced linked-device status:
+
+- **Device type icon:** shield (Primary) or chain-link (Linked), colored red if cert expired.
+- **Capability chips:** visual display of the 4 delegation capabilities (Send, Contacts, Groups, Channels) — active caps highlighted in `primaryContainer`, inactive in `surfaceContainerHighest`.
+- **Expiry countdown:** date + remaining days. Warning (orange) at ≤7 days, error (red) when expired.
+- **Renew button:** appears when cert is within 7 days of expiry or expired.
+- **Soft migration button:** "Request Pairing" shown for non-linked devices when >1 device exists (§7.1.3 flow via GUI).
+
+`LinkedDeviceStatus` data class (`service_types.dart`) provides `daysRemaining`, `expiresWithin7Days`, `capabilityNames`, `expiryDate` — consumed by both the GUI and the IPC layer.
 
 ### 7.2 Twin-Sync Protocol
 
@@ -2660,7 +2807,7 @@ Once Multi-Device is active, application-state changes (new contacts, conversati
 | 5 | TWIN_READ_RECEIPT | own read on one device → other devices also mark read |
 | 6 | GROUP_CREATED | own device created/joined a new group *(receive-side wired; sender-side wiring pending)* |
 | 7 | PROFILE_CHANGED | own profile picture / display name changed *(receive-side wired; sender-side wiring pending — `_emitProfileChange()` hook missing)* |
-| 8 | SETTINGS_CHANGED | shared per-identity settings changed (currently used for seed-phrase persistence sync) |
+| 8 | SETTINGS_CHANGED | shared per-identity settings changed (emergency rotation sync: entropy for legacy twins, delegation rotation for linked devices §7.1.4) |
 | 9 | DEVICE_ANNOUNCE | new device pairing announce to existing twin devices (carries inner `DeviceRecord`) |
 | 10 | DEVICE_RENAMED | one of own devices got renamed |
 | 11 | TWIN_DEVICE_REVOKED | device removed from `authorizedDeviceIds` — revocation propagated to twins |
@@ -2725,11 +2872,84 @@ Two flavors with distinct wire-paths:
 1. The user generates fresh User-Ed25519 + User-ML-DSA + User-X25519 + User-ML-KEM keypairs
 2. The app emits `KEY_ROTATION_BROADCAST` with the **Emergency-variant** dual-signature: `oldSignatureEd25519` (proves: I am the legitimate previous holder) AND `newSignatureEd25519` (proves: I control the new key)
 3. **Wire-path:** InfrastructureFrame (§2.4.1), KEM-encrypted under each contact's Device-KEM-PK. Outer-signed under unchanged Device-Sig-Keys (§3.5b, rotation-stable). This is the path adopted in V3.0 Welle 6 — see §2.3.5 selector and the rationale in §2.4.0.
-4. Contacts verify both inner signatures, replace stored User-Pubkeys, and respond with `KEY_ROTATION_ACK` (regular ApplicationFrame, now KEM-encrypted under the rotated User-KEM-PK).
+4. **Stable anchor (SR-2):** the rotating identity does **NOT** recompute its UserID — it stays pinned to the founding key (§3.1). At rotation time the identity appends a `RotationChainLink` (old key signs `newEd25519Pk || newMlDsaPk`, the §4.3 link shape) to its **persisted rotation chain**; the IdentityPublisher embeds the chain in every subsequent Auth-Manifest, so resolvers verify the embedded keys via the chain path (§4.3 verification path 2) and TOFU anchors bridge old→new.
+5. Contacts verify both inner signatures and replace the stored User-Pubkeys **in place** — the contact's UserID, groups and channels are untouched; there is no contact re-keying. They respond with `KEY_ROTATION_ACK` (regular ApplicationFrame, now KEM-encrypted under the rotated User-KEM-PK).
+6. **Visibility (SR-1):** an accepted emergency rotation is routed through the §8.3 **Key-Change-Detection** path, exactly like any other change of a contact's identity key — the contact's verification level is reset (`verified`/`trusted` → `unverified`) and a key-change warning is surfaced in the chat. The new keys ARE applied (the dual-sig + chain make the rotation cryptographically valid, so communication keeps working and a legitimate rotation is not blocked), but it is **not silently followed at full trust**. See the authorization threat model below.
+
+**Rotation-authorization threat model (SR-1 — structurally resolved by linked-device model):** the dual-sig proves only that the broadcaster controls the old AND the new key — it does **not** distinguish the legitimate owner from anyone else who holds the old key. **With the linked-device model (§7.1.1–§7.1.3, LD-1 through LD-12):** linked devices hold only per-device delegation subkeys + User-KEM-SK, **not** the master seed. A stolen linked device cannot rotate the identity (rotation requires the seed, which resides only on the Primary). The attack surface is reduced to: (a) theft of the Primary device itself (which holds the seed — same exposure as any self-custody wallet), or (b) extraction of the seed from the 24-word recovery phrase. **Defense-in-depth remains**: step 6's visibility mitigation (key-change warning + verification reset at every contact) applies regardless, so even a Primary-device theft is detectable. **Receiver-enforced co-authorization** is implemented in §7.5: the AuthManifest carries Device-Sig pubkeys (field 12) and the KeyRotationBroadcast carries Device-Sig countersigs (field 7); contacts verify a `max(2, ceil(N/2))` quorum against cached Device-Sig keys and escalate the warning when quorum is not met.
+
+*Doc-vs-code drift corrected (SR-2 review, 2026-06-12):* the previous implementation recomputed the UserID on both sides and migrated contacts/groups/channels to the new hex — contradicting §3.1, leaving the D1 chain path unused, and making rotation a free identity reset (moderation age, TOFU anchors and per-identity history wiped). Mixed-network honesty: pre-SR-2 builds still perform the migration on receive; a rotation initiated by a current build degrades those contacts until they upgrade (emergency rotation is rare and the beta field small — corrected now rather than never).
 
 Both flavors are **hard cuts** in user-perception terms — no Twin-Sync of old conversations to the new identity, no automatic migration. Variant (b) preserves the UserID but still requires the Inner Dual-Sig as the only authentication subject; receivers MUST NOT accept a key-rotation without inner dual-sig verification regardless of `senderIdentitySnapshot.outerSigStatus`.
 
 Note on periodic KEM-only rotation: `MessageType.KEY_ROTATION` (single-sig in body, KEM keys only) remains an ApplicationFrame because Ed25519/ML-DSA do not change — Outer Device-Sig-Verify and Inner User-Sig-Verify both function regularly.
+
+### 7.5 Device Co-Authorization for Key Rotation
+
+**Motivation:** §7.4b rotation-authorization threat model notes that the dual-sig proves key control but not legitimate ownership — anyone holding the old key (seed thief) can rotate. The linked-device model (§7.1) introduces **Device-Sig keys** that are locally generated (CSPRNG, NOT seed-derived). A seed thief cannot forge Device-Sig countersignatures. §7.5 leverages this for **receiver-enforced co-authorization**.
+
+**Mechanism:**
+
+1. **AuthManifest extension (field 12):** every Auth-Manifest now carries `repeated AuthorizedDeviceSigningKeys device_sig_keys` — the Device-Sig Ed25519 + ML-DSA pubkeys for each authorized device (Primary + all Linked). Contacts cache these on resolution.
+
+2. **Quorum formula:** `max(2, ceil(N/2))` where N = total authorized devices. N=1 → no co-auth (single-device identity, same threat model as before). N=2 → both must sign. N=3 → 2. This is the minimum number of `RotationApprovalToken` entries required in a `KeyRotationBroadcast`.
+
+3. **Rotation flow (sender-side):**
+   - Primary generates new keys (unchanged from §7.4b steps 1-2).
+   - Primary computes `rotationHash = SHA-256(newEd25519Pk || newMlDsaPk || newX25519Pk || newMlKemPk || userId)`.
+   - Primary signs `rotationHash` with its own Device-Sig keys (Primary's own token).
+   - Primary sends `ROTATION_APPROVAL_REQUEST` (TwinSync type 12) to all Linked Devices.
+   - Linked Devices sign `rotationHash` with their Device-Sig keys and respond with `ROTATION_APPROVAL_RESPONSE` (TwinSync type 13).
+   - Primary waits up to 5 minutes for responses.
+   - Primary embeds collected `approval_tokens` + `pre_rotation_device_count` in the `KeyRotationBroadcast` (fields 7-8).
+   - Broadcast proceeds regardless of quorum result (visibility, not prevention — SR-1 principle).
+
+4. **Rotation flow (receiver-side):**
+   - Contact receives `KeyRotationBroadcast`, verifies dual-sig as before (§7.4b).
+   - Contact looks up cached `device_sig_keys` from the pre-rotation AuthManifest.
+   - Contact calls `verifyRotationCoAuth()`:
+     - `legacy` (no cached device_sig_keys) → standard Key-Change-Detection (pre-§7.5 builds).
+     - `singleDevice` (N≤1) → standard Key-Change-Detection.
+     - `quorumMet` → standard Key-Change-Detection (elevated confidence, legitimate rotation).
+     - `quorumNotMet` → **escalated warning**: "Key rotation without device quorum — possible Primary theft." Callback `onRotationCoAuthWarning` fires in addition to the standard `onContactIdentityRotated`.
+   - Keys are **always applied** (rotation is never blocked — SR-1 visibility principle).
+
+5. **Active Rejection (Rejection Token):**
+   - A Linked Device that detects an unauthorized rotation (e.g. user explicitly rejects via UI) sends `ROTATION_APPROVAL_RESPONSE` with `rejected=true`.
+   - The receiving Primary (possibly compromised) relays this as `MTV3_ROTATION_REJECTION_ALERT` directly to all contacts.
+   - Contact receives the alert → `onRotationRejectionAlert` callback → strongest possible theft signal.
+   - The Rejection Alert carries `device_node_id` + `rotation_hash` + Device-Sig hybrid signature for authenticity.
+
+6. **Device-Set Shrink Co-Auth (field 13):**
+   - When devices are **removed** from the AuthManifest, the new manifest carries a `DeviceSetChangeProof` with `previousDeviceCount`, `changeHash = SHA-256(userId || sorted(newDeviceNodeIds) || newSeq)`, and `approvals` from remaining devices.
+   - This prevents the attack: steal Primary → remove all Linked Devices from manifest → rotate without quorum (because there are now "no" linked devices to check against).
+   - Contacts that see a device-set shrink without co-auth proof treat it as suspicious (same escalated warning).
+
+7. **Mixed-Network Transition:**
+   - proto3 unknown-field behavior: old builds ignore `device_sig_keys` (field 12), `device_set_change_proof` (field 13), `approval_tokens` (field 7), `pre_rotation_device_count` (field 8).
+   - Old builds receive rotations and apply them via standard Key-Change-Detection — no regression.
+   - Phase 2 enforcement (future): `minRequiredVersion` gate where contacts reject rotations without quorum from builds that should support it.
+
+**Wire types:**
+
+```
+TwinSyncType:
+  ROTATION_APPROVAL_REQUEST  = 12
+  ROTATION_APPROVAL_RESPONSE = 13
+
+MessageTypeV3:
+  MTV3_ROTATION_REJECTION_ALERT = 184
+
+AuthManifestProto:
+  repeated AuthorizedDeviceSigningKeys device_sig_keys = 12;
+  DeviceSetChangeProof device_set_change_proof         = 13;
+
+KeyRotationBroadcast:
+  repeated RotationApprovalToken approval_tokens = 7;
+  uint32 pre_rotation_device_count               = 8;
+```
+
+**Implementation:** `lib/core/identity_resolution/rotation_co_auth.dart` (model classes, quorum math, verification), wired in `cleona_service.dart` (sender: co-auth collection in `rotateIdentityKeys()`, receiver: verification in `_handleEmergencyKeyRotation()`).
 
 ---
 
@@ -2783,7 +3003,21 @@ A Contact Request (CR) is the only permitted form in which an **unknown** user m
 
 **Re-Contact**: when the sender is already "accepted" in the receiver's contact store and the sender sends another CR (e.g. key-change recovery), the CR is shown as a DM (Direct Message) in the Current tab instead of the Inbox tab — with the hint "Re-Contact from Alice with new keys".
 
-**Re-Contact-Auto-Overwrite gate (V3.0 Welle 6):** The auto-overwrite of stored pubkeys for an already-accepted contact (key-change-recovery convenience path) requires `senderIdentitySnapshot.outerSigStatus == verified` (§2.4.0). If the snapshot reports `skippedBootstrap` — i.e. the receiver has no Device-Sig-Pubkey on file for the sender — the CR is treated as a fresh inbound CR and lands in the Inbox tab; the user must explicitly accept that the new keys are legitimate. This closes the F4 defensive-fallback gap from the V2 → V3 bridge.
+**Re-Contact-Auto-Overwrite-Gate (V3.0 Wave 6 + RC-1 Hardening):** The auto-overwrite of stored pubkeys for an already `accepted` contact requires **two cumulative proofs** — a verified outer Device-Sig (`senderIdentitySnapshot.outerSigStatus == verified`, §2.4.0) **and** an inner User-Sig that verifies against the **stored** User-Keys of the contact (§3.5/`v3_frame_codec` Inner-Sig-Verify; the `trustBootstrapPubkeys` fallback to payload keys applies exclusively while **no** User-Keys are stored yet). A device-key compromise alone is therefore **not** sufficient to replace a contact's User-Keys — the attacker would additionally need the old User-Signing-Key, which already amounts to full identity compromise.
+
+**Continuity Proof on Key-Change (RC-1):** When a re-contact CR (or a CR-Response) carries **different** User-Keys than the stored ones, `identityKeyChanged` is evaluated before any overwrite. An actual key change is **never** followed silently via the CR path:
+
+| Case | Condition | Behavior |
+|------|-----------|----------|
+| Same-Seed-Reinstall | Keys unchanged | Refresh keys/device-ID, re-accept (silently ok) |
+| Key changed | `ed25519Pk` differs from stored | Overwrite + §8.3 Key-Change-Detection (verification reset + warning + `contact_identity_rotated` IPC event) |
+| Contact without stored User-Key | `ed25519Pk` null/empty | Treated as fresh inbound CR (Inbox + explicit accept), never Device-Sig-only-Overwrite |
+
+The CR/CRR path is thereby consistent with RESTORE_BROADCAST (§6.3, H-2) and Emergency Key Rotation (§7.4b, SR-1): **a real identity-key change is never silent**, regardless of the transport carrier. The prior state (overwrite solely on `outerSigStatus==verified`, without §8.3) allowed a takeover via the CR path around Key-Change-Detection — RC-1 hardening closes this door.
+
+**Cross-reference §8.3:** Key-Change-Detection (§8.3) is the **only** permitted reaction path to an identity-key change of a known contact and MUST be traversed by **all** overwrite paths (RESTORE, KEY_ROTATION, CONTACT_REQUEST, CONTACT_REQUEST_RESPONSE) whenever `ed25519Pk` changes.
+
+**Mixed-Net:** Receiver-side hardening — an RC-1 receiver protects itself regardless of the sender build. Legacy builds still overwrite silently on receive; enforcement via `minRequiredVersion` (§19.5.7 Phase-2 pattern), as with SR-2.
 
 **Bidirectional CR auto-accept**: if Alice accepts Bob's CR while Bob has already sent Alice a CR (race), both CRs are auto-accepted without further user confirmation.
 
@@ -2822,10 +3056,13 @@ cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd255
 | `did` | DeviceID | 64 hex chars (32 bytes) | identifies the QR-emitting device of Bob |
 | `ep` (NEW rev3) | userEd25519Pk | 32 bytes, **base64url** (RFC 4648 §5, no `+`/`/`/`=`) | Trust-anchor for Deferred Key Exchange and DHT record verification |
 | `t` (NEW) | ContactSeed creation time | 8-byte ms epoch, base64url | Age hint — lets the scanner distinguish a stale seed from an offline target |
-| `a` | reachable addresses | `ip:port+ip:port+...` (`+` URL-encoded as `%2B`) | Bob's current addresses for direct send |
+| `a` | reachable addresses | `ip:port+[ipv6]:port+...` (`+` URL-encoded as `%2B`) | Bob's current addresses for direct send — includes private IPv4 (LAN, max 2), public IPv4 (if port-mapped), and first global IPv6 (not link-local, not ULA). IPv6 addresses are bracket-wrapped per RFC 2732. |
 | `s` | seed peers (≤5) | `nodeIdHex@ip:port+ip:port,...` | routing helpers (any node, not necessarily bootstrap) |
+| `fp` (NEW SR-2) | founding userEd25519Pk | 32 bytes, base64url; **only emitted when the identity has rotated** (`fp != ep`) | Founding anchor — integrity-check target for rotated identities (§3.1 stable anchor) |
 
-**Integrity check**: the scanner verifies `SHA-256(networkSecret + ep) == userIdHex`. A manipulated QR fails this check.
+**Integrity check**: the scanner verifies `SHA-256(networkSecret + fp) == userIdHex` when `fp` is present, else `SHA-256(networkSecret + ep) == userIdHex` (unchanged — all existing seeds and all non-rotated identities). A manipulated QR fails this check. When `fp` is present, `ep` is provisional until the first D1-verified Auth-Manifest proves the rotation chain founding→`ep` (§4.3 path 2) — the Deferred Key Exchange already defers key use to that resolution step, so no additional roundtrip is introduced.
+
+**QR binary (rotated identities)**: format bytes `0x09` (zstd) / `0x0A` (uncompressed) = the v2 layout with `[32B foundingEd25519Pk]` appended after `createdAtMs`. Non-rotated identities keep emitting `0x07`/`0x08` — zero impact on the existing field.
 
 **Seed age**: the scanner surfaces the seed's age from `t` and distinguishes "code is stale — request a fresh one" from "target is offline", instead of silently retrying a seed whose addresses have long expired. The `t` field is outside the integrity-check input (it is not part of the `userId` derivation), so its presence is backward-compatible with legacy seeds.
 
@@ -2848,7 +3085,7 @@ Legacy v1 ContactSeeds with `dxk`+`dmk` are still fully parsed and trigger the d
 
 **Seed-peer selection criteria** (V3.1.x):
 
-1. **At least 1 relay-capable peer** — a peer with confirmed port-mapping (`hasPortMapping` = true, i.e. UPnP/PCP/NAT-PMP has established a public IP:port). This peer is reachable from any network (internet, other subnet, mobile data) and serves as the relay entry point for scanners that cannot reach the QR emitter directly (AP isolation, different subnets, CGNAT). All known addresses of this peer are included (private IPv4 + IPv6 + public IPv4 + IPv6), so the scanner can choose the optimal address for its network position: private IP when on the same network (avoids mobile data costs), public IP when external.
+1. **At least 1 relay-capable peer** — a peer with confirmed port-mapping (`hasPortMapping` = true, i.e. UPnP/PCP/NAT-PMP has established a public IP:port) **or** a peer with at least one global IPv6 address (not link-local `fe80:` and not ULA `fd`/`fc`). A global-IPv6 peer is end-to-end reachable from any IPv6-capable network — including DS-Lite mobile carriers where IPv4 is CGNAT-tunneled and unreliable — and therefore qualifies as relay entry point. This peer is reachable from any network (internet, other subnet, mobile data) and serves as the relay entry point for scanners that cannot reach the QR emitter directly (AP isolation, different subnets, CGNAT). All known addresses of this peer are included (private IPv4 + IPv6 + public IPv4 + IPv6), so the scanner can choose the optimal address for its network position: private IP when on the same network (avoids mobile data costs), public IP when external.
 
 2. **Remaining slots (up to 4)** — selected by freshness (`lastSeen` < 30 min), address diversity (different subnets, max 2 LAN + rest public), and score. Each seed peer is included with all known addresses (private + public).
 
@@ -3141,6 +3378,39 @@ Together these safeguards make accidental leave a three-click path (menu → Ver
 
 **Profile data:** Groups and channels can have optional pictures (JPEG, max 64 KB) and descriptions. These are set during creation, included in invites, and updated via `updateGroupProfile()` / `updateChannelProfile()`. Profile data is persisted in the group/channel JSON state and included in restore responses.
 
+#### 9.1.4 Group Membership Consistency (GM-1)
+
+**Problem:** Without cryptographic authority enforcement, a compromised or malicious node that knows the group ID can forge GROUP_INVITE updates to inject members or remove legitimate ones (Attack A: Split-View). A removed member who missed the removal can continue posting (Attack B: Ghost Posts).
+
+**Monotonic Epoch:** Every group carries a `membershipEpoch` counter (uint64, starts at 1 for new groups, 0 = legacy). Any membership-mutating operation (`createGroup`, `inviteToGroup`, `removeMemberFromGroup`, `setMemberRole`, `leaveGroup`) increments the epoch before broadcasting the update. Receivers reject updates with `wireEpoch <= localEpoch` (replay/downgrade protection).
+
+**Canonical Membership Hash:** `SHA-256(epoch_le64 || groupId_bytes || Σ sorted(nodeId || role_utf8))`. Only security-relevant fields (identity + role) are included; display names and profile pictures are excluded. The hash is deterministic regardless of member insertion order.
+
+**Hybrid Signature:** The sender (owner or admin) signs the hash with both Ed25519 (`membershipSigEd25519`) and ML-DSA-65 (`membershipSigMlDsa`). Receivers verify both signatures against the sender's public keys from the OLD group state (before applying the update). This prevents a forged update from installing new keys that would validate its own signature.
+
+**Authority Gate (Inbound):** On receiving a GROUP_INVITE for an existing group:
+1. Sender must be `owner` or `admin` in the receiver's current member list — otherwise rejected.
+2. `wireEpoch > localEpoch` — otherwise rejected (replay).
+3. Ed25519 signature over `membershipHash` verified against sender's stored `ed25519Pk` — otherwise rejected.
+4. ML-DSA signature verified if present (mixed-net: not all nodes have PQ keys yet).
+5. Recomputed hash from the wire member list must match `membershipHash` — otherwise rejected (tampered member list).
+
+**Non-Member Post Drop (Inbound):** `_handleTextV3` checks `group.members.containsKey(senderHex)` and silently drops posts from non-members. This mitigates Attack B for the receiver side.
+
+**Post-Tagging:** Every group text message carries `groupMembershipEpoch` and `groupMembershipHash` in the ApplicationFrameV3 inner fields. This enables future GM-2 split-view detection: if a receiver sees a post tagged with an epoch/hash that doesn't match their local state, they know they have a stale or divergent member list.
+
+**Mixed-Net Transition:** All new fields are optional (protobuf default 0/empty). Legacy nodes that don't set epoch/hash/sig are accepted as `legacy-unverified` (logged, not rejected). The `minRequiredVersion` gate (§19.5.7) will enforce GM-1 fields once the network has fully upgraded.
+
+**Wire Format:**
+| Field | Proto Message | Number | Type |
+|-------|--------------|--------|------|
+| `membership_epoch` | GroupInviteV3 | 7 | uint64 |
+| `membership_hash` | GroupInviteV3 | 8 | bytes (32) |
+| `membership_sig_ed25519` | GroupInviteV3 | 9 | bytes (64) |
+| `membership_sig_ml_dsa` | GroupInviteV3 | 10 | bytes (~3300) |
+| `group_membership_epoch` | ApplicationFrameV3 | 18 | uint64 |
+| `group_membership_hash` | ApplicationFrameV3 | 19 | bytes (32) |
+
 ### 9.2 Public Channels
 
 Public, openly discoverable broadcast channels with decentralized content moderation.
@@ -3186,7 +3456,25 @@ Six report categories: Not safe for minors (mislabeled), Wrong content (doesn't 
 
 **Single post reports** → Channel admins are notified; escalation to channel-level report after 7 days if unresolved.
 
-**Channel-level reports** → Reporter selects 3-10 specific posts as evidence. When the report counter reaches a threshold, a **jury of 5-11 randomly selected users** reviews the evidence and votes with 2/3 majority required. Jury members have 2 days to respond; abstentions and timeouts are replaced.
+**Channel-level reports** → Reporter selects 3-10 specific posts as evidence. When the report counter reaches a threshold, a **jury of 5-11 deterministically selected users** reviews the evidence and votes. A verdict requires a **hard quorum** (§9.3.1a); abstentions and timeouts are replaced by deterministic re-selection (max. 2 rounds) — a jury that cannot reach quorum produces **no consequence**.
+
+#### 9.3.1a Verifiable Juror Selection & Signed Verdicts
+
+The jury is the trust anchor of decentralized moderation, so juror selection must be **recomputable by every node** — not asserted by whoever initiated the jury.
+
+**Juror registry (opt-in).** Nodes with "Review channel reports" enabled publish a **JurorAvailabilityRecord** into the Kademlia ring (pattern: Liveness record, §4.3): `juror_record_id = SHA-256("juror" || userPubKey)`, the user's Ed25519 + ML-DSA public keys, creation epoch, hybrid self-signature, adaptive TTL. The record deliberately carries **no language and no adult flag** — both remain local attributes, answered as a plain yes/no when a jury request arrives (preserving the §3.1 anonymity principle and the existing §9.3.1 language-eligibility model).
+
+**Selection point.** When the report threshold for a channel+category is crossed, the selection point is `H = SHA-256("jury-select" || channelId || categoryIndex || epochDay || juryRound)`. The jury consists of the `jurySize` registered jurors whose `juror_record_id` is XOR-closest to `H`. None of the inputs is freely grindable by a reporter (the reporter-chosen `reportId` is deliberately **excluded**); `epochDay` is the UTC day the threshold was crossed, `juryRound` starts at 0 and increments for replacement rounds. Juror qualification (identity age ≥ 7 days via record epoch, anti-Sybil reachability §9.4.1) is checked by verifiers, not asserted.
+
+**Juror-selection ticket.** A juror proves legitimacy by reference: its signed vote plus its registry record allow any verifier to recompute `H` and confirm the juror lies within the closest set. This is the "verifiable juror-selection ticket" referenced by the §8.2 context-proof exception and §9.4.1.
+
+**Consistency limits (by design, stated explicitly).** The DHT has no global consensus; K-closest views differ under churn. Verifiers therefore apply a **tolerance check**: a verdict signer is accepted if it lies within the **top 2× jurySize** records closest to `H` from the verifier's own lookup. The initiator additionally embeds an **eligibility-snapshot hash** (hash of the candidate record IDs it observed) into the jury request and verdict as an audit trail. Residual risk: an attacker eclipsing the DHT region around `H` can bias both selection and verification; mitigations are the qualification gates, the epoch binding (the region is unpredictable in advance), independent verification by every gossip recipient, and the hard quorum. This residual risk is accepted and documented — full prevention would require global consensus, which Cleona does not have.
+
+**Signed verdicts as write authorization.** Every jury vote is hybrid-signed (Ed25519 + ML-DSA, pattern H-2) over the canonical verdict core `SHA-256(juryId || channelId || reportId || vote || consequence || epochDay || juryRound)`. The jury result carries the collected per-juror signatures. **No node applies a Bad-Badge level ≥ 1 or a Tombstone unless it verifies ≥ quorum distinct valid juror signatures whose signers pass the tolerance check.** Channel-index gossip entries carrying a badge/tombstone reference the verdict via `moderation_proof_hash`; the full proof is stored as a DHT record under `SHA-256("modproof" || channelId)` and fetched on demand before the badge level is adopted. Unproven badge levels are treated as badge 0.
+
+**Hard quorum.** A verdict passes only if `votes_approve ≥ ceil(juryMajority × nominal jury size)` — the denominator is the **nominal** jury size, never the number of respondents. With the production 5-juror minimum and 2/3 majority this means ≥ 4 approvals; partial responses never lower the bar.
+
+**Mixed-net rollout.** Phase 1 (observe/verify-only): new builds emit and verify signatures and count verification failures as telemetry; unproven writes from legacy builds are still applied. Phase 2, gated behind `minRequiredVersion` (§19.5.7): unproven badge/tombstone values are ignored (the entry degrades to badge 0 — receipt of user payloads is **never** dropped), and unsigned votes do not count toward quorum. This mirrors the D1/SR-2/H-2 legacy-record handling.
 
 **Jury language selection:** The language for jury selection comes from the **reported channel's language field** (set at creation, stored in the DHT index), not from any attribute on the juror's identity. A node is eligible for jury duty if it subscribes to at least one channel with the same language setting — a behavioral proxy for language competence that requires no metadata on the identity itself. For channels with `language: multi`, nodes of all languages are eligible. This preserves the anonymity principle (see §3.1 Identity Model): no language attribute is stored on or published with any identity. Eligibility is determined locally from the node's own subscription list and answered as a simple yes/no to jury requests.
 
@@ -3212,7 +3500,7 @@ CSAM (child sexual abuse material) cannot use the standard jury procedure becaus
 |-------|---------|--------|
 | 1 | First report | Registered, no visible action |
 | 2 | `max(10, subscribers × 0.05)` independent reports | Channel **temporarily hidden** from search (14-day window), admin can file objection |
-| 3 | `max(20, subscribers × 0.10)` independent reports | Channel **permanently deleted** (Tombstone) |
+| 3 | `max(20, subscribers × 0.10)` independent reports | Channel enters **extended-hide** (same as Stage 2 visibility, NOT immediate deletion). A mandatory **14-day objection window** opens; the admin can file an objection triggering a plausibility jury (identical to Stage 2). After the window closes without successful objection, a Tombstone is written — accompanied by a `CsamReporterQuorumProof` (list of reporter UserIDs + hybrid signatures over their report IDs). The proof is stored as a DHT record (`SHA-256("modproof" || channelId)`) and allows any node to verify that the Stage-3 threshold was reached by distinct, qualified reporters. Without this proof, a Tombstone is not applied. |
 
 **Example thresholds:** 50 subscribers → 10/20 reporters; 500 subscribers → 25/50 reporters; 5,000 subscribers → 250/500 reporters. Minimum is always 10 for temporary, 20 for permanent — always double-digit.
 
@@ -3230,7 +3518,7 @@ All time-based moderation limits are enforced by a **periodic timer** (`_moderat
 
 **Four checks per tick:**
 
-1. **Jury vote timeout:** Active jury sessions that exceed `juryVoteTimeout` are resolved with whatever votes have been cast (partial quorum).
+1. **Jury vote timeout:** Active jury sessions that exceed `juryVoteTimeout` trigger **deterministic replacement** of non-responders: the next-closest registered jurors at `juryRound + 1` are selected (same algorithm as §9.3.1a, incremented round parameter). Votes and signatures from the previous round carry over. A maximum of `juryReplacementRounds` rounds are attempted (production: 2). If the quorum is still not reached after the final round, the session resolves with **no consequence** — verdicts are never derived from "whatever votes happen to be cast".
 2. **Badge probation:** Channels with `correctionSubmitted=true` and `badBadgeSince` older than the probation period (`badgeProbationLevel1` / `badgeProbationLevel2`) have their badge level decremented.
 3. **CSAM temp-hide lift:** Channels with `isCsamHidden=true` and `csamHiddenSince` older than `csamTempHideDuration` are unhidden.
 4. **Single-post escalation:** Pending `PostReport` entries older than `singlePostEscalationTimeout` are escalated to `ChannelReport` entries and checked against the jury threshold.
@@ -3270,6 +3558,7 @@ All moderation timeouts, thresholds, and qualification requirements are centrali
 |-----------|-----------|------|
 | Jury vote timeout | 2 days | 10 seconds |
 | Jury minimum size | 5 | 3 |
+| Jury hard quorum (approvals) | 4 | 2 |
 | Report threshold for jury | 3 reports | 1 report |
 | Badge probation (stage 1) | 30 days | 30 seconds |
 | Badge probation (stage 2) | 90 days | 60 seconds |
@@ -3281,10 +3570,13 @@ All moderation timeouts, thresholds, and qualification requirements are centrali
 | Anti-Sybil reachability | ON (60%, 5 hops) | OFF |
 | Single post escalation | 7 days | 15 seconds |
 | Squatting protection | 7 days | 0 |
+| Juror-set tolerance factor | 2 | 2 |
+| Jury replacement rounds | 2 | 2 |
+| CSAM objection window | 14 days | 10 seconds |
 
-The config also provides calculation methods: `independenceThreshold(totalUsers)`, `effectiveJurySize(availableJurors)`, `csamStage2Threshold(subscribers)`, `csamStage3Threshold(subscribers)`, `hasJuryMajority(votesFor, totalVotes)`, and time-based checks (`isJuryVoteExpired`, `isProbationComplete`, etc.).
+The config also provides calculation methods: `independenceThreshold(totalUsers)`, `effectiveJurySize(availableJurors)`, `csamStage2Threshold(subscribers)`, `csamStage3Threshold(subscribers)`, `hasJuryMajority(votesFor, totalVotes)`, `juryHardQuorum(nominalJurySize)` / `juryApproved(...)` (hard quorum against the nominal jury size, §9.3.4), and time-based checks (`isJuryVoteExpired`, `isProbationComplete`, etc.).
 
-**Enums:** `ReportCategory` (6 categories), `JuryVote` (approve/reject/abstain), `JuryConsequence` (reclassifyNsfw/addBadBadge/deleteChannel/noAction), `BadBadgeLevel` (none/questionable/repeatedlyMisleading/permanent).
+**Enums:** `ReportCategory` (6 categories), `JuryVote` (approve/reject/abstain), `JuryConsequence` (reclassifyNsfw/addBadBadge/deleteChannel/noAction), `BadBadgeLevel` (none/questionable/repeatedlyMisleading/permanent), `VerdictVerification` (verified/legacyUnproven/failed — used by receive-side gossip verification, §9.3.1a).
 
 ### 9.5 System Channels — Bug Log & Feature Requests
 
@@ -4680,7 +4972,7 @@ Closed polls are retained for 90 days, then auto-deleted (configurable per group
 
 ### 11.4 Anonymous Voting (Linkable Ring Signatures)
 
-When `anonymous == true`, votes are cryptographically anonymous using **Linkable Ring Signatures**. No participant — not even the poll creator — can determine who voted what, while double-voting is still detected and prevented.
+When `anonymous == true`, votes are protected by **Linkable Ring Signatures**: the vote payload carries no voter ID, group membership is proven by the ring, and double-voting is detected via the key image. **Scope of this guarantee (honest):** in the current transport (Phase 1), the anonymity holds at the *application and persistence layer* — tallies, snapshots, exports and the UI identify votes only by key image. It does **not** yet hold at the *transport layer*: see §11.4.7. A planned anonymous submission path (single re-origination hop) will extend the guarantee to the transport layer in a later phase.
 
 #### 11.4.1 Concept
 
@@ -4769,6 +5061,23 @@ This allows changing votes while maintaining anonymity.
 - **Timing analysis:** If votes arrive in rapid succession, the order of arrival could hint at identity (network proximity). Mitigation: votes are delayed by a random 0–30 second jitter before broadcast.
 - **Collusion:** If N-1 members collude, they can deduce the last member's vote by elimination. This is inherent to any anonymous voting system with a known voter set.
 
+#### 11.4.7 Honest Limitations: Transport Deanonymization & Quantum
+
+**Transport deanonymization (Phase 1, current behavior).** `POLL_VOTE_ANONYMOUS` and `POLL_VOTE_REVOKE` are delivered through the standard pairwise send path (§2.6): each recipient receives a KEM-encrypted Inner ApplicationFrame that carries the voter's `senderUserId` and hybrid user signature, wrapped in an Outer NetworkPacket carrying the voter's `senderDeviceId`, hybrid device signature and — on direct routes — source IP. **Every recipient of the vote therefore learns who voted and when**, even though the vote *content* record is keyed only by the key image. The ring signature currently protects the persisted tally (DB, snapshots, exports, UI) and any party that obtains vote records without having received the frames — it does not protect against the participants themselves. In channels, anonymous votes follow the same creator-only path as non-anonymous votes (§24.3.2) — this limits the transport-layer observer to the poll creator rather than all subscribers. In groups, the pairwise fan-out exposes the voter to all members. Until the planned anonymous submission path (a single re-origination hop, scheduled for a later phase) extends the guarantee to the transport layer, the UI must state this scope explicitly ("anonymous in results, not on the network").
+
+**Retroactive quantum deanonymization.** The ring construction is classical Ed25519 (§11.4.2). The `ringMembers` public keys travel in cleartext inside the (hybrid-KEM-protected) vote message and are held by all participants. A future CRQC can recover each member's secret scalar from its public key, recompute the candidate key image `I' = sk · H_p(pollId ‖ P)` for every ring member and match it against the recorded key image — identifying the voter retroactively — and can equally forge ring signatures for any poll whose ring keys it has. No production-grade post-quantum linkable ring signature library exists (liboqs ships plain signatures only; lattice LRS schemes are research code with signatures in the tens-to-hundreds of KB). **Decision:** Cleona accepts this limitation and documents it instead of shipping home-grown research cryptography. Anyone whose vote must remain secret against a decades-horizon quantum adversary should not use anonymous polls. In practice the dominant risks remain the anonymity-set size and N−1 collusion (§11.4.6), both of which are quantum-independent.
+
+#### 11.4.8 Anonymous Submission Path (Re-Broadcaster)
+
+To extend vote anonymity to the transport layer without activating full onion routing (rejected for V3.0, §2.5), anonymous votes use a single re-origination hop:
+
+1. **De-attributed inner frame.** For `POLL_VOTE_ANONYMOUS` / `POLL_VOTE_REVOKE` only, the Inner ApplicationFrame is built with empty `senderUserId` and **no** user signatures — authenticity is carried entirely by the ring signature, which every participant verifies anyway. The receive pipeline (§2.4 step [13]) special-cases exactly these two MessageTypes: the user-sig verify is skipped and the frame is dispatched straight to the ring-signature handler; all other types keep the mandatory user-sig + KEX gate unchanged.
+2. **Submission bundle.** The voter KEM-encrypts one inner blob per recipient (as today), packs them into a `PollAnonSubmitMsg { entries: [(recipientUserId, kemBlob, deviceIds)] }` and sends it KEM-encrypted under the **Device-KEM public key** (§3.5b) of one uniformly random routing-table peer R that is neither a poll participant nor the voter's contact. R is the only party that links the voter's device to the act of voting; it never sees poll choice or content (end-to-end KEM).
+3. **Re-origination.** R validates limits (bundle ≤ 64 KB, ≤ 64 entries, standard rate limiting) and emits each entry as a **fresh** APPLICATION_FRAME NetworkPacket under **R's own** deviceId and device signature. The closed-network invariant (device sig on every packet) is preserved; recipients see R as the transport sender. R acknowledges acceptance with `POLL_ANON_SUBMIT_ACK`; on timeout the voter retries with a different R (max 3), then falls back to the legacy attributed path (§11.4.7).
+4. **Residual exposure (by design):** R learns "device X submitted an anonymous vote to recipient set {…}" (the set approximates the group); collusion between R and a participant deanonymizes; a global passive observer can correlate timing (mitigated by the 0–30 s jitter, §11.4.6). This is a deliberate reduction from "all N participants see the voter" to "one random third party sees participation" — not a mixnet.
+
+**Transition (mixed net):** old builds drop de-attributed frames (user-sig verify fails, silent drop) and cannot act as R. The legacy attributed path therefore remains the fallback. The re-broadcaster path activates as default behind the `minRequiredVersion` hard-block (§19.5.7), mirroring the D1/SR-2/H-2 legacy-handling pattern.
+
 ---
 
 ## 12. Synchronization Strategy
@@ -4796,7 +5105,7 @@ When a node starts, it follows a deterministic initialization sequence:
  3. Initialize components: DHT RPC, ACK tracker, MailboxStore,
     S&F + Mailbox-Pull subsystem (§5.5 / §5.6)
  4. Enumerate all local network interfaces (IP addresses)
- 5. Start transport (bind UDP socket)
+ 5. Start transport (bind UDP socket, set SO_RCVBUF=2MB)
  6. Start LAN discovery (IPv4 broadcast + IPv6 multicast)
  7. Start UPnP/NAT-PMP port mapping (non-blocking)
  8. Register self in routing table
@@ -4836,13 +5145,16 @@ Within the startup poll window, operations are strictly prioritized:
 
 #### 12.2.4 Background Timers
 
-Three periodic timers run during normal operation:
+Four periodic timers run during normal operation:
 
 | Timer | Interval | Purpose |
 |-------|----------|---------|
+| Daemon heartbeat | 5 seconds | Drift detection (WARN if tick >6.5s — indicates blocked main isolate), receive-health self-probe (`checkReceiveHealth`). At tick 12 (~60s uptime): **firewall blockade heuristic** — if `externalPacketsReceived == 0` (zero non-loopback inbound packets since start), log WARN suggesting OS firewall blocks inbound UDP. Fires once per session. |
 | Maintenance | 60 seconds | Routing table cleanup, stale peer pruning, mailbox housekeeping |
 | Peer exchange | 120 seconds | Share peer list deltas with known peers (Mesh Discovery, §4.5) |
 | DV safety-net | 1 hour | Full Distance-Vector route exchange with all neighbors (§4.4) |
+
+**UDP receive-health self-probe.** `checkReceiveHealth()` (called by the 5s daemon heartbeat) sends a 4-byte raw probe (`0x43 0x50 0x52 0x42` = "CPRB") to 127.0.0.1 on the node's own port. The probe is intentionally too short for V3 outer-frame parsing — it serves solely to set `_lastUdpReceiveMs` in the `onUdpEvent` handler *before* any HMAC/parse step, confirming that the Dart `RawDatagramSocket` listen callback is alive. If no UDP event (including the self-probe) fires within 30 seconds, the socket is considered dead and `reconnectSockets()` triggers. The probe's parse failure is suppressed in the V3 parser (loopback + ≤4 bytes → no "HMAC fail" log line) to avoid misleading log noise. On iOS, an additional `recvPeek()` path detects EBADF socket death (see §25.2).
 
 Additionally, a **welcome route update** fires 500 ms after a new neighbor is detected, sending full DV routes to the newcomer. A **DV catch-up** is triggered when the last full route exchange was more than 60 seconds ago.
 
@@ -4976,7 +5288,7 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 
 **Linux Desktop:** The daemon process (`cleona-daemon`) runs continuously as a separate process from the GUI. The UDP socket is permanently open, providing instant push delivery. The daemon survives GUI restarts. Becomes fully offline when the system enters standby. System tray icon (GTK3 + libappindicator3) provides visual status.
 
-**Windows Desktop:** Identical architecture to Linux Desktop. The daemon runs as a user-space process (not a Windows Service) with a system tray icon (Win32 Shell_NotifyIcon). Each Windows user gets their own daemon instance with separate data in `%APPDATA%\.cleona`. The daemon starts at user login (Registry autostart) and provides the same always-on UDP connectivity as Linux. IPC via TCP loopback (127.0.0.1) with auth-token file (`cleona.port`).
+**Windows Desktop:** Identical architecture to Linux Desktop. The daemon runs as a user-space process (not a Windows Service) with a system tray icon (Win32 Shell_NotifyIcon). Each Windows user gets their own daemon instance with separate data in `%APPDATA%\.cleona`. The daemon starts at user login (Registry autostart) and provides the same always-on UDP connectivity as Linux. IPC via TCP loopback (127.0.0.1) with auth-token file (`cleona.port`). **Firewall auto-rule (V3.1.85):** On first daemon start the daemon attempts to add a Windows Firewall inbound-UDP rule for its own executable via `netsh advfirewall firewall add rule`. A marker file (`firewall_rule_added`) prevents re-running. If the process lacks admin privileges, the attempt fails gracefully (logged, no crash) — the user must then add the rule manually or run the daemon once elevated. Without this rule, Windows Firewall silently blocks all inbound UDP and the node cannot receive any traffic from the network.
 
 ---
 
@@ -5062,6 +5374,8 @@ Excessive traffic from a single source is silently dropped. **Exemptions:** Rela
 
 **Positive reputation from accepted traffic:** Every packet that passes the rate limiter generates a `recordGood` event for the sender's reputation score. This is critical because infrastructure messages (DHT, DV-Routing, PeerList, Relay) return early in the node-level switch-case and never reach the application-level handler. Without this, new peers doing normal bootstrap traffic could never build positive reputation.
 
+**Collective quota for non-introduced sources (D5):** in addition to the per-source limits, all senders that have not *introduced* themselves share one collective slice of the global budget. A sender counts as **introduced** once its admission PoW verified (D3, §13.1.2) **or** its Device-Sig-PK was learned **firstParty** from its own self-broadcast — every build does this as part of normal discovery, so legacy builds leave the pool within seconds and contact devices are firstParty by construction. All other (anonymous/unknown) senders collectively share **50% of the global packet and byte budgets** (1,000 packets / 10 MB per 10 s window); per-source limits apply unchanged on top. N minted IDs that never introduce themselves compete with each other inside this slice instead of multiplying per-source budgets. The pool is deliberately generous — it binds only under attack, never during cold-start (the first packet from a new peer is typically the self-broadcast that lifts it out of the pool). Pool drops generate no `recordBad` (rule above unchanged). **Honest limitation:** pre-Phase-2 an insider lifts each minted ID out of the pool with one self-broadcast per ID — the pool throttles *anonymous* floods, not introduction-capable Sybils. Phase-2 enforcement narrows "introduced" to admission-verified (§13.1.8), making pool exemption CPU-bound per ID. Observability: `poolDropsRate` / `poolDropsRelay` counters in network stats.
+
 #### 13.1.4 Layer 3: Reputation System
 
 Nodes build reputation over time based on observed behavior. Reputation is strictly local — each node independently evaluates its peers. There is no global reputation score.
@@ -5096,7 +5410,7 @@ Ban Decay:
 
 #### 13.1.5 Layer 4: Fragment Budgets
 
-Each node allocates a limited relay storage budget per source Device-ID. If a single source attempts to store an excessive number of fragments, the excess is rejected with FRAGMENT_STORE_NACK. This prevents a single attacker from filling all relay storage on a victim node.
+Each node allocates a limited relay storage budget. **Keying honesty (D5 review):** in v3.0 the per-source cap is keyed per **mailbox** (recipient mailbox-ID, 20% of the total budget) plus the total budget bound — a *source-device*-keyed ingest limit does not exist; the original "per source Device-ID" claim was doc-vs-code drift. Excess stores are rejected (FRAGMENT_STORE_NACK), preventing a single mailbox from monopolizing relay storage. Fragments are deliberately NOT part of the D5 collective-quota pool — source-pooled ingest would require persistent sender attribution in the fragment store format (tracked in the security review).
 
 #### 13.1.6 Layer 5: Network-Level Banning
 
@@ -5132,8 +5446,8 @@ The DoS layers keyed on Device-IDs (Layer 2 rate limiting, Layer 3 reputation, L
 **Hardening roadmap (decided, security review cycle D):**
 
 - **D3 — Admission PoW per device keypair.** A static, reusable proof — nonce such that `SHA-256("cleona-id-pow-v1" || ed25519_device_pk || nonce)` has ≥ N leading zero bits — computed once at device creation and carried **alongside the device pubkey it certifies** (`PeerInfoProto.device_id_pow_nonce`, PEER_LIST_PUSH / PEER_KEY_RESPONSE — no additional packets), verified and cached by receivers (two hashes). Bound to the **pubkey**, not the Device-ID, so it survives secret rotation. Legacy builds ignore the unknown field. This raises ID minting from free to CPU-bound; it is a cost factor, not a prevention. Spec: §13.1.2.
-- **D4 — Replicator/lookup diversity + publisher self-verify.** K-closest selection prefers IP-subnet diversity (binds eclipse to the genuinely scarce resource — addresses); the publisher verifies its own records with one self-lookup per publish cycle.
-- **D5 — Collective quotas.** Non-admitted/unknown sources additionally share a collective fraction of the global budgets, so N minted IDs compete with each other instead of multiplying.
+- **D4 — Replicator/lookup diversity + publisher self-verify.** K-closest selection prefers IP-subnet diversity (binds eclipse to the genuinely scarce resource — addresses); the publisher verifies its own records with one self-lookup per publish cycle. Spec: §4.3 (*Replicator & lookup diversity* / *Publisher self-verify*).
+- **D5 — Collective quotas.** Non-admitted/unknown sources additionally share a collective fraction of the global budgets, so N minted IDs compete with each other instead of multiplying. Spec: §13.1.3 (*Collective quota for non-introduced sources*) + §5.3 (relay budget); fragments deliberately excluded (§13.1.5).
 - **Phase-2 enforcement** is gated behind a `minRequiredVersion` hard-block (§19.5.7) and implemented as **role gating** (admission required for DHT-store acceptance, relay candidacy, DV route acceptance, fragment storage) — basic packet receive is **never** dropped for missing admission, so no build generation ever loses message delivery.
 
 ### 13.2 Secret Rotation
@@ -5159,19 +5473,25 @@ The `network_secret` (see §4.10) is Cleona's closed-network authentication. Whe
 
 2. New Cleona builds (v3.0+) embed the `epoch=2` tag and can derive both secrets — old and new.
 
-3. **Dual-secret window** (typically 30 days): the daemon accepts HMAC under either the old or the new secret. This gives users time to update their builds.
+3. **Dual-secret window** (typically 90 days): the daemon accepts HMAC under either the old or the new secret. This gives users time to update their builds.
 
-4. After the window ends, old secrets are removed from the code path. Builds with the old secret can no longer enter the mesh — they are silently isolated.
+4. **Outbound backward-compatibility**: during the dual-secret window, outgoing packets use the **previous** (old) secret — not the current one. This ensures that un-updated peers (who only know the old secret) can still verify incoming packets. Updated peers accept both secrets, so the old-secret outbound is transparent to them. After the window closes, outbound switches to the current secret. Implementation: `NetworkSecret.outboundSecret` returns `previousSecret ?? secret`.
+
+5. After the window ends, old secrets are removed from the acceptance path. Builds with the old secret can no longer enter the mesh.
+
+6. **EPOCH_EXPIRED update hint**: when the window is closed, a one-generation-old secret (`expiredHintSecretVersion`) is retained solely for **detecting** expired peers. When the daemon receives a packet whose HMAC fails against both current and previous secrets but matches the expired-hint secret, it responds with a compact `EPOCH_EXPIRED` packet (magic `CEEP`, 16 bytes on wire) wrapped with the expired peer's old secret — so the expired peer can verify the HMAC and display an update notification. Rate-limited to 1 hint per source-IP per hour (amplification prevention). The receive-side parser (`NetworkSecret.parseEpochExpiredPayload`) is shipped in the **current** build so that future secret rotations can notify today's builds.
 
 **Hard-block update mechanism** (§19.5.7) complements secret rotation: the `UpdateManifest` can set `minRequiredVersion`, and old versions are placed into `ReducedMode` (no send/receive of user messages).
 
 **Implementation**:
 - `network_secret` derivation in `lib/core/crypto/network_secret.dart`
 - Embedded `epoch` tag in `assets/cleona_maintainer_public.pem` companion metadata
-- The daemon holds both secrets in memory during the window: `currentSecret` + `previousSecret` (optional)
-- HMAC verification tries both; if both fail, drop
+- Three secret tiers: `secret` (current), `previousSecret` (transition window), `expiredHintSecret` (detection-only)
+- Outbound: `outboundSecret` = previous during transition, current after
+- HMAC verification: tries current → previous → (if both fail) expired-hint for CEEP response
+- EPOCH_EXPIRED: `Transport._maybeSendEpochExpiredHint` / `_maybeSendEpochExpiredHintV3` with per-IP rate-limit
 
-**User observability**: no direct notifications. Old builds simply observe "no peers available" (the same behavior as an isolated network). The update-manifest hard-block (§19.5.7) shows an explicit prompt to update.
+**User observability**: expired builds that encounter a newer peer receive an `EPOCH_EXPIRED` hint via the `Transport.onEpochExpired` callback. Additionally, the update-manifest hard-block (§19.5.7) shows an explicit prompt to update when a peer is reachable to deliver the manifest.
 
 ### 13.3 Service Layer Resilience
 
@@ -5581,6 +5901,7 @@ Mapping to wire layers:
 - Notifications: Windows Toast API
 - Audio: WASAPI via libcleona_audio (miniaudio)
 - Single-Instance: machine-global flock+PID at `%USERPROFILE%\.cleona-daemon.lock` (cross-platform `RandomAccessFile.lock` → `LockFileEx` on Windows, `flock` on Linux at `$HOME/.cleona-daemon.lock`) — deterministic, profile-independent, sibling of the profile dir (§15.1)
+- Firewall: on first start, `netsh advfirewall` adds inbound-UDP rule for the daemon exe (marker file, graceful on non-admin)
 
 **Android**:
 - In-process: no separate daemon, Foreground Service with Activity lifecycle

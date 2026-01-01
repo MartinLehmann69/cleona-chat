@@ -147,7 +147,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     final peers = [...lanPeers, ...publicPeers];
     // Own addresses: up to 2 IPv4 private + public IPv4 + 1 IPv6 global (§27)
     final ipv4Ips = service.localIps.where((ip) => !ip.contains(':')).take(2);
-    final ipv6Ips = service.localIps.where((ip) => ip.contains(':') && !ip.toLowerCase().startsWith('fe80:')).take(1);
+    final ipv6Ips = service.localIps.where((ip) =>
+        ip.contains(':') && !ip.startsWith('fe80:') &&
+        !ip.startsWith('fd') && !ip.startsWith('fc')).take(1);
     final ownAddrs = [...ipv4Ips, ...ipv6Ips].map((ip) => _formatAddr(ip, service.port)).toList();
     if (service.publicIp != null && service.publicPort != null) {
       ownAddrs.add(_formatAddr(service.publicIp!, service.publicPort!));
@@ -176,6 +178,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
       userEd25519Pk: service.userEd25519Pk,
+      // SR-2: founding anchor — ContactSeed emits `fp` only when it
+      // differs from ep (i.e. the identity has rotated).
+      foundingEd25519Pk: service.foundingEd25519Pk,
       createdAtMs: DateTime.now().millisecondsSinceEpoch,
     );
     final qrBytes = qrSeed.toQrBytes();
@@ -192,6 +197,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
       userEd25519Pk: service.userEd25519Pk,
+      // SR-2: founding anchor — ContactSeed emits `fp` only when it
+      // differs from ep (i.e. the identity has rotated).
+      foundingEd25519Pk: service.foundingEd25519Pk,
       createdAtMs: DateTime.now().millisecondsSinceEpoch,
     );
     final shareUri = shareSeed.toUri();

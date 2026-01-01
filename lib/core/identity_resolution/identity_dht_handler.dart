@@ -20,6 +20,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/rotation_co_auth.dart';
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
@@ -50,6 +51,16 @@ class IdentityDhtHandler {
   final Map<String, LivenessRecord> _storedLiveness = {};
   // (userIdHex, deviceIdHex) joined with ":" → DeviceKemRecord (Welle 5, §4.3)
   final Map<String, DeviceKemRecord> _storedKemRecords = {};
+
+  /// §7.5: fired when a stored AuthManifest shrinks its device set without
+  /// valid co-auth proof. Args: userId, oldDeviceCount, newDeviceCount.
+  void Function(Uint8List userId, int oldCount, int newCount)?
+      _onDeviceSetShrinkWithoutProof;
+
+  void set onDeviceSetShrinkWithoutProof(
+      void Function(Uint8List userId, int oldCount, int newCount)? cb) {
+    _onDeviceSetShrinkWithoutProof = cb;
+  }
 
   Timer? _maintenanceTimer;
   Timer? _persistDebounce;
@@ -125,10 +136,42 @@ class IdentityDhtHandler {
       }
     }
     if (incomingVerified) {
-      // Volumen: Auth-Republish alle 20h pro User — info ok. Dient als
-      // VM-/Feld-Evidenz, dass der D1-Pfad aktiv ist.
       _log.info('D1: verankertes AuthManifest fuer '
           '${hex.substring(0, 16)}... gespeichert (seq=${m.sequenceNumber})');
+    }
+    // §7.5: detect device-set shrink without co-auth proof.
+    if (existing != null &&
+        existing.deviceSigKeys.length >= 2 &&
+        m.deviceSigKeys.isNotEmpty &&
+        m.deviceSigKeys.length < existing.deviceSigKeys.length) {
+      if (m.deviceSetChangeProof == null) {
+        _log.warn('§7.5 DEVICE-SET SHRINK without proof for '
+            '${hex.substring(0, 16)}...: '
+            '${existing.deviceSigKeys.length}→${m.deviceSigKeys.length} '
+            'devices (seq ${existing.sequenceNumber}→${m.sequenceNumber})');
+        _onDeviceSetShrinkWithoutProof?.call(
+            m.userId, existing.deviceSigKeys.length, m.deviceSigKeys.length);
+      } else {
+        final proof = m.deviceSetChangeProof!;
+        final changeHash = computeDeviceSetChangeHash(
+          userId: m.userId,
+          newDeviceNodeIds: m.authorizedDeviceNodeIds,
+          newSeq: m.sequenceNumber,
+        );
+        final result = verifyRotationCoAuth(
+          tokens: proof.approvals,
+          cachedDeviceSigKeys: existing.deviceSigKeys,
+          rotationHash: changeHash,
+          preRotationDeviceCount: proof.previousDeviceCount,
+        );
+        if (result == RotationCoAuthResult.quorumNotMet) {
+          _log.warn('§7.5 DEVICE-SET SHRINK with INSUFFICIENT proof for '
+              '${hex.substring(0, 16)}...: '
+              '${existing.deviceSigKeys.length}→${m.deviceSigKeys.length}');
+          _onDeviceSetShrinkWithoutProof?.call(
+              m.userId, existing.deviceSigKeys.length, m.deviceSigKeys.length);
+        }
+      }
     }
     _storedAuthManifests[hex] = m;
     _enforceAuthCap();
@@ -137,6 +180,16 @@ class IdentityDhtHandler {
 
   AuthManifest? getAuthManifest(Uint8List userId) {
     return _storedAuthManifests[bytesToHex(userId)];
+  }
+
+  /// §7.1 LD-4: extract delegated signing PKs from a cached AuthManifest.
+  List<({Uint8List edPk, Uint8List mlDsaPk})> getDelegatedKeys(Uint8List userId) {
+    final m = _storedAuthManifests[bytesToHex(userId)];
+    if (m == null || m.deviceDelegations.isEmpty) return const [];
+    return m.deviceDelegations
+        .where((d) => !d.isExpired())
+        .map((d) => (edPk: d.delegatedEd25519Pk, mlDsaPk: d.delegatedMlDsaPk))
+        .toList();
   }
 
   // ── Liveness API ──────────────────────────────────────────────

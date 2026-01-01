@@ -1,6 +1,7 @@
 // lib/ui/components/message_bubble.dart
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 
@@ -24,6 +25,10 @@ class MessageBubble extends StatelessWidget {
   /// can see at a glance that the message will expire (gui-42).
   final bool expiryActive;
 
+  /// GM-3 (§9.1.4): sender's membership hash diverges from ours at the same
+  /// or lower epoch — split-view anomaly detected.
+  final bool membershipMismatch;
+
   const MessageBubble({
     super.key,
     required this.text,
@@ -36,6 +41,7 @@ class MessageBubble extends StatelessWidget {
     this.onLongPress,
     this.onActionsPressed,
     this.expiryActive = false,
+    this.membershipMismatch = false,
   });
 
   @override
@@ -143,6 +149,29 @@ class MessageBubble extends StatelessWidget {
                   : null,
             ),
           ),
+          if (membershipMismatch)
+            Padding(
+              padding: EdgeInsets.only(top: tokens.spacing.xs),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.warning_amber_rounded, size: 12,
+                      color: Colors.orange.shade300),
+                  const SizedBox(width: 3),
+                  Flexible(
+                    child: Text(
+                      AppLocale.read(context).get('group_membership_mismatch'),
+                      style: tokens.typography.caption.copyWith(
+                        color: Colors.orange.shade300,
+                        fontSize: 10,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           SizedBox(height: tokens.spacing.xs),
           Row(
             mainAxisSize: MainAxisSize.min,

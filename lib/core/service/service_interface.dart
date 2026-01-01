@@ -33,6 +33,10 @@ abstract class ICleonaService {
   Uint8List get deviceMlKemPk;
   /// rev3: User-Ed25519-PK (32 bytes) — trust-anchor for ContactSeed v2.
   Uint8List get userEd25519Pk;
+  /// SR-2 (§8.1.1): founding User-Ed25519-PK — the key whose hash IS the
+  /// userId. Equals [userEd25519Pk] for never-rotated identities; the
+  /// ContactSeed emits the `fp` field only when the two differ.
+  Uint8List get foundingEd25519Pk;
   int get peerCount;
   /// Peers with confirmed bidirectional UDP contact this session.
   /// Used for P2P-aware connection status icon.
@@ -252,6 +256,13 @@ abstract class ICleonaService {
   /// `gui_action('reset_nat_wizard_latch')` invoked from the test harness.
   void testResetNatWizardDismissed();
 
+  // §7.1 Linked-Device Pairing
+  void Function(String requestingDeviceIdHex)? onDevicePairRequest;
+  bool get isLinkedDevice;
+  LinkedDeviceStatus get linkedDeviceStatus;
+  Future<bool> sendDevicePairRequest();
+  Future<bool> requestDelegationRenewal();
+
   // Guardian Recovery (Shamir SSS)
   Future<bool> setupGuardians(List<String> guardianNodeIds);
   Future<Map<String, dynamic>?> triggerGuardianRestore(String contactNodeIdHex);
@@ -371,11 +382,48 @@ abstract class ICleonaService {
   void Function(String contactNodeIdHex, int pendingCount)?
       onKeyRotationPendingExpired;
 
+  /// SR-1 (§7.4b step 6 / §8.3): fired when an accepted emergency key
+  /// rotation from a contact reset that contact's verification level —
+  /// the UI must surface the key-change warning so a soft re-key is never
+  /// followed silently (a valid rotation chain does not prove the rotation
+  /// was authorized by the legitimate owner vs. a seed-holding thief).
+  /// Args: contact userId hex, display name, whether the level was reset
+  /// from a previously verified/trusted state.
+  void Function(
+          String contactNodeIdHex, String displayName, bool wasVerified)?
+      onContactIdentityRotated;
+
+  /// §7.5: fired when a KEY_ROTATION_BROADCAST is received from a multi-device
+  /// contact but the Device-Sig countersig quorum is NOT met. This is the
+  /// elevated "possible Primary theft" warning — the standard key-change
+  /// warning fires regardless via [onContactIdentityRotated].
+  void Function(String contactNodeIdHex, String displayName,
+      int tokensPresent, int tokensRequired)? onRotationCoAuthWarning;
+
+  /// §7.5: fired when a Linked Device actively rejects a rotation via
+  /// MTV3_ROTATION_REJECTION_ALERT. Strongest possible theft signal.
+  void Function(String contactNodeIdHex, String displayName)?
+      onRotationRejectionAlert;
+
+  /// H-2 (§6.3.5): fired for every accepted Restore Broadcast — the
+  /// "[Name] has set up a new device" notification. `identityKeyChanged`
+  /// is true when the restore actually changed the contact's identity key
+  /// (new-seed re-identity / forge attempt → verification was reset, §8.3),
+  /// false for a deterministic same-seed recovery (keys unchanged).
+  /// Args: contact userId hex (new), display name, identityKeyChanged.
+  void Function(
+          String contactNodeIdHex, String displayName, bool identityKeyChanged)?
+      onContactRestoreDetected;
+
   /// [triggerNodeReset] (default `true`): forwards to `node.onNetworkChanged()`
   /// before running service-side cleanup (mailbox poll, identity-publisher
   /// re-publish). Daemon-style callers that already invoke `node.onNetworkChanged()`
   /// once for all identities should pass `false` to avoid the N+1 multiplication
   /// (one node-reset per identity on top of the direct one).
+  // Peer Rescue Bundle (§8.1.2)
+  Future<Map<String, dynamic>?> exportPeerBundle();
+  Future<Map<String, dynamic>> importPeerBundle({String? uri, String? bundleBase64});
+
   Future<void> onNetworkChanged({bool triggerNodeReset = true});
   Future<void> stop();
 }

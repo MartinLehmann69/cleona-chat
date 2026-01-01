@@ -234,6 +234,42 @@ class CleonaNode {
   final Set<String> _dvPendingChanges = {};
   final RelayDedupCache _relayDedup = RelayDedupCache();
 
+  // D5 (§5.3 + §13.1.3): collective relay-forward slice for non-introduced
+  // origins. Sliding 60s window. Origins that never introduced themselves
+  // (no admission PoW, no firstParty PK) collectively get this much forward
+  // amplification; introduced origins are unaffected. Generous: binds only
+  // under attack.
+  static const int relayPoolMaxBytesPerMinute = 2 * 1024 * 1024; // 2 MB
+  static const int relayPoolMaxMessagesPerMinute = 1000;
+  int _relayPoolBytes = 0;
+  int _relayPoolMessages = 0;
+  DateTime _relayPoolWindowStart = DateTime.now();
+  int _relayPoolDrops = 0;
+
+  /// D5: relay forwards dropped because the collective pool slice was
+  /// exhausted. Exposed as `poolDropsRelay` in network stats.
+  int get relayPoolDrops => _relayPoolDrops;
+
+  /// D5: returns true (and accounts the forward) when the pooled relay
+  /// slice still has room; false → the forward must be dropped. Only called
+  /// for non-introduced origins.
+  bool _relayPoolAllow(int payloadSize) {
+    final now = DateTime.now();
+    if (now.difference(_relayPoolWindowStart).inSeconds >= 60) {
+      _relayPoolBytes = 0;
+      _relayPoolMessages = 0;
+      _relayPoolWindowStart = now;
+    }
+    if (_relayPoolMessages >= relayPoolMaxMessagesPerMinute ||
+        _relayPoolBytes + payloadSize > relayPoolMaxBytesPerMinute) {
+      _relayPoolDrops++;
+      return false;
+    }
+    _relayPoolMessages++;
+    _relayPoolBytes += payloadSize;
+    return true;
+  }
+
   /// §2.4 step [3b]: duplicate-frame cache (replay dedup). Keyed on the
   /// networkTag HMAC, which covers the full packet incl. timestampMs — a
   /// byte-identical replay maps to the identical tag, while relay re-wraps
@@ -810,6 +846,9 @@ class CleonaNode {
       onNetworkChanged(force: true)
           .whenComplete(() => _networkChangeInProgress = false);
     };
+    transport.onEpochExpired = (minVersion) {
+      _log.warn('EPOCH_EXPIRED: network requires secret version $minVersion — this build is outdated');
+    };
     await transport.start();
 
     // Init LAN discovery — Phase 2: broadcast deviceNodeId (per-device routing)
@@ -1039,6 +1078,20 @@ class CleonaNode {
       return;
     }
 
+    // D5 (§13.1.3 Collective quota): source classification. A sender is
+    // "introduced" once its admission PoW verified (D3) OR its Device-Sig-PK
+    // was learned firstParty from its own self-broadcast (every build does
+    // this during normal discovery — legacy builds and contact devices are
+    // therefore exempt within seconds). Everything else shares the
+    // collective pool slice of the global budgets. The peer lookup here is
+    // the same O(1) lookup step [4] needs for Device-Sig-Verify below.
+    final senderPeer = senderDeviceId.isNotEmpty
+        ? routingTable.getPeer(senderDeviceId)
+        : null;
+    final introducedSource = senderPeer != null &&
+        (senderPeer.idPowVerified ||
+            senderPeer.pkSource == PkSource.firstParty);
+
     // DoS Layer 2: Rate limiting per sender device.
     // PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME is plaintext (cheap to forge) →
     // full per-source limits apply.  KEM-encrypted frames (INFRASTRUCTURE_FRAME
@@ -1048,7 +1101,8 @@ class CleonaNode {
       final pktSize = packet.writeToBuffer().length;
       final isBootInfra = packet.payloadType == proto.PayloadTypeV3.PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME;
       if (!rateLimiter.allowPacketHex(senderHex, pktSize,
-          checkPacketCount: isBootInfra, checkSourceLimits: isBootInfra)) {
+          checkPacketCount: isBootInfra, checkSourceLimits: isBootInfra,
+          pooled: !introducedSource)) {
         _log.debug('V3 drop: rate-limited ${senderHex.substring(0, 8)} pkt=${pktSize}B type=${packet.payloadType.name}');
         return;
       }
@@ -1069,9 +1123,7 @@ class CleonaNode {
     // `ed25519PublicKey` field). Bootstrap path: no Device-Sig PK on file →
     // lenient pass; the next self-broadcast PEER_LIST_PUSH installs the PK
     // and subsequent packets verify strictly.
-    final senderPeer = senderDeviceId.isNotEmpty
-        ? routingTable.getPeer(senderDeviceId)
-        : null;
+    // (senderPeer was already looked up before the rate-limit step — D5.)
     final edPk = senderPeer?.deviceEd25519PublicKey;
     OuterSigStatus outerStatus;
     if (edPk != null) {
@@ -1292,6 +1344,16 @@ class CleonaNode {
       final nextHopHex = bytesToHex(nextHop);
       if (!dvRouting.hasAliveRouteTo(nextHopHex)) {
         _log.debug('V3 relay drop: dest ${nextHopHex.substring(0, 8)} no alive route');
+        return;
+      }
+      // D5 (§5.3): collective forward slice for non-introduced origins.
+      // `introducedSource` classifies packet.senderDeviceId — for a relayed
+      // packet that IS the originator, exactly the identity whose forward
+      // amplification the pool bounds. Introduced origins skip this entirely.
+      if (!introducedSource && !_relayPoolAllow(packet.payload.length)) {
+        _log.debug('V3 relay drop: pooled-origin slice exhausted '
+            '(${senderHex.substring(0, 8)}, '
+            '$_relayPoolMessages msgs/${_relayPoolBytes ~/ 1024}KB this window)');
         return;
       }
       // §3.7.3 Reverse-path loop prevention: resolve who sent this packet
@@ -2778,6 +2840,18 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
       // Wave 2B.3 (§10.2): channel-index gossip — see codec selector for rationale.
       case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+      // Deferred Key Exchange (rev3 §8.1.1) — BOOT path: sender does not yet
+      // have recipient's Device-KEM-PK (that's what we're requesting).
+      case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
+      case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
+      // First-CR-Mailbox (rev3 §5.5b) — KEM path (sender has SeedPeer's
+      // Device-KEM-PK from routing table).
+      case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
+      case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
+      case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
+      // §11.4.8: Anonymous Vote Re-Broadcaster — voter→R bundle + R→voter ACK
+      case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
+      case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
         return true;
       default:
         return false;
@@ -4376,11 +4450,22 @@ class CleonaNode {
         if (pruned > 0) {
           _log.info('Routing-table audit: pruned $pruned unreachable addresses');
         }
-        // Touch all loaded peers so maintenance prune (4h) doesn't remove them
-        // before they have a chance to respond to discovery/PINGs.
-        final now = DateTime.now();
+        // Prune-protection for loaded peers: backdate lastSeen to just past
+        // the findClosestPeers recent-cutoff (10 min) instead of faking
+        // `now`. The touch exists ONLY so the 4h maintenance prune doesn't
+        // remove loaded peers before they had a chance to respond — but
+        // `lastSeen = now` also made every dead persisted peer count as
+        // "recent" for 10 minutes, poisoning the recent/stale partition of
+        // findClosestPeers: replicator selections right after startup went
+        // to dead peers while the actually-live peer (genuinely recent via
+        // _touchPeer on inbound traffic) lost the XOR race (found via D4
+        // publisher self-verify MISS on VM verification, 2026-06-12).
+        // Backdating keeps full prune protection (4h window) while loaded
+        // peers honestly start as "stale" until they really respond.
+        final loadedSeen =
+            DateTime.now().subtract(const Duration(minutes: 11));
         for (final peer in routingTable.allPeers) {
-          peer.lastSeen = now;
+          peer.lastSeen = loadedSeen;
         }
         _log.info('Loaded ${routingTable.peerCount} peers from routing table');
       } catch (e) {

@@ -51,16 +51,33 @@ class RateLimiter {
   /// Max tracked sources (LRU eviction beyond this).
   final int maxTrackedSources;
 
+  /// D5 (§13.1.3 Collective quota): fraction of the GLOBAL budgets that all
+  /// non-introduced (anonymous/unknown) sources share collectively. Generous
+  /// by design — binds only under attack, never during cold-start (a peer's
+  /// first packet is typically the self-broadcast that lifts it out of the
+  /// pool via firstParty PK / admission PoW).
+  final double poolFraction;
+
   // ── Internal state ─────────────────────────────────────────────────
 
   final Map<String, _SourceBucket> _sources = {};
   int _totalPackets = 0;
   int _totalBytes = 0;
+  // D5: collective counters for pooled (non-introduced) sources. Reset on
+  // the same window as the global counters.
+  int _poolPackets = 0;
+  int _poolBytes = 0;
   DateTime _totalWindowStart = DateTime.now();
 
   // Stats for monitoring
   int _droppedPackets = 0;
   int get droppedPackets => _droppedPackets;
+
+  /// D5: packets dropped because the collective pool slice was exhausted
+  /// (subset of [droppedPackets]). Exposed as `poolDropsRate` in network
+  /// stats.
+  int _poolDroppedPackets = 0;
+  int get poolDroppedPackets => _poolDroppedPackets;
 
   RateLimiter({
     this.window = const Duration(seconds: 10),
@@ -69,6 +86,7 @@ class RateLimiter {
     this.maxTotalPackets = 2000,
     this.maxTotalBytes = 20 * 1024 * 1024, // 20 MB
     this.maxTrackedSources = 500,
+    this.poolFraction = 0.5,
   });
 
   /// Production defaults — generous limits that only catch real abuse.
@@ -144,9 +162,17 @@ class RateLimiter {
   /// natural rate limit is CPU-bound. PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME is
   /// plaintext and cheap — it is the only type that should consume per-source
   /// quota.
+  ///
+  /// [pooled] — D5 (§13.1.3 Collective quota): true when the sender has NOT
+  /// introduced itself (no verified admission PoW and no firstParty
+  /// Device-Sig-PK). Pooled senders collectively share `poolFraction` of the
+  /// global packet/byte budgets, so N minted IDs compete with each other
+  /// instead of multiplying per-source budgets. Per-source limits apply
+  /// unchanged on top. Pool drops generate no recordBad (§13.1.3).
   bool allowPacketHex(String senderHex, int packetSize, {
     bool checkPacketCount = true,
     bool checkSourceLimits = true,
+    bool pooled = false,
   }) {
     _resetTotalIfExpired();
 
@@ -157,6 +183,21 @@ class RateLimiter {
     if (_totalBytes + packetSize > maxTotalBytes) {
       _droppedPackets++;
       return false;
+    }
+
+    // D5: collective pool slice for non-introduced sources.
+    if (pooled) {
+      if (checkPacketCount &&
+          _poolPackets >= (maxTotalPackets * poolFraction).floor()) {
+        _droppedPackets++;
+        _poolDroppedPackets++;
+        return false;
+      }
+      if (_poolBytes + packetSize > (maxTotalBytes * poolFraction).floor()) {
+        _droppedPackets++;
+        _poolDroppedPackets++;
+        return false;
+      }
     }
 
     if (checkSourceLimits) {
@@ -184,6 +225,10 @@ class RateLimiter {
 
     _totalPackets++;
     _totalBytes += packetSize;
+    if (pooled) {
+      _poolPackets++;
+      _poolBytes += packetSize;
+    }
     return true;
   }
 
@@ -191,6 +236,8 @@ class RateLimiter {
     if (DateTime.now().difference(_totalWindowStart) >= window) {
       _totalPackets = 0;
       _totalBytes = 0;
+      _poolPackets = 0;
+      _poolBytes = 0;
       _totalWindowStart = DateTime.now();
     }
   }

@@ -75,6 +75,7 @@ const Map<String, Map<String, String>> translations = {
   'all_contacts_in_group': {'de': 'Alle Kontakte sind bereits in der Gruppe', 'en': 'All contacts are already in the group', 'es': 'Todos los contactos ya están en el grupo', 'hu': 'Minden kontakt már a csoportban van', 'sv': 'Alla kontakter är redan i gruppen', 'ar': 'جميع جهات الاتصال في المجموعة', 'he': 'כל אנשי הקשר כבר בקבוצה', 'fa': 'همه مخاطبین در گروه هستند', 'fr': 'Tous les contacts sont dans le groupe', 'it': 'Tutti i contatti sono nel gruppo', 'pt': 'Todos os contatos estão no grupo', 'nl': 'Alle contacten zitten in de groep', 'pl': 'Wszyscy kontakty są w grupie', 'ro': 'Toate contactele sunt în grup', 'cs': 'Všechny kontakty jsou ve skupině', 'sk': 'Všetky kontakty sú v skupine', 'hr': 'Svi kontakti su u grupi', 'bg': 'Всички контакти са в групата', 'el': 'Όλες οι επαφές είναι στην ομάδα', 'da': 'Alle kontakter er i gruppen', 'fi': 'Kaikki yhteystiedot ovat ryhmässä', 'no': 'Alle kontakter er i gruppen', 'uk': 'Всі контакти вже в групі', 'ru': 'Все контакты в группе', 'tr': 'Tüm kişiler grupta', 'zh': '所有联系人已在群组中', 'ja': '全連絡先がグループ内', 'ko': '모든 연락처가 그룹에 있음', 'hi': 'सभी संपर्क समूह में हैं', 'th': 'ผู้ติดต่อทั้งหมดอยู่ในกลุ่มแล้ว', 'vi': 'Tất cả đã trong nhóm', 'id': 'Semua kontak di grup', 'ms': 'Semua kenalan dalam kumpulan'},
   'no_groups': {'de': 'Keine Gruppen', 'en': 'No groups', 'es': 'Sin grupos', 'hu': 'Nincsenek csoportok', 'sv': 'Inga grupper', 'ar': 'لا مجموعات', 'he': 'אין קבוצות', 'fa': 'گروهی نیست', 'fr': 'Aucun groupe', 'it': 'Nessun gruppo', 'pt': 'Sem grupos', 'nl': 'Geen groepen', 'pl': 'Brak grup', 'ro': 'Niciun grup', 'cs': 'Žádné skupiny', 'sk': 'Žiadne skupiny', 'hr': 'Nema grupa', 'bg': 'Няма групи', 'el': 'Δεν υπάρχουν ομάδες', 'da': 'Ingen grupper', 'fi': 'Ei ryhmiä', 'no': 'Ingen grupper', 'uk': 'Немає груп', 'ru': 'Нет групп', 'tr': 'Grup yok', 'zh': '没有群组', 'ja': 'グループなし', 'ko': '그룹 없음', 'hi': 'कोई समूह नहीं', 'th': 'ไม่มีกลุ่ม', 'vi': 'Không có nhóm', 'id': 'Tidak ada grup', 'ms': 'Tiada kumpulan'},
   'group_unavailable': {'de': 'Gruppe nicht mehr verfügbar — Du hast sie verlassen.', 'en': 'Group no longer available — you left it.', 'es': 'Grupo ya no disponible — lo abandonaste.', 'hu': 'A csoport már nem elérhető — kiléptél.', 'sv': 'Gruppen är inte längre tillgänglig — du lämnade den.', 'ar': 'المجموعة غير متاحة — غادرتها.', 'he': 'הקבוצה לא זמינה — עזבת אותה.', 'fa': 'گروه در دسترس نیست — شما خارج شدید.', 'fr': 'Groupe indisponible — vous l\'avez quitté.', 'it': 'Gruppo non disponibile — lo hai lasciato.', 'pt': 'Grupo indisponível — você saiu.', 'nl': 'Groep niet beschikbaar — je hebt het verlaten.', 'pl': 'Grupa niedostępna — opuściłeś ją.', 'ro': 'Grup indisponibil — l-ai părăsit.', 'cs': 'Skupina nedostupná — opustili jste ji.', 'sk': 'Skupina nedostupná — opustili ste ju.', 'hr': 'Grupa nedostupna — napustili ste je.', 'bg': 'Групата не е налична — напуснахте я.', 'el': 'Ομάδα μη διαθέσιμη — αποχωρήσατε.', 'da': 'Gruppen er ikke tilgængelig — du forlod den.', 'fi': 'Ryhmä ei saatavilla — poistuit.', 'no': 'Gruppen er ikke tilgjengelig — du forlot den.', 'uk': 'Група недоступна — ви покинули її.', 'ru': 'Группа недоступна — вы покинули её.', 'tr': 'Grup mevcut değil — ayrıldınız.', 'zh': '群组不可用——您已离开。', 'ja': 'グループは利用不可——退出済み。', 'ko': '그룹 사용 불가——나갔습니다.', 'hi': 'समूह अनुपलब्ध — आपने छोड़ दिया।', 'th': 'กลุ่มไม่พร้อมใช้งาน — คุณออกแล้ว', 'vi': 'Nhóm không khả dụng — bạn đã rời.', 'id': 'Grup tidak tersedia — Anda keluar.', 'ms': 'Kumpulan tidak tersedia — anda keluar.'},
+  'group_membership_mismatch': {'de': 'Mitgliederliste weicht ab — mögliche Inkonsistenz', 'en': 'Member list diverges — possible inconsistency', 'es': 'Lista de miembros diverge — posible inconsistencia', 'fr': 'Liste des membres diverge — incohérence possible', 'hu': 'A taglista eltér — lehetséges inkonzisztencia', 'sv': 'Medlemslistan avviker — möjlig inkonsistens', 'ar': 'قائمة الأعضاء مختلفة — احتمال عدم تطابق', 'he': 'רשימת החברים שונה — אי-עקביות אפשרית', 'fa': 'لیست اعضا متفاوت است — ناسازگاری احتمالی', 'it': 'Elenco membri diverge — possibile incoerenza', 'pt': 'Lista de membros diverge — possível inconsistência', 'nl': 'Ledenlijst wijkt af — mogelijke inconsistentie', 'pl': 'Lista członków rozbieżna — możliwa niespójność', 'ro': 'Lista membrilor diferă — posibilă inconsistență', 'cs': 'Seznam členů se liší — možná nekonzistence', 'sk': 'Zoznam členov sa líši — možná nekonzistencia', 'hr': 'Popis članova se razlikuje — moguća nedosljednost', 'bg': 'Списъкът с членове се различава — възможна несъвместимост', 'el': 'Η λίστα μελών αποκλίνει — πιθανή ασυνέπεια', 'da': 'Medlemslisten afviger — mulig inkonsistens', 'fi': 'Jäsenlista poikkeaa — mahdollinen epäjohdonmukaisuus', 'no': 'Medlemslisten avviker — mulig inkonsistens', 'uk': 'Список учасників розходиться — можлива невідповідність', 'ru': 'Список участников расходится — возможная несогласованность', 'tr': 'Üye listesi farklı — olası tutarsızlık', 'zh': '成员列表不一致——可能存在差异', 'ja': 'メンバーリストが一致しません——不整合の可能性', 'ko': '멤버 목록이 다릅니다 — 불일치 가능', 'hi': 'सदस्य सूची भिन्न है — संभावित असंगति', 'th': 'รายชื่อสมาชิกไม่ตรงกัน — อาจไม่สอดคล้อง', 'vi': 'Danh sách thành viên khác nhau — có thể không nhất quán', 'id': 'Daftar anggota berbeda — kemungkinan inkonsistensi', 'ms': 'Senarai ahli berbeza — kemungkinan ketidakselarasan'},
 
   // ── Channels ──────────────────────────────────────────────────────
   'create_channel': {'de': 'Channel erstellen', 'en': 'Create channel', 'es': 'Crear canal', 'hu': 'Csatorna létrehozása', 'sv': 'Skapa kanal', 'ar': 'إنشاء قناة', 'he': 'יצירת ערוץ', 'fa': 'ایجاد کانال', 'fr': 'Créer une chaîne', 'it': 'Crea canale', 'pt': 'Criar canal', 'nl': 'Kanaal aanmaken', 'pl': 'Utwórz kanał', 'ro': 'Creează canal', 'cs': 'Vytvořit kanál', 'sk': 'Vytvoriť kanál', 'hr': 'Stvori kanal', 'bg': 'Създай канал', 'el': 'Δημιουργία καναλιού', 'da': 'Opret kanal', 'fi': 'Luo kanava', 'no': 'Opprett kanal', 'uk': 'Створити канал', 'ru': 'Создать канал', 'tr': 'Kanal oluştur', 'zh': '创建频道', 'ja': 'チャンネル作成', 'ko': '채널 만들기', 'hi': 'चैनल बनाएं', 'th': 'สร้างช่อง', 'vi': 'Tạo kênh', 'id': 'Buat kanal', 'ms': 'Cipta saluran'},
@@ -519,6 +520,11 @@ const Map<String, Map<String, String>> translations = {
   'device_key_rotation_hint': {'de': 'Erzeugt neue Schlüssel und benachrichtigt alle Kontakte. Unwiderruflich!', 'en': 'Generates new keys and notifies all contacts. Irreversible!', 'es': 'Genera nuevas claves y notifica a todos los contactos. ¡Irreversible!', 'hu': 'Új kulcsok generálása és értesítés. Visszavonhatatlan!', 'sv': 'Genererar nya nycklar och meddelar alla kontakter. Oåterkalleligt!', 'fr': 'Génère de nouvelles clés et notifie tous les contacts. Irréversible !', 'it': 'Genera nuove chiavi e notifica tutti i contatti. Irreversibile!', 'pt': 'Gera novas chaves e notifica todos. Irreversível!', 'nl': 'Genereert nieuwe sleutels. Onherroepelijk!', 'pl': 'Generuje nowe klucze. Nieodwracalne!', 'cs': 'Generuje nové klíče. Nevratné!', 'uk': 'Генерує нові ключі. Незворотно!', 'ru': 'Генерирует новые ключи. Необратимо!', 'tr': 'Yeni anahtarlar üretir. Geri alınamaz!', 'zh': '生成新密钥并通知所有联系人。不可逆！', 'ja': '新しい鍵を生成し全連絡先に通知。不可逆！', 'ko': '새 키를 생성하고 모든 연락처에 알립니다. 되돌릴 수 없습니다!', 'ar': 'ينشئ مفاتيح جديدة ويُبلِّغ جميع جهات الاتصال. لا يمكن التراجع!', 'he': 'מייצר מפתחות חדשים ומודיע לכל אנשי הקשר. בלתי הפיך!', 'fa': 'کلیدهای جدید می‌سازد و به همه مخاطبین اطلاع می‌دهد. برگشت‌ناپذیر!', 'ro': 'Generează chei noi și notifică toate contactele. Ireversibil!', 'sk': 'Generuje nové kľúče a upozorní všetky kontakty. Nezvratné!', 'hr': 'Generira nove ključeve i obavještava sve kontakte. Nepovratno!', 'bg': 'Генерира нови ключове и уведомява всички контакти. Необратимо!', 'el': 'Δημιουργεί νέα κλειδιά και ειδοποιεί όλες τις επαφές. Μη αναστρέψιμο!', 'da': 'Genererer nye nøgler og underretter alle kontakter. Uigenkaldeligt!', 'fi': 'Luo uudet avaimet ja ilmoittaa kaikille kontakteille. Peruuttamaton!', 'no': 'Genererer nye nøkler og varsler alle kontakter. Uopprettelig!', 'hi': 'नई कुंजियाँ बनाता है और सभी संपर्कों को सूचित करता है। अपरिवर्तनीय!', 'th': 'สร้างคีย์ใหม่และแจ้งผู้ติดต่อทั้งหมด ไม่สามารถย้อนกลับได้!', 'vi': 'Tạo khóa mới và thông báo cho tất cả liên hệ. Không thể hoàn tác!', 'id': 'Membuat kunci baru dan memberitahu semua kontak. Tidak dapat dibatalkan!', 'ms': 'Menjana kunci baharu dan memaklumkan semua kenalan. Tidak boleh diundur!'},
   'device_key_rotation_title': {'de': 'Identität neu schlüsseln', 'en': 'Rotate identity keys', 'es': 'Rotar claves', 'hu': 'Kulcscsere', 'sv': 'Rotera nycklar', 'fr': 'Rotation des clés', 'it': 'Rotazione chiavi', 'pt': 'Rotação de chaves', 'nl': 'Sleutelrotatie', 'pl': 'Rotacja kluczy', 'cs': 'Rotace klíčů', 'uk': 'Ротація ключів', 'ru': 'Ротация ключей', 'tr': 'Anahtar rotasyonu', 'zh': '密钥轮换', 'ja': '鍵ローテーション', 'ko': '키 교체', 'ar': 'تدوير مفاتيح الهوية', 'he': 'החלפת מפתחות', 'fa': 'چرخش کلیدهای هویت', 'ro': 'Rotație chei', 'sk': 'Rotácia kľúčov', 'hr': 'Rotacija ključeva', 'bg': 'Ротация на ключове', 'el': 'Εναλλαγή κλειδιών', 'da': 'Rotér nøgler', 'fi': 'Kierrätä avaimet', 'no': 'Rotér nøkler', 'hi': 'कुंजियाँ बदलें', 'th': 'หมุนคีย์', 'vi': 'Xoay khóa', 'id': 'Rotasi kunci', 'ms': 'Putaran kunci'},
   'device_key_rotation_warning': {'de': 'Dies generiert einen komplett neuen Schlüsselsatz für diese Identität. Alle Kontakte werden benachrichtigt und müssen die neuen Schlüssel akzeptieren.', 'en': 'This generates a completely new set of keys for this identity. All contacts will be notified and must accept the new keys.', 'es': 'Esto genera un nuevo juego de claves. Todos los contactos serán notificados.', 'hu': 'Ez új kulcskészletet generál. Minden kontakt értesítést kap.', 'sv': 'Detta genererar helt nya nycklar. Alla kontakter meddelas.', 'fr': 'Ceci génère de nouvelles clés. Tous les contacts seront notifiés.', 'it': 'Genera nuove chiavi. Tutti i contatti verranno notificati.', 'pt': 'Gera novas chaves. Todos os contatos serão notificados.', 'uk': 'Це створить новий набір ключів. Усі контакти будуть сповіщені.', 'ru': 'Создаст новый набор ключей. Все контакты будут уведомлены.', 'zh': '这将生成全新密钥集。所有联系人将被通知。', 'ja': '新しい鍵セットを生成します。全連絡先に通知されます。', 'ko': '새로운 키 세트를 생성합니다. 모든 연락처에 알립니다.', 'ar': 'سيؤدي ذلك إلى إنشاء مجموعة مفاتيح جديدة تمامًا لهذه الهوية. سيتم إعلام جميع جهات الاتصال ويجب عليها قبول المفاتيح الجديدة.', 'he': 'זה ייצור סט מפתחות חדש לגמרי. כל אנשי הקשר יקבלו הודעה.', 'fa': 'این کار مجموعه کلیدهای کاملاً جدیدی ایجاد می‌کند. همه مخاطبین مطلع می‌شوند.', 'nl': 'Dit genereert een compleet nieuwe sleutelset. Alle contacten worden geïnformeerd.', 'pl': 'To wygeneruje zupełnie nowy zestaw kluczy. Wszystkie kontakty zostaną powiadomione.', 'ro': 'Generează un set complet nou de chei. Toate contactele vor fi notificate.', 'cs': 'Vygeneruje zcela novou sadu klíčů. Všechny kontakty budou upozorněny.', 'sk': 'Vygeneruje úplne novú sadu kľúčov. Všetky kontakty budú upozornené.', 'hr': 'Ovo će stvoriti potpuno novi skup ključeva. Svi kontakti bit će obaviješteni.', 'bg': 'Това генерира напълно нов набор ключове. Всички контакти ще бъдат уведомени.', 'el': 'Δημιουργεί εντελώς νέα κλειδιά. Όλες οι επαφές θα ειδοποιηθούν.', 'da': 'Dette genererer et helt nyt nøglesæt. Alle kontakter underrettes.', 'fi': 'Luo täysin uudet avaimet. Kaikille kontakteille ilmoitetaan.', 'no': 'Dette genererer et helt nytt nøkkelsett. Alle kontakter varsles.', 'tr': 'Bu, tamamen yeni bir anahtar seti oluşturur. Tüm kişilere bildirilir.', 'hi': 'इससे इस पहचान के लिए पूरी तरह नई कुंजियाँ बनेंगी। सभी संपर्कों को सूचित किया जाएगा।', 'th': 'การทำเช่นนี้จะสร้างชุดคีย์ใหม่ทั้งหมด ผู้ติดต่อทั้งหมดจะได้รับแจ้ง', 'vi': 'Thao tác này tạo bộ khóa hoàn toàn mới. Tất cả liên hệ sẽ được thông báo.', 'id': 'Ini akan membuat set kunci baru. Semua kontak akan diberi tahu.', 'ms': 'Ini menjana set kunci baharu sepenuhnya. Semua kenalan akan dimaklumkan.'},
+  // uncertain: all non-de/en for rotation_co_auth_warning, rotation_co_auth_warning_body, rotation_rejection_alert, rotation_rejection_alert_body
+  'rotation_co_auth_warning': {'de': 'Schlüsselrotation ohne Geräte-Quorum', 'en': 'Key rotation without device quorum', 'es': 'Rotación de claves sin quórum de dispositivos', 'hu': 'Kulcsrotáció eszközkvórum nélkül', 'sv': 'Nyckelrotation utan enhetskvorum', 'ar': 'تدوير مفاتيح بدون نصاب الأجهزة', 'he': 'החלפת מפתחות ללא קוורום מכשירים', 'fa': 'چرخش کلیدها بدون نصاب دستگاه', 'fr': 'Rotation des clés sans quorum d\'appareils', 'it': 'Rotazione chiavi senza quorum dispositivi', 'pt': 'Rotação de chaves sem quórum de dispositivos', 'nl': 'Sleutelrotatie zonder apparaatquorum', 'pl': 'Rotacja kluczy bez kworum urządzeń', 'ro': 'Rotație chei fără cvorumul dispozitivelor', 'cs': 'Rotace klíčů bez kvora zařízení', 'sk': 'Rotácia kľúčov bez kvóra zariadení', 'hr': 'Rotacija ključeva bez kvoruma uređaja', 'bg': 'Ротация на ключове без кворум на устройства', 'el': 'Εναλλαγή κλειδιών χωρίς απαρτία συσκευών', 'da': 'Nøglerotation uden enhedskvorum', 'fi': 'Avainten kierrätys ilman laitekvorum', 'no': 'Nøkkelrotasjon uten enhetskvorum', 'uk': 'Ротація ключів без кворуму пристроїв', 'ru': 'Ротация ключей без кворума устройств', 'tr': 'Cihaz çekirdeği olmadan anahtar rotasyonu', 'zh': '未达设备法定人数的密钥轮换', 'ja': 'デバイスクォーラム未達の鍵ローテーション', 'ko': '기기 쿼럼 없는 키 교체', 'hi': 'डिवाइस कोरम के बिना कुंजी रोटेशन', 'th': 'การหมุนคีย์โดยไม่มีองค์ประชุมอุปกรณ์', 'vi': 'Xoay khóa không đủ số lượng thiết bị', 'id': 'Rotasi kunci tanpa kuorum perangkat', 'ms': 'Putaran kunci tanpa kuorum peranti'},
+  'rotation_co_auth_warning_body': {'de': '{name} hat die Schlüssel rotiert, aber nur {present} von {required} Geräten haben bestätigt. Möglicher Diebstahl des Hauptgeräts.', 'en': '{name} rotated keys but only {present} of {required} devices confirmed. Possible theft of primary device.', 'es': '{name} rotó las claves, pero solo {present} de {required} dispositivos confirmaron. Posible robo del dispositivo principal.', 'hu': '{name} kulcsokat rotált, de csak {present} / {required} eszköz erősítette meg. Lehetséges főeszköz-lopás.', 'sv': '{name} roterade nycklar men bara {present} av {required} enheter bekräftade. Möjlig stöld av primär enhet.', 'ar': 'دوّر {name} المفاتيح، لكن {present} فقط من {required} جهاز أكّدت. يُحتمل سرقة الجهاز الرئيسي.', 'he': '{name} ביצע החלפת מפתחות, אך רק {present} מתוך {required} מכשירים אישרו. ייתכן גניבה של המכשיר הראשי.', 'fa': '{name} کلیدها را چرخاند، اما تنها {present} از {required} دستگاه تأیید کردند. احتمال سرقت دستگاه اصلی.', 'fr': '{name} a effectué une rotation des clés, mais seulement {present} sur {required} appareils ont confirmé. Vol possible de l\'appareil principal.', 'it': '{name} ha ruotato le chiavi ma solo {present} di {required} dispositivi hanno confermato. Possibile furto del dispositivo principale.', 'pt': '{name} rotacionou as chaves, mas apenas {present} de {required} dispositivos confirmaram. Possível roubo do dispositivo principal.', 'nl': '{name} rouleerde sleutels maar slechts {present} van {required} apparaten bevestigden. Mogelijke diefstal van primair apparaat.', 'pl': '{name} obrócił klucze, ale tylko {present} z {required} urządzeń potwierdziło. Możliwa kradzież głównego urządzenia.', 'ro': '{name} a rotat cheile, dar doar {present} din {required} dispozitive au confirmat. Posibilă furt al dispozitivului principal.', 'cs': '{name} provedl rotaci klíčů, ale potvrdilo pouze {present} z {required} zařízení. Možná krádež hlavního zařízení.', 'sk': '{name} rotoval kľúče, ale potvrdilo iba {present} z {required} zariadení. Možná krádež hlavného zariadenia.', 'hr': '{name} je rotirao ključeve, ali je samo {present} od {required} uređaja potvrdilo. Moguća krađa primarnog uređaja.', 'bg': '{name} е ротирал ключовете, но само {present} от {required} устройства потвърдиха. Възможна кражба на основното устройство.', 'el': 'Ο {name} εναλλάσσει κλειδιά, αλλά μόνο {present} από {required} συσκευές επιβεβαίωσαν. Πιθανή κλοπή κύριας συσκευής.', 'da': '{name} roterede nøgler, men kun {present} af {required} enheder bekræftede. Muligt tyveri af primær enhed.', 'fi': '{name} kierrätti avaimia, mutta vain {present}/{required} laitetta vahvisti. Mahdollinen päälaitteen varkaus.', 'no': '{name} roterte nøkler, men bare {present} av {required} enheter bekreftet. Mulig tyveri av primærenhet.', 'uk': '{name} виконав ротацію ключів, але лише {present} з {required} пристроїв підтвердили. Можливе викрадення основного пристрою.', 'ru': '{name} выполнил ротацию ключей, но только {present} из {required} устройств подтвердили. Возможная кража основного устройства.', 'tr': '{name} anahtarları döndürdü ancak yalnızca {present}/{required} cihaz onayladı. Birincil cihazın çalınmış olma ihtimali.', 'zh': '{name} 已轮换密钥，但仅 {present}/{required} 台设备确认。主设备可能遭窃。', 'ja': '{name} が鍵をローテーションしましたが、{required} 台中 {present} 台のみが確認しました。メインデバイスが盗まれた可能性があります。', 'ko': '{name}이(가) 키를 교체했지만 {required}개 기기 중 {present}개만 확인했습니다. 기본 기기 도난 가능성.', 'hi': '{name} ने कुंजियाँ बदलीं, लेकिन {required} में से केवल {present} डिवाइस ने पुष्टि की। मुख्य डिवाइस चोरी की संभावना।', 'th': '{name} หมุนคีย์แล้ว แต่มีเพียง {present} จาก {required} อุปกรณ์ยืนยัน อาจมีการโจรกรรมอุปกรณ์หลัก', 'vi': '{name} đã xoay khóa nhưng chỉ {present}/{required} thiết bị xác nhận. Có thể thiết bị chính bị đánh cắp.', 'id': '{name} merotasi kunci tetapi hanya {present} dari {required} perangkat yang mengonfirmasi. Kemungkinan pencurian perangkat utama.', 'ms': '{name} memutar kunci tetapi hanya {present} daripada {required} peranti mengesahkan. Kemungkinan kecurian peranti utama.'},
+  'rotation_rejection_alert': {'de': 'Schlüsselrotation von Gerät abgelehnt', 'en': 'Key rotation rejected by device', 'es': 'Rotación de claves rechazada por dispositivo', 'hu': 'Az eszköz visszautasította a kulcsrotációt', 'sv': 'Nyckelrotation avvisad av enhet', 'ar': 'رفض الجهاز تدوير المفاتيح', 'he': 'מכשיר דחה את החלפת המפתחות', 'fa': 'چرخش کلید توسط دستگاه رد شد', 'fr': 'Rotation des clés refusée par un appareil', 'it': 'Rotazione chiavi rifiutata dal dispositivo', 'pt': 'Rotação de chaves rejeitada pelo dispositivo', 'nl': 'Sleutelrotatie geweigerd door apparaat', 'pl': 'Rotacja kluczy odrzucona przez urządzenie', 'ro': 'Rotație chei respinsă de dispozitiv', 'cs': 'Rotace klíčů odmítnuta zařízením', 'sk': 'Rotácia kľúčov zamietnutá zariadením', 'hr': 'Rotacija ključeva odbijena od strane uređaja', 'bg': 'Ротацията на ключове е отхвърлена от устройство', 'el': 'Η εναλλαγή κλειδιών απορρίφθηκε από συσκευή', 'da': 'Nøglerotation afvist af enhed', 'fi': 'Laite hylkäsi avainten kierrätyksen', 'no': 'Nøkkelrotasjon avvist av enhet', 'uk': 'Ротацію ключів відхилено пристроєм', 'ru': 'Ротация ключей отклонена устройством', 'tr': 'Anahtar rotasyonu cihaz tarafından reddedildi', 'zh': '设备拒绝了密钥轮换', 'ja': 'デバイスが鍵ローテーションを拒否しました', 'ko': '기기가 키 교체를 거부했습니다', 'hi': 'डिवाइस द्वारा कुंजी रोटेशन अस्वीकृत', 'th': 'อุปกรณ์ปฏิเสธการหมุนคีย์', 'vi': 'Thiết bị từ chối xoay khóa', 'id': 'Rotasi kunci ditolak oleh perangkat', 'ms': 'Putaran kunci ditolak oleh peranti'},
+  'rotation_rejection_alert_body': {'de': 'Ein Gerät von {name} hat eine Schlüsselrotation aktiv abgelehnt. Dies deutet stark auf einen Diebstahl des Hauptgeräts hin. Kontaktiere {name} über einen anderen Kanal!', 'en': 'A device of {name} actively rejected a key rotation. This strongly indicates theft of the primary device. Contact {name} through another channel!', 'es': 'Un dispositivo de {name} rechazó activamente una rotación de claves. Esto indica fuertemente un robo del dispositivo principal. ¡Contacta a {name} por otro canal!', 'hu': '{name} egyik eszköze aktívan visszautasította a kulcsrotációt. Ez erősen utal a főeszköz ellopására. Lépj kapcsolatba {name}-val egy másik csatornán!', 'sv': 'En enhet av {name} avvisade aktivt en nyckelrotation. Detta tyder starkt på stöld av primärenheten. Kontakta {name} via en annan kanal!', 'ar': 'رفض أحد أجهزة {name} تدوير المفاتيح بشكل نشط. يشير هذا بشدة إلى سرقة الجهاز الرئيسي. تواصل مع {name} عبر قناة أخرى!', 'he': 'מכשיר של {name} דחה באופן פעיל החלפת מפתחות. זה מצביע בחוזקה על גניבת המכשיר הראשי. פנה אל {name} דרך ערוץ אחר!', 'fa': 'یکی از دستگاه‌های {name} به‌طور فعال چرخش کلید را رد کرد. این به‌شدت نشان‌دهنده سرقت دستگاه اصلی است. از طریق کانال دیگری با {name} تماس بگیرید!', 'fr': 'Un appareil de {name} a activement refusé une rotation des clés. Cela indique fortement un vol de l\'appareil principal. Contactez {name} par un autre canal !', 'it': 'Un dispositivo di {name} ha rifiutato attivamente una rotazione delle chiavi. Ciò indica fortemente il furto del dispositivo principale. Contatta {name} tramite un altro canale!', 'pt': 'Um dispositivo de {name} rejeitou ativamente uma rotação de chaves. Isso indica fortemente roubo do dispositivo principal. Contate {name} por outro canal!', 'nl': 'Een apparaat van {name} heeft actief een sleutelrotatie geweigerd. Dit wijst sterk op diefstal van het primaire apparaat. Neem contact op met {name} via een ander kanaal!', 'pl': 'Urządzenie {name} aktywnie odrzuciło rotację kluczy. Silnie wskazuje to na kradzież głównego urządzenia. Skontaktuj się z {name} innym kanałem!', 'ro': 'Un dispozitiv al lui {name} a refuzat activ o rotație de chei. Aceasta indică puternic un furt al dispozitivului principal. Contactează {name} prin alt canal!', 'cs': 'Zařízení uživatele {name} aktivně odmítlo rotaci klíčů. To silně naznačuje krádež hlavního zařízení. Kontaktujte {name} jiným kanálem!', 'sk': 'Zariadenie používateľa {name} aktívne odmietlo rotáciu kľúčov. Toto silne naznačuje krádež hlavného zariadenia. Kontaktujte {name} iným kanálom!', 'hr': 'Uređaj {name} aktivno je odbio rotaciju ključeva. To snažno ukazuje na krađu primarnog uređaja. Kontaktirajte {name} putem drugog kanala!', 'bg': 'Устройство на {name} активно е отхвърлило ротацията на ключовете. Това силно показва кражба на основното устройство. Свържете се с {name} по друг канал!', 'el': 'Μια συσκευή του {name} απέρριψε ενεργά μια εναλλαγή κλειδιών. Αυτό υποδηλώνει έντονα κλοπή της κύριας συσκευής. Επικοινωνήστε με τον {name} μέσω άλλου καναλιού!', 'da': 'En enhed tilhørende {name} afviste aktivt en nøglerotation. Dette tyder stærkt på tyveri af primærenheden. Kontakt {name} via en anden kanal!', 'fi': '{name}:n laite hylkäsi aktiivisesti avainten kierrätyksen. Tämä viittaa vahvasti päälaitteen varkauteen. Ota yhteyttä {name}:ään toisen kanavan kautta!', 'no': 'En enhet tilhørende {name} avviste aktivt en nøkkelrotasjon. Dette tyder sterkt på tyveri av primærenheten. Kontakt {name} via en annen kanal!', 'uk': 'Пристрій {name} активно відхилив ротацію ключів. Це настійно свідчить про крадіжку основного пристрою. Зв\'яжіться з {name} через інший канал!', 'ru': 'Устройство {name} активно отклонило ротацию ключей. Это настоятельно указывает на кражу основного устройства. Свяжитесь с {name} по другому каналу!', 'tr': '{name}\'ın bir cihazı anahtar rotasyonunu aktif olarak reddetti. Bu, birincil cihazın çalındığına güçlü şekilde işaret eder. {name} ile başka bir kanal üzerinden iletişime geçin!', 'zh': '{name} 的一台设备主动拒绝了密钥轮换。这强烈表明主设备已被盗。请通过其他渠道联系 {name}！', 'ja': '{name} のデバイスが鍵ローテーションを積極的に拒否しました。これはメインデバイスが盗まれた可能性が高いことを示しています。別のチャネルから {name} に連絡してください！', 'ko': '{name}의 기기가 키 교체를 능동적으로 거부했습니다. 이는 기본 기기 도난을 강력히 시사합니다. 다른 채널을 통해 {name}에게 연락하세요!', 'hi': '{name} के एक डिवाइस ने कुंजी रोटेशन को सक्रिय रूप से अस्वीकार कर दिया। यह मुख्य डिवाइस की चोरी का प्रबल संकेत है। {name} से किसी अन्य चैनल के माध्यम से संपर्क करें!', 'th': 'อุปกรณ์ของ {name} ปฏิเสธการหมุนคีย์โดยตรง ซึ่งบ่งชี้อย่างชัดเจนว่าอุปกรณ์หลักถูกขโมย ติดต่อ {name} ผ่านช่องทางอื่น!', 'vi': 'Một thiết bị của {name} đã chủ động từ chối xoay khóa. Điều này cho thấy rất có thể thiết bị chính đã bị đánh cắp. Hãy liên hệ {name} qua kênh khác!', 'id': 'Sebuah perangkat {name} secara aktif menolak rotasi kunci. Ini sangat mengindikasikan pencurian perangkat utama. Hubungi {name} melalui saluran lain!', 'ms': 'Sebuah peranti {name} secara aktif menolak putaran kunci. Ini amat menunjukkan kecurian peranti utama. Hubungi {name} melalui saluran lain!'},
   'device_key_rotation_irreversible': {'de': 'Dieser Vorgang ist UNWIDERRUFLICH!', 'en': 'This action is IRREVERSIBLE!', 'es': '¡Esta acción es IRREVERSIBLE!', 'hu': 'Ez a művelet VISSZAVONHATATLAN!', 'sv': 'Denna åtgärd är OÅTERKALLELIG!', 'fr': 'Cette action est IRRÉVERSIBLE !', 'it': 'Questa azione è IRREVERSIBILE!', 'pt': 'Esta ação é IRREVERSÍVEL!', 'uk': 'Ця дія НЕЗВОРОТНА!', 'ru': 'Это действие НЕОБРАТИМО!', 'zh': '此操作不可逆！', 'ja': 'この操作は取り消せません！', 'ko': '이 작업은 되돌릴 수 없습니다!', 'ar': 'لا يمكن التراجع عن هذا الإجراء!', 'he': 'פעולה זו בלתי הפיכה!', 'fa': 'این عمل برگشت‌ناپذیر است!', 'nl': 'Deze actie is ONOMKEERBAAR!', 'pl': 'Ta czynność jest NIEODWRACALNA!', 'ro': 'Această acțiune este IREVERSIBILĂ!', 'cs': 'Tato akce je NEVRATNÁ!', 'sk': 'Táto akcia je NEZVRATNÁ!', 'hr': 'Ova radnja je NEPOVRATNA!', 'bg': 'Това действие е НЕОБРАТИМО!', 'el': 'Αυτή η ενέργεια είναι ΜΗ ΑΝΑΣΤΡΕΨΙΜΗ!', 'da': 'Denne handling er UIGENKALDELIG!', 'fi': 'Tämä toiminto on PERUUTTAMATON!', 'no': 'Denne handlingen er UOPPRETTELIG!', 'tr': 'Bu işlem GERİ ALINAMAZ!', 'hi': 'यह क्रिया अपरिवर्तनीय है!', 'th': 'การกระทำนี้ไม่สามารถย้อนกลับได้!', 'vi': 'Thao tác này KHÔNG THỂ HOÀN TÁC!', 'id': 'Tindakan ini TIDAK DAPAT DIBATALKAN!', 'ms': 'Tindakan ini TIDAK BOLEH DIUNDUR!'},
   'device_key_rotation_continue': {'de': 'Weiter', 'en': 'Continue', 'es': 'Continuar', 'hu': 'Tovább', 'sv': 'Fortsätt', 'fr': 'Continuer', 'it': 'Continua', 'pt': 'Continuar', 'nl': 'Doorgaan', 'pl': 'Kontynuuj', 'cs': 'Pokračovat', 'uk': 'Продовжити', 'ru': 'Продолжить', 'tr': 'Devam', 'zh': '继续', 'ja': '続ける', 'ko': '계속', 'ar': 'متابعة', 'he': 'המשך', 'fa': 'ادامه', 'ro': 'Continuă', 'sk': 'Pokračovať', 'hr': 'Nastavi', 'bg': 'Продължи', 'el': 'Συνέχεια', 'da': 'Fortsæt', 'fi': 'Jatka', 'no': 'Fortsett', 'hi': 'जारी रखें', 'th': 'ดำเนินการต่อ', 'vi': 'Tiếp tục', 'id': 'Lanjutkan', 'ms': 'Teruskan'},
   'device_key_rotation_confirm_title': {'de': 'Bestätigung erforderlich', 'en': 'Confirmation required', 'es': 'Confirmación requerida', 'hu': 'Megerősítés szükséges', 'sv': 'Bekräftelse krävs', 'fr': 'Confirmation requise', 'it': 'Conferma richiesta', 'pt': 'Confirmação necessária', 'uk': 'Потрібне підтвердження', 'ru': 'Требуется подтверждение', 'zh': '需要确认', 'ja': '確認が必要', 'ko': '확인 필요', 'ar': 'التأكيد مطلوب', 'he': 'נדרש אישור', 'fa': 'تأیید لازم است', 'nl': 'Bevestiging vereist', 'pl': 'Wymagane potwierdzenie', 'ro': 'Confirmare necesară', 'cs': 'Je vyžadováno potvrzení', 'sk': 'Vyžaduje sa potvrdenie', 'hr': 'Potrebna je potvrda', 'bg': 'Необходимо е потвърждение', 'el': 'Απαιτείται επιβεβαίωση', 'da': 'Bekræftelse påkrævet', 'fi': 'Vahvistus vaaditaan', 'no': 'Bekreftelse kreves', 'tr': 'Onay gerekli', 'hi': 'पुष्टि आवश्यक', 'th': 'ต้องยืนยัน', 'vi': 'Cần xác nhận', 'id': 'Konfirmasi diperlukan', 'ms': 'Pengesahan diperlukan'},
@@ -703,6 +709,7 @@ const Map<String, Map<String, String>> translations = {
   'poll_settings': {'de': 'Einstellungen', 'en': 'Settings', 'es': 'Configuración', 'fr': 'Paramètres', 'hu': 'Beállítások', 'sv': 'Inställningar', 'ar': 'الإعدادات', 'he': 'הגדרות', 'fa': 'تنظیمات', 'it': 'Impostazioni', 'pt': 'Configurações', 'nl': 'Instellingen', 'pl': 'Ustawienia', 'ro': 'Setări', 'cs': 'Nastavení', 'sk': 'Nastavenia', 'hr': 'Postavke', 'bg': 'Настройки', 'el': 'Ρυθμίσεις', 'da': 'Indstillinger', 'fi': 'Asetukset', 'no': 'Innstillinger', 'uk': 'Налаштування', 'ru': 'Настройки', 'tr': 'Ayarlar', 'zh': '设置', 'ja': '設定', 'ko': '설정', 'hi': 'सेटिंग्स', 'th': 'การตั้งค่า', 'vi': 'Cài đặt', 'id': 'Pengaturan', 'ms': 'Tetapan'},
   'poll_anonymous': {'de': 'Anonyme Abstimmung', 'en': 'Anonymous voting', 'es': 'Votación anónima', 'fr': 'Vote anonyme', 'hu': 'Névtelen szavazás', 'sv': 'Anonym omröstning', 'ar': 'تصويت مجهول', 'he': 'הצבעה אנונימית', 'fa': 'رأی‌گیری ناشناس', 'it': 'Voto anonimo', 'pt': 'Votação anônima', 'nl': 'Anoniem stemmen', 'pl': 'Głosowanie anonimowe', 'ro': 'Vot anonim', 'cs': 'Anonymní hlasování', 'sk': 'Anonymné hlasovanie', 'hr': 'Anonimno glasanje', 'bg': 'Анонимно гласуване', 'el': 'Ανώνυμη ψηφοφορία', 'da': 'Anonym afstemning', 'fi': 'Anonyymi äänestys', 'no': 'Anonym avstemning', 'uk': 'Анонімне голосування', 'ru': 'Анонимное голосование', 'tr': 'Anonim oylama', 'zh': '匿名投票', 'ja': '匿名投票', 'ko': '익명 투표', 'hi': 'गुमनाम मतदान', 'th': 'โหวตแบบไม่ระบุตัวตน', 'vi': 'Bỏ phiếu ẩn danh', 'id': 'Voting anonim', 'ms': 'Undian tanpa nama'},
   'poll_anonymous_hint': {'de': 'Stimmen sind nicht zur Person rückverfolgbar.', 'en': 'Votes cannot be linked back to a voter.', 'es': 'Los votos no se pueden rastrear.', 'fr': 'Les votes ne peuvent pas être tracés.', 'hu': 'A szavazatok nem köthetők a szavazóhoz.', 'sv': 'Rösterna kan inte kopplas till avsändaren.', 'ar': 'لا يمكن تتبع الأصوات إلى الناخبين.', 'he': 'לא ניתן לקשר את ההצבעות למצביע.', 'fa': 'رأی‌ها به رأی‌دهنده قابل ردیابی نیستند.', 'it': 'I voti non sono riconducibili al votante.', 'pt': 'Os votos não podem ser vinculados ao eleitor.', 'nl': 'Stemmen zijn niet te herleiden tot de stemmer.', 'pl': 'Głosów nie można powiązać z głosującym.', 'ro': 'Voturile nu pot fi asociate cu votantul.', 'cs': 'Hlasy nelze přiřadit k hlasujícímu.', 'sk': 'Hlasy nemožno priradiť k hlasujúcemu.', 'hr': 'Glasovi se ne mogu povezati s glasačem.', 'bg': 'Гласовете не могат да бъдат проследени до гласоподавателя.', 'el': 'Οι ψήφοι δεν μπορούν να συνδεθούν με τον ψηφοφόρο.', 'da': 'Stemmer kan ikke spores tilbage til afsenderen.', 'fi': 'Ääniä ei voi yhdistää äänestäjään.', 'no': 'Stemmene kan ikke spores tilbake til velgeren.', 'uk': 'Голоси не можна пов’язати з голосуючим.', 'ru': 'Голоса нельзя связать с голосующим.', 'tr': 'Oylar, oy verene bağlanamaz.', 'zh': '投票无法追溯到投票者。', 'ja': '投票は投票者にひもづけられません。', 'ko': '투표는 투표자와 연결되지 않습니다.', 'hi': 'वोटों को मतदाता से नहीं जोड़ा जा सकता।', 'th': 'ไม่สามารถเชื่อมโยงการโหวตกับผู้โหวตได้', 'vi': 'Phiếu bầu không thể truy ngược về người bỏ phiếu.', 'id': 'Suara tidak dapat dilacak ke pemilih.', 'ms': 'Undian tidak boleh dikaitkan dengan pengundi.'},
+  'poll_anonymity_scope_hint': {'de': 'Anonym in der Ergebnisanzeige — auf Netzwerkebene können Teilnehmer derzeit sehen, dass und wann du abgestimmt hast.', 'en': 'Anonymous in the results view — on the network level, participants can currently see that and when you voted.', 'es': 'Anónimo en la vista de resultados: a nivel de red, los participantes actualmente pueden ver que has votado y cuándo.', 'fr': 'Anonyme dans l\'affichage des résultats — au niveau du réseau, les participants peuvent actuellement voir que vous avez voté et quand.', 'hu': 'Névtelen az eredménynézetben — hálózati szinten a résztvevők jelenleg láthatják, hogy szavaztál és mikor.', 'sv': 'Anonym i resultatvyn — på nätverksnivå kan deltagarna för närvarande se att och när du röstade.', 'ar': 'مجهول في عرض النتائج — على مستوى الشبكة، يمكن للمشاركين حاليًا رؤية أنك صوّتّ ومتى.', 'he': 'אנונימי בתצוגת התוצאות — ברמת הרשת, המשתתפים יכולים כיום לראות שהצבעת ומתי.', 'fa': 'ناشناس در نمای نتایج — در سطح شبکه، شرکت‌کنندگان در حال حاضر می‌توانند ببینند که رأی داده‌اید و چه زمانی.', 'it': 'Anonimo nella vista dei risultati — a livello di rete, i partecipanti possono attualmente vedere che hai votato e quando.', 'pt': 'Anônimo na exibição de resultados — no nível da rede, os participantes atualmente podem ver que você votou e quando.', 'nl': 'Anoniem in de resultatenweergave — op netwerkniveau kunnen deelnemers momenteel zien dat en wanneer je hebt gestemd.', 'pl': 'Anonimowo w widoku wyników — na poziomie sieci uczestnicy mogą obecnie zobaczyć, że i kiedy oddano Twój głos.', 'ro': 'Anonim în afișarea rezultatelor — la nivel de rețea, participanții pot vedea în prezent că ai votat și când.', 'cs': 'Anonymní v zobrazení výsledků — na úrovni sítě účastníci aktuálně vidí, že a kdy jste hlasovali.', 'sk': 'Anonymné v zobrazení výsledkov — na úrovni siete účastníci momentálne vidia, že a kedy ste hlasovali.', 'hr': 'Anonimno u prikazu rezultata — na razini mreže sudionici trenutačno mogu vidjeti da ste glasali i kada.', 'bg': 'Анонимно в изгледа на резултатите — на мрежово ниво участниците в момента могат да видят, че и кога сте гласували.', 'el': 'Ανώνυμο στην προβολή αποτελεσμάτων — σε επίπεδο δικτύου, οι συμμετέχοντες μπορούν προς το παρόν να δουν ότι ψηφίσατε και πότε.', 'da': 'Anonym i resultatvisningen — på netværksniveau kan deltagerne i øjeblikket se, at og hvornår du stemte.', 'fi': 'Anonyymi tulosnäkymässä — verkkotasolla osallistujat voivat tällä hetkellä nähdä, että ja milloin äänestit.', 'no': 'Anonym i resultatvisningen — på nettverksnivå kan deltakerne for øyeblikket se at og når du stemte.', 'uk': 'Анонімно в перегляді результатів — на мережевому рівні учасники наразі можуть бачити, що і коли ви проголосували.', 'ru': 'Анонимно в просмотре результатов — на сетевом уровне участники в настоящее время могут видеть, что и когда вы проголосовали.', 'tr': 'Sonuç görünümünde anonim — ağ düzeyinde katılımcılar şu anda oy verdiğinizi ve ne zaman verdiğinizi görebilir.', 'zh': '仅在结果显示中匿名——在网络层面，参与者目前可以看到你已投票以及投票时间。', 'ja': '結果表示では匿名ですが、ネットワークレベルでは、参加者は現在あなたが投票したことと投票した時刻を確認できます。', 'ko': '결과 보기에서만 익명 — 네트워크 수준에서는 참가자가 현재 회원님의 투표 여부와 시점을 볼 수 있습니다.', 'hi': 'परिणाम दृश्य में गुमनाम — नेटवर्क स्तर पर प्रतिभागी फ़िलहाल देख सकते हैं कि आपने मतदान किया है और कब किया है।', 'th': 'ไม่ระบุตัวตนเฉพาะในมุมมองผลลัพธ์ — ในระดับเครือข่าย ผู้เข้าร่วมยังคงเห็นได้ว่าคุณโหวตและโหวตเมื่อใด', 'vi': 'Ẩn danh trong phần hiển thị kết quả — ở cấp độ mạng, người tham gia hiện có thể thấy rằng bạn đã bỏ phiếu và vào lúc nào.', 'id': 'Anonim di tampilan hasil — di tingkat jaringan, peserta saat ini dapat melihat bahwa dan kapan Anda memberikan suara.', 'ms': 'Tanpa nama dalam paparan keputusan — pada peringkat rangkaian, peserta kini boleh melihat bahawa dan bila anda mengundi.'},
   'poll_allow_vote_change': {'de': 'Stimmenänderung erlauben', 'en': 'Allow vote change', 'es': 'Permitir cambio de voto', 'fr': 'Permettre le changement de vote', 'hu': 'Szavazat módosítása engedélyezett', 'sv': 'Tillåt ändrad röst', 'ar': 'السماح بتغيير التصويت', 'he': 'אפשר שינוי הצבעה', 'fa': 'اجازه تغییر رأی', 'it': 'Consenti modifica del voto', 'pt': 'Permitir alteração de voto', 'nl': 'Stem wijzigen toestaan', 'pl': 'Zezwól na zmianę głosu', 'ro': 'Permite modificarea votului', 'cs': 'Povolit změnu hlasu', 'sk': 'Povoliť zmenu hlasu', 'hr': 'Dopusti promjenu glasa', 'bg': 'Разреши промяна на гласа', 'el': 'Να επιτρέπεται αλλαγή ψήφου', 'da': 'Tillad ændring af stemme', 'fi': 'Salli äänen muutos', 'no': 'Tillat endring av stemme', 'uk': 'Дозволити зміну голосу', 'ru': 'Разрешить изменение голоса', 'tr': 'Oy değişikliğine izin ver', 'zh': '允许更改投票', 'ja': '投票の変更を許可', 'ko': '투표 변경 허용', 'hi': 'वोट बदलने की अनुमति दें', 'th': 'อนุญาตให้เปลี่ยนการโหวต', 'vi': 'Cho phép đổi phiếu', 'id': 'Izinkan ubah suara', 'ms': 'Benarkan ubah undi'},
   'poll_show_results_before_close': {'de': 'Ergebnisse live zeigen', 'en': 'Show live results', 'es': 'Mostrar resultados en vivo', 'fr': 'Afficher les résultats en direct', 'hu': 'Élő eredmények megjelenítése', 'sv': 'Visa live-resultat', 'ar': 'عرض النتائج المباشرة', 'he': 'הצגת תוצאות בזמן אמת', 'fa': 'نمایش نتایج زنده', 'it': 'Mostra risultati in diretta', 'pt': 'Mostrar resultados ao vivo', 'nl': 'Live resultaten tonen', 'pl': 'Pokaż wyniki na żywo', 'ro': 'Afișează rezultate live', 'cs': 'Zobrazit průběžné výsledky', 'sk': 'Zobraziť priebežné výsledky', 'hr': 'Prikaži rezultate uživo', 'bg': 'Показвай резултати на живо', 'el': 'Εμφάνιση ζωντανών αποτελεσμάτων', 'da': 'Vis live-resultater', 'fi': 'Näytä tulokset reaaliajassa', 'no': 'Vis sanntidsresultater', 'uk': 'Показувати результати наживо', 'ru': 'Показывать результаты в реальном времени', 'tr': 'Canlı sonuçları göster', 'zh': '显示实时结果', 'ja': 'ライブ結果を表示', 'ko': '실시간 결과 표시', 'hi': 'लाइव परिणाम दिखाएं', 'th': 'แสดงผลแบบสด', 'vi': 'Hiện kết quả trực tiếp', 'id': 'Tampilkan hasil langsung', 'ms': 'Tunjuk keputusan langsung'},
   'poll_deadline': {'de': 'Stichtag', 'en': 'Deadline', 'es': 'Fecha límite', 'fr': 'Date limite', 'hu': 'Határidő', 'sv': 'Sista svarsdag', 'ar': 'الموعد النهائي', 'he': 'מועד אחרון', 'fa': 'مهلت', 'it': 'Scadenza', 'pt': 'Prazo', 'nl': 'Einddatum', 'pl': 'Termin', 'ro': 'Termen-limită', 'cs': 'Uzávěrka', 'sk': 'Uzávierka', 'hr': 'Rok', 'bg': 'Краен срок', 'el': 'Προθεσμία', 'da': 'Frist', 'fi': 'Määräaika', 'no': 'Frist', 'uk': 'Кінцевий термін', 'ru': 'Срок', 'tr': 'Son tarih', 'zh': '截止时间', 'ja': '締切', 'ko': '마감일', 'hi': 'समय सीमा', 'th': 'กำหนดเส้นตาย', 'vi': 'Hạn chót', 'id': 'Batas waktu', 'ms': 'Tarikh tamat'},
@@ -1170,5 +1177,880 @@ const Map<String, Map<String, String>> translations = {
     'vi': 'Gửi lại', // uncertain:
     'id': 'Kirim ulang', // uncertain:
     'ms': 'Hantar semula', // uncertain:
+  },
+  'linked_device_pair_request_title': {
+    'de': 'Gerätekopplung-Anfrage',
+    'en': 'Device Pairing Request',
+    'es': 'Solicitud de emparejamiento', // uncertain:
+    'hu': 'Eszközpárosítási kérelem', // uncertain:
+    'sv': 'Begäran om enhetsparkoppling', // uncertain:
+    'ar': 'طلب إقران الجهاز', // uncertain:
+    'he': 'בקשת שיוך מכשיר', // uncertain:
+    'fa': 'درخواست جفت‌سازی دستگاه', // uncertain:
+    'fr': 'Demande d\'appairage', // uncertain:
+    'it': 'Richiesta di accoppiamento dispositivo', // uncertain:
+    'pt': 'Pedido de emparelhamento', // uncertain:
+    'nl': 'Apparaatkoppelingsverzoek', // uncertain:
+    'pl': 'Żądanie parowania urządzenia', // uncertain:
+    'ro': 'Cerere de asociere dispozitiv', // uncertain:
+    'cs': 'Požadavek na spárování zařízení', // uncertain:
+    'sk': 'Žiadosť o spárovanie zariadenia', // uncertain:
+    'hr': 'Zahtjev za uparivanje uređaja', // uncertain:
+    'bg': 'Заявка за сдвояване на устройство', // uncertain:
+    'el': 'Αίτημα σύζευξης συσκευής', // uncertain:
+    'da': 'Anmodning om enhedsparring', // uncertain:
+    'fi': 'Laiteparituspyyntö', // uncertain:
+    'no': 'Forespørsel om enhetssammenkobling', // uncertain:
+    'uk': 'Запит на з\'єднання пристрою', // uncertain:
+    'ru': 'Запрос на сопряжение устройства', // uncertain:
+    'tr': 'Cihaz eşleştirme isteği', // uncertain:
+    'zh': '设备配对请求', // uncertain:
+    'ja': 'デバイスペアリングリクエスト', // uncertain:
+    'ko': '기기 페어링 요청', // uncertain:
+    'hi': 'डिवाइस पेयरिंग अनुरोध', // uncertain:
+    'th': 'คำขอจับคู่อุปกรณ์', // uncertain:
+    'vi': 'Yêu cầu ghép nối thiết bị', // uncertain:
+    'id': 'Permintaan pemasangan perangkat', // uncertain:
+    'ms': 'Permintaan gandingan peranti', // uncertain:
+  },
+  'linked_device_pair_request_body': {
+    'de': 'Ein neues Gerät möchte sich mit dieser Identität koppeln. Es erhält delegierte Signatur-Schlüssel, aber NICHT deine Seed-Phrase. Zustimmen?',
+    'en': 'A new device wants to pair with this identity. It will receive delegated signing keys but NOT your seed phrase. Approve?',
+    'es': 'Un nuevo dispositivo quiere emparejarse con esta identidad. Recibirá claves de firma delegadas, pero NO tu frase semilla. ¿Aprobar?', // uncertain:
+    'hu': 'Egy új eszköz párosodni szeretne ezzel az identitással. Delegált aláíró kulcsokat kap, de NEM a seed-kifejezésedet. Jóváhagyod?', // uncertain:
+    'sv': 'En ny enhet vill parkopplas med denna identitet. Den får delegerade signeringsnycklar men INTE din seed-fras. Godkänna?', // uncertain:
+    'ar': 'يريد جهاز جديد الاقتران بهذه الهوية. سيحصل على مفاتيح توقيع مفوضة ولكن ليس عبارة البذرة الخاصة بك. الموافقة؟', // uncertain:
+    'he': 'מכשיר חדש רוצה להתשייך לזהות זו. הוא יקבל מפתחות חתימה מואצלים אך לא את ביטוי הזרע שלך. לאשר?', // uncertain:
+    'fa': 'یک دستگاه جدید می‌خواهد با این هویت جفت شود. کلیدهای امضای واگذارشده دریافت می‌کند اما عبارت بذر شما را نه. تأیید؟', // uncertain:
+    'fr': 'Un nouvel appareil souhaite s\'appairer avec cette identité. Il recevra des clés de signature déléguées mais PAS votre phrase de récupération. Approuver ?', // uncertain:
+    'it': 'Un nuovo dispositivo vuole accoppiarsi con questa identità. Riceverà chiavi di firma delegate ma NON la tua seed phrase. Approvare?', // uncertain:
+    'pt': 'Um novo dispositivo quer emparelhar com esta identidade. Receberá chaves de assinatura delegadas, mas NÃO a sua frase semente. Aprovar?', // uncertain:
+    'nl': 'Een nieuw apparaat wil koppelen met deze identiteit. Het ontvangt gedelegeerde ondertekeningssleutels maar NIET je seed-zin. Goedkeuren?', // uncertain:
+    'pl': 'Nowe urządzenie chce sparować się z tą tożsamością. Otrzyma delegowane klucze podpisu, ale NIE twoją frazę odzyskiwania. Zatwierdzić?', // uncertain:
+    'ro': 'Un dispozitiv nou dorește să se asocieze cu această identitate. Va primi chei de semnare delegate, dar NU fraza ta de recuperare. Aprobi?', // uncertain:
+    'cs': 'Nové zařízení se chce spárovat s touto identitou. Získá delegované podepisovací klíče, ale NE vaši seed frázi. Schválit?', // uncertain:
+    'sk': 'Nové zariadenie sa chce spárovať s touto identitou. Získa delegované podpisové kľúče, ale NIE vašu seed frázu. Schváliť?', // uncertain:
+    'hr': 'Novi uređaj želi se upariti s ovim identitetom. Primit će delegirane ključeve za potpisivanje, ali NE vašu seed frazu. Odobriti?', // uncertain:
+    'bg': 'Ново устройство иска да се сдвои с тази самоличност. Ще получи делегирани ключове за подпис, но НЕ вашата seed фраза. Одобрявате?', // uncertain:
+    'el': 'Μια νέα συσκευή θέλει να συζευχθεί με αυτήν την ταυτότητα. Θα λάβει εκχωρημένα κλειδιά υπογραφής αλλά ΟΧΙ τη seed phrase σας. Έγκριση;', // uncertain:
+    'da': 'En ny enhed vil parre med denne identitet. Den modtager delegerede signeringsnøgler, men IKKE din seed-sætning. Godkend?', // uncertain:
+    'fi': 'Uusi laite haluaa parittua tämän identiteetin kanssa. Se saa delegoidut allekirjoitusavaimet, mutta EI seed-lausettasi. Hyväksytäänkö?', // uncertain:
+    'no': 'En ny enhet vil kobles til denne identiteten. Den mottar delegerte signeringsnøkler, men IKKE din seed-frase. Godkjenne?', // uncertain:
+    'uk': 'Новий пристрій хоче з\'єднатися з цією особистістю. Він отримає делеговані ключі підпису, але НЕ вашу seed-фразу. Схвалити?', // uncertain:
+    'ru': 'Новое устройство хочет сопрячься с этой личностью. Оно получит делегированные ключи подписи, но НЕ вашу seed-фразу. Одобрить?', // uncertain:
+    'tr': 'Yeni bir cihaz bu kimlikle eşleşmek istiyor. Yetkilendirilmiş imzalama anahtarları alacak ama tohum ifadenizi ALMAYACAK. Onayla?', // uncertain:
+    'zh': '一个新设备想要与此身份配对。它将获得委托签名密钥，但不会获得你的种子短语。批准？', // uncertain:
+    'ja': '新しいデバイスがこのIDとペアリングしたいと要求しています。委任された署名鍵を受け取りますが、シードフレーズは受け取りません。承認しますか？', // uncertain:
+    'ko': '새 기기가 이 신원과 페어링하려고 합니다. 위임된 서명 키를 받지만 시드 구문은 받지 않습니다. 승인하시겠습니까?', // uncertain:
+    'hi': 'एक नया डिवाइस इस पहचान के साथ पेयर करना चाहता है। इसे प्रत्यायोजित हस्ताक्षर कुंजियाँ मिलेंगी लेकिन आपका सीड फ्रेज़ नहीं। स्वीकृत करें?', // uncertain:
+    'th': 'อุปกรณ์ใหม่ต้องการจับคู่กับตัวตนนี้ จะได้รับคีย์ลงนามที่มอบหมาย แต่ไม่ใช่ seed phrase ของคุณ อนุมัติ?', // uncertain:
+    'vi': 'Một thiết bị mới muốn ghép nối với danh tính này. Nó sẽ nhận khóa ký ủy quyền nhưng KHÔNG nhận cụm từ hạt giống của bạn. Phê duyệt?', // uncertain:
+    'id': 'Perangkat baru ingin dipasangkan dengan identitas ini. Perangkat akan menerima kunci tanda tangan yang didelegasikan tetapi BUKAN frasa benih Anda. Setujui?', // uncertain:
+    'ms': 'Peranti baharu ingin digandingkan dengan identiti ini. Ia akan menerima kunci tandatangan yang diwakilkan tetapi BUKAN frasa benih anda. Luluskan?', // uncertain:
+  },
+  'linked_device_approve': {
+    'de': 'Zustimmen',
+    'en': 'Approve',
+    'es': 'Aprobar', // uncertain:
+    'hu': 'Jóváhagyás', // uncertain:
+    'sv': 'Godkänn', // uncertain:
+    'ar': 'موافقة', // uncertain:
+    'he': 'אישור', // uncertain:
+    'fa': 'تأیید', // uncertain:
+    'fr': 'Approuver', // uncertain:
+    'it': 'Approva', // uncertain:
+    'pt': 'Aprovar', // uncertain:
+    'nl': 'Goedkeuren', // uncertain:
+    'pl': 'Zatwierdź', // uncertain:
+    'ro': 'Aprobă', // uncertain:
+    'cs': 'Schválit', // uncertain:
+    'sk': 'Schváliť', // uncertain:
+    'hr': 'Odobri', // uncertain:
+    'bg': 'Одобри', // uncertain:
+    'el': 'Έγκριση', // uncertain:
+    'da': 'Godkend', // uncertain:
+    'fi': 'Hyväksy', // uncertain:
+    'no': 'Godkjenn', // uncertain:
+    'uk': 'Схвалити', // uncertain:
+    'ru': 'Одобрить', // uncertain:
+    'tr': 'Onayla', // uncertain:
+    'zh': '批准', // uncertain:
+    'ja': '承認', // uncertain:
+    'ko': '승인', // uncertain:
+    'hi': 'स्वीकृत करें', // uncertain:
+    'th': 'อนุมัติ', // uncertain:
+    'vi': 'Phê duyệt', // uncertain:
+    'id': 'Setujui', // uncertain:
+    'ms': 'Luluskan', // uncertain:
+  },
+  'linked_device_reject': {
+    'de': 'Ablehnen',
+    'en': 'Reject',
+    'es': 'Rechazar', // uncertain:
+    'hu': 'Elutasítás', // uncertain:
+    'sv': 'Avvisa', // uncertain:
+    'ar': 'رفض', // uncertain:
+    'he': 'דחייה', // uncertain:
+    'fa': 'رد', // uncertain:
+    'fr': 'Rejeter', // uncertain:
+    'it': 'Rifiuta', // uncertain:
+    'pt': 'Rejeitar', // uncertain:
+    'nl': 'Afwijzen', // uncertain:
+    'pl': 'Odrzuć', // uncertain:
+    'ro': 'Respinge', // uncertain:
+    'cs': 'Odmítnout', // uncertain:
+    'sk': 'Odmietnuť', // uncertain:
+    'hr': 'Odbij', // uncertain:
+    'bg': 'Отхвърли', // uncertain:
+    'el': 'Απόρριψη', // uncertain:
+    'da': 'Afvis', // uncertain:
+    'fi': 'Hylkää', // uncertain:
+    'no': 'Avvis', // uncertain:
+    'uk': 'Відхилити', // uncertain:
+    'ru': 'Отклонить', // uncertain:
+    'tr': 'Reddet', // uncertain:
+    'zh': '拒绝', // uncertain:
+    'ja': '拒否', // uncertain:
+    'ko': '거부', // uncertain:
+    'hi': 'अस्वीकार करें', // uncertain:
+    'th': 'ปฏิเสธ', // uncertain:
+    'vi': 'Từ chối', // uncertain:
+    'id': 'Tolak', // uncertain:
+    'ms': 'Tolak', // uncertain:
+  },
+  'linked_device_approved': {
+    'de': 'Gerät erfolgreich gekoppelt',
+    'en': 'Device paired successfully',
+    'es': 'Dispositivo emparejado con éxito', // uncertain:
+    'hu': 'Eszköz sikeresen párosítva', // uncertain:
+    'sv': 'Enheten parkopplad', // uncertain:
+    'ar': 'تم إقران الجهاز بنجاح', // uncertain:
+    'he': 'המכשיר שויך בהצלחה', // uncertain:
+    'fa': 'دستگاه با موفقیت جفت شد', // uncertain:
+    'fr': 'Appareil appairé avec succès', // uncertain:
+    'it': 'Dispositivo accoppiato con successo', // uncertain:
+    'pt': 'Dispositivo emparelhado com sucesso', // uncertain:
+    'nl': 'Apparaat succesvol gekoppeld', // uncertain:
+    'pl': 'Urządzenie sparowane pomyślnie', // uncertain:
+    'ro': 'Dispozitiv asociat cu succes', // uncertain:
+    'cs': 'Zařízení úspěšně spárováno', // uncertain:
+    'sk': 'Zariadenie úspešne spárované', // uncertain:
+    'hr': 'Uređaj uspješno uparen', // uncertain:
+    'bg': 'Устройството е сдвоено успешно', // uncertain:
+    'el': 'Η συσκευή συζεύχθηκε επιτυχώς', // uncertain:
+    'da': 'Enhed parret med succes', // uncertain:
+    'fi': 'Laite paritettu onnistuneesti', // uncertain:
+    'no': 'Enheten ble koblet til', // uncertain:
+    'uk': 'Пристрій успішно з\'єднано', // uncertain:
+    'ru': 'Устройство успешно сопряжено', // uncertain:
+    'tr': 'Cihaz başarıyla eşleştirildi', // uncertain:
+    'zh': '设备配对成功', // uncertain:
+    'ja': 'デバイスのペアリングに成功しました', // uncertain:
+    'ko': '기기 페어링 성공', // uncertain:
+    'hi': 'डिवाइस सफलतापूर्वक पेयर किया गया', // uncertain:
+    'th': 'จับคู่อุปกรณ์สำเร็จ', // uncertain:
+    'vi': 'Ghép nối thiết bị thành công', // uncertain:
+    'id': 'Perangkat berhasil dipasangkan', // uncertain:
+    'ms': 'Peranti berjaya digandingkan', // uncertain:
+  },
+  'linked_device_rejected': {
+    'de': 'Kopplungsanfrage abgelehnt',
+    'en': 'Pairing request rejected',
+    'es': 'Solicitud de emparejamiento rechazada', // uncertain:
+    'hu': 'Párosítási kérelem elutasítva', // uncertain:
+    'sv': 'Parkopplingsbegäran avvisad', // uncertain:
+    'ar': 'تم رفض طلب الإقران', // uncertain:
+    'he': 'בקשת השיוך נדחתה', // uncertain:
+    'fa': 'درخواست جفت‌سازی رد شد', // uncertain:
+    'fr': 'Demande d\'appairage rejetée', // uncertain:
+    'it': 'Richiesta di accoppiamento rifiutata', // uncertain:
+    'pt': 'Pedido de emparelhamento rejeitado', // uncertain:
+    'nl': 'Koppelingsverzoek afgewezen', // uncertain:
+    'pl': 'Żądanie parowania odrzucone', // uncertain:
+    'ro': 'Cerere de asociere respinsă', // uncertain:
+    'cs': 'Požadavek na spárování zamítnut', // uncertain:
+    'sk': 'Žiadosť o spárovanie zamietnutá', // uncertain:
+    'hr': 'Zahtjev za uparivanje odbijen', // uncertain:
+    'bg': 'Заявката за сдвояване е отхвърлена', // uncertain:
+    'el': 'Το αίτημα σύζευξης απορρίφθηκε', // uncertain:
+    'da': 'Parringsanmodning afvist', // uncertain:
+    'fi': 'Parituspyyntö hylätty', // uncertain:
+    'no': 'Sammenkoblingsforespørsel avvist', // uncertain:
+    'uk': 'Запит на з\'єднання відхилено', // uncertain:
+    'ru': 'Запрос на сопряжение отклонён', // uncertain:
+    'tr': 'Eşleştirme isteği reddedildi', // uncertain:
+    'zh': '配对请求已拒绝', // uncertain:
+    'ja': 'ペアリングリクエストが拒否されました', // uncertain:
+    'ko': '페어링 요청이 거부되었습니다', // uncertain:
+    'hi': 'पेयरिंग अनुरोध अस्वीकार किया गया', // uncertain:
+    'th': 'คำขอจับคู่ถูกปฏิเสธ', // uncertain:
+    'vi': 'Yêu cầu ghép nối bị từ chối', // uncertain:
+    'id': 'Permintaan pemasangan ditolak', // uncertain:
+    'ms': 'Permintaan gandingan ditolak', // uncertain:
+  },
+  'linked_device_status_title': {
+    'de': 'Verknüpftes Gerät',
+    'en': 'Linked Device',
+    'es': 'Dispositivo vinculado', // uncertain:
+    'hu': 'Kapcsolt eszköz', // uncertain:
+    'sv': 'Länkad enhet', // uncertain:
+    'ar': 'جهاز مرتبط', // uncertain:
+    'he': 'מכשיר מקושר', // uncertain:
+    'fa': 'دستگاه متصل', // uncertain:
+    'fr': 'Appareil lié', // uncertain:
+    'it': 'Dispositivo collegato', // uncertain:
+    'pt': 'Dispositivo vinculado', // uncertain:
+    'nl': 'Gekoppeld apparaat', // uncertain:
+    'pl': 'Połączone urządzenie', // uncertain:
+    'ro': 'Dispozitiv asociat', // uncertain:
+    'cs': 'Propojené zařízení', // uncertain:
+    'sk': 'Prepojené zariadenie', // uncertain:
+    'hr': 'Povezani uređaj', // uncertain:
+    'bg': 'Свързано устройство', // uncertain:
+    'el': 'Συνδεδεμένη συσκευή', // uncertain:
+    'da': 'Tilknyttet enhed', // uncertain:
+    'fi': 'Linkitetty laite', // uncertain:
+    'no': 'Tilknyttet enhet', // uncertain:
+    'uk': 'Пов\'язаний пристрій', // uncertain:
+    'ru': 'Связанное устройство', // uncertain:
+    'tr': 'Bağlı cihaz', // uncertain:
+    'zh': '关联设备', // uncertain:
+    'ja': 'リンク済みデバイス', // uncertain:
+    'ko': '연결된 기기', // uncertain:
+    'hi': 'लिंक किया गया डिवाइस', // uncertain:
+    'th': 'อุปกรณ์ที่เชื่อมต่อ', // uncertain:
+    'vi': 'Thiết bị liên kết', // uncertain:
+    'id': 'Perangkat tertaut', // uncertain:
+    'ms': 'Peranti dipautkan', // uncertain:
+  },
+  'linked_device_status_primary': {
+    'de': 'Dies ist das Primärgerät (hält die Seed-Phrase)',
+    'en': 'This is the Primary device (holds seed phrase)',
+    'es': 'Este es el dispositivo primario (contiene la frase semilla)', // uncertain:
+    'hu': 'Ez az elsődleges eszköz (tartalmazza a seed-kifejezést)', // uncertain:
+    'sv': 'Detta är den primära enheten (innehåller seed-frasen)', // uncertain:
+    'ar': 'هذا هو الجهاز الأساسي (يحتوي على عبارة البذرة)', // uncertain:
+    'he': 'זהו המכשיר הראשי (מחזיק את ביטוי הזרע)', // uncertain:
+    'fa': 'این دستگاه اصلی است (عبارت بذر را نگه می‌دارد)', // uncertain:
+    'fr': 'Ceci est l\'appareil principal (détient la phrase de récupération)', // uncertain:
+    'it': 'Questo è il dispositivo primario (detiene la seed phrase)', // uncertain:
+    'pt': 'Este é o dispositivo primário (contém a frase semente)', // uncertain:
+    'nl': 'Dit is het primaire apparaat (bevat de seed-zin)', // uncertain:
+    'pl': 'To jest urządzenie główne (przechowuje frazę odzyskiwania)', // uncertain:
+    'ro': 'Acesta este dispozitivul primar (deține fraza de recuperare)', // uncertain:
+    'cs': 'Toto je primární zařízení (uchovává seed frázi)', // uncertain:
+    'sk': 'Toto je primárne zariadenie (uchováva seed frázu)', // uncertain:
+    'hr': 'Ovo je primarni uređaj (sadrži seed frazu)', // uncertain:
+    'bg': 'Това е основното устройство (съхранява seed фразата)', // uncertain:
+    'el': 'Αυτή είναι η κύρια συσκευή (διατηρεί τη seed phrase)', // uncertain:
+    'da': 'Dette er den primære enhed (indeholder seed-sætningen)', // uncertain:
+    'fi': 'Tämä on ensisijainen laite (sisältää seed-lauseen)', // uncertain:
+    'no': 'Dette er den primære enheten (inneholder seed-frasen)', // uncertain:
+    'uk': 'Це основний пристрій (зберігає seed-фразу)', // uncertain:
+    'ru': 'Это основное устройство (хранит seed-фразу)', // uncertain:
+    'tr': 'Bu birincil cihazdır (tohum ifadesini tutar)', // uncertain:
+    'zh': '这是主设备（持有种子短语）', // uncertain:
+    'ja': 'これはプライマリデバイスです（シードフレーズを保持）', // uncertain:
+    'ko': '이것은 기본 기기입니다 (시드 구문 보유)', // uncertain:
+    'hi': 'यह प्राथमिक डिवाइस है (सीड फ्रेज़ रखता है)', // uncertain:
+    'th': 'นี่คืออุปกรณ์หลัก (เก็บ seed phrase)', // uncertain:
+    'vi': 'Đây là thiết bị chính (giữ cụm từ hạt giống)', // uncertain:
+    'id': 'Ini adalah perangkat utama (menyimpan frasa benih)', // uncertain:
+    'ms': 'Ini adalah peranti utama (menyimpan frasa benih)', // uncertain:
+  },
+  'linked_device_status_linked': {
+    'de': 'Dieses Gerät läuft mit delegierten Schlüsseln',
+    'en': 'This device runs with delegated keys',
+    'es': 'Este dispositivo funciona con claves delegadas', // uncertain:
+    'hu': 'Ez az eszköz delegált kulcsokkal működik', // uncertain:
+    'sv': 'Denna enhet körs med delegerade nycklar', // uncertain:
+    'ar': 'يعمل هذا الجهاز بمفاتيح مفوضة', // uncertain:
+    'he': 'מכשיר זה פועל עם מפתחות מואצלים', // uncertain:
+    'fa': 'این دستگاه با کلیدهای واگذارشده کار می‌کند', // uncertain:
+    'fr': 'Cet appareil fonctionne avec des clés déléguées', // uncertain:
+    'it': 'Questo dispositivo funziona con chiavi delegate', // uncertain:
+    'pt': 'Este dispositivo funciona com chaves delegadas', // uncertain:
+    'nl': 'Dit apparaat werkt met gedelegeerde sleutels', // uncertain:
+    'pl': 'To urządzenie działa z delegowanymi kluczami', // uncertain:
+    'ro': 'Acest dispozitiv funcționează cu chei delegate', // uncertain:
+    'cs': 'Toto zařízení běží s delegovanými klíči', // uncertain:
+    'sk': 'Toto zariadenie beží s delegovanými kľúčmi', // uncertain:
+    'hr': 'Ovaj uređaj radi s delegiranim ključevima', // uncertain:
+    'bg': 'Това устройство работи с делегирани ключове', // uncertain:
+    'el': 'Αυτή η συσκευή λειτουργεί με εκχωρημένα κλειδιά', // uncertain:
+    'da': 'Denne enhed kører med delegerede nøgler', // uncertain:
+    'fi': 'Tämä laite toimii delegoiduilla avaimilla', // uncertain:
+    'no': 'Denne enheten kjører med delegerte nøkler', // uncertain:
+    'uk': 'Цей пристрій працює з делегованими ключами', // uncertain:
+    'ru': 'Это устройство работает с делегированными ключами', // uncertain:
+    'tr': 'Bu cihaz yetkilendirilmiş anahtarlarla çalışır', // uncertain:
+    'zh': '此设备使用委托密钥运行', // uncertain:
+    'ja': 'このデバイスは委任されたキーで動作しています', // uncertain:
+    'ko': '이 기기는 위임된 키로 실행됩니다', // uncertain:
+    'hi': 'यह डिवाइस प्रत्यायोजित कुंजियों से चलता है', // uncertain:
+    'th': 'อุปกรณ์นี้ทำงานด้วยคีย์ที่มอบหมาย', // uncertain:
+    'vi': 'Thiết bị này chạy với khóa ủy quyền', // uncertain:
+    'id': 'Perangkat ini berjalan dengan kunci yang didelegasikan', // uncertain:
+    'ms': 'Peranti ini berjalan dengan kunci yang diwakilkan', // uncertain:
+  },
+  'linked_device_status_caps': {
+    'de': 'Fähigkeiten: {caps}',
+    'en': 'Capabilities: {caps}',
+    'es': 'Capacidades: {caps}', // uncertain:
+    'hu': 'Képességek: {caps}', // uncertain:
+    'sv': 'Funktioner: {caps}', // uncertain:
+    'ar': 'القدرات: {caps}', // uncertain:
+    'he': 'יכולות: {caps}', // uncertain:
+    'fa': 'قابلیت‌ها: {caps}', // uncertain:
+    'fr': 'Capacités : {caps}', // uncertain:
+    'it': 'Capacità: {caps}', // uncertain:
+    'pt': 'Capacidades: {caps}', // uncertain:
+    'nl': 'Mogelijkheden: {caps}', // uncertain:
+    'pl': 'Możliwości: {caps}', // uncertain:
+    'ro': 'Capabilități: {caps}', // uncertain:
+    'cs': 'Schopnosti: {caps}', // uncertain:
+    'sk': 'Schopnosti: {caps}', // uncertain:
+    'hr': 'Mogućnosti: {caps}', // uncertain:
+    'bg': 'Възможности: {caps}', // uncertain:
+    'el': 'Δυνατότητες: {caps}', // uncertain:
+    'da': 'Funktioner: {caps}', // uncertain:
+    'fi': 'Ominaisuudet: {caps}', // uncertain:
+    'no': 'Funksjoner: {caps}', // uncertain:
+    'uk': 'Можливості: {caps}', // uncertain:
+    'ru': 'Возможности: {caps}', // uncertain:
+    'tr': 'Yetenekler: {caps}', // uncertain:
+    'zh': '功能：{caps}', // uncertain:
+    'ja': '機能: {caps}', // uncertain:
+    'ko': '기능: {caps}', // uncertain:
+    'hi': 'क्षमताएं: {caps}', // uncertain:
+    'th': 'ความสามารถ: {caps}', // uncertain:
+    'vi': 'Khả năng: {caps}', // uncertain:
+    'id': 'Kemampuan: {caps}', // uncertain:
+    'ms': 'Keupayaan: {caps}', // uncertain:
+  },
+  'linked_device_status_expires': {
+    'de': 'Gültig bis: {date}',
+    'en': 'Expires: {date}',
+    'es': 'Expira: {date}', // uncertain:
+    'hu': 'Lejárat: {date}', // uncertain:
+    'sv': 'Upphör: {date}', // uncertain:
+    'ar': 'تنتهي الصلاحية: {date}', // uncertain:
+    'he': 'תפוגה: {date}', // uncertain:
+    'fa': 'انقضا: {date}', // uncertain:
+    'fr': 'Expire : {date}', // uncertain:
+    'it': 'Scade: {date}', // uncertain:
+    'pt': 'Expira: {date}', // uncertain:
+    'nl': 'Verloopt: {date}', // uncertain:
+    'pl': 'Wygasa: {date}', // uncertain:
+    'ro': 'Expiră: {date}', // uncertain:
+    'cs': 'Vyprší: {date}', // uncertain:
+    'sk': 'Vyprší: {date}', // uncertain:
+    'hr': 'Istječe: {date}', // uncertain:
+    'bg': 'Изтича: {date}', // uncertain:
+    'el': 'Λήξη: {date}', // uncertain:
+    'da': 'Udløber: {date}', // uncertain:
+    'fi': 'Vanhenee: {date}', // uncertain:
+    'no': 'Utløper: {date}', // uncertain:
+    'uk': 'Закінчується: {date}', // uncertain:
+    'ru': 'Истекает: {date}', // uncertain:
+    'tr': 'Bitiş: {date}', // uncertain:
+    'zh': '过期时间：{date}', // uncertain:
+    'ja': '有効期限: {date}', // uncertain:
+    'ko': '만료: {date}', // uncertain:
+    'hi': 'समाप्ति: {date}', // uncertain:
+    'th': 'หมดอายุ: {date}', // uncertain:
+    'vi': 'Hết hạn: {date}', // uncertain:
+    'id': 'Kedaluwarsa: {date}', // uncertain:
+    'ms': 'Tamat tempoh: {date}', // uncertain:
+  },
+  'linked_device_status_no_expiry': {
+    'de': 'Kein Ablauf',
+    'en': 'No expiry',
+    'es': 'Sin caducidad', // uncertain:
+    'hu': 'Nincs lejárat', // uncertain:
+    'sv': 'Ingen utgång', // uncertain:
+    'ar': 'بدون انتهاء صلاحية', // uncertain:
+    'he': 'ללא תפוגה', // uncertain:
+    'fa': 'بدون انقضا', // uncertain:
+    'fr': 'Pas d\'expiration', // uncertain:
+    'it': 'Nessuna scadenza', // uncertain:
+    'pt': 'Sem expiração', // uncertain:
+    'nl': 'Geen vervaldatum', // uncertain:
+    'pl': 'Bez wygaśnięcia', // uncertain:
+    'ro': 'Fără expirare', // uncertain:
+    'cs': 'Bez expirace', // uncertain:
+    'sk': 'Bez expirácie', // uncertain:
+    'hr': 'Bez isteka', // uncertain:
+    'bg': 'Без изтичане', // uncertain:
+    'el': 'Χωρίς λήξη', // uncertain:
+    'da': 'Ingen udløb', // uncertain:
+    'fi': 'Ei vanhenemista', // uncertain:
+    'no': 'Ingen utløp', // uncertain:
+    'uk': 'Без терміну дії', // uncertain:
+    'ru': 'Без срока действия', // uncertain:
+    'tr': 'Süresiz', // uncertain:
+    'zh': '无过期时间', // uncertain:
+    'ja': '有効期限なし', // uncertain:
+    'ko': '만료 없음', // uncertain:
+    'hi': 'कोई समाप्ति नहीं', // uncertain:
+    'th': 'ไม่มีวันหมดอายุ', // uncertain:
+    'vi': 'Không hết hạn', // uncertain:
+    'id': 'Tanpa kedaluwarsa', // uncertain:
+    'ms': 'Tiada tamat tempoh', // uncertain:
+  },
+  'linked_device_device_id': {
+    'de': 'Gerät: {id}',
+    'en': 'Device: {id}',
+    'es': 'Dispositivo: {id}', // uncertain:
+    'hu': 'Eszköz: {id}', // uncertain:
+    'sv': 'Enhet: {id}', // uncertain:
+    'ar': 'الجهاز: {id}', // uncertain:
+    'he': 'מכשיר: {id}', // uncertain:
+    'fa': 'دستگاه: {id}', // uncertain:
+    'fr': 'Appareil : {id}', // uncertain:
+    'it': 'Dispositivo: {id}', // uncertain:
+    'pt': 'Dispositivo: {id}', // uncertain:
+    'nl': 'Apparaat: {id}', // uncertain:
+    'pl': 'Urządzenie: {id}', // uncertain:
+    'ro': 'Dispozitiv: {id}', // uncertain:
+    'cs': 'Zařízení: {id}', // uncertain:
+    'sk': 'Zariadenie: {id}', // uncertain:
+    'hr': 'Uređaj: {id}', // uncertain:
+    'bg': 'Устройство: {id}', // uncertain:
+    'el': 'Συσκευή: {id}', // uncertain:
+    'da': 'Enhed: {id}', // uncertain:
+    'fi': 'Laite: {id}', // uncertain:
+    'no': 'Enhet: {id}', // uncertain:
+    'uk': 'Пристрій: {id}', // uncertain:
+    'ru': 'Устройство: {id}', // uncertain:
+    'tr': 'Cihaz: {id}', // uncertain:
+    'zh': '设备：{id}', // uncertain:
+    'ja': 'デバイス: {id}', // uncertain:
+    'ko': '기기: {id}', // uncertain:
+    'hi': 'डिवाइस: {id}', // uncertain:
+    'th': 'อุปกรณ์: {id}', // uncertain:
+    'vi': 'Thiết bị: {id}', // uncertain:
+    'id': 'Perangkat: {id}', // uncertain:
+    'ms': 'Peranti: {id}', // uncertain:
+  },
+  'linked_device_request_pairing': {
+    'de': 'Kopplung anfordern',
+    'en': 'Request Pairing',
+    'es': 'Solicitar emparejamiento', // uncertain:
+    'hu': 'Párosítás kérése', // uncertain:
+    'sv': 'Begär parkoppling', // uncertain:
+    'ar': 'طلب الاقتران', // uncertain:
+    'he': 'בקש צימוד', // uncertain:
+    'fa': 'درخواست جفت‌سازی', // uncertain:
+    'fr': 'Demander le couplage', // uncertain:
+    'it': 'Richiedi accoppiamento', // uncertain:
+    'pt': 'Solicitar emparelhamento', // uncertain:
+    'nl': 'Koppeling aanvragen', // uncertain:
+    'pl': 'Żądaj sparowania', // uncertain:
+    'ro': 'Solicită asocierea', // uncertain:
+    'cs': 'Požádat o spárování', // uncertain:
+    'sk': 'Požiadať o spárovanie', // uncertain:
+    'hr': 'Zatraži uparivanje', // uncertain:
+    'bg': 'Заявка за сдвояване', // uncertain:
+    'el': 'Αίτημα σύζευξης', // uncertain:
+    'da': 'Anmod om parring', // uncertain:
+    'fi': 'Pyydä pariliitosta', // uncertain:
+    'no': 'Be om sammenkobling', // uncertain:
+    'uk': 'Запит на з\'єднання', // uncertain:
+    'ru': 'Запросить сопряжение', // uncertain:
+    'tr': 'Eşleştirme iste', // uncertain:
+    'zh': '请求配对', // uncertain:
+    'ja': 'ペアリングを要求', // uncertain:
+    'ko': '페어링 요청', // uncertain:
+    'hi': 'पेयरिंग का अनुरोध करें', // uncertain:
+    'th': 'ขอจับคู่', // uncertain:
+    'vi': 'Yêu cầu ghép nối', // uncertain:
+    'id': 'Minta pemasangan', // uncertain:
+    'ms': 'Minta gandingan', // uncertain:
+  },
+  'linked_device_request_pairing_subtitle': {
+    'de': 'Dieses Gerät als verknüpftes Gerät einrichten',
+    'en': 'Convert this device to a Linked Device',
+    'es': 'Configurar este dispositivo como dispositivo vinculado', // uncertain:
+    'hu': 'Eszköz beállítása csatolt eszközként', // uncertain:
+    'sv': 'Konfigurera denna enhet som en länkad enhet', // uncertain:
+    'ar': 'إعداد هذا الجهاز كجهاز مرتبط', // uncertain:
+    'he': 'הגדר מכשיר זה כמכשיר מקושר', // uncertain:
+    'fa': 'تنظیم این دستگاه به‌عنوان دستگاه مرتبط', // uncertain:
+    'fr': 'Configurer cet appareil comme appareil lié', // uncertain:
+    'it': 'Configura questo dispositivo come dispositivo collegato', // uncertain:
+    'pt': 'Configurar este dispositivo como dispositivo vinculado', // uncertain:
+    'nl': 'Dit apparaat instellen als gekoppeld apparaat', // uncertain:
+    'pl': 'Skonfiguruj to urządzenie jako urządzenie powiązane', // uncertain:
+    'ro': 'Configurează acest dispozitiv ca dispozitiv asociat', // uncertain:
+    'cs': 'Nastavit toto zařízení jako propojené zařízení', // uncertain:
+    'sk': 'Nastaviť toto zariadenie ako prepojené zariadenie', // uncertain:
+    'hr': 'Postavi ovaj uređaj kao povezani uređaj', // uncertain:
+    'bg': 'Настрой това устройство като свързано устройство', // uncertain:
+    'el': 'Ρύθμιση αυτής της συσκευής ως συνδεδεμένη συσκευή', // uncertain:
+    'da': 'Konfigurer denne enhed som en tilknyttet enhed', // uncertain:
+    'fi': 'Määritä tämä laite linkitetyksi laitteeksi', // uncertain:
+    'no': 'Konfigurer denne enheten som en tilknyttet enhet', // uncertain:
+    'uk': 'Налаштувати цей пристрій як пов\'язаний пристрій', // uncertain:
+    'ru': 'Настроить это устройство как связанное устройство', // uncertain:
+    'tr': 'Bu cihazı bağlı cihaz olarak yapılandır', // uncertain:
+    'zh': '将此设备设置为关联设备', // uncertain:
+    'ja': 'このデバイスをリンクデバイスとして設定', // uncertain:
+    'ko': '이 기기를 연결된 기기로 설정', // uncertain:
+    'hi': 'इस डिवाइस को लिंक्ड डिवाइस के रूप में सेट करें', // uncertain:
+    'th': 'ตั้งค่าอุปกรณ์นี้เป็นอุปกรณ์ที่เชื่อมโยง', // uncertain:
+    'vi': 'Thiết lập thiết bị này làm thiết bị liên kết', // uncertain:
+    'id': 'Atur perangkat ini sebagai perangkat tertaut', // uncertain:
+    'ms': 'Tetapkan peranti ini sebagai peranti terpaut', // uncertain:
+  },
+  'linked_device_request_sent': {
+    'de': 'Kopplungsanfrage gesendet — warte auf Bestätigung vom Primärgerät',
+    'en': 'Pairing request sent — waiting for Primary approval',
+    'es': 'Solicitud de emparejamiento enviada — esperando aprobación del dispositivo primario', // uncertain:
+    'hu': 'Párosítási kérés elküldve — várakozás az elsődleges eszköz jóváhagyására', // uncertain:
+    'sv': 'Parkopplingsbegäran skickad — väntar på godkännande från primär enhet', // uncertain:
+    'ar': 'تم إرسال طلب الاقتران — في انتظار موافقة الجهاز الأساسي', // uncertain:
+    'he': 'בקשת צימוד נשלחה — ממתין לאישור מהמכשיר הראשי', // uncertain:
+    'fa': 'درخواست جفت‌سازی ارسال شد — در انتظار تأیید دستگاه اصلی', // uncertain:
+    'fr': 'Demande de couplage envoyée — en attente de l\'approbation de l\'appareil principal', // uncertain:
+    'it': 'Richiesta di accoppiamento inviata — in attesa di approvazione dal dispositivo primario', // uncertain:
+    'pt': 'Solicitação de emparelhamento enviada — aguardando aprovação do dispositivo primário', // uncertain:
+    'nl': 'Koppelingsverzoek verzonden — wachten op goedkeuring van het primaire apparaat', // uncertain:
+    'pl': 'Żądanie sparowania wysłane — oczekiwanie na zatwierdzenie z urządzenia głównego', // uncertain:
+    'ro': 'Cerere de asociere trimisă — se așteaptă aprobarea de la dispozitivul principal', // uncertain:
+    'cs': 'Žádost o spárování odeslána — čeká se na schválení z primárního zařízení', // uncertain:
+    'sk': 'Žiadosť o spárovanie odoslaná — čaká sa na schválenie z primárneho zariadenia', // uncertain:
+    'hr': 'Zahtjev za uparivanje poslan — čeka se odobrenje primarnog uređaja', // uncertain:
+    'bg': 'Заявката за сдвояване е изпратена — изчаква се одобрение от основното устройство', // uncertain:
+    'el': 'Το αίτημα σύζευξης στάλθηκε — αναμονή για έγκριση από την κύρια συσκευή', // uncertain:
+    'da': 'Parringsanmodning sendt — venter på godkendelse fra den primære enhed', // uncertain:
+    'fi': 'Pariliitospyyntö lähetetty — odotetaan ensisijaisen laitteen hyväksyntää', // uncertain:
+    'no': 'Sammenkoblingsforespørsel sendt — venter på godkjenning fra primærenheten', // uncertain:
+    'uk': 'Запит на з\'єднання надіслано — очікування підтвердження від основного пристрою', // uncertain:
+    'ru': 'Запрос на сопряжение отправлен — ожидание подтверждения от основного устройства', // uncertain:
+    'tr': 'Eşleştirme isteği gönderildi — birincil cihaz onayı bekleniyor', // uncertain:
+    'zh': '配对请求已发送 — 等待主设备批准', // uncertain:
+    'ja': 'ペアリング要求を送信しました — プライマリデバイスの承認を待っています', // uncertain:
+    'ko': '페어링 요청 전송됨 — 기본 기기 승인 대기 중', // uncertain:
+    'hi': 'पेयरिंग अनुरोध भेजा गया — प्राथमिक डिवाइस की स्वीकृति की प्रतीक्षा', // uncertain:
+    'th': 'ส่งคำขอจับคู่แล้ว — รอการอนุมัติจากอุปกรณ์หลัก', // uncertain:
+    'vi': 'Đã gửi yêu cầu ghép nối — đang chờ phê duyệt từ thiết bị chính', // uncertain:
+    'id': 'Permintaan pemasangan terkirim — menunggu persetujuan dari perangkat utama', // uncertain:
+    'ms': 'Permintaan gandingan dihantar — menunggu kelulusan daripada peranti utama', // uncertain:
+  },
+  'linked_device_cert_expired': {
+    'de': 'Zertifikat abgelaufen',
+    'en': 'Certificate expired',
+    'es': 'Certificado caducado', // uncertain:
+    'hu': 'Tanusítvány lejárt', // uncertain:
+    'sv': 'Certifikatet har gått ut', // uncertain:
+    'ar': 'انتهت صلاحية الشهادة', // uncertain:
+    'he': 'התעודה פגה', // uncertain:
+    'fa': 'گواهی منقضی شده', // uncertain:
+    'fr': 'Certificat expiré', // uncertain:
+    'it': 'Certificato scaduto', // uncertain:
+    'pt': 'Certificado expirado', // uncertain:
+    'nl': 'Certificaat verlopen', // uncertain:
+    'pl': 'Certyfikat wygasł', // uncertain:
+    'ro': 'Certificat expirat', // uncertain:
+    'cs': 'Certifikát vypršel', // uncertain:
+    'sk': 'Certifikát vypršal', // uncertain:
+    'hr': 'Certifikat istekao', // uncertain:
+    'bg': 'Сертификатът е изтекъл', // uncertain:
+    'el': 'Το πιστοποιητικό έληξε', // uncertain:
+    'da': 'Certifikat udløbet', // uncertain:
+    'fi': 'Sertifikaatti vanhentunut', // uncertain:
+    'no': 'Sertifikat utløpt', // uncertain:
+    'uk': 'Сертифікат прострочений', // uncertain:
+    'ru': 'Сертификат просрочен', // uncertain:
+    'tr': 'Sertifika süresi doldu', // uncertain:
+    'zh': '证书已过期', // uncertain:
+    'ja': '証明書の有効期限切れ', // uncertain:
+    'ko': '인증서 만료됨', // uncertain:
+    'hi': 'प्रमाणपत्र समाप्त', // uncertain:
+    'th': 'ใบรับรองหมดอายุ', // uncertain:
+    'vi': 'Chứng chỉ đã hết hạn', // uncertain:
+    'id': 'Sertifikat kedaluwarsa', // uncertain:
+    'ms': 'Sijil tamat tempoh', // uncertain:
+  },
+  'linked_device_days_remaining': {
+    'de': '({days} Tage)',
+    'en': '({days} days)',
+    'es': '({days} días)', // uncertain:
+    'hu': '({days} nap)', // uncertain:
+    'sv': '({days} dagar)', // uncertain:
+    'ar': '({days} أيام)', // uncertain:
+    'he': '({days} ימים)', // uncertain:
+    'fa': '({days} روز)', // uncertain:
+    'fr': '({days} jours)', // uncertain:
+    'it': '({days} giorni)', // uncertain:
+    'pt': '({days} dias)', // uncertain:
+    'nl': '({days} dagen)', // uncertain:
+    'pl': '({days} dni)', // uncertain:
+    'ro': '({days} zile)', // uncertain:
+    'cs': '({days} dní)', // uncertain:
+    'sk': '({days} dní)', // uncertain:
+    'hr': '({days} dana)', // uncertain:
+    'bg': '({days} дни)', // uncertain:
+    'el': '({days} ημέρες)', // uncertain:
+    'da': '({days} dage)', // uncertain:
+    'fi': '({days} päivää)', // uncertain:
+    'no': '({days} dager)', // uncertain:
+    'uk': '({days} днів)', // uncertain:
+    'ru': '({days} дней)', // uncertain:
+    'tr': '({days} gün)', // uncertain:
+    'zh': '({days} 天)', // uncertain:
+    'ja': '({days} 日)', // uncertain:
+    'ko': '({days}일)', // uncertain:
+    'hi': '({days} दिन)', // uncertain:
+    'th': '({days} วัน)', // uncertain:
+    'vi': '({days} ngày)', // uncertain:
+    'id': '({days} hari)', // uncertain:
+    'ms': '({days} hari)', // uncertain:
+  },
+  'linked_device_renew_now': {
+    'de': 'Jetzt erneuern',
+    'en': 'Renew now',
+    'es': 'Renovar ahora', // uncertain:
+    'hu': 'Megújítás most', // uncertain:
+    'sv': 'Förnya nu', // uncertain:
+    'ar': 'تجديد الآن', // uncertain:
+    'he': 'חדש עכשיו', // uncertain:
+    'fa': 'تمدید اکنون', // uncertain:
+    'fr': 'Renouveler maintenant', // uncertain:
+    'it': 'Rinnova ora', // uncertain:
+    'pt': 'Renovar agora', // uncertain:
+    'nl': 'Nu verlengen', // uncertain:
+    'pl': 'Odnów teraz', // uncertain:
+    'ro': 'Reînnoiește acum', // uncertain:
+    'cs': 'Obnovit nyní', // uncertain:
+    'sk': 'Obnoviť teraz', // uncertain:
+    'hr': 'Obnovi sada', // uncertain:
+    'bg': 'Поднови сега', // uncertain:
+    'el': 'Ανανέωση τώρα', // uncertain:
+    'da': 'Forny nu', // uncertain:
+    'fi': 'Uusi nyt', // uncertain:
+    'no': 'Forny nå', // uncertain:
+    'uk': 'Оновити зараз', // uncertain:
+    'ru': 'Обновить сейчас', // uncertain:
+    'tr': 'Şimdi yenile', // uncertain:
+    'zh': '立即续期', // uncertain:
+    'ja': '今すぐ更新', // uncertain:
+    'ko': '지금 갱신', // uncertain:
+    'hi': 'अभी नवीनीकरण करें', // uncertain:
+    'th': 'ต่ออายุตอนนี้', // uncertain:
+    'vi': 'Gia hạn ngay', // uncertain:
+    'id': 'Perpanjang sekarang', // uncertain:
+    'ms': 'Perbaharui sekarang', // uncertain:
+  },
+  'linked_device_renewal_sent': {
+    'de': 'Erneuerungsanfrage gesendet',
+    'en': 'Renewal request sent',
+    'es': 'Solicitud de renovación enviada', // uncertain:
+    'hu': 'Megújítási kérés elküldve', // uncertain:
+    'sv': 'Förnyelsebegäran skickad', // uncertain:
+    'ar': 'تم إرسال طلب التجديد', // uncertain:
+    'he': 'בקשת חידוש נשלחה', // uncertain:
+    'fa': 'درخواست تمدید ارسال شد', // uncertain:
+    'fr': 'Demande de renouvellement envoyée', // uncertain:
+    'it': 'Richiesta di rinnovo inviata', // uncertain:
+    'pt': 'Pedido de renovação enviado', // uncertain:
+    'nl': 'Verlengingsverzoek verzonden', // uncertain:
+    'pl': 'Żądanie odnowienia wysłane', // uncertain:
+    'ro': 'Cerere de reînnoire trimisă', // uncertain:
+    'cs': 'Žádost o obnovu odeslána', // uncertain:
+    'sk': 'Žiadosť o obnovu odoslaná', // uncertain:
+    'hr': 'Zahtjev za obnovu poslan', // uncertain:
+    'bg': 'Заявка за подновяване е изпратена', // uncertain:
+    'el': 'Αίτημα ανανέωσης στάλθηκε', // uncertain:
+    'da': 'Fornyelsesanmodning sendt', // uncertain:
+    'fi': 'Uusimispyyntö lähetetty', // uncertain:
+    'no': 'Fornyelseforespørsel sendt', // uncertain:
+    'uk': 'Запит на оновлення надіслано', // uncertain:
+    'ru': 'Запрос на обновление отправлен', // uncertain:
+    'tr': 'Yenileme isteği gönderildi', // uncertain:
+    'zh': '续期请求已发送', // uncertain:
+    'ja': '更新リクエストを送信しました', // uncertain:
+    'ko': '갱신 요청 전송됨', // uncertain:
+    'hi': 'नवीनीकरण अनुरोध भेजा गया', // uncertain:
+    'th': 'ส่งคำขอต่ออายุแล้ว', // uncertain:
+    'vi': 'Đã gửi yêu cầu gia hạn', // uncertain:
+    'id': 'Permintaan perpanjangan terkirim', // uncertain:
+    'ms': 'Permintaan pembaharuan dihantar', // uncertain:
+  },
+  'linked_device_renewal_failed': {
+    'de': 'Erneuerung fehlgeschlagen — kein Kontakt zum Primärgerät',
+    'en': 'Renewal failed — no route to Primary',
+    'es': 'Renovación fallida — sin ruta al primario', // uncertain:
+    'hu': 'Megújítás sikertelen — nincs útvonal az elsődlegeshez', // uncertain:
+    'sv': 'Förnyelse misslyckades — ingen rutt till primär', // uncertain:
+    'ar': 'فشل التجديد — لا مسار للجهاز الأساسي', // uncertain:
+    'he': 'החידוש נכשל — אין נתיב למכשיר הראשי', // uncertain:
+    'fa': 'تمدید ناموفق — مسیری به دستگاه اصلی وجود ندارد', // uncertain:
+    'fr': 'Renouvellement échoué — pas de route vers le principal', // uncertain:
+    'it': 'Rinnovo fallito — nessuna rotta verso il primario', // uncertain:
+    'pt': 'Renovação falhou — sem rota para o primário', // uncertain:
+    'nl': 'Verlenging mislukt — geen route naar primair', // uncertain:
+    'pl': 'Odnowienie nie powiodło się — brak trasy do głównego', // uncertain:
+    'ro': 'Reînnoire eșuată — fără rută către primar', // uncertain:
+    'cs': 'Obnova selhala — žádná trasa k primárnímu', // uncertain:
+    'sk': 'Obnova zlyhala — žiadna trasa k primárnemu', // uncertain:
+    'hr': 'Obnova neuspješna — nema rute do primarnog', // uncertain:
+    'bg': 'Подновяването е неуспешно — няма маршрут до основното', // uncertain:
+    'el': 'Η ανανέωση απέτυχε — δεν υπάρχει διαδρομή προς την κύρια', // uncertain:
+    'da': 'Fornyelse mislykkedes — ingen rute til primær', // uncertain:
+    'fi': 'Uusiminen epäonnistui — ei reittiä ensisijaiseen', // uncertain:
+    'no': 'Fornyelse mislyktes — ingen rute til primær', // uncertain:
+    'uk': 'Оновлення не вдалося — немає маршруту до основного', // uncertain:
+    'ru': 'Обновление не удалось — нет маршрута к основному', // uncertain:
+    'tr': 'Yenileme başarısız — birincile rota yok', // uncertain:
+    'zh': '续期失败 — 无法到达主设备', // uncertain:
+    'ja': '更新失敗 — プライマリへのルートがありません', // uncertain:
+    'ko': '갱신 실패 — 기본 기기로의 경로 없음', // uncertain:
+    'hi': 'नवीनीकरण विफल — प्राथमिक तक कोई मार्ग नहीं', // uncertain:
+    'th': 'ต่ออายุล้มเหลว — ไม่มีเส้นทางไปยังอุปกรณ์หลัก', // uncertain:
+    'vi': 'Gia hạn thất bại — không có đường đến thiết bị chính', // uncertain:
+    'id': 'Perpanjangan gagal — tidak ada rute ke utama', // uncertain:
+    'ms': 'Pembaharuan gagal — tiada laluan ke utama', // uncertain:
+  },
+  'linked_device_cap_send': {
+    'de': 'Senden',
+    'en': 'Send',
+    'es': 'Enviar', // uncertain:
+    'hu': 'Küldés', // uncertain:
+    'sv': 'Skicka', // uncertain:
+    'ar': 'إرسال', // uncertain:
+    'he': 'שליחה', // uncertain:
+    'fa': 'ارسال', // uncertain:
+    'fr': 'Envoyer', // uncertain:
+    'it': 'Invia', // uncertain:
+    'pt': 'Enviar', // uncertain:
+    'nl': 'Verzenden', // uncertain:
+    'pl': 'Wyślij', // uncertain:
+    'ro': 'Trimite', // uncertain:
+    'cs': 'Odeslat', // uncertain:
+    'sk': 'Odoslať', // uncertain:
+    'hr': 'Pošalji', // uncertain:
+    'bg': 'Изпрати', // uncertain:
+    'el': 'Αποστολή', // uncertain:
+    'da': 'Send', // uncertain:
+    'fi': 'Lähetä', // uncertain:
+    'no': 'Send', // uncertain:
+    'uk': 'Надіслати', // uncertain:
+    'ru': 'Отправить', // uncertain:
+    'tr': 'Gönder', // uncertain:
+    'zh': '发送', // uncertain:
+    'ja': '送信', // uncertain:
+    'ko': '보내기', // uncertain:
+    'hi': 'भेजें', // uncertain:
+    'th': 'ส่ง', // uncertain:
+    'vi': 'Gửi', // uncertain:
+    'id': 'Kirim', // uncertain:
+    'ms': 'Hantar', // uncertain:
+  },
+  'linked_device_cap_contacts': {
+    'de': 'Kontakte',
+    'en': 'Contacts',
+    'es': 'Contactos', // uncertain:
+    'hu': 'Kapcsolatok', // uncertain:
+    'sv': 'Kontakter', // uncertain:
+    'ar': 'جهات الاتصال', // uncertain:
+    'he': 'אנשי קשר', // uncertain:
+    'fa': 'مخاطبین', // uncertain:
+    'fr': 'Contacts', // uncertain:
+    'it': 'Contatti', // uncertain:
+    'pt': 'Contatos', // uncertain:
+    'nl': 'Contacten', // uncertain:
+    'pl': 'Kontakty', // uncertain:
+    'ro': 'Contacte', // uncertain:
+    'cs': 'Kontakty', // uncertain:
+    'sk': 'Kontakty', // uncertain:
+    'hr': 'Kontakti', // uncertain:
+    'bg': 'Контакти', // uncertain:
+    'el': 'Επαφές', // uncertain:
+    'da': 'Kontakter', // uncertain:
+    'fi': 'Yhteystiedot', // uncertain:
+    'no': 'Kontakter', // uncertain:
+    'uk': 'Контакти', // uncertain:
+    'ru': 'Контакты', // uncertain:
+    'tr': 'Kişiler', // uncertain:
+    'zh': '联系人', // uncertain:
+    'ja': '連絡先', // uncertain:
+    'ko': '연락처', // uncertain:
+    'hi': 'संपर्क', // uncertain:
+    'th': 'รายชื่อ', // uncertain:
+    'vi': 'Danh bạ', // uncertain:
+    'id': 'Kontak', // uncertain:
+    'ms': 'Kenalan', // uncertain:
+  },
+  'linked_device_cap_groups': {
+    'de': 'Gruppen',
+    'en': 'Groups',
+    'es': 'Grupos', // uncertain:
+    'hu': 'Csoportok', // uncertain:
+    'sv': 'Grupper', // uncertain:
+    'ar': 'مجموعات', // uncertain:
+    'he': 'קבוצות', // uncertain:
+    'fa': 'گروه‌ها', // uncertain:
+    'fr': 'Groupes', // uncertain:
+    'it': 'Gruppi', // uncertain:
+    'pt': 'Grupos', // uncertain:
+    'nl': 'Groepen', // uncertain:
+    'pl': 'Grupy', // uncertain:
+    'ro': 'Grupuri', // uncertain:
+    'cs': 'Skupiny', // uncertain:
+    'sk': 'Skupiny', // uncertain:
+    'hr': 'Grupe', // uncertain:
+    'bg': 'Групи', // uncertain:
+    'el': 'Ομάδες', // uncertain:
+    'da': 'Grupper', // uncertain:
+    'fi': 'Ryhmät', // uncertain:
+    'no': 'Grupper', // uncertain:
+    'uk': 'Групи', // uncertain:
+    'ru': 'Группы', // uncertain:
+    'tr': 'Gruplar', // uncertain:
+    'zh': '群组', // uncertain:
+    'ja': 'グループ', // uncertain:
+    'ko': '그룹', // uncertain:
+    'hi': 'समूह', // uncertain:
+    'th': 'กลุ่ม', // uncertain:
+    'vi': 'Nhóm', // uncertain:
+    'id': 'Grup', // uncertain:
+    'ms': 'Kumpulan', // uncertain:
+  },
+  'linked_device_cap_channels': {
+    'de': 'Channels',
+    'en': 'Channels',
+    'es': 'Canales', // uncertain:
+    'hu': 'Csatornák', // uncertain:
+    'sv': 'Kanaler', // uncertain:
+    'ar': 'القنوات', // uncertain:
+    'he': 'ערוצים', // uncertain:
+    'fa': 'کانال‌ها', // uncertain:
+    'fr': 'Chaînes', // uncertain:
+    'it': 'Canali', // uncertain:
+    'pt': 'Canais', // uncertain:
+    'nl': 'Kanalen', // uncertain:
+    'pl': 'Kanały', // uncertain:
+    'ro': 'Canale', // uncertain:
+    'cs': 'Kanály', // uncertain:
+    'sk': 'Kanály', // uncertain:
+    'hr': 'Kanali', // uncertain:
+    'bg': 'Канали', // uncertain:
+    'el': 'Κανάλια', // uncertain:
+    'da': 'Kanaler', // uncertain:
+    'fi': 'Kanavat', // uncertain:
+    'no': 'Kanaler', // uncertain:
+    'uk': 'Канали', // uncertain:
+    'ru': 'Каналы', // uncertain:
+    'tr': 'Kanallar', // uncertain:
+    'zh': '频道', // uncertain:
+    'ja': 'チャンネル', // uncertain:
+    'ko': '채널', // uncertain:
+    'hi': 'चैनल', // uncertain:
+    'th': 'ช่อง', // uncertain:
+    'vi': 'Kênh', // uncertain:
+    'id': 'Saluran', // uncertain:
+    'ms': 'Saluran', // uncertain:
   },
 };

@@ -10,20 +10,27 @@ import 'package:cleona/core/crypto/per_message_kem.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/dht/channel_index.dart';
+import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
 import 'package:cleona/core/dht/mailbox_store.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/identity_resolution/device_delegation.dart';
+import 'package:cleona/core/identity_resolution/rotation_co_auth.dart';
+import 'package:cleona/core/identity_resolution/linked_device_keys.dart';
+import 'package:cleona/core/identity_resolution/linked_device_keys_store.dart';
 import 'package:cleona/core/identity_resolution/identity_publisher.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart' show ResolvedDevice;
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
+import 'package:cleona/core/service/device_pairing_service.dart';
+import 'package:cleona/core/moderation/jury_selection.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/ack_tracker.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/network/peer_message_store.dart';
+import 'package:cleona/core/network/peer_rescue_bundle.dart';
 import 'package:cleona/core/network/v3_frame_codec.dart';
 import 'package:cleona/core/network/sender_identity_snapshot.dart';
 import 'package:cleona/core/node/cleona_node.dart';
@@ -58,6 +65,7 @@ import 'package:cleona/core/calendar/sync/calendar_sync_service.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/crypto/linkable_ring_signature.dart';
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
+import 'package:cleona/core/services/key_change_policy.dart';
 import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/channels/contact_issue_reporter.dart';
@@ -261,14 +269,44 @@ class CleonaService implements ICleonaService {
   @override
   void Function(String contactNodeIdHex, int pendingCount)?
       onKeyRotationPendingExpired;
+
+  // SR-1 (§7.4b step 6 / §8.3)
+  @override
+  void Function(
+          String contactNodeIdHex, String displayName, bool wasVerified)?
+      onContactIdentityRotated;
+
+  // §7.5 Co-Auth warning callbacks
+  @override
+  void Function(String contactNodeIdHex, String displayName,
+      int tokensPresent, int tokensRequired)? onRotationCoAuthWarning;
+  @override
+  void Function(String contactNodeIdHex, String displayName)?
+      onRotationRejectionAlert;
+
+  // H-2 (§6.3.5)
+  @override
+  void Function(
+          String contactNodeIdHex, String displayName, bool identityKeyChanged)?
+      onContactRestoreDetected;
   /// Closed key-image hex values keyed by pollId (§24.4). In-memory only —
   /// after a restart every stored vote is re-indexed from poll.votes.
   final Map<String, Set<String>> _anonymousKeyImages = {};
   Timer? _pollDeadlineTimer;
 
+  /// Jitter-pending anonymous vote sends, key = `pollId:keyImageHex`
+  /// (§11.4.6). A revoke issued while the send is still pending cancels
+  /// the timer instead of racing the vote on the wire.
+  final Map<String, Timer> _pendingAnonVoteSends = {};
+
   /// §26: fires whenever the twin-device list changes (add/remove/rename).
   /// GUI listens via IPC to refresh the Device Management screen.
   void Function()? onDevicesUpdated;
+
+  /// §7.1 LD-2: fires when a new Linked-Device pairing request arrives.
+  /// The GUI shows a confirmation dialog; on approval, call approvePairRequest().
+  @override
+  void Function(String requestingDeviceIdHex)? onDevicePairRequest;
 
   // Multi-Device (§26): twin device list + deduplication
   final Map<String, DeviceRecord> _devices = {};
@@ -298,6 +336,7 @@ class CleonaService implements ICleonaService {
   // Keeps retrying forever so eventually-online contacts still get through,
   // but at low frequency after the initial burst (~10 attempts in 20min).
   final Map<String, int> _crRetryCountPerContact = {};
+  // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
   // Per-contact last end-to-end-confirmed ACK (any message type).
   // Proves reachability to the contact — stops CR-Response retry flooding
   // on CGNAT peers where DELIVERY_RECEIPTs arrive only via relay and thus
@@ -307,6 +346,9 @@ class CleonaService implements ICleonaService {
   // into the conversation. Prevents duplicate warnings; cleared on the next
   // ACK (contact is alive) or re-acceptance.
   final Set<String> _staleWarningWrittenFor = {};
+  // GM-2 (§9.1.4): track per-group last epoch for which a RESYNC_REQUEST was sent
+  // to avoid flooding the owner. Key = groupIdHex, value = epoch that triggered it.
+  final Map<String, int> _resyncRequestedAtEpoch = {};
   Timer? _keyRotationTimer;
   // §26.6.2 Paket C: drives _keyRotationRetry re-sends every 24h.
   Timer? _keyRotationRetryTimer;
@@ -358,6 +400,8 @@ class CleonaService implements ICleonaService {
   final Map<String, DateTime> _csamCooldowns = {};
   /// CSAM reporter strikes: nodeIdHex -> strike count.
   final Map<String, int> _csamStrikes = {};
+  /// CSAM Stage 3 / jury moderation proofs: channelIdHex -> proof bytes.
+  final Map<String, Uint8List> _moderationProofs = {};
 
   // System channels (§9.5)
   CrashReporter? _crashReporter;
@@ -399,6 +443,7 @@ class CleonaService implements ICleonaService {
   // The startup polling timer fires every 3s for ~30s and polls only newly
   // observed peers, catching late arrivals without re-flooding known peers.
   Timer? _startupPollingTimer;
+  Timer? _delegationRenewalTimer;
   int _startupPollCount = 0;
   final Set<String> _startupPolledPeers = {};
 
@@ -418,6 +463,16 @@ class CleonaService implements ICleonaService {
   // Structure: messageIdHex → _OutboxEntry
   final Map<String, _OutboxEntry> _outbox = {};
   bool _outboxLoaded = false;
+
+  // §5.8 extension: pending membership update resends.
+  // When _broadcastGroupUpdate / _broadcastChannelUpdate fails for a member
+  // (sendToUser returned false), the (entityId, recipientHex) pair is parked
+  // here. On the next onNetworkChanged edge, the CURRENT group/channel state
+  // is re-sent to pending recipients only (not all members). Successful
+  // re-sends are removed; stale entries (member removed, entity deleted) are
+  // cleaned up during flush.
+  // Structure: entityIdHex (group or channel) → Set<recipientUserIdHex>
+  final Map<String, Set<String>> _pendingMembershipResends = {};
 
   CleonaService({
     required this.identity,
@@ -543,6 +598,16 @@ class CleonaService implements ICleonaService {
     // Init local device (§26 Multi-Device)
     _initLocalDevice();
 
+    // §7.1: Restore linked-device delegation keys (if this is a Linked Device)
+    final restoredLinkedKeys = LinkedDeviceKeysStore.load(
+      profileDir: profileDir,
+      fileEnc: _fileEnc,
+    );
+    if (restoredLinkedKeys != null) {
+      applyLinkedDeviceKeys(restoredLinkedKeys);
+      _log.info('Restored linked-device keys from disk');
+    }
+
     // Load own profile picture
     _loadProfilePicture();
 
@@ -650,6 +715,7 @@ class CleonaService implements ICleonaService {
     // sender had 0 connectivity). Flush is edge-triggered by onNetworkChanged —
     // NOT by any startup timer.
     _loadOutbox();
+    _loadPendingMembershipResends();
 
     // V3.1.44: Migrate self-entries from deviceNodeId to userIdHex in groups/channels/messages.
     // §26 Phase 2 temporarily stored deviceNodeId as member keys, but service-level
@@ -728,6 +794,10 @@ class CleonaService implements ICleonaService {
     _systemChannelEvictionTimer = Timer.periodic(
         const Duration(minutes: 30), (_) => _evictSystemChannels());
 
+    // §7.1 LD-9: delegation cert renewal check (hourly)
+    _delegationRenewalTimer = Timer.periodic(
+        const Duration(hours: 1), (_) => _checkDelegationRenewal());
+
     // Stats wiring lives on CleonaNode now (single shared collector across
     // all identities). #U5: previous per-Service `??=` only let the first
     // service to start win the transport callbacks; all later services saw
@@ -803,7 +873,12 @@ class CleonaService implements ICleonaService {
       routingTable: node.routingTable,
       sender: _IdentityPublisherSender(node),
       dhtHandler: node.identityDhtHandler,
+      // D4 (§4.3 Publisher self-verify): post-publish self-lookup channel.
+      dhtRpc: node.dhtRpc,
     );
+    // D4 observability: feed the idSelfVerifyOk/Miss network-stats counters.
+    _identityPublisher!.onSelfVerifyResult =
+        (ok) => node.statsCollector.recordIdSelfVerify(ok);
     _identityPublisher!.setForeground(_isAppResumed);
     _identityPublisher!.setAddressProvider(() => node.currentSelfAddresses());
     // Welle 5 (§3.5b + §4.3): publisher braucht die Device-KEM-Pubkeys, um
@@ -815,6 +890,22 @@ class CleonaService implements ICleonaService {
           x25519Pk: node.deviceKem.x25519PublicKey,
           mlKemPk: node.deviceKem.mlKemPublicKey,
         ));
+    // §7.5: Device-Sig-Pubkeys fuer Co-Authorization im AuthManifest.
+    _identityPublisher!.setDeviceSigPkProvider(() => (
+          ed25519Pk: node.deviceKeyPair.ed25519PublicKey,
+          mlDsaPk: node.deviceKeyPair.mlDsaPublicKey,
+        ));
+    // §7.5: detect device-set shrink without co-auth proof in incoming manifests.
+    node.identityDhtHandler.onDeviceSetShrinkWithoutProof =
+        (userId, oldCount, newCount) {
+      final userHex = bytesToHex(userId);
+      final contact = _contacts[userHex];
+      if (contact == null) return;
+      _log.warn('§7.5 Device-set shrink for ${contact.displayName}: '
+          '$oldCount→$newCount without valid proof');
+      onRotationCoAuthWarning?.call(
+          userHex, contact.displayName, 0, rotationQuorum(oldCount));
+    };
     // Wake parked cold-start retry as soon as new peers join the routing table.
     // Without this hook the publisher only ever re-checks every 60s after
     // initial timeout — meaning a daemon that started before any peer was
@@ -1670,7 +1761,12 @@ class CleonaService implements ICleonaService {
 
   /// Broadcast IDENTITY_DELETED to all accepted contacts before deletion.
   /// V3: per-contact sendToUser fan-out; KEM/Sig handled inside sendToUser.
+  /// §7.1 LD-5: only the Primary may delete an identity.
   Future<void> broadcastIdentityDeleted() async {
+    if (identity.isLinkedDevice) {
+      _log.warn('broadcastIdentityDeleted: blocked — Linked Device cannot delete identity');
+      return;
+    }
     final notification = proto.IdentityDeletedNotification()
       ..identityEd25519Pk = identity.ed25519PublicKey
       ..deletedAtMs = Int64(DateTime.now().millisecondsSinceEpoch)
@@ -2468,7 +2564,10 @@ class CleonaService implements ICleonaService {
 
       final rs = ReedSolomon();
       final fragments = rs.encode(packetBytes);
-      final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
+      // D4 (§4.3): subnet-diverse replicator selection (same store/retrieve
+      // pattern as the identity records — eclipse cost binding).
+      final peers = node.routingTable.findClosestPeers(mailboxId,
+          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
       if (peers.isEmpty) {
         _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
         return false;
@@ -2775,6 +2874,133 @@ class CleonaService implements ICleonaService {
     return true;
   }
 
+  // ── Peer Rescue Bundle (§8.1.2) ──────────────────────────────────────────
+
+  @override
+  Future<Map<String, dynamic>?> exportPeerBundle() async {
+    final summaries = peerSummaries;
+    final inbound = summaries.where((p) => p.allAddresses.any(_isPublicAddress)).toList();
+    final others = summaries.where((p) => !p.allAddresses.any(_isPublicAddress)).toList();
+    final selected = <RescuePeer>[];
+    for (final p in [...inbound, ...others].take(PeerRescueBundle.maxPeers)) {
+      final nodeId = _hexToBytes32(p.nodeIdHex);
+      if (nodeId == null) continue;
+      selected.add(RescuePeer(nodeId: nodeId, addresses: p.allAddresses));
+    }
+
+    final bundle = PeerRescueBundle.build(
+      exporterDeviceId: identity.deviceNodeId,
+      exporterEd25519Sk: identity.ed25519SecretKey,
+      peers: selected,
+    );
+
+    final bytes = bundle.toBytes();
+    final uri = bundle.toUri();
+
+    return {
+      'bundleBase64': base64.encode(bytes),
+      'uri': uri,
+      'peerCount': selected.length,
+      'createdAtMs': bundle.createdAt.millisecondsSinceEpoch,
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> importPeerBundle({String? uri, String? bundleBase64}) async {
+    assert(uri != null || bundleBase64 != null);
+
+    PeerRescueBundleParseResult result;
+    if (uri != null) {
+      result = PeerRescueBundle.parseUriAndValidate(uri);
+    } else {
+      final bytes = base64.decode(bundleBase64!);
+      result = PeerRescueBundle.parseAndValidate(bytes);
+    }
+
+    if (!result.networkTagValid) {
+      return {
+        'networkTagValid': false,
+        'error': result.errorMessage ?? 'Network tag mismatch',
+      };
+    }
+
+    final bundle = result.bundle!;
+    var contacted = 0;
+    for (final peer in bundle.peers) {
+      for (final addr in peer.addresses) {
+        final parts = _splitHostPort(addr);
+        if (parts != null) {
+          addManualPeer(parts.$1, parts.$2);
+          contacted++;
+        }
+      }
+    }
+
+    unawaited(node.onNetworkChanged(force: true));
+
+    return {
+      'networkTagValid': true,
+      'sigValid': result.sigValid,
+      'sigUnknownExporter': result.sigUnknownExporter,
+      'ageHours': result.ageHours,
+      'peerCount': bundle.peers.length,
+      'peersContacted': contacted,
+      'exporterDeviceIdHex': bytesToHex(bundle.exporterDeviceId),
+      'createdAtMs': bundle.createdAt.millisecondsSinceEpoch,
+    };
+  }
+
+  static bool _isPublicAddress(String addr) {
+    final h = _splitHostPort(addr);
+    if (h == null) return false;
+    final ip = h.$1;
+    if (ip == '127.0.0.1' || ip == '::1') return false;
+    if (ip.startsWith('10.')) return false;
+    if (ip.startsWith('192.168.')) return false;
+    final parts = ip.split('.');
+    if (parts.length == 4) {
+      final b1 = int.tryParse(parts[0]) ?? 0;
+      final b2 = int.tryParse(parts[1]) ?? 0;
+      if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
+      if (b1 == 169 && b2 == 254) return false;
+    }
+    if (ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return false;
+    return true;
+  }
+
+  static (String, int)? _splitHostPort(String addr) {
+    try {
+      if (addr.startsWith('[')) {
+        final closeBracket = addr.indexOf(']');
+        if (closeBracket < 0) return null;
+        final ip = addr.substring(1, closeBracket);
+        final rest = addr.substring(closeBracket + 1);
+        if (!rest.startsWith(':')) return null;
+        final port = int.tryParse(rest.substring(1));
+        if (port == null || port <= 0 || port > 65535) return null;
+        return (ip, port);
+      } else {
+        final lastColon = addr.lastIndexOf(':');
+        if (lastColon < 0) return null;
+        final ip = addr.substring(0, lastColon);
+        final port = int.tryParse(addr.substring(lastColon + 1));
+        if (port == null || port <= 0 || port > 65535) return null;
+        return (ip, port);
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Uint8List? _hexToBytes32(String hex) {
+    if (hex.length != 64) return null;
+    try {
+      return hexToBytes(hex);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Send a contact request.
   /// If the contact already exists as "accepted", re-sends CR with fresh keys
   /// so the remote side can re-establish the relationship (e.g. after data loss).
@@ -2928,8 +3154,8 @@ class CleonaService implements ICleonaService {
       ..payload = crBytes;
     final signedInnerBytes = V3FrameCodec.signApplicationFrameInner(
       inner: innerFrame,
-      senderUserEd25519Sk: identity.ed25519SecretKey,
-      senderUserMlDsaSk: identity.mlDsaSecretKey,
+      senderUserEd25519Sk: identity.signingEd25519Sk,
+      senderUserMlDsaSk: identity.signingMlDsaSk,
     );
 
     // Build InfrastructureFrame with §8.1.1-relaxed selector
@@ -3753,6 +3979,7 @@ class CleonaService implements ICleonaService {
       name: name,
       ownerNodeIdHex: identity.userIdHex,
       members: members,
+      membershipEpoch: 1,
     );
     _groups[groupIdHex] = group;
     _saveGroups();
@@ -3779,6 +4006,13 @@ class CleonaService implements ICleonaService {
         ..x25519PublicKey = m.x25519Pk ?? Uint8List(0)
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
+
+    // GM-1 (§9.1.4): attach epoch, hash, and hybrid sig
+    invite.membershipEpoch = Int64(group.membershipEpoch);
+    final createHash = _computeMembershipHash(group.membershipEpoch, groupIdHex, members);
+    invite.membershipHash = createHash;
+    invite.membershipSigEd25519 = SodiumFFI().signEd25519(createHash, identity.ed25519SecretKey);
+    invite.membershipSigMlDsa = OqsFFI().mlDsaSign(createHash, identity.mlDsaSecretKey);
 
     final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
     // V3: pairwise sendToUser with groupId for receiver-side conversation routing.
@@ -3838,6 +4072,9 @@ class CleonaService implements ICleonaService {
     if (wirePreview != null) tm.linkPreview = wirePreview;
     final basePayload = tm.writeToBuffer();
     final groupIdBytes = hexToBytes(groupIdHex);
+    // GM-1 (§9.1.4): post-tag with sender's local membership state
+    final gmEpoch = group.membershipEpoch;
+    final gmHash = _computeMembershipHash(gmEpoch, groupIdHex, group.members);
     bool anySent = false;
 
     for (final member in group.members.values) {
@@ -3847,6 +4084,8 @@ class CleonaService implements ICleonaService {
         messageType: proto.MessageTypeV3.MTV3_TEXT,
         payload: basePayload,
         groupId: groupIdBytes,
+        groupMembershipEpoch: gmEpoch,
+        groupMembershipHash: gmHash,
       );
       if (ok) anySent = true;
     }
@@ -3898,6 +4137,7 @@ class CleonaService implements ICleonaService {
 
     // Remove self from member list before broadcasting
     group.members.remove(identity.userIdHex);
+    group.membershipEpoch++;
 
     // Broadcast updated group (without us) to remaining members
     if (group.members.isNotEmpty) {
@@ -3951,6 +4191,7 @@ class CleonaService implements ICleonaService {
       x25519Pk: contact.x25519Pk,
       mlKemPk: contact.mlKemPk,
     );
+    group.membershipEpoch++;
     _saveGroups();
 
     // Send GROUP_INVITE to new member AND broadcast updated member list to
@@ -3987,6 +4228,7 @@ class CleonaService implements ICleonaService {
 
     final memberName = group.members[memberNodeIdHex]?.displayName ?? memberNodeIdHex.substring(0, 8);
     group.members.remove(memberNodeIdHex);
+    group.membershipEpoch++;
     _saveGroups();
 
     // Broadcast updated member list to all remaining members
@@ -4042,6 +4284,7 @@ class CleonaService implements ICleonaService {
         group.ownerNodeIdHex = memberNodeIdHex;
       }
 
+      group.membershipEpoch++;
       _saveGroups();
       await _broadcastGroupUpdate(group);
       _broadcastRoleUpdate(entityIdHex, memberNodeIdHex, role, group.members);
@@ -4075,6 +4318,7 @@ class CleonaService implements ICleonaService {
         channel.ownerNodeIdHex = memberNodeIdHex;
       }
 
+      channel.membershipEpoch++;
       _saveChannels();
       _broadcastRoleUpdate(entityIdHex, memberNodeIdHex, role, channel.members);
 
@@ -4124,11 +4368,26 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  /// Broadcast updated group member list to all members via GROUP_INVITE.
-  Future<void> _broadcastGroupUpdate(GroupInfo group) async {
-    final groupId = hexToBytes(group.groupIdHex);
+  /// GM-1 (§9.1.4): canonical membership hash.
+  /// SHA-256(epoch_le64 || groupId_bytes || Σ sorted(nodeId || role_utf8))
+  Uint8List _computeMembershipHash(int epoch, String groupIdHex, Map<String, GroupMemberInfo> members) {
+    final sorted = members.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final parts = <int>[];
+    final epochBytes = ByteData(8)..setUint64(0, epoch, Endian.little);
+    parts.addAll(epochBytes.buffer.asUint8List());
+    parts.addAll(hexToBytes(groupIdHex));
+    for (final e in sorted) {
+      parts.addAll(hexToBytes(e.key));
+      parts.addAll(utf8.encode(e.value.role));
+    }
+    return SodiumFFI().sha256(Uint8List.fromList(parts));
+  }
+
+  /// Build a signed GROUP_INVITE payload from current group state.
+  Uint8List _buildSignedGroupInviteBytes(GroupInfo group) {
     final invite = proto.GroupInviteV3()
-      ..groupId = groupId
+      ..groupId = hexToBytes(group.groupIdHex)
       ..groupName = group.name
       ..inviterId = identity.nodeId;
     for (final m in group.members.values) {
@@ -4140,8 +4399,19 @@ class CleonaService implements ICleonaService {
         ..x25519PublicKey = m.x25519Pk ?? Uint8List(0)
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
+    invite.membershipEpoch = Int64(group.membershipEpoch);
+    final hash = _computeMembershipHash(group.membershipEpoch, group.groupIdHex, group.members);
+    invite.membershipHash = hash;
+    invite.membershipSigEd25519 = SodiumFFI().signEd25519(hash, identity.ed25519SecretKey);
+    invite.membershipSigMlDsa = OqsFFI().mlDsaSign(hash, identity.mlDsaSecretKey);
+    return Uint8List.fromList(invite.writeToBuffer());
+  }
 
-    final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
+  /// Broadcast updated group member list to all members via GROUP_INVITE.
+  Future<void> _broadcastGroupUpdate(GroupInfo group) async {
+    final groupId = hexToBytes(group.groupIdHex);
+    final inviteBytes = _buildSignedGroupInviteBytes(group);
+    bool anyFailed = false;
     for (final m in group.members.values) {
       if (m.nodeIdHex == identity.userIdHex) continue;
       final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex,
@@ -4155,8 +4425,13 @@ class CleonaService implements ICleonaService {
       );
       if (!ok) {
         _log.warn('GROUP_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
+        _pendingMembershipResends
+            .putIfAbsent(group.groupIdHex, () => {})
+            .add(m.nodeIdHex);
+        anyFailed = true;
       }
     }
+    if (anyFailed) _savePendingMembershipResends();
     _log.info('Broadcast group update for "${group.name}" to ${group.members.length - 1} members');
   }
 
@@ -4255,6 +4530,7 @@ class CleonaService implements ICleonaService {
       isPublic: isPublic,
       isAdult: isAdult,
       language: language,
+      membershipEpoch: 1,
     );
     _channels[channelIdHex] = channel;
     _saveChannels();
@@ -4269,7 +4545,7 @@ class CleonaService implements ICleonaService {
 
     // Send CHANNEL_INVITE to each subscriber (pairwise encrypted)
     if (members.length > 1) {
-      _broadcastChannelUpdate(channel);
+      await _broadcastChannelUpdate(channel);
     }
 
     // Publish to DHT channel index if public
@@ -4333,6 +4609,10 @@ class CleonaService implements ICleonaService {
     final basePayload = Uint8List.fromList(tm.writeToBuffer());
     final channelIdBytes = hexToBytes(channelIdHex);
 
+    // GM-4 (§9.1.4): tag channel posts with membership epoch+hash
+    final chEpoch = channel.membershipEpoch;
+    final chHash = _computeChannelMembershipHash(chEpoch, channelIdHex, channel.members);
+
     String? firstMsgId;
 
     for (final member in channel.members.values) {
@@ -4345,6 +4625,8 @@ class CleonaService implements ICleonaService {
         messageType: proto.MessageTypeV3.MTV3_CHANNEL_POST,
         payload: basePayload,
         groupId: channelIdBytes,
+        groupMembershipEpoch: chEpoch,
+        groupMembershipHash: chHash,
       );
     }
 
@@ -4394,10 +4676,11 @@ class CleonaService implements ICleonaService {
 
     // Remove self from member list before broadcasting
     channel.members.remove(identity.userIdHex);
+    channel.membershipEpoch++;
 
     // Broadcast updated channel (without us) to remaining members
     if (channel.members.isNotEmpty) {
-      _broadcastChannelUpdate(channel);
+      await _broadcastChannelUpdate(channel);
     }
 
     // V3 CHANNEL_LEAVE fan-out
@@ -4446,10 +4729,11 @@ class CleonaService implements ICleonaService {
       x25519Pk: contact.x25519Pk,
       mlKemPk: contact.mlKemPk,
     );
+    channel.membershipEpoch++;
     _saveChannels();
 
     // Broadcast updated member list to all members
-    _broadcastChannelUpdate(channel);
+    await _broadcastChannelUpdate(channel);
 
     // System message
     final sysMsg = UiMessage(
@@ -4479,10 +4763,11 @@ class CleonaService implements ICleonaService {
 
     final memberName = channel.members[memberNodeIdHex]?.displayName ?? memberNodeIdHex.substring(0, 8);
     channel.members.remove(memberNodeIdHex);
+    channel.membershipEpoch++;
     _saveChannels();
 
     // Broadcast updated member list
-    _broadcastChannelUpdate(channel);
+    await _broadcastChannelUpdate(channel);
 
     // System message
     final sysMsg = UiMessage(
@@ -4516,11 +4801,25 @@ class CleonaService implements ICleonaService {
     return setMemberRole(channelIdHex, memberNodeIdHex, role);
   }
 
-  /// Broadcast updated channel member list to all members via CHANNEL_INVITE.
-  void _broadcastChannelUpdate(ChannelInfo channel) {
-    final channelId = hexToBytes(channel.channelIdHex);
+  Uint8List _computeChannelMembershipHash(
+      int epoch, String channelIdHex, Map<String, ChannelMemberInfo> members) {
+    final sorted = members.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final parts = <int>[];
+    final epochBytes = ByteData(8)..setUint64(0, epoch, Endian.little);
+    parts.addAll(epochBytes.buffer.asUint8List());
+    parts.addAll(hexToBytes(channelIdHex));
+    for (final e in sorted) {
+      parts.addAll(hexToBytes(e.key));
+      parts.addAll(utf8.encode(e.value.role));
+    }
+    return SodiumFFI().sha256(Uint8List.fromList(parts));
+  }
+
+  /// Build a signed CHANNEL_INVITE payload from current channel state.
+  Uint8List _buildSignedChannelInviteBytes(ChannelInfo channel) {
     final invite = proto.ChannelInvite()
-      ..channelId = channelId
+      ..channelId = hexToBytes(channel.channelIdHex)
       ..channelName = channel.name
       ..inviterId = identity.nodeId
       ..isPublic = channel.isPublic
@@ -4528,7 +4827,7 @@ class CleonaService implements ICleonaService {
       ..language = channel.language;
     if (channel.description != null) invite.channelDescription = channel.description!;
     for (final m in channel.members.values) {
-      invite.members.add(proto.GroupMemberV3() // reuse GroupMemberV3 proto
+      invite.members.add(proto.GroupMemberV3()
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role
@@ -4536,20 +4835,42 @@ class CleonaService implements ICleonaService {
         ..x25519PublicKey = m.x25519Pk ?? Uint8List(0)
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
+    invite.membershipEpoch = Int64(channel.membershipEpoch);
+    final hash = _computeChannelMembershipHash(
+        channel.membershipEpoch, channel.channelIdHex, channel.members);
+    invite.membershipHash = hash;
+    invite.membershipSigEd25519 =
+        SodiumFFI().signEd25519(hash, identity.ed25519SecretKey);
+    invite.membershipSigMlDsa =
+        OqsFFI().mlDsaSign(hash, identity.mlDsaSecretKey);
+    return Uint8List.fromList(invite.writeToBuffer());
+  }
 
-    final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
+  /// Broadcast updated channel member list to all members via CHANNEL_INVITE.
+  Future<void> _broadcastChannelUpdate(ChannelInfo channel) async {
+    final channelId = hexToBytes(channel.channelIdHex);
+    final inviteBytes = _buildSignedChannelInviteBytes(channel);
+    bool anyFailed = false;
     for (final m in channel.members.values) {
       if (m.nodeIdHex == identity.userIdHex) continue;
       final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex,
           memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      final ok = await sendToUser(
         recipientUserId: hexToBytes(m.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_CHANNEL_INVITE,
         payload: inviteBytes,
         groupId: channelId,
       );
+      if (!ok) {
+        _log.warn('CHANNEL_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
+        _pendingMembershipResends
+            .putIfAbsent(channel.channelIdHex, () => {})
+            .add(m.nodeIdHex);
+        anyFailed = true;
+      }
     }
+    if (anyFailed) _savePendingMembershipResends();
     _log.info('Broadcast channel update for "${channel.name}" to ${channel.members.length - 1} members');
   }
 
@@ -4981,6 +5302,16 @@ class CleonaService implements ICleonaService {
       final exchange = proto.ChannelIndexExchange.fromBuffer(payload);
       var added = 0;
       for (final e in exchange.entries) {
+        // Phase 1 (§9.3.1a): log unproven badge/tombstone entries.
+        // Badge ≥ 1 or tombstone (badge 3) without moderation_proof_hash
+        // are accepted but flagged — Phase 2 will reject them.
+        final hasModerationProof = e.moderationProofHash.isNotEmpty;
+        if (e.badBadgeLevel > 0 && !hasModerationProof) {
+          _log.warn('Channel index gossip: badge=${e.badBadgeLevel} for '
+              '${bytesToHex(Uint8List.fromList(e.channelId)).substring(0, 16)} '
+              'WITHOUT moderation proof — accepted (Phase 1 observe-only)');
+        }
+
         final entry = ChannelIndexEntry(
           channelIdHex: bytesToHex(Uint8List.fromList(e.channelId)),
           name: e.name,
@@ -5192,12 +5523,12 @@ class CleonaService implements ICleonaService {
     final config = moderationConfig;
     var changed = false;
 
-    // 1. Jury vote timeouts — resolve timed-out jury sessions
+    // 1. Jury vote timeouts — attempt replacement jurors or resolve
     for (final session in _activeSessions.values.toList()) {
       if (session.isComplete) continue;
       if (now.difference(session.createdAt) > config.juryVoteTimeout) {
         _log.info('Moderation timer: jury ${session.juryId} timed out');
-        _resolveJury(session);
+        _handleJuryTimeout(session);
         changed = true;
       }
     }
@@ -5224,15 +5555,38 @@ class CleonaService implements ICleonaService {
       }
     }
 
-    // 3. CSAM temp-hide — lift hide after duration expires
+    // 3. CSAM temp-hide — lift hide after duration expires (only Stage 2)
     for (final channel in _channels.values) {
       if (!channel.isCsamHidden) continue;
+      if (channel.csamStage3Active) continue; // Stage 3 manages its own lifecycle
       if (channel.csamHiddenSince == null) continue;
       if (now.difference(channel.csamHiddenSince!) >= config.csamTempHideDuration) {
         channel.isCsamHidden = false;
         channel.csamHiddenSince = null;
         _log.info('Moderation timer: CSAM temp-hide lifted for "${channel.name}"');
         if (channel.isPublic) await publishChannelToIndex(channel.channelIdHex);
+        changed = true;
+      }
+    }
+
+    // 3b. CSAM Stage 3 objection window expiry → finalize tombstone
+    for (final channel in _channels.values.toList()) {
+      if (!channel.csamStage3Active) continue;
+      if (channel.tombstoned) continue;
+      if (channel.csamObjectionWindowEnd == null) continue;
+      if (now.isAfter(channel.csamObjectionWindowEnd!)) {
+        // Check if plausibility jury objected (resolved as NOT approved = objection succeeded)
+        final juryId = channel.csamObjectionJuryId;
+        if (juryId != null) {
+          final session = _activeSessions[juryId];
+          if (session != null && session.isComplete) {
+            // Plausibility jury completed — if it was NOT approved,
+            // the objection succeeded and hide should be lifted
+            // (this is handled in _resolveJury already)
+          }
+        }
+        _log.info('Moderation timer: CSAM Stage 3 objection window expired for "${channel.name}"');
+        _finalizeCsamStage3(channel);
         changed = true;
       }
     }
@@ -5274,6 +5628,7 @@ class CleonaService implements ICleonaService {
   /// Check if reports for a channel have reached the jury threshold.
   void _checkJuryThreshold(String channelIdHex) {
     final config = moderationConfig;
+    final channel = _channels[channelIdHex];
     // Count unique reporters per category for this channel
     final reportsByCategory = <ReportCategory, Set<String>>{};
     for (final r in _channelReports.values) {
@@ -5282,6 +5637,14 @@ class CleonaService implements ICleonaService {
     }
 
     for (final entry in reportsByCategory.entries) {
+      // CSAM has special procedure — no standard jury
+      if (entry.key == ReportCategory.illegalCSAM) {
+        if (channel == null) continue;
+        final subscriberCount = channel.members.length;
+        _checkCsamThresholds(channel, entry.value.length, subscriberCount);
+        continue;
+      }
+
       if (entry.value.length >= config.reportThresholdForJury) {
         // Check if jury already active for this channel+category
         final alreadyActive = _activeSessions.values.any((s) =>
@@ -5291,6 +5654,136 @@ class CleonaService implements ICleonaService {
         _initiateJury(channelIdHex, entry.key);
       }
     }
+  }
+
+  /// CSAM special procedure: check Stage 2 (temp-hide) and Stage 3
+  /// (extended-hide + objection window) thresholds.
+  void _checkCsamThresholds(ChannelInfo channel, int uniqueReporters, int subscriberCount) {
+    final config = moderationConfig;
+
+    // Stage 3: extended-hiding + objection window → eventual tombstone
+    final stage3Threshold = config.csamStage3Threshold(subscriberCount);
+    if (uniqueReporters >= stage3Threshold && !channel.csamStage3Active && !channel.tombstoned) {
+      _triggerCsamStage3(channel);
+      return;
+    }
+
+    // Stage 2: temporary hiding
+    final stage2Threshold = config.csamStage2Threshold(subscriberCount);
+    if (uniqueReporters >= stage2Threshold && !channel.isCsamHidden && !channel.csamStage3Active) {
+      channel.isCsamHidden = true;
+      channel.csamHiddenSince = DateTime.now();
+      _saveChannels();
+      _log.info('CSAM Stage 2: channel "${channel.name}" temporarily hidden '
+          '($uniqueReporters reporters ≥ threshold $stage2Threshold)');
+
+      // Start plausibility jury for Stage 2
+      final juryId = bytesToHex(SodiumFFI().randomBytes(16));
+      final report = _channelReports.values
+          .where((r) => r.channelIdHex == channel.channelIdHex &&
+              r.category == ReportCategory.illegalCSAM)
+          .firstOrNull;
+      if (report != null) {
+        _createJurySession(
+          juryId: juryId,
+          reportId: report.reportId,
+          channelIdHex: channel.channelIdHex,
+          category: ReportCategory.illegalCSAM,
+          isPlausibilityJury: true,
+        );
+      }
+    }
+  }
+
+  /// CSAM Stage 3: extended-hide the channel and start the mandatory
+  /// objection window (§9.3.3). Tombstone is NOT written immediately —
+  /// only after the window expires without a successful objection.
+  void _triggerCsamStage3(ChannelInfo channel) {
+    final config = moderationConfig;
+
+    channel.isCsamHidden = true;
+    channel.csamHiddenSince ??= DateTime.now();
+    channel.csamStage3Active = true;
+    channel.csamObjectionWindowEnd = DateTime.now().add(config.csamObjectionWindow);
+
+    _saveChannels();
+    _log.info('CSAM Stage 3: channel "${channel.name}" extended-hidden, '
+        'objection window until ${channel.csamObjectionWindowEnd}');
+
+    // Start mandatory plausibility jury (same as Stage 2, metadata-only)
+    final juryId = bytesToHex(SodiumFFI().randomBytes(16));
+    channel.csamObjectionJuryId = juryId;
+
+    final report = _channelReports.values
+        .where((r) => r.channelIdHex == channel.channelIdHex &&
+            r.category == ReportCategory.illegalCSAM)
+        .firstOrNull;
+    if (report != null) {
+      _createJurySession(
+        juryId: juryId,
+        reportId: report.reportId,
+        channelIdHex: channel.channelIdHex,
+        category: ReportCategory.illegalCSAM,
+        isPlausibilityJury: true,
+      );
+      _log.info('CSAM Stage 3: plausibility jury $juryId started for "${channel.name}"');
+    }
+
+    _saveChannels();
+    if (channel.isPublic) publishChannelToIndex(channel.channelIdHex);
+  }
+
+  /// Finalize CSAM Stage 3: write Tombstone with reporter-quorum proof.
+  /// Called when the objection window expires without a successful objection.
+  void _finalizeCsamStage3(ChannelInfo channel) {
+    // Collect CSAM reports for this channel and build quorum proof
+    final csamReports = _channelReports.values
+        .where((r) => r.channelIdHex == channel.channelIdHex &&
+            r.category == ReportCategory.illegalCSAM)
+        .toList();
+
+    final subscriberCount = channel.members.length;
+    final threshold = moderationConfig.csamStage3Threshold(subscriberCount);
+
+    // Verify we have enough unique reporters
+    final uniqueReporters = csamReports.map((r) => r.reporterNodeIdHex).toSet();
+    if (uniqueReporters.length < threshold) {
+      _log.warn('CSAM Stage 3: cannot finalize "${channel.name}" — '
+          'only ${uniqueReporters.length} reporters, need $threshold');
+      channel.csamStage3Active = false;
+      channel.csamObjectionWindowEnd = null;
+      channel.csamObjectionJuryId = null;
+      _saveChannels();
+      return;
+    }
+
+    // Build reporter-quorum proof (CsamReporterQuorumProof proto)
+    final proof = proto.CsamReporterQuorumProof()
+      ..channelId = hexToBytes(channel.channelIdHex);
+    for (final r in csamReports) {
+      proof.reporterSigs.add(proto.CsamReportSig()
+        ..reporterUserId = hexToBytes(r.reporterNodeIdHex)
+        ..reportId = hexToBytes(r.reportId)
+        ..reportedAtMs = Int64(r.createdAt.millisecondsSinceEpoch));
+    }
+
+    // Write Tombstone
+    channel.tombstoned = true;
+    channel.badBadgeLevel = 3;
+    channel.badBadgeSince = DateTime.now();
+    _channelIndex.remove(channel.channelIdHex);
+    _channelIndex.save();
+
+    // Store proof locally (served on-demand via DHT/gossip)
+    final proofBytes = Uint8List.fromList(proof.writeToBuffer());
+    final sodium = SodiumFFI();
+    final proofHash = computeModerationProofHash(proofBytes, sodium);
+    _moderationProofs[channel.channelIdHex] = proofBytes;
+
+    _saveChannels();
+    _log.info('CSAM Stage 3: channel "${channel.name}" TOMBSTONED with '
+        '${uniqueReporters.length}-reporter quorum proof '
+        '(hash=${bytesToHex(proofHash).substring(0, 16)})');
   }
 
   /// Start a jury process for a channel+category.
@@ -5329,9 +5822,13 @@ class CleonaService implements ICleonaService {
     required String channelIdHex,
     required ReportCategory category,
     bool isPlausibilityJury = false,
+    int juryRound = 0,
   }) {
     final config = moderationConfig;
     final channel = _channels[channelIdHex];
+    final sodium = SodiumFFI();
+    final now = DateTime.now();
+    final epochDay = utcEpochDay(now);
 
     // Select eligible jurors from accepted contacts
     final eligible = <ContactInfo>[];
@@ -5345,27 +5842,57 @@ class CleonaService implements ICleonaService {
       eligible.add(c);
     }
 
-    final jurySize = config.effectiveJurySize(eligible.length);
     if (eligible.length < config.juryMinSize) return null;
 
-    // Random selection
-    eligible.shuffle();
-    final selected = eligible.take(jurySize).toList();
+    // Deterministic selection via DHT-style XOR distance (§9.3.1a).
+    // Build JurorRecords from eligible contacts and select XOR-closest to H.
+    final jurorRecords = eligible.map((c) => JurorRecord(
+      recordId: computeJurorRecordId(c.ed25519Pk!, sodium),
+      userPubKeyEd25519: c.ed25519Pk!,
+      userPubKeyMlDsa: c.mlDsaPk ?? Uint8List(0),
+      creationEpochMs: 0,
+      selfSigEd25519: Uint8List(0),
+      selfSigMlDsa: Uint8List(0),
+    )).toList();
+
+    final selectionPoint = computeSelectionPoint(
+      channelId: hexToBytes(channelIdHex),
+      categoryIndex: category.index,
+      epochDay: epochDay,
+      juryRound: juryRound,
+      sodium: sodium,
+    );
+
+    final jurySize = config.effectiveJurySize(eligible.length);
+    final selected = selectJurors(
+      selectionPoint: selectionPoint,
+      registeredJurors: jurorRecords,
+      jurySize: jurySize,
+    );
+
+    final snapshotHash = computeEligibilitySnapshotHash(
+      jurorRecords.map((j) => j.recordId).toList(),
+      sodium,
+    );
 
     final session = _JurySession(
       juryId: juryId,
       reportId: reportId,
       channelIdHex: channelIdHex,
       category: category,
-      jurorNodeIds: selected.map((c) => c.nodeIdHex).toList(),
+      jurorNodeIds: selected.map((j) => j.userIdHex).toList(),
       isPlausibilityJury: isPlausibilityJury,
-      createdAt: DateTime.now(),
+      createdAt: now,
+      epochDay: epochDay,
+      juryRound: juryRound,
+      eligibilitySnapshotHash: snapshotHash,
     );
     _activeSessions[juryId] = session;
 
     // Send JuryRequest to each selected juror
-    for (final juror in selected) {
-      _sendJuryRequest(session, juror);
+    for (final j in selected) {
+      final contact = _contacts[j.userIdHex];
+      if (contact != null) _sendJuryRequest(session, contact);
     }
 
     return session;
@@ -5380,7 +5907,10 @@ class CleonaService implements ICleonaService {
       ..reportId = hexToBytes(session.reportId)
       ..category = session.category.index
       ..channelName = channel?.name ?? 'Unknown'
-      ..channelLanguage = channel?.language ?? '';
+      ..channelLanguage = channel?.language ?? ''
+      ..epochDay = session.epochDay
+      ..juryRound = session.juryRound
+      ..eligibilitySnapshotHash = session.eligibilitySnapshotHash;
 
     final report = _channelReports[session.reportId];
     if (report != null) {
@@ -5424,6 +5954,8 @@ class CleonaService implements ICleonaService {
         channelLanguage: msg.channelLanguage,
         reportDescription: msg.reportDescription.isNotEmpty ? msg.reportDescription : null,
         requesterNodeIdHex: senderHex,
+        epochDay: msg.epochDay,
+        juryRound: msg.juryRound,
       );
 
       _pendingJuryRequests[juryId] = request;
@@ -5450,11 +5982,30 @@ class CleonaService implements ICleonaService {
     if (request.requesterNodeIdHex != null) {
       final contact = _contacts[request.requesterNodeIdHex!];
       if (contact?.x25519Pk != null && contact?.mlKemPk != null) {
+        final sodium = SodiumFFI();
+        final consequence = consequenceForCategory(request.category);
+
+        // Hybrid-sign the canonical verdict core (§9.3.1a)
+        final verdictCore = computeVerdictCoreHash(
+          juryId: hexToBytes(juryId),
+          channelId: hexToBytes(request.channelIdHex),
+          reportId: hexToBytes(reportId),
+          vote: vote,
+          consequence: consequence.index,
+          epochDay: request.epochDay,
+          juryRound: request.juryRound,
+          sodium: sodium,
+        );
+
         final voteMsg = proto.JuryVoteMsg()
           ..juryId = hexToBytes(juryId)
           ..reportId = hexToBytes(reportId)
           ..vote = vote
-          ..reason = reason ?? '';
+          ..reason = reason ?? ''
+          ..sigEd25519 = sodium.signEd25519(verdictCore, identity.ed25519SecretKey)
+          ..sigMlDsa = OqsFFI().mlDsaSign(verdictCore, identity.mlDsaSecretKey)
+          ..juryRound = request.juryRound
+          ..epochDay = request.epochDay;
         await sendToUser(
           recipientUserId: hexToBytes(request.requesterNodeIdHex!),
           messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
@@ -5483,8 +6034,25 @@ class CleonaService implements ICleonaService {
       final session = _activeSessions[juryId];
       if (session == null) return;
 
+      // Only selected jurors may vote — anyone who learns the juryId could
+      // otherwise stuff the vote map and force early resolution (§9.3.1).
+      if (!session.jurorNodeIds.contains(voterHex)) {
+        _log.warn('Jury $juryId: vote from non-juror $voterHex dropped');
+        return;
+      }
+
       session.votes[voterHex] = JuryVoteResult.values[msg.vote];
-      _log.info('Jury $juryId: vote from $voterHex = ${JuryVoteResult.values[msg.vote].name}');
+
+      // Store hybrid signature for verdict proof (§9.3.1a)
+      if (msg.sigEd25519.isNotEmpty && msg.sigMlDsa.isNotEmpty) {
+        session.verdictSigs[voterHex] = _JurorVerdictSigData(
+          sigEd25519: Uint8List.fromList(msg.sigEd25519),
+          sigMlDsa: Uint8List.fromList(msg.sigMlDsa),
+          vote: msg.vote,
+        );
+      }
+
+      _log.info('Jury $juryId: vote from $voterHex = ${JuryVoteResult.values[msg.vote].name} (sig=${msg.sigEd25519.isNotEmpty ? "yes" : "no"})');
 
       // Check if all votes are in
       _checkJuryCompletion(session);
@@ -5503,12 +6071,123 @@ class CleonaService implements ICleonaService {
       // Check for timeout
       if (DateTime.now().difference(session.createdAt) > config.juryVoteTimeout) {
         _log.info('Jury ${session.juryId} timed out with $voteCount/$totalJurors votes');
-        _resolveJury(session);
+        _handleJuryTimeout(session);
       }
       return;
     }
 
     _resolveJury(session);
+  }
+
+  /// Handle jury timeout — attempt deterministic replacement jurors
+  /// (§9.3.1a: next-closest records to H with juryRound+1, max 2 rounds).
+  void _handleJuryTimeout(_JurySession session) {
+    final config = moderationConfig;
+
+    // Identify non-responding jurors
+    final nonResponders = session.jurorNodeIds
+        .where((id) => !session.votes.containsKey(id))
+        .toList();
+
+    if (nonResponders.isEmpty || session.juryRound >= config.juryReplacementRounds) {
+      _log.info('Jury ${session.juryId}: no more replacement rounds '
+          '(round=${session.juryRound}, max=${config.juryReplacementRounds}) — resolving');
+      _resolveJury(session);
+      return;
+    }
+
+    // Build candidate pool (same filter as _createJurySession)
+    final channel = _channels[session.channelIdHex];
+    final sodium = SodiumFFI();
+    final eligible = <ContactInfo>[];
+    for (final c in _contacts.values) {
+      if (c.status != 'accepted') continue;
+      if (c.nodeIdHex == identity.userIdHex) continue;
+      if (c.ed25519Pk == null) continue;
+      if (channel != null && channel.members.containsKey(c.nodeIdHex)) continue;
+      if (_channelReports.values.any((r) =>
+          r.channelIdHex == session.channelIdHex &&
+          r.reporterNodeIdHex == c.nodeIdHex)) continue;
+      // Exclude already-selected jurors (both responded and non-responded)
+      if (session.jurorNodeIds.contains(c.nodeIdHex)) continue;
+      eligible.add(c);
+    }
+
+    if (eligible.isEmpty) {
+      _log.info('Jury ${session.juryId}: no replacement candidates available — resolving');
+      _resolveJury(session);
+      return;
+    }
+
+    // Compute new selection point with incremented round
+    final nextRound = session.juryRound + 1;
+    final newH = computeSelectionPoint(
+      channelId: hexToBytes(session.channelIdHex),
+      categoryIndex: session.category.index,
+      epochDay: session.epochDay,
+      juryRound: nextRound,
+      sodium: sodium,
+    );
+
+    final jurorRecords = eligible.map((c) => JurorRecord(
+      recordId: computeJurorRecordId(c.ed25519Pk!, sodium),
+      userPubKeyEd25519: c.ed25519Pk!,
+      userPubKeyMlDsa: c.mlDsaPk ?? Uint8List(0),
+      creationEpochMs: 0,
+      selfSigEd25519: Uint8List(0),
+      selfSigMlDsa: Uint8List(0),
+    )).toList();
+
+    // Select replacements for non-responders (XOR-closest to new H)
+    final replacements = selectJurors(
+      selectionPoint: newH,
+      registeredJurors: jurorRecords,
+      jurySize: nonResponders.length,
+    );
+
+    if (replacements.isEmpty) {
+      _log.info('Jury ${session.juryId}: replacement selection empty — resolving');
+      _resolveJury(session);
+      return;
+    }
+
+    // Swap non-responders for replacements in the session
+    for (var i = 0; i < nonResponders.length && i < replacements.length; i++) {
+      final oldIdx = session.jurorNodeIds.indexOf(nonResponders[i]);
+      if (oldIdx >= 0) {
+        session.jurorNodeIds[oldIdx] = replacements[i].userIdHex;
+      }
+    }
+
+    // Update session metadata (recreate with new round via mutable fields)
+    // Note: juryRound is final, so we create a replacement session
+    final newSession = _JurySession(
+      juryId: session.juryId,
+      reportId: session.reportId,
+      channelIdHex: session.channelIdHex,
+      category: session.category,
+      jurorNodeIds: session.jurorNodeIds,
+      isPlausibilityJury: session.isPlausibilityJury,
+      createdAt: DateTime.now(),
+      epochDay: session.epochDay,
+      juryRound: nextRound,
+      eligibilitySnapshotHash: session.eligibilitySnapshotHash,
+    );
+    // Carry over existing votes and sigs
+    newSession.votes.addAll(session.votes);
+    newSession.verdictSigs.addAll(session.verdictSigs);
+    _activeSessions[session.juryId] = newSession;
+
+    // Send JuryRequest to replacement jurors
+    for (final j in replacements) {
+      final contact = _contacts[j.userIdHex];
+      if (contact != null) _sendJuryRequest(newSession, contact);
+    }
+
+    _log.info('Jury ${session.juryId}: replaced ${replacements.length} '
+        'non-responders in round $nextRound '
+        '(jurors: ${newSession.jurorNodeIds.length})');
+    _saveModeration();
   }
 
   /// Resolve a jury — compute result and apply consequences.
@@ -5526,11 +6205,16 @@ class CleonaService implements ICleonaService {
       }
     }
 
-    final totalVotes = approve + reject;
-    final approved = totalVotes > 0 && (approve / totalVotes) >= config.juryMajority;
+    // Hard quorum (§9.3.4): approvals are measured against the NOMINAL
+    // jury size (number of selected jurors), never against the number of
+    // responders — rejections, abstentions and timeouts do not lower the
+    // bar. A session that misses the quorum resolves with no consequence.
+    final nominalJurySize = session.jurorNodeIds.length;
+    final approved = config.juryApproved(
+        approvals: approve, nominalJurySize: nominalJurySize);
     session.isComplete = true;
 
-    _log.info('Jury ${session.juryId} resolved: approve=$approve reject=$reject abstain=$abstain → ${approved ? "APPROVED" : "REJECTED"}');
+    _log.info('Jury ${session.juryId} resolved: approve=$approve reject=$reject abstain=$abstain quorum=${config.juryHardQuorum(nominalJurySize)}/$nominalJurySize → ${approved ? "APPROVED" : "REJECTED"}');
 
     if (approved) {
       _applyJuryConsequence(session);
@@ -5541,6 +6225,13 @@ class CleonaService implements ICleonaService {
         channel.isCsamHidden = false;
         channel.csamHiddenSince = null;
         if (channel.badBadgeLevel > 0) channel.badBadgeLevel--;
+        // Also cancel Stage 3 if active
+        if (channel.csamStage3Active) {
+          channel.csamStage3Active = false;
+          channel.csamObjectionWindowEnd = null;
+          channel.csamObjectionJuryId = null;
+          _log.info('CSAM Stage 3 cancelled for "${channel.name}" — objection upheld');
+        }
         _saveChannels();
         _log.info('CSAM hide lifted for "${channel.name}" after plausibility jury rejection');
       }
@@ -5609,7 +6300,19 @@ class CleonaService implements ICleonaService {
       ..votesApprove = approve
       ..votesReject = reject
       ..votesAbstain = abstain
-      ..newBadBadgeLevel = channel?.badBadgeLevel ?? 0;
+      ..newBadBadgeLevel = channel?.badBadgeLevel ?? 0
+      ..eligibilitySnapshotHash = session.eligibilitySnapshotHash
+      ..epochDay = session.epochDay
+      ..juryRound = session.juryRound;
+
+    // Attach collected juror verdict signatures (§9.3.1a)
+    for (final entry in session.verdictSigs.entries) {
+      resultMsg.jurorSigs.add(proto.JurorVerdictSig()
+        ..jurorUserId = hexToBytes(entry.key)
+        ..sigEd25519 = entry.value.sigEd25519
+        ..sigMlDsa = entry.value.sigMlDsa
+        ..vote = entry.value.vote);
+    }
 
     final payload = Uint8List.fromList(resultMsg.writeToBuffer());
     final channelIdBytes = hexToBytes(session.channelIdHex);
@@ -5661,6 +6364,50 @@ class CleonaService implements ICleonaService {
       final channelIdHex = bytesToHex(Uint8List.fromList(msg.channelId));
       final reportId = bytesToHex(Uint8List.fromList(msg.reportId));
       final reporterHex = bytesToHex(senderUserId);
+
+      // reportId is sender-chosen — never let it overwrite someone else's
+      // stored report (report censorship via id collision).
+      final existing = _channelReports[reportId];
+      if (existing != null && existing.reporterNodeIdHex != reporterHex) {
+        _log.warn('Channel report $reportId from $reporterHex dropped: '
+            'id collision with report from ${existing.reporterNodeIdHex}');
+        return;
+      }
+
+      // Evidence sanity (§9.3.1): 1-10 evidence posts, valid category.
+      if (msg.evidencePostIds.isEmpty || msg.evidencePostIds.length > 10) {
+        _log.warn('Channel report $reportId from $reporterHex dropped: '
+            'evidence count ${msg.evidencePostIds.length} outside 1-10');
+        return;
+      }
+      if (msg.category < 0 || msg.category >= ReportCategory.values.length) {
+        _log.warn('Channel report $reportId from $reporterHex dropped: '
+            'invalid category ${msg.category}');
+        return;
+      }
+
+      // Anti-Sybil local reachability (§9.4.1): reporter must be known
+      // to us — either as a contact or visible in the routing table.
+      // A node with zero network presence is likely a Sybil identity.
+      final knownContact = _contacts.containsKey(reporterHex);
+      final knownPeer = node.routingTable.getPeerByUserId(senderUserId) != null;
+      if (!knownContact && !knownPeer) {
+        _log.warn('Channel report $reportId from $reporterHex dropped: '
+            'reporter not reachable (not in contacts or routing table)');
+        return;
+      }
+
+      // Receive-side rate limit (§9.4): sender-side checks are not
+      // enforceable on a remote node.
+      final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+      final recentFromReporter = _channelReports.values.where((r) =>
+          r.reporterNodeIdHex == reporterHex &&
+          r.createdAt.isAfter(cutoff)).length;
+      if (recentFromReporter >= moderationConfig.maxReportsPerIdentityPerDay) {
+        _log.warn('Channel report from $reporterHex dropped: '
+            'daily report limit reached');
+        return;
+      }
 
       // Store the report
       final report = ChannelReport(
@@ -6010,6 +6757,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<bool> setupGuardians(List<String> guardianNodeIds) async {
+    if (identity.isLinkedDevice) {
+      _log.warn('setupGuardians: blocked — Linked Device cannot set up guardians');
+      return false;
+    }
     if (guardianNodeIds.length != 5) return false;
 
     // Resolve contacts
@@ -6362,6 +7113,7 @@ class CleonaService implements ICleonaService {
     // onNetworkChanged event (= a real network interface transition), NOT
     // periodically.
     unawaited(_flushOutbox());
+    unawaited(_flushPendingMembershipResends());
   }
 
   // ── Persistence ────────────────────────────────────────────────────
@@ -6542,6 +7294,111 @@ class CleonaService implements ICleonaService {
       _outbox.remove(id);
     }
     if (toRemove.isNotEmpty) _saveOutbox();
+  }
+
+  // ── §5.8 extension: pending membership update resends ────────────
+
+  void _loadPendingMembershipResends() {
+    try {
+      final json = _fileEnc.readJsonFile('$profileDir/membership_resend.json');
+      if (json == null) return;
+      for (final entry in json.entries) {
+        final list = entry.value as List<dynamic>;
+        _pendingMembershipResends[entry.key] =
+            list.map((e) => e as String).toSet();
+      }
+      if (_pendingMembershipResends.isNotEmpty) {
+        _log.info('Membership resend: loaded ${_pendingMembershipResends.length} entities');
+      }
+    } catch (e) {
+      _log.warn('Membership resend: load failed: $e');
+    }
+  }
+
+  void _savePendingMembershipResends() {
+    try {
+      if (_pendingMembershipResends.isEmpty) {
+        final f = File('$profileDir/membership_resend.json.enc');
+        if (f.existsSync()) f.deleteSync();
+        return;
+      }
+      _fileEnc.writeJsonFile('$profileDir/membership_resend.json', {
+        for (final e in _pendingMembershipResends.entries)
+          e.key: e.value.toList()
+      });
+    } catch (e) {
+      _log.warn('Membership resend: save failed: $e');
+    }
+  }
+
+  Future<void> _flushPendingMembershipResends() async {
+    if (_pendingMembershipResends.isEmpty) return;
+    _log.info('Membership resend flush: ${_pendingMembershipResends.length} entities');
+    final toRemoveEntities = <String>[];
+    for (final entry in _pendingMembershipResends.entries.toList()) {
+      final entityId = entry.key;
+      final recipients = entry.value;
+      final group = _groups[entityId];
+      final channel = _channels[entityId];
+      if (group == null && channel == null) {
+        toRemoveEntities.add(entityId);
+        continue;
+      }
+      final succeeded = <String>{};
+      final stale = <String>{};
+      final Uint8List inviteBytes;
+      final proto.MessageTypeV3 msgType;
+      final bool Function(String) isMember;
+      final Uint8List? Function(String) memberX25519;
+      final Uint8List? Function(String) memberMlKem;
+      if (group != null) {
+        inviteBytes = _buildSignedGroupInviteBytes(group);
+        msgType = proto.MessageTypeV3.MTV3_GROUP_INVITE;
+        isMember = group.members.containsKey;
+        memberX25519 = (h) => group.members[h]?.x25519Pk;
+        memberMlKem = (h) => group.members[h]?.mlKemPk;
+      } else {
+        inviteBytes = _buildSignedChannelInviteBytes(channel!);
+        msgType = proto.MessageTypeV3.MTV3_CHANNEL_INVITE;
+        isMember = channel.members.containsKey;
+        memberX25519 = (h) => channel.members[h]?.x25519Pk;
+        memberMlKem = (h) => channel.members[h]?.mlKemPk;
+      }
+      final entityIdBytes = hexToBytes(entityId);
+      for (final recipientHex in recipients) {
+        if (!isMember(recipientHex)) {
+          stale.add(recipientHex);
+          continue;
+        }
+        final (x25519Pk, mlKemPk) = _resolveMemberKeys(recipientHex,
+            memberX25519Pk: memberX25519(recipientHex),
+            memberMlKemPk: memberMlKem(recipientHex));
+        if (x25519Pk == null || mlKemPk == null) continue;
+        try {
+          final ok = await sendToUser(
+            recipientUserId: hexToBytes(recipientHex),
+            messageType: msgType,
+            payload: inviteBytes,
+            groupId: entityIdBytes,
+          );
+          if (ok) {
+            succeeded.add(recipientHex);
+            _log.info('Membership resend: sent to ${recipientHex.substring(0, 8)}');
+          }
+        } catch (e) {
+          _log.warn('Membership resend: error for ${recipientHex.substring(0, 8)}: $e');
+        }
+      }
+      recipients.removeAll(succeeded);
+      recipients.removeAll(stale);
+      if (recipients.isEmpty) toRemoveEntities.add(entityId);
+    }
+    for (final id in toRemoveEntities) {
+      _pendingMembershipResends.remove(id);
+    }
+    if (toRemoveEntities.isNotEmpty || _pendingMembershipResends.isEmpty) {
+      _savePendingMembershipResends();
+    }
   }
 
   /// §5.8: Update a message status by its wire message-ID hex.
@@ -7304,6 +8161,10 @@ class CleonaService implements ICleonaService {
   Uint8List get deviceMlKemPk => node.deviceKem.mlKemPublicKey;
   @override
   Uint8List get userEd25519Pk => identity.ed25519PublicKey;
+
+  /// SR-2 (§8.1.1): founding anchor for the ContactSeed `fp` field.
+  @override
+  Uint8List get foundingEd25519Pk => identity.foundingEd25519Pk;
   @override
   int get peerCount => node.routingTable.peerCount;
   @override
@@ -7326,6 +8187,34 @@ class CleonaService implements ICleonaService {
   int get fragmentCount => mailboxStore.fragmentCount;
   @override
   bool get isRunning => node.isRunning;
+  @override
+  bool get isLinkedDevice => identity.isLinkedDevice;
+
+  @override
+  LinkedDeviceStatus get linkedDeviceStatus {
+    final ldKeys = identity.linkedDeviceKeys;
+    if (!identity.isLinkedDevice || ldKeys == null) {
+      return LinkedDeviceStatus(isLinkedDevice: false);
+    }
+    final cert = ldKeys.delegationCert;
+    return LinkedDeviceStatus(
+      isLinkedDevice: true,
+      capabilities: cert.capabilities,
+      issuedAtMs: cert.issuedAtMs,
+      maxValidUntilMs: cert.maxValidUntilMs,
+      isExpired: cert.isExpired(),
+    );
+  }
+
+  @override
+  Future<bool> requestDelegationRenewal() async {
+    if (!identity.isLinkedDevice) {
+      _log.warn('requestDelegationRenewal: not a linked device');
+      return false;
+    }
+    _log.info('LD-9: requesting delegation renewal from Primary');
+    return sendDevicePairRequest();
+  }
 
   @override
   List<ContactInfo> get acceptedContacts =>
@@ -7426,6 +8315,8 @@ class CleonaService implements ICleonaService {
       'mobileFallbackActive': node.transport.isMobileFallbackActive,
       'fragmentCount': fragmentCount,
       'isRunning': isRunning,
+      'isLinkedDevice': isLinkedDevice,
+      'linkedDeviceStatus': linkedDeviceStatus.toJson(),
       'profilePicture': _profilePictureBase64,
       'profileDescription': _profileDescription,
       'isGuardianSetUp': isGuardianSetUp,
@@ -7451,6 +8342,8 @@ class CleonaService implements ICleonaService {
       'deviceX25519PkB64': base64Encode(deviceX25519Pk),
       'deviceMlKemPkB64': base64Encode(deviceMlKemPk),
       'userEd25519PkB64': base64Encode(userEd25519Pk),
+      // SR-2: founding anchor (== userEd25519Pk for never-rotated identities).
+      'foundingEd25519PkB64': base64Encode(foundingEd25519Pk),
     };
   }
 
@@ -7466,6 +8359,9 @@ class CleonaService implements ICleonaService {
       rttMap: node.dhtRpc.rttMap,
       isRunning: isRunning,
       profileDir: profileDir,
+      // D5 (§13.1.3): collective-quota observability.
+      poolDropsRate: node.rateLimiter.poolDroppedPackets,
+      poolDropsRelay: node.relayPoolDrops,
     );
   }
 
@@ -7647,6 +8543,13 @@ class CleonaService implements ICleonaService {
   /// KEY_ROTATION_BROADCAST to all contacts, syncs new seed to twin devices.
   @override
   Future<void> rotateIdentityKeys() async {
+    // §7.1 LD-5: only the Primary device (with master seed) may rotate keys.
+    if (identity.isLinkedDevice) {
+      _log.warn('rotateIdentityKeys: blocked — this is a Linked Device '
+          '(no master seed). Rotation must be initiated on the Primary.');
+      return;
+    }
+
     final sodium = SodiumFFI();
 
     // 1. Generate new seed → new keys (BEFORE sending, so we can dual-sign)
@@ -7677,6 +8580,61 @@ class CleonaService implements ICleonaService {
     broadcast.newSignatureEd25519 =
         sodium.signEd25519(dataToSign, newEd25519.secretKey); // NEW key
 
+    // §7.5 Co-Auth: collect Device-Sig countersigs from Linked Devices
+    final pub0 = _identityPublisher;
+    final linkedDelegations = pub0?.delegations ?? <DeviceDelegation>[];
+    final totalDevices = linkedDelegations.length + 1; // +1 for Primary
+    final approvalTokens = <RotationApprovalToken>[];
+
+    if (totalDevices >= 2) {
+      final rotHash = computeRotationHash(
+        newEd25519Pk: newEd25519.publicKey,
+        newMlDsaPk: newMlDsa.publicKey,
+        newX25519Pk: newX25519Pk,
+        newMlKemPk: newMlKem.publicKey,
+        userId: identity.userId,
+      );
+
+      // Primary's own approval token
+      final deviceKp = node.deviceKeyPair;
+      approvalTokens.add(RotationApprovalToken(
+        deviceNodeId: identity.deviceNodeId,
+        rotationHash: rotHash,
+        deviceEd25519Sig: SodiumFFI().signEd25519(rotHash, deviceKp.ed25519PrivateKey),
+        deviceMlDsaSig: OqsFFI().mlDsaSign(rotHash, deviceKp.mlDsaPrivateKey),
+      ));
+
+      // Request approval from Linked Devices (5min timeout)
+      _pendingRotationHash = rotHash;
+      _collectedApprovalTokens.clear();
+      _rotationApprovalCompleter = Completer<void>();
+
+      final reqPayload = proto.RotationApprovalRequestPayload()
+        ..rotationHash = rotHash;
+      _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_REQUEST,
+          Uint8List.fromList(reqPayload.writeToBuffer()));
+      _log.info('§7.5 ROTATION_APPROVAL_REQUEST sent to ${linkedDelegations.length} '
+          'linked device(s), waiting up to 5min');
+
+      await _rotationApprovalCompleter!.future
+          .timeout(const Duration(minutes: 5), onTimeout: () {
+        _log.warn('§7.5 Approval timeout — proceeding with '
+            '${_collectedApprovalTokens.length + 1}/$totalDevices tokens');
+      });
+
+      approvalTokens.addAll(_collectedApprovalTokens);
+      _pendingRotationHash = null;
+      _collectedApprovalTokens.clear();
+      _rotationApprovalCompleter = null;
+
+      _log.info('§7.5 Co-Auth complete: ${approvalTokens.length}/$totalDevices '
+          'tokens (quorum=${rotationQuorum(totalDevices)})');
+    }
+
+    // Embed approval tokens in broadcast
+    broadcast.approvalTokens.addAll(approvalTokens.map((t) => t.toProto()));
+    broadcast.preRotationDeviceCount = totalDevices;
+
     // 3. Send KEY_ROTATION_BROADCAST to all contacts (signed with OLD identity).
     //    Welle 6 §7.4 Variant (b) — Emergency-flavor MUST go on the
     //    InfrastructureFrame path: KEM-encap under each contact's
@@ -7685,11 +8643,10 @@ class CleonaService implements ICleonaService {
     //    authentication subject. Every recipient device gets its own frame
     //    (per-device fan-out via 2D-DHT auth-manifest).
     final payloadBytes = Uint8List.fromList(broadcast.writeToBuffer());
-    // Paket C: captured BEFORE `rotateIdentityFull` overwrites identity.userId,
-    // so the retry timer can address contacts under the pre-rotation hex.
-    // (Currently informational on the InfraFrame path — the routing key is
-    // recipientDeviceId, not envelope.senderId — but kept for symmetry with
-    // the persisted retry state.)
+    // Paket C: pre-rotation hex for the persisted retry state. SR-2: the
+    // userId is a stable anchor (§3.1) and no longer changes on rotation —
+    // this now always equals the post-rotation hex; kept for the persisted
+    // retry-state format.
     final oldUserIdHex = identity.userIdHex;
     final sentToHex = <String>[];
     for (final contact in _contacts.values) {
@@ -7733,15 +8690,43 @@ class CleonaService implements ICleonaService {
     }
     final sentCount = sentToHex.length;
 
-    // 4. Send new seed to twin devices via TWIN_SYNC (encrypted with OLD key)
+    // 4. Send rotation material to twin devices (encrypted with OLD key).
+    //    §7.1 LD-8: Linked Devices get per-device delegation keys (no seed!).
+    //    Legacy twins (seed-on-every-device) get entropy as before.
     if (_devices.length > 1) {
-      final seedPayload = utf8.encode(jsonEncode({
-        'emergencyRotation': true,
-        'newEntropy': bytesToHex(newEntropy),
-        'hdIndex': hdIndex,
-      }));
-      _sendTwinSync(
-          proto.TwinSyncType.SETTINGS_CHANGED, Uint8List.fromList(seedPayload));
+      final pub = _identityPublisher;
+      final linkedDeviceIds = pub != null
+          ? pub.delegations.map((d) => bytesToHex(d.deviceId)).toSet()
+          : <String>{};
+
+      // 4a. Linked devices: per-device delegation rotation
+      for (final delegation in pub?.delegations ?? <DeviceDelegation>[]) {
+        _sendDelegationRotation(
+          targetDeviceId: delegation.deviceId,
+          capabilities: delegation.capabilities,
+          maxValidUntilMs: delegation.maxValidUntilMs,
+          newMasterSeed: newMasterSeed,
+          newEd25519Pk: newEd25519.publicKey,
+          newMlDsaPk: newMlDsa.publicKey,
+          newX25519Pk: newX25519Pk,
+          newMlKemPk: newMlKem.publicKey,
+          newX25519Sk: newX25519Sk,
+          newMlKemSk: newMlKem.secretKey,
+        );
+      }
+
+      // 4b. Legacy twins only: entropy (they already hold the seed)
+      final hasLegacyTwins = _devices.keys.any((devHex) =>
+          devHex != _localDeviceId && !linkedDeviceIds.contains(devHex));
+      if (hasLegacyTwins) {
+        final seedPayload = utf8.encode(jsonEncode({
+          'emergencyRotation': true,
+          'newEntropy': bytesToHex(newEntropy),
+          'hdIndex': hdIndex,
+        }));
+        _sendTwinSync(
+            proto.TwinSyncType.SETTINGS_CHANGED, Uint8List.fromList(seedPayload));
+      }
     }
 
     // 5. NOW apply new keys locally (after all messages sent with OLD key)
@@ -7762,6 +8747,16 @@ class CleonaService implements ICleonaService {
     // their stale-PK caches without waiting for the §5.12 cold-path 1 h tick.
     node.broadcastAddressUpdate();
 
+    // SR-2: republish the Auth-Manifest promptly so the DHT carries the
+    // chained manifest (new embedded keys + rotation chain, §4.3 path 2)
+    // instead of waiting for the 20h refresh tick. The 7-day old-KEM
+    // retention covers senders still resolving the pre-rotation manifest.
+    final pub = _identityPublisher;
+    if (pub != null) {
+      pub.stop();
+      unawaited(pub.start());
+    }
+
     // 6. Initialize ACK tracking + persisted retry state (§26.6.2 Paket C).
     // The retry manager stores `payloadBytes` (the dual-signed inner
     // broadcast) so we can re-send to contacts that have not ACKed without
@@ -7775,7 +8770,8 @@ class CleonaService implements ICleonaService {
 
     _log.info('Emergency key rotation complete. '
         'Broadcast to $sentCount contacts. '
-        'New Node-ID: ${identity.userIdHex.substring(0, 16)}...');
+        'UserID ${identity.userIdHex.substring(0, 16)}... unchanged '
+        '(stable anchor, chain ${identity.rotationChain.length} link(s))');
     onStateChanged?.call();
   }
 
@@ -8118,15 +9114,27 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  /// Handle SETTINGS_CHANGED from twin: includes emergency key rotation (§26.6.2).
-  /// When a twin device triggers rotateIdentityKeys(), it sends the new entropy
-  /// so this device can derive and apply the same new keys.
+  /// Handle SETTINGS_CHANGED from twin: includes emergency key rotation (§26.6.2)
+  /// and §7.1 LD-8 delegation rotation.
   /// Async: PQ keygen runs in background isolate (ANR fix).
   Future<void> _handleTwinSettingsChanged(List<int> payload) async {
     try {
       final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
 
+      // §7.1 LD-8: delegation rotation for Linked Devices (no seed transfer)
+      if (json['delegationRotation'] == true) {
+        await _handleDelegationRotation(json);
+        return;
+      }
+
       if (json['emergencyRotation'] == true) {
+        // §7.1 LD-5: Linked Devices must NOT process seed entropy —
+        // they receive delegation rotation via the path above.
+        if (identity.isLinkedDevice) {
+          _log.warn('Ignoring emergency rotation entropy — '
+              'this is a Linked Device (LD-5 guard)');
+          return;
+        }
         final newEntropyHex = json['newEntropy'] as String;
         final hdIndex = json['hdIndex'] as int? ?? identity.hdIndex ?? 0;
         final newEntropy = hexToBytes(newEntropyHex);
@@ -8154,8 +9162,15 @@ class CleonaService implements ICleonaService {
         // PeerInfo to all known peers so the mesh heals stale-PK caches
         // without waiting for the §5.12 cold-path 1 h tick.
         node.broadcastAddressUpdate();
+        // SR-2: prompt chained-manifest republish (see originating path).
+        final pub = _identityPublisher;
+        if (pub != null) {
+          pub.stop();
+          unawaited(pub.start());
+        }
         _log.info('Emergency key rotation applied from twin. '
-            'New Node-ID: ${identity.userIdHex.substring(0, 16)}...');
+            'UserID ${identity.userIdHex.substring(0, 16)}... unchanged '
+            '(stable anchor)');
         onStateChanged?.call();
       }
     } catch (e) {
@@ -8284,136 +9299,130 @@ class CleonaService implements ICleonaService {
     final newX25519Pk = Uint8List.fromList(broadcast.newX25519Pk);
     final newMlKemPk = Uint8List.fromList(broadcast.newMlKemPk);
 
+    // §7.5 Co-Auth verification: check Device-Sig countersigs against
+    // cached AuthManifest device_sig_keys before applying new keys.
+    final cachedManifest = node.identityDhtHandler.getAuthManifest(senderUserId);
+    final cachedDeviceSigKeys = cachedManifest?.deviceSigKeys ?? <DeviceSigInfo>[];
+    RotationCoAuthResult coAuthResult;
+
+    if (cachedDeviceSigKeys.isEmpty) {
+      coAuthResult = RotationCoAuthResult.legacy;
+    } else {
+      final rotHash = computeRotationHash(
+        newEd25519Pk: newEd25519Pk,
+        newMlDsaPk: newMlDsaPk,
+        newX25519Pk: newX25519Pk,
+        newMlKemPk: newMlKemPk,
+        userId: senderUserId,
+      );
+      final tokens = broadcast.approvalTokens
+          .map(RotationApprovalToken.fromProto)
+          .toList();
+      coAuthResult = verifyRotationCoAuth(
+        tokens: tokens,
+        cachedDeviceSigKeys: cachedDeviceSigKeys,
+        rotationHash: rotHash,
+        preRotationDeviceCount: broadcast.preRotationDeviceCount,
+      );
+      _log.info('§7.5 Co-Auth result for ${senderHex.substring(0, 8)}: '
+          '$coAuthResult (${tokens.length} tokens, '
+          '${cachedDeviceSigKeys.length} cached devices, '
+          'quorum=${rotationQuorum(cachedDeviceSigKeys.length)})');
+    }
+
+    // Keys are always applied (SR-1: visibility, not prevention).
     contact.ed25519Pk = newEd25519Pk;
     contact.mlDsaPk = newMlDsaPk;
     contact.x25519Pk = newX25519Pk;
     contact.mlKemPk = newMlKemPk;
 
-    // Compute new Node-ID for this contact
-    final newNodeId = HdWallet.computeNodeId(newEd25519Pk, NetworkSecret.secret);
-    final newNodeIdHex = bytesToHex(newNodeId);
-    contact.nodeId = newNodeId;
+    // SR-1 (§7.4b step 6 / §8.3): route the rotation through Key-Change-
+    // Detection (policy in key_change_policy.dart). The dual-sig + chain make
+    // the rotation cryptographically valid, so we DO apply the new keys
+    // (comms keep working, a legitimate rotation is not blocked) — but a
+    // valid chain does NOT prove the rotation was authorized by the
+    // legitimate owner vs. a seed-holding thief, so we never follow it
+    // silently at full trust. Reset the verification level and surface a
+    // key-change warning, exactly like any other identity-key change.
+    final prevLevel = contact.verificationLevel;
+    final keyChange = onIdentityRotation(prevLevel);
+    final wasVerified = keyChange.wasVerified;
+    contact.verificationLevel = keyChange.newLevel;
 
-    // Re-key across all data structures if Node-ID changed
-    if (newNodeIdHex != senderHex) {
-      _contacts.remove(senderHex);
-      _contacts[newNodeIdHex] = contact;
-
-      // Re-key group members
-      for (final group in _groups.values) {
-        final member = group.members.remove(senderHex);
-        if (member != null) {
-          group.members[newNodeIdHex] = GroupMemberInfo(
-            nodeIdHex: newNodeIdHex,
-            displayName: member.displayName,
-            role: member.role,
-            ed25519Pk: newEd25519Pk,
-            x25519Pk: newX25519Pk,
-            mlKemPk: newMlKemPk,
-          );
-          if (group.ownerNodeIdHex == senderHex) {
-            group.ownerNodeIdHex = newNodeIdHex;
-          }
-        }
-      }
-      _saveGroups();
-
-      // Re-key channel members
-      for (final channel in _channels.values) {
-        final member = channel.members.remove(senderHex);
-        if (member != null) {
-          channel.members[newNodeIdHex] = ChannelMemberInfo(
-            nodeIdHex: newNodeIdHex,
-            displayName: member.displayName,
-            role: member.role,
-            ed25519Pk: newEd25519Pk,
-            x25519Pk: newX25519Pk,
-            mlKemPk: newMlKemPk,
-          );
-          if (channel.ownerNodeIdHex == senderHex) {
-            channel.ownerNodeIdHex = newNodeIdHex;
-          }
-        }
-      }
-      _saveChannels();
-
-      // Re-key conversations (Conversation.id is final → rebuild)
-      if (conversations.containsKey(senderHex)) {
-        final oldConv = conversations.remove(senderHex)!;
-        conversations[newNodeIdHex] = Conversation(
-          id: newNodeIdHex,
-          displayName: oldConv.displayName,
-          messages: oldConv.messages,
-          unreadCount: oldConv.unreadCount,
-          lastActivity: oldConv.lastActivity,
-          profilePictureBase64: oldConv.profilePictureBase64,
-          isGroup: oldConv.isGroup,
-          isChannel: oldConv.isChannel,
-          config: oldConv.config,
-          pendingConfigProposal: oldConv.pendingConfigProposal,
-          pendingConfigProposer: oldConv.pendingConfigProposer,
-          isFavorite: oldConv.isFavorite,
-        );
-        _saveConversations();
-      }
-
-      // Update routing table: copy old peer's addresses to new peer entry.
-      // Architecture §17.3: KEY_ROTATION_BROADCAST is authenticated with the
-      // old key (verified upstream), so the new key is firstParty.
-      final oldPeer = node.routingTable.getPeer(senderUserId);
-      if (oldPeer != null) {
-        node.routingTable.removePeer(senderUserId);
-        node.routingTable.addPeer(PeerInfo(
-          nodeId: newNodeId,
-          addresses: oldPeer.addresses,
-          ed25519PublicKey: newEd25519Pk,
-          x25519PublicKey: newX25519Pk,
-          mlKemPublicKey: newMlKemPk,
-          pkSource: PkSource.firstParty,
-        ));
-      }
-    } else {
-      // Node-ID unchanged — update keys in-place. firstParty per §17.3.
-      final peer = node.routingTable.getPeer(contact.nodeId);
-      if (peer != null) {
-        peer.ed25519PublicKey = newEd25519Pk;
-        peer.x25519PublicKey = newX25519Pk;
-        peer.mlKemPublicKey = newMlKemPk;
-        peer.pkSource = PkSource.firstParty;
-      }
-      for (final group in _groups.values) {
-        final member = group.members[senderHex];
-        if (member != null) {
-          member.ed25519Pk = newEd25519Pk;
-          member.x25519Pk = newX25519Pk;
-          member.mlKemPk = newMlKemPk;
-        }
-      }
-      _saveGroups();
-      for (final channel in _channels.values) {
-        final member = channel.members[senderHex];
-        if (member != null) {
-          member.ed25519Pk = newEd25519Pk;
-          member.x25519Pk = newX25519Pk;
-          member.mlKemPk = newMlKemPk;
-        }
-      }
-      _saveChannels();
+    // SR-2 (§7.4b step 5, stable anchor): the contact's UserID does NOT
+    // change — it is pinned to the founding key (§3.1); the rotating side
+    // proves continuity via the rotation chain in its Auth-Manifests
+    // (§4.3 path 2). Keys are updated IN PLACE; contact entry, groups,
+    // channels and conversations are untouched (verification level is reset
+    // above per SR-1).
+    // (The pre-SR-2 implementation recomputed the UserID here and migrated
+    // contact/groups/channels/conversations to the new hex — that
+    // contradicted §3.1 and wiped per-identity continuity.)
+    final peer = node.routingTable.getPeer(contact.nodeId);
+    if (peer != null) {
+      // firstParty per §17.3: the broadcast is authenticated with the old
+      // key (verified above), so the new key is first-party provenance.
+      peer.ed25519PublicKey = newEd25519Pk;
+      peer.x25519PublicKey = newX25519Pk;
+      peer.mlKemPublicKey = newMlKemPk;
+      peer.pkSource = PkSource.firstParty;
     }
+    for (final group in _groups.values) {
+      final member = group.members[senderHex];
+      if (member != null) {
+        member.ed25519Pk = newEd25519Pk;
+        member.x25519Pk = newX25519Pk;
+        member.mlKemPk = newMlKemPk;
+      }
+    }
+    _saveGroups();
+    for (final channel in _channels.values) {
+      final member = channel.members[senderHex];
+      if (member != null) {
+        member.ed25519Pk = newEd25519Pk;
+        member.x25519Pk = newX25519Pk;
+        member.mlKemPk = newMlKemPk;
+      }
+    }
+    _saveChannels();
 
     _saveContacts();
 
-    // §26.6.2 Send KEY_ROTATION_ACK back to the rotator at their new
-    // Node-ID. Pure ACK — empty payload. V3 inner User-Sig + outer Device-
-    // Sig + KEM-decap chain provides Paket-C-F2 forge defence.
+    // §26.6.2 Send KEY_ROTATION_ACK back to the rotator — same UserID as
+    // before (stable anchor). Pure ACK — empty payload. V3 inner User-Sig +
+    // outer Device-Sig + KEM-decap chain provides Paket-C-F2 forge defence.
     unawaited(sendToUser(
-      recipientUserId: newNodeId,
+      recipientUserId: senderUserId,
       messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK,
       payload: Uint8List(0),
     ));
 
     _log.info('Emergency key rotation from ${contact.displayName}: '
-        'all keys updated, Node-ID ${senderHex.substring(0, 8)} → ${newNodeIdHex.substring(0, 8)}');
+        'all keys updated in place, UserID ${senderHex.substring(0, 8)} '
+        'unchanged (stable anchor); verification reset '
+        '$prevLevel→${contact.verificationLevel} (SR-1 visibility), '
+        'coAuth=$coAuthResult');
+    // SR-1: surface the key-change warning to the UI so a soft re-key is
+    // never followed silently. Fired for every accepted rotation; the UI
+    // decides how loudly to warn based on `wasVerified`.
+    try {
+      onContactIdentityRotated?.call(
+          senderHex, contact.displayName, wasVerified);
+    } catch (e) {
+      _log.warn('onContactIdentityRotated listener threw: $e');
+    }
+    // §7.5: escalated warning when co-auth quorum is NOT met on a
+    // multi-device identity (possible Primary theft).
+    if (coAuthResult == RotationCoAuthResult.quorumNotMet) {
+      final tokens = broadcast.approvalTokens.length;
+      final required = rotationQuorum(cachedDeviceSigKeys.length);
+      try {
+        onRotationCoAuthWarning?.call(
+            senderHex, contact.displayName, tokens, required);
+      } catch (e) {
+        _log.warn('onRotationCoAuthWarning listener threw: $e');
+      }
+    }
     onStateChanged?.call();
   }
 
@@ -8437,6 +9446,30 @@ class CleonaService implements ICleonaService {
       _log.info('All still-reachable contacts acknowledged key rotation');
     }
     _emitKeyRotationRetryEvents();
+  }
+
+  /// §7.5: handle ROTATION_REJECTION_ALERT from a Linked Device of a contact.
+  void _handleRotationRejectionAlertV3(proto.ApplicationFrameV3 frame,
+      Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final alert = proto.RotationRejectionAlertPayload.fromBuffer(frame.payload);
+      final userIdHex = bytesToHex(Uint8List.fromList(alert.userId));
+      final contact = _contacts[userIdHex];
+      if (contact == null) {
+        _log.warn('ROTATION_REJECTION_ALERT for unknown user $userIdHex — dropped');
+        return;
+      }
+      _log.warn('§7.5 ROTATION_REJECTION_ALERT: a linked device of '
+          '${contact.displayName} actively rejected a key rotation — '
+          'possible Primary theft!');
+      try {
+        onRotationRejectionAlert?.call(userIdHex, contact.displayName);
+      } catch (e) {
+        _log.warn('onRotationRejectionAlert listener threw: $e');
+      }
+    } catch (e) {
+      _log.error('ROTATION_REJECTION_ALERT processing failed: $e');
+    }
   }
 
   /// §26.6.2 Paket C: called from the 24h retry timer (and once at daemon
@@ -9026,8 +10059,12 @@ class CleonaService implements ICleonaService {
       msg.ringMembers.add(pk);
     }
 
-    final payload = msg.writeToBuffer();
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS, payload);
+    final payload = Uint8List.fromList(msg.writeToBuffer());
+    await _sendAnonViaReBroadcaster(
+      poll: poll,
+      messageType: proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
+      payload: payload,
+    );
   }
 
   Future<void> _sendPollVoteRevoke(Poll poll, Uint8List keyImage) async {
@@ -9052,7 +10089,264 @@ class CleonaService implements ICleonaService {
       msg.ringMembers.add(pk);
     }
 
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_REVOKE, msg.writeToBuffer());
+    final payload = Uint8List.fromList(msg.writeToBuffer());
+    await _sendAnonViaReBroadcaster(
+      poll: poll,
+      messageType: proto.MessageTypeV3.MTV3_POLL_REVOKE,
+      payload: payload,
+    );
+  }
+
+  // ── §11.4.8 Anonymous Vote Re-Broadcaster ────────────────────────────
+
+  /// Pending re-broadcaster ACKs: pollId → completer.
+  final Map<String, Completer<bool>> _anonSubmitAcks = {};
+
+  /// §11.4.8: Send an anonymous vote/revoke via a random re-broadcaster R.
+  /// Builds de-attributed inner frames (no senderUserId, no user sigs),
+  /// bundles them, and ships to R. Falls back to legacy direct send if no
+  /// suitable R is found or all retries fail.
+  Future<void> _sendAnonViaReBroadcaster({
+    required Poll poll,
+    required proto.MessageTypeV3 messageType,
+    required Uint8List payload,
+  }) async {
+    final recipients = _pollRecipients(poll.groupId);
+    if (recipients == null || recipients.isEmpty) return;
+
+    // Channels: creator-only (§24.3.2).
+    final isChannel = _channels.containsKey(poll.groupId);
+    final effectiveRecipients = isChannel && poll.createdByHex != identity.userIdHex
+        ? [poll.createdByHex]
+        : recipients.toList();
+
+    // Build de-attributed KEM blob per recipient.
+    final entries = <proto.PollAnonSubmitEntry>[];
+    for (final recipientHex in effectiveRecipients) {
+      final contact = _contacts[recipientHex];
+      if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) continue;
+
+      final inner = proto.ApplicationFrameV3()
+        ..recipientUserId = hexToBytes(recipientHex)
+        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+        ..messageId = SodiumFFI().randomBytes(16)
+        ..messageType = messageType
+        ..payload = payload;
+
+      final kemBlob = V3FrameCodec.buildDeAttributedInner(
+        inner: inner,
+        recipientUserX25519Pk: contact.x25519Pk!,
+        recipientUserMlKemPk: contact.mlKemPk!,
+      );
+
+      final entry = proto.PollAnonSubmitEntry()
+        ..recipientUserId = hexToBytes(recipientHex)
+        ..kemBlob = kemBlob;
+      if (contact.deviceNodeIds.isNotEmpty) {
+        for (final did in contact.deviceNodeIds) {
+          entry.deviceIds.add(hexToBytes(did));
+        }
+      }
+      entries.add(entry);
+    }
+    if (entries.isEmpty) return;
+
+    final bundle = proto.PollAnonSubmitMsg()
+      ..pollId = hexToBytes(poll.pollId);
+    bundle.entries.addAll(entries);
+    final bundleBytes = bundle.writeToBuffer();
+
+    // §11.4.8 limit: ≤64KB, ≤64 entries.
+    if (bundleBytes.length > 65536 || entries.length > 64) {
+      _log.warn('Anon submit bundle too large (${bundleBytes.length}B, '
+          '${entries.length} entries) — legacy fallback');
+      await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
+      return;
+    }
+
+    // Try up to 3 different re-broadcasters.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final r = _selectReBroadcaster(poll.groupId);
+      if (r == null) {
+        _log.info('No suitable re-broadcaster found — legacy fallback');
+        await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
+        return;
+      }
+
+      final pollIdHex = poll.pollId;
+      final completer = Completer<bool>();
+      _anonSubmitAcks[pollIdHex] = completer;
+
+      final ok = await node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT,
+        innerPayload: Uint8List.fromList(bundleBytes),
+        recipientDeviceId: r.nodeId,
+      );
+
+      if (!ok) {
+        _anonSubmitAcks.remove(pollIdHex);
+        _log.info('Anon submit to R ${_hexShort(r.nodeId)} failed (attempt $attempt)');
+        continue;
+      }
+
+      // Wait for ACK with timeout.
+      final acked = await completer.future
+          .timeout(const Duration(seconds: 10), onTimeout: () => false);
+      _anonSubmitAcks.remove(pollIdHex);
+
+      if (acked) {
+        _log.info('Anon vote re-broadcast OK via R ${_hexShort(r.nodeId)}');
+        return;
+      }
+      _log.info('Anon submit ACK timeout from R ${_hexShort(r.nodeId)} '
+          '(attempt $attempt)');
+    }
+
+    _log.info('All re-broadcaster attempts failed — legacy fallback');
+    await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
+  }
+
+  /// Legacy direct-send path for anonymous votes (Phase 1 behavior).
+  Future<void> _sendAnonLegacy(
+    Poll poll,
+    proto.MessageTypeV3 messageType,
+    Uint8List payload,
+    List<String> recipients,
+  ) async {
+    for (final memberHex in recipients) {
+      await _sendEncryptedPayload(
+        hexToBytes(memberHex),
+        messageType,
+        payload,
+      );
+    }
+  }
+
+  /// Select a random routing-table peer as re-broadcaster R.
+  /// R must not be a participant in the poll's entity and not a contact.
+  PeerInfo? _selectReBroadcaster(String entityIdHex) {
+    final participantIds = <String>{};
+    final group = _groups[entityIdHex];
+    if (group != null) {
+      participantIds.addAll(group.members.keys);
+    }
+    final channel = _channels[entityIdHex];
+    if (channel != null) {
+      participantIds.addAll(channel.members.keys);
+    }
+    participantIds.add(identity.userIdHex);
+
+    final contactIds = _contacts.keys.toSet();
+
+    final candidates = node.routingTable.allPeers.where((p) {
+      final pHex = bytesToHex(p.nodeId);
+      final uHex = p.userId != null ? bytesToHex(p.userId!) : null;
+      if (participantIds.contains(pHex) || participantIds.contains(uHex)) return false;
+      if (contactIds.contains(pHex) || contactIds.contains(uHex)) return false;
+      return true;
+    }).toList();
+
+    if (candidates.isEmpty) return null;
+    // Uniform random selection via libsodium.
+    final idx = SodiumFFI().randomBytes(4);
+    final v = ((idx[0] << 24) | (idx[1] << 16) | (idx[2] << 8) | idx[3]) & 0x7fffffff;
+    return candidates[v % candidates.length];
+  }
+
+  /// R-side handler: validate and re-originate each entry under own identity.
+  void handleIncomingPollAnonSubmit(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress from,
+    int port,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    final proto.PollAnonSubmitMsg bundle;
+    try {
+      bundle = proto.PollAnonSubmitMsg.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.warn('POLL_ANON_SUBMIT parse error: $e');
+      return;
+    }
+
+    // Validate limits.
+    if (frame.payload.length > 65536) {
+      _log.warn('POLL_ANON_SUBMIT too large: ${frame.payload.length}B — rejected');
+      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_large');
+      return;
+    }
+    if (bundle.entries.length > 64) {
+      _log.warn('POLL_ANON_SUBMIT too many entries: ${bundle.entries.length} — rejected');
+      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_many_entries');
+      return;
+    }
+
+    // Re-originate each entry as fresh APPLICATION_FRAME under own device identity.
+    final myDeviceNodeId = node.primaryIdentity.deviceNodeId;
+    for (final entry in bundle.entries) {
+      final recipientUserId = Uint8List.fromList(entry.recipientUserId);
+
+      // Resolve device IDs: prefer bundle-supplied, fall back to local cache.
+      List<Uint8List> deviceIds;
+      if (entry.deviceIds.isNotEmpty) {
+        deviceIds = entry.deviceIds.map((d) => Uint8List.fromList(d)).toList();
+      } else {
+        final cached = node.routingTable.getAllPeersForUserId(recipientUserId);
+        if (cached.isEmpty) continue;
+        deviceIds = cached.map((p) => p.nodeId).toList();
+      }
+
+      for (final deviceId in deviceIds) {
+        final outer = V3FrameCodec.buildOuter(
+          nextHopDeviceId: deviceId,
+          senderDeviceId: myDeviceNodeId,
+          deviceKeys: node.deviceKeyPair,
+          innerPayload: Uint8List.fromList(entry.kemBlob),
+          payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
+          applicationFlavor: true,
+          skipPoW: true,
+        );
+        unawaited(node.sendToDevice(outer, deviceId));
+      }
+    }
+
+    _log.info('POLL_ANON_SUBMIT: re-originated ${bundle.entries.length} entries '
+        'from ${_hexShort(senderDeviceId)}');
+    _sendAnonSubmitAck(senderDeviceId, bundle.pollId, true, '');
+  }
+
+  void _sendAnonSubmitAck(
+      Uint8List recipientDeviceId, List<int> pollId, bool accepted, String reason) {
+    final ack = proto.PollAnonSubmitAckMsg()
+      ..pollId = pollId
+      ..accepted = accepted
+      ..rejectReason = reason;
+    unawaited(node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK,
+      innerPayload: Uint8List.fromList(ack.writeToBuffer()),
+      recipientDeviceId: recipientDeviceId,
+    ));
+  }
+
+  /// Voter-side handler: resolve pending ACK.
+  void handleIncomingPollAnonSubmitAck(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
+    final proto.PollAnonSubmitAckMsg ack;
+    try {
+      ack = proto.PollAnonSubmitAckMsg.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.warn('POLL_ANON_SUBMIT_ACK parse error: $e');
+      return;
+    }
+    final pollIdHex = bytesToHex(Uint8List.fromList(ack.pollId));
+    final completer = _anonSubmitAcks.remove(pollIdHex);
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(ack.accepted);
+      _log.info('POLL_ANON_SUBMIT_ACK from ${_hexShort(senderDeviceId)}: '
+          '${ack.accepted ? "accepted" : "rejected: ${ack.rejectReason}"}');
+    }
   }
 
   Future<void> _sendPollUpdate(Poll poll, proto.PollAction action,
@@ -9266,10 +10560,16 @@ class CleonaService implements ICleonaService {
     final keyImageHex = bytesToHex(keyImage);
 
     final seen = _anonymousKeyImages.putIfAbsent(pollId, () => {});
+    final pendingKey = '$pollId:$keyImageHex';
+    var needsRevoke = false;
     if (seen.contains(keyImageHex)) {
       // Re-vote on an anonymous poll requires revoke first (§24.4.5).
       if (!poll.settings.allowVoteChange) return false;
-      await _sendPollVoteRevoke(poll, keyImage);
+      // If the previous vote is still jitter-pending it never reached the
+      // wire — cancelling the timer replaces the on-wire revoke.
+      final pending = _pendingAnonVoteSends.remove(pendingKey);
+      pending?.cancel();
+      needsRevoke = pending == null;
       pollManager.revokeAnonymousVote(pollId, keyImageHex);
       seen.remove(keyImageHex);
     }
@@ -9290,10 +10590,39 @@ class CleonaService implements ICleonaService {
     // _sendPollVoteAnonymous uses an internally-derived ring that must match
     // the canonical sort used here, so both sides produce the same key image.
     ring.length; // ensure variable escapes so analyzer does not complain
-    await _sendPollVoteAnonymous(poll, vote);
+
+    Future<void> sendNow() async {
+      try {
+        if (needsRevoke) await _sendPollVoteRevoke(poll, keyImage);
+        await _sendPollVoteAnonymous(poll, vote);
+      } catch (e) {
+        _log.warn('Anonymous vote send failed: $e');
+      }
+    }
+
+    final jitter = _anonVoteJitter();
+    if (jitter == Duration.zero) {
+      await sendNow();
+    } else {
+      // §11.4.6: random 0-30s send jitter so arrival order does not hint
+      // at the voter. The local tally above is recorded immediately.
+      _pendingAnonVoteSends[pendingKey] = Timer(jitter, () {
+        _pendingAnonVoteSends.remove(pendingKey);
+        sendNow();
+      });
+    }
     onPollTallyUpdated?.call(pollId);
     onStateChanged?.call();
     return true;
+  }
+
+  /// Random 0..[ModerationConfig.anonVoteJitterMax] send delay (§11.4.6).
+  Duration _anonVoteJitter() {
+    final maxMs = moderationConfig.anonVoteJitterMax.inMilliseconds;
+    if (maxMs <= 0) return Duration.zero;
+    final b = SodiumFFI().randomBytes(4);
+    final v = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) & 0x7fffffff;
+    return Duration(milliseconds: v % maxMs);
   }
 
   @override
@@ -9313,7 +10642,13 @@ class CleonaService implements ICleonaService {
     if (!(_anonymousKeyImages[pollId]?.contains(keyImageHex) ?? false)) {
       return false;
     }
-    await _sendPollVoteRevoke(poll, keyImage);
+    // If the vote is still jitter-pending (§11.4.6) it never reached the
+    // wire — cancel the pending send instead of racing it with a revoke.
+    final pending = _pendingAnonVoteSends.remove('$pollId:$keyImageHex');
+    pending?.cancel();
+    if (pending == null) {
+      await _sendPollVoteRevoke(poll, keyImage);
+    }
     pollManager.revokeAnonymousVote(pollId, keyImageHex);
     _anonymousKeyImages[pollId]?.remove(keyImageHex);
     onPollTallyUpdated?.call(pollId);
@@ -9446,7 +10781,9 @@ class CleonaService implements ICleonaService {
         return;
       }
 
-      // Verify signature with old ed25519 key
+      // H-2: verify the inner restore proof against the contact's STORED
+      // keys (before we apply the broadcast's new keys). The canonical
+      // bytes are the body with both signature fields empty.
       if (contact.ed25519Pk != null) {
         final dataToVerify = (proto.RestoreBroadcast()
               ..oldNodeId = rb.oldNodeId
@@ -9458,18 +10795,53 @@ class CleonaService implements ICleonaService {
               ..displayName = rb.displayName
               ..timestamp = rb.timestamp)
             .writeToBuffer();
-        final valid = SodiumFFI().verifyEd25519(
+        final edValid = SodiumFFI().verifyEd25519(
           dataToVerify,
           Uint8List.fromList(rb.signature),
           contact.ed25519Pk!,
         );
-        if (!valid) {
-          _log.warn('RESTORE_BROADCAST signature invalid from ${oldNodeIdHex.substring(0, 8)}');
+        if (!edValid) {
+          _log.warn('RESTORE_BROADCAST Ed25519 signature invalid from ${oldNodeIdHex.substring(0, 8)}');
           return;
+        }
+        // H-2 hybrid: when the sender supplied an ML-DSA signature AND we
+        // hold the contact's ML-DSA key, the PQ proof MUST verify too — a
+        // classical-only forge is rejected. A missing `signature_ml_dsa`
+        // (pre-H-2 sender) is accepted as legacy-classical during the
+        // transition; a present-but-invalid one is a forge and rejected.
+        if (rb.signatureMlDsa.isNotEmpty) {
+          if (contact.mlDsaPk == null) {
+            _log.warn('RESTORE_BROADCAST carries ML-DSA sig but no stored '
+                'mlDsaPk for ${oldNodeIdHex.substring(0, 8)} — accepting '
+                'classical proof (legacy transition)');
+          } else {
+            final pqValid = OqsFFI().mlDsaVerify(
+              dataToVerify,
+              Uint8List.fromList(rb.signatureMlDsa),
+              contact.mlDsaPk!,
+            );
+            if (!pqValid) {
+              _log.warn('RESTORE_BROADCAST ML-DSA signature INVALID from '
+                  '${oldNodeIdHex.substring(0, 8)} — rejected (H-2 forge defence)');
+              return;
+            }
+          }
+        } else {
+          _log.info('RESTORE_BROADCAST from ${oldNodeIdHex.substring(0, 8)} '
+              'is Ed25519-only (legacy-classical, pre-H-2 sender)');
         }
       }
 
       _log.info('Valid RESTORE_BROADCAST from ${contact.displayName} (old: ${oldNodeIdHex.substring(0, 8)}, new: ${newNodeIdHex.substring(0, 8)})');
+
+      // H-2 Part B: detect whether this restore actually CHANGES the
+      // contact's identity key (new-seed re-identity or forge attempt) vs.
+      // a deterministic same-seed recovery where the keys are unchanged.
+      // Captured before the overwrite below.
+      final identityKeyChanged = contact.ed25519Pk == null ||
+          !_bytesEqual(contact.ed25519Pk!,
+              Uint8List.fromList(rb.newEd25519Pk));
+      final prevVerification = contact.verificationLevel;
 
       // Update contact with new keys and node ID
       _contacts.remove(oldNodeIdHex);
@@ -9479,6 +10851,15 @@ class CleonaService implements ICleonaService {
       contact.mlKemPk = Uint8List.fromList(rb.newMlKemPk);
       contact.mlDsaPk = Uint8List.fromList(rb.newMlDsaPk);
       if (rb.displayName.isNotEmpty) contact.displayName = rb.displayName;
+      // H-2 Part B (§8.3, SR-1-consistent): if the restore changed the
+      // contact's identity key, run Key-Change-Detection — reset the
+      // verification level so a re-identity / forge is never followed
+      // silently at full trust. A deterministic same-seed recovery leaves
+      // the key unchanged and keeps the verification level.
+      if (identityKeyChanged) {
+        contact.verificationLevel =
+            onIdentityRotation(contact.verificationLevel).newLevel;
+      }
       _contacts[newNodeIdHex] = contact;
       _saveContacts();
 
@@ -9547,6 +10928,20 @@ class CleonaService implements ICleonaService {
       Timer(const Duration(seconds: 10), () {
         _sendRestoreResponse(contact, 3);
       });
+
+      // H-2 Part B (§6.3.5): surface the restore to the UI. Fired for EVERY
+      // accepted restore (the §6.3.5 "[Name] has set up a new device"
+      // notification, now real). `identityKeyChanged` tells the UI whether
+      // to escalate to a key-change warning (verification was reset above).
+      _log.info('RESTORE_BROADCAST visibility: ${contact.displayName} '
+          'keyChanged=$identityKeyChanged verification '
+          '$prevVerification→${contact.verificationLevel}');
+      try {
+        onContactRestoreDetected?.call(
+            newNodeIdHex, contact.displayName, identityKeyChanged);
+      } catch (e) {
+        _log.warn('onContactRestoreDetected listener threw: $e');
+      }
 
       onStateChanged?.call();
     } catch (e) {
@@ -9868,6 +11263,12 @@ class CleonaService implements ICleonaService {
     required Uint8List oldEd25519Pk,
     required Uint8List oldNodeId,
     required List<ContactInfo> oldContacts,
+    // H-2: old ML-DSA-65 secret key for the hybrid inner signature. In the
+    // dominant deterministic same-seed recovery the re-derived key is
+    // identical to the old one (§6.3.5 PQ-handling), so the caller passes
+    // `identity.mlDsaSecretKey`. Null → classical-only broadcast (legacy
+    // transition; receivers accept it until the Phase-2 gate).
+    Uint8List? oldMlDsaSk,
   }) async {
     // Rate limiting: max 1 per 5 minutes
     if (_lastRestoreBroadcast != null &&
@@ -9887,9 +11288,16 @@ class CleonaService implements ICleonaService {
       ..displayName = displayName
       ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch);
 
-    // Sign with OLD key to prove ownership
+    // H-2: hybrid inner signature — sign the canonical body with BOTH the
+    // old Ed25519 key (classical ownership) AND the old ML-DSA-65 key (PQ
+    // ownership). A classical-only forge of the contact's Ed25519 key no
+    // longer suffices to forge a restore takeover. Both signature fields are
+    // empty while signing so they cover identical canonical bytes.
     final dataToSign = rb.writeToBuffer();
     rb.signature = SodiumFFI().signEd25519(dataToSign, oldEd25519Sk);
+    if (oldMlDsaSk != null) {
+      rb.signatureMlDsa = OqsFFI().mlDsaSign(dataToSign, oldMlDsaSk);
+    }
 
     final broadcastBytes = rb.writeToBuffer();
     var sent = 0;
@@ -9982,6 +11390,7 @@ class CleonaService implements ICleonaService {
         oldEd25519Pk: oldEd25519Pk,
         oldNodeId: oldNodeId,
         oldContacts: oldContacts,
+        oldMlDsaSk: oldMlDsaSk,
       );
     });
 
@@ -10057,10 +11466,16 @@ class CleonaService implements ICleonaService {
     _channelIndexGossipTimer = null;
     _moderationTimer?.cancel();
     _moderationTimer = null;
+    for (final t in _pendingAnonVoteSends.values) {
+      t.cancel();
+    }
+    _pendingAnonVoteSends.clear();
     _systemChannelEvictionTimer?.cancel();
     _systemChannelEvictionTimer = null;
     _updateCheckTimer?.cancel();
     _updateCheckTimer = null;
+    _delegationRenewalTimer?.cancel();
+    _delegationRenewalTimer = null;
     _natWizardTrigger?.stop();
     _natWizardTrigger = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
@@ -10202,7 +11617,9 @@ class CleonaService implements ICleonaService {
       // Store via FRAGMENT_STORE to closest DHT peers.
       // V3 (Architecture §23.3): FRAGMENT_STORE is an infrastructure
       // message — route via DV cascade as InfrastructureFrame.
-      final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
+      // D4 (§4.3): subnet-diverse replicator selection.
+      final peers = node.routingTable.findClosestPeers(mailboxId,
+          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
       for (final peer in peers) {
         final store = proto.FragmentStore()
           ..mailboxId = mailboxId
@@ -10267,6 +11684,8 @@ class CleonaService implements ICleonaService {
     proto.ExpiryMetadata? expiryMetadata,
     proto.ErasureCodingMetadata? erasureMetadata,
     List<bool>? l3Result,
+    int? groupMembershipEpoch,
+    Uint8List? groupMembershipHash,
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
@@ -10335,10 +11754,16 @@ class CleonaService implements ICleonaService {
       if (editMetadata != null) inner.editMetadata = editMetadata;
       if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
       if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
+      if (groupMembershipEpoch != null && groupMembershipEpoch > 0) {
+        inner.groupMembershipEpoch = Int64(groupMembershipEpoch);
+      }
+      if (groupMembershipHash != null) {
+        inner.groupMembershipHash = groupMembershipHash;
+      }
       final kemBytes = V3FrameCodec.buildAndEncryptInner(
         inner: inner,
-        senderUserEd25519Sk: identity.ed25519SecretKey,
-        senderUserMlDsaSk: identity.mlDsaSecretKey,
+        senderUserEd25519Sk: identity.signingEd25519Sk,
+        senderUserMlDsaSk: identity.signingMlDsaSk,
         recipientUserX25519Pk: contact.x25519Pk!,
         recipientUserMlKemPk: contact.mlKemPk!,
       );
@@ -10425,11 +11850,17 @@ class CleonaService implements ICleonaService {
         if (editMetadata != null) inner.editMetadata = editMetadata;
         if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
         if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
+        if (groupMembershipEpoch != null && groupMembershipEpoch > 0) {
+          inner.groupMembershipEpoch = Int64(groupMembershipEpoch);
+        }
+        if (groupMembershipHash != null) {
+          inner.groupMembershipHash = groupMembershipHash;
+        }
 
         final kemBytes = V3FrameCodec.buildAndEncryptInner(
           inner: inner,
-          senderUserEd25519Sk: identity.ed25519SecretKey,
-          senderUserMlDsaSk: identity.mlDsaSecretKey,
+          senderUserEd25519Sk: identity.signingEd25519Sk,
+          senderUserMlDsaSk: identity.signingMlDsaSk,
           recipientUserX25519Pk: contact.x25519Pk!,
           recipientUserMlKemPk: contact.mlKemPk!,
         );
@@ -10536,7 +11967,7 @@ class CleonaService implements ICleonaService {
   /// pubkeys carried *in plaintext inside the CR payload* — that is the
   /// §8.1.1 trust-bootstrap (the recipient cannot do contact-registry
   /// lookup because the CR is what creates the contact).
-  ///
+
   /// Verify path: parse inner ApplicationFrameV3, parse its
   /// ContactRequestMsg payload, extract `(ed25519_pk, ml_dsa_pk)`, run the
   /// User-Sig verify against those — then dispatch through the normal
@@ -11027,6 +12458,8 @@ class CleonaService implements ICleonaService {
         } catch (_) {/* malformed body — keep silent drop */}
         return null;
       },
+      lookupDelegatedKeys: (senderUserId) =>
+          node.identityDhtHandler.getDelegatedKeys(senderUserId),
     );
     final frame = result.frame;
     if (frame == null) {
@@ -11186,6 +12619,9 @@ class CleonaService implements ICleonaService {
       case proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK:
         _handleKeyRotationAckV3(frame, senderDeviceId, snapshot);
         break;
+      case proto.MessageTypeV3.MTV3_ROTATION_REJECTION_ALERT:
+        _handleRotationRejectionAlertV3(frame, senderDeviceId, snapshot);
+        break;
 
       // Contact-Request — Cluster C4
       case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
@@ -11207,6 +12643,9 @@ class CleonaService implements ICleonaService {
         break;
       case proto.MessageTypeV3.MTV3_GROUP_KEY_UPDATE:
         _handleGroupKeyUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST:
+        _handleGroupMembershipResyncRequest(frame, senderDeviceId, snapshot);
         break;
 
       // Channels — Cluster C4
@@ -11609,6 +13048,138 @@ class CleonaService implements ICleonaService {
   //     group_id). Receiver liest frame.groupId und dispatcht in den passenden
   //     Group/Channel-Tab; leer = DM auf Sender-Hex.
 
+  /// GM-2 (§9.1.4): centralized group-post gatekeeper. Returns null if the
+  /// post should be dropped (non-member). Returns true if a split-view
+  /// anomaly was detected (same/lower epoch, different hash).
+  bool? _checkGroupPostMembership(proto.ApplicationFrameV3 frame, String senderHex) {
+    if (frame.groupId.isEmpty) return false;
+    final groupIdHex = bytesToHex(Uint8List.fromList(frame.groupId));
+    final group = _groups[groupIdHex];
+    if (group == null) return false;
+
+    if (!group.members.containsKey(senderHex)) {
+      _log.warn('GM-2: group post from non-member ${senderHex.substring(0, 8)} '
+          'in "${group.name}" — dropped');
+      return null;
+    }
+
+    final wireEpoch = frame.groupMembershipEpoch.toInt();
+    if (wireEpoch <= 0) return false; // legacy sender, no tag
+
+    final wireHash = frame.groupMembershipHash;
+    if (wireHash.isEmpty) return false;
+
+    final localEpoch = group.membershipEpoch;
+    final localHash = _computeMembershipHash(localEpoch, groupIdHex, group.members);
+
+    if (wireEpoch == localEpoch && _bytesEqual(Uint8List.fromList(wireHash), localHash)) {
+      return false; // match
+    }
+
+    if (wireEpoch > localEpoch) {
+      // sender has newer membership — edge-triggered resync to owner
+      final prevRequested = _resyncRequestedAtEpoch[groupIdHex] ?? 0;
+      if (wireEpoch > prevRequested) {
+        _resyncRequestedAtEpoch[groupIdHex] = wireEpoch;
+        _sendResyncRequest(group);
+      }
+      return false; // not a split-view, just stale local state
+    }
+
+    // same or lower epoch, different hash → split-view anomaly
+    _log.warn('GM-2: SPLIT-VIEW in "${group.name}" — '
+        'local epoch=$localEpoch hash=${bytesToHex(localHash).substring(0, 16)}, '
+        'wire epoch=$wireEpoch hash=${bytesToHex(Uint8List.fromList(wireHash)).substring(0, 16)} '
+        'from ${senderHex.substring(0, 8)}');
+    return true;
+  }
+
+  void _sendResyncRequest(GroupInfo group) {
+    final ownerHex = group.ownerNodeIdHex;
+    if (ownerHex == identity.userIdHex) return; // we are owner, no need
+    final req = proto.GroupMembershipResyncRequest()
+      ..groupId = hexToBytes(group.groupIdHex)
+      ..localEpoch = Int64(group.membershipEpoch);
+    sendToUser(
+      recipientUserId: hexToBytes(ownerHex),
+      messageType: proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
+      payload: req.writeToBuffer(),
+      groupId: hexToBytes(group.groupIdHex),
+    );
+    _log.info('GM-2: RESYNC_REQUEST sent to owner ${ownerHex.substring(0, 8)} '
+        'for group "${group.name}" (local epoch=${group.membershipEpoch})');
+  }
+
+  void _sendChannelResyncRequest(ChannelInfo channel) {
+    final ownerHex = channel.ownerNodeIdHex;
+    if (ownerHex == identity.userIdHex) return;
+    final req = proto.GroupMembershipResyncRequest()
+      ..groupId = hexToBytes(channel.channelIdHex)
+      ..localEpoch = Int64(channel.membershipEpoch);
+    sendToUser(
+      recipientUserId: hexToBytes(ownerHex),
+      messageType: proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
+      payload: req.writeToBuffer(),
+      groupId: hexToBytes(channel.channelIdHex),
+    );
+    _log.info('GM-4: RESYNC_REQUEST sent to channel owner ${ownerHex.substring(0, 8)} '
+        'for "${channel.name}" (local epoch=${channel.membershipEpoch})');
+  }
+
+  void _handleGroupMembershipResyncRequest(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final req = proto.GroupMembershipResyncRequest.fromBuffer(frame.payload);
+      final entityIdHex = bytesToHex(Uint8List.fromList(req.groupId));
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      // GM-4: dual-mode — handle both groups and channels
+      final group = _groups[entityIdHex];
+      final channel = _channels[entityIdHex];
+      if (group == null && channel == null) return;
+
+      if (group != null) {
+        if (group.ownerNodeIdHex != identity.userIdHex) {
+          _log.debug('GM-2: RESYNC_REQUEST for "$entityIdHex" but we are not owner — ignoring');
+          return;
+        }
+        if (!group.members.containsKey(senderHex)) {
+          _log.warn('GM-2: RESYNC_REQUEST from non-member ${senderHex.substring(0, 8)} — dropped');
+          return;
+        }
+        final reqEpoch = req.localEpoch.toInt();
+        if (reqEpoch >= group.membershipEpoch) {
+          _log.debug('GM-2: RESYNC_REQUEST from ${senderHex.substring(0, 8)} '
+              'already at epoch $reqEpoch (ours=${group.membershipEpoch}) — no resync needed');
+          return;
+        }
+        _log.info('GM-2: RESYNC_REQUEST from ${senderHex.substring(0, 8)} '
+            'epoch $reqEpoch < ${group.membershipEpoch} — sending GROUP_INVITE');
+        unawaited(_broadcastGroupUpdate(group));
+      } else {
+        if (channel!.ownerNodeIdHex != identity.userIdHex) {
+          _log.debug('GM-4: channel RESYNC_REQUEST for "$entityIdHex" but we are not owner — ignoring');
+          return;
+        }
+        if (!channel.members.containsKey(senderHex)) {
+          _log.warn('GM-4: channel RESYNC_REQUEST from non-member ${senderHex.substring(0, 8)} — dropped');
+          return;
+        }
+        final reqEpoch = req.localEpoch.toInt();
+        if (reqEpoch >= channel.membershipEpoch) {
+          _log.debug('GM-4: channel RESYNC_REQUEST from ${senderHex.substring(0, 8)} '
+              'already at epoch $reqEpoch (ours=${channel.membershipEpoch}) — no resync needed');
+          return;
+        }
+        _log.info('GM-4: channel RESYNC_REQUEST from ${senderHex.substring(0, 8)} '
+            'epoch $reqEpoch < ${channel.membershipEpoch} — sending CHANNEL_INVITE');
+        unawaited(_broadcastChannelUpdate(channel));
+      }
+    } catch (e) {
+      _log.warn('GM-2/4: RESYNC_REQUEST parse fail: $e');
+    }
+  }
+
   /// V3 TEXT: TextMessageV3-payload. Reply-fields (replyToMessageId +
   /// replyToSnippet) live on the proto sub-message. Link-Preview travels
   /// in `tm.linkPreview` (sender-side only — the receiver renders the card
@@ -11624,6 +13195,11 @@ class CleonaService implements ICleonaService {
       final conversationId = frame.groupId.isNotEmpty
           ? bytesToHex(Uint8List.fromList(frame.groupId))
           : senderHex;
+
+      // GM-2 (§9.1.4): centralized membership gatekeeper
+      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      if (mismatchResult == null) return; // non-member, dropped
+      final isMembershipMismatch = mismatchResult;
 
       // Reply metadata: hex-encode the wire bytes; resolve sender display-
       // name from the local conversation (best-effort; UI falls back to the
@@ -11665,6 +13241,7 @@ class CleonaService implements ICleonaService {
         replyToMessageId: replyToMessageId,
         replyToText: replyToText,
         replyToSender: replyToSender,
+        membershipMismatch: isMembershipMismatch,
       );
 
       // Link preview from sender (Architecture §2.3.4). We trust the
@@ -11713,6 +13290,9 @@ class CleonaService implements ICleonaService {
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      if (mismatchResult == null) return;
+      final isMembershipMismatch = mismatchResult;
       final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
       final conversationId = frame.groupId.isNotEmpty
           ? bytesToHex(Uint8List.fromList(frame.groupId))
@@ -11773,6 +13353,7 @@ class CleonaService implements ICleonaService {
         transcriptText: transcriptText,
         transcriptLanguage: transcriptLanguage,
         transcriptConfidence: transcriptConfidence,
+        membershipMismatch: isMembershipMismatch,
       );
 
       final isGroup = _groups.containsKey(conversationId);
@@ -11818,6 +13399,9 @@ class CleonaService implements ICleonaService {
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      if (mismatchResult == null) return;
+      final isMembershipMismatch = mismatchResult;
       final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
       final conversationId = frame.groupId.isNotEmpty
           ? bytesToHex(Uint8List.fromList(frame.groupId))
@@ -11843,6 +13427,7 @@ class CleonaService implements ICleonaService {
         filename: metadata.filename,
         thumbnailBase64: thumbnailB64,
         mediaState: MediaDownloadState.announced,
+        membershipMismatch: isMembershipMismatch,
       );
 
       final isGroup = _groups.containsKey(conversationId);
@@ -12101,8 +13686,9 @@ class CleonaService implements ICleonaService {
   void _handleReactionV3(
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
-      final reaction = proto.EmojiReaction.fromBuffer(frame.payload);
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      if (_checkGroupPostMembership(frame, senderHex) == null) return;
+      final reaction = proto.EmojiReaction.fromBuffer(frame.payload);
       final targetMsgId =
           bytesToHex(Uint8List.fromList(reaction.messageId));
       final emoji = reaction.emoji;
@@ -12145,8 +13731,11 @@ class CleonaService implements ICleonaService {
   void _handleReplyV3(
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
-      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      if (mismatchResult == null) return;
+      final isMembershipMismatch = mismatchResult;
+      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
       final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
       final conversationId = frame.groupId.isNotEmpty
           ? bytesToHex(Uint8List.fromList(frame.groupId))
@@ -12166,6 +13755,7 @@ class CleonaService implements ICleonaService {
         status: MessageStatus.delivered,
         isOutgoing: false,
         readAt: DateTime.now(),
+        membershipMismatch: isMembershipMismatch,
       );
       final isChannel = _channels.containsKey(conversationId);
       final isGroup = _groups.containsKey(conversationId);
@@ -12184,8 +13774,9 @@ class CleonaService implements ICleonaService {
   void _handleEditV3(
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
-      final editMsg = proto.MessageEdit.fromBuffer(frame.payload);
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      if (_checkGroupPostMembership(frame, senderHex) == null) return;
+      final editMsg = proto.MessageEdit.fromBuffer(frame.payload);
       final originalMsgId =
           bytesToHex(Uint8List.fromList(editMsg.originalMessageId));
       final conversationId = frame.groupId.isNotEmpty
@@ -12239,8 +13830,9 @@ class CleonaService implements ICleonaService {
   void _handleDeleteV3(
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     try {
-      final deleteMsg = proto.MessageDelete.fromBuffer(frame.payload);
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      if (_checkGroupPostMembership(frame, senderHex) == null) return;
+      final deleteMsg = proto.MessageDelete.fromBuffer(frame.payload);
       final targetMsgId =
           bytesToHex(Uint8List.fromList(deleteMsg.messageId));
       final conversationId = frame.groupId.isNotEmpty
@@ -12638,25 +14230,60 @@ class CleonaService implements ICleonaService {
       final existing = _contacts[senderHex];
       final allowAutoOverwrite = snapshot.isOuterVerified;
       if (existing != null && existing.status == 'accepted' && allowAutoOverwrite) {
-        existing.displayName = cr.displayName;
-        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
-        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-        existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
-        if (cr.profilePicture.isNotEmpty) {
-          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+        // RC-1 (§8.1+§8.3): detect identity key change before overwrite
+        final storedEd25519 = existing.ed25519Pk;
+        final incomingEd25519 = Uint8List.fromList(cr.ed25519PublicKey);
+
+        // Restlücke A: accepted contact with empty stored key — treat as fresh CR
+        if (storedEd25519 == null || storedEd25519.isEmpty) {
+          _log.warn('RC-1: accepted contact ${senderHex.substring(0, 8)} has no stored ed25519Pk — routing to Inbox');
         }
-        // Refresh device ID so sendToUser → deviceNodeIds fallback stays warm.
-        if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+        // Same-Seed-Reinstall: keys unchanged — silent refresh
+        else if (_bytesEqual(storedEd25519, incomingEd25519)) {
+          existing.displayName = cr.displayName;
+          existing.ed25519Pk = incomingEd25519;
+          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
+          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
+          existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
+          if (cr.profilePicture.isNotEmpty) {
+            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+          }
+          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
+            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+          }
+          _saveContacts();
+          _log.info('Re-contact from accepted ${cr.displayName} (same keys) — sending acceptance');
+          acceptContactRequest(senderHex);
+          return;
         }
-        _saveContacts();
-        _log.info('Re-contact from accepted ${cr.displayName} — sending acceptance response');
-        // Re-send acceptance so the remote side knows we still have them.
-        // Not awaited intentionally: sendEnvelope is ACK-tracked by AckTracker,
-        // and the CR retry timer handles failures — no need to block here.
-        acceptContactRequest(senderHex);
-        return;
+        // Key changed — fire §8.3 Key-Change-Detection, overwrite with verification reset
+        else {
+          final prevLevel = existing.verificationLevel;
+          final keyChange = onIdentityRotation(prevLevel);
+          existing.displayName = cr.displayName;
+          existing.ed25519Pk = incomingEd25519;
+          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
+          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
+          existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
+          if (cr.profilePicture.isNotEmpty) {
+            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+          }
+          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
+            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+          }
+          existing.verificationLevel = keyChange.newLevel;
+          _saveContacts();
+          _log.info('RC-1: Re-contact from ${cr.displayName} with CHANGED keys — '
+              'overwrite + §8.3 reset $prevLevel→${keyChange.newLevel}');
+          try {
+            onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
+          } catch (e) {
+            _log.warn('onContactIdentityRotated listener threw: $e');
+          }
+          acceptContactRequest(senderHex);
+          onStateChanged?.call();
+          return;
+        }
       }
       if (existing != null && existing.status == 'accepted' && !allowAutoOverwrite) {
         // F4-Gate triggered: status==accepted, but outer-sig was not verified.
@@ -12786,6 +14413,9 @@ class CleonaService implements ICleonaService {
         // callback — just refresh the keys in case they changed.
         final wasAlreadyAccepted = existing.status == 'accepted';
 
+        // RC-1 (§8.1+§8.3): snapshot old key before overwrite
+        final oldEd25519 = existing.ed25519Pk;
+
         final picBase64 = resp.profilePicture.isNotEmpty
             ? base64Encode(resp.profilePicture)
             : null;
@@ -12800,6 +14430,45 @@ class CleonaService implements ICleonaService {
         existing.seedDeviceIdHex = null;
         existing.seedDxkB64 = null;
         existing.seedDmkB64 = null;
+        existing.seedEpB64 = null;
+
+        // RC-1 (§8.1+§8.3): if already accepted AND keys changed, fire §8.3
+        if (wasAlreadyAccepted) {
+          final incomingEd25519 = Uint8List.fromList(resp.ed25519PublicKey);
+          final identityKeyChanged = oldEd25519 == null || oldEd25519.isEmpty ||
+              !_bytesEqual(oldEd25519, incomingEd25519);
+
+          existing.ed25519Pk = incomingEd25519;
+          existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
+          existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
+          existing.mlDsaPk = Uint8List.fromList(resp.mlDsaPublicKey);
+          existing.displayName = resp.displayName;
+          if (picBase64 != null) existing.profilePictureBase64 = picBase64;
+          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+
+          if (identityKeyChanged) {
+            final prevLevel = existing.verificationLevel;
+            final keyChange = onIdentityRotation(prevLevel);
+            existing.verificationLevel = keyChange.newLevel;
+            _saveContacts();
+            _log.info('RC-1: CRR retry from ${senderHex.substring(0, 8)} with CHANGED keys — '
+                '§8.3 reset $prevLevel→${keyChange.newLevel}');
+            try {
+              onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
+            } catch (e) {
+              _log.warn('onContactIdentityRotated listener threw: $e');
+            }
+            onStateChanged?.call();
+            return;
+          }
+
+          _saveContacts();
+          _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
+          onStateChanged?.call();
+          return;
+        }
+
+        // First acceptance path
         existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
         existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
         existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
@@ -12809,13 +14478,23 @@ class CleonaService implements ICleonaService {
         // Store sender's device ID so sendToUser can reach them immediately
         // even before the DHT auth-manifest is warm (§2.6.2 bootstrapping).
         existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-        _saveContacts();
 
-        if (wasAlreadyAccepted) {
-          _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
-          onStateChanged?.call();
-          return;
+        // RC-1: first CRR acceptance — check if keys differ from pending_outgoing entry
+        final identityKeyChanged = oldEd25519 != null && oldEd25519.isNotEmpty &&
+            !_bytesEqual(oldEd25519, Uint8List.fromList(resp.ed25519PublicKey));
+        if (identityKeyChanged) {
+          final keyChange = onIdentityRotation(existing.verificationLevel);
+          existing.verificationLevel = keyChange.newLevel;
+          _log.info('RC-1: CRR first-accept from ${senderHex.substring(0, 8)} with '
+              'changed keys — §8.3 reset');
+          try {
+            onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
+          } catch (e) {
+            _log.warn('onContactIdentityRotated listener threw: $e');
+          }
         }
+
+        _saveContacts();
 
         // Create conversation with system message so the contact appears
         // immediately in the "Aktuell" tab (not only in "Kontakte" tab).
@@ -12878,6 +14557,69 @@ class CleonaService implements ICleonaService {
     final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
     final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
 
+    final isUpdate = _groups.containsKey(groupIdHex);
+
+    // GM-1 (§9.1.4): authority check for group updates
+    int newEpoch;
+    if (isUpdate) {
+      final oldGroup = _groups[groupIdHex]!;
+      final senderMember = oldGroup.members[senderHex];
+
+      if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
+        _log.warn('GM-1: GROUP_INVITE update from non-admin ${senderHex.substring(0, 8)} '
+            'for "${oldGroup.name}" — rejected');
+        return;
+      }
+
+      final wireEpoch = invite.membershipEpoch.toInt();
+
+      if (wireEpoch > 0 && wireEpoch <= oldGroup.membershipEpoch) {
+        _log.warn('GM-1: GROUP_INVITE epoch $wireEpoch <= ${oldGroup.membershipEpoch} '
+            'from ${senderHex.substring(0, 8)} — rejected (replay/downgrade)');
+        return;
+      }
+
+      if (invite.membershipHash.isNotEmpty && invite.membershipSigEd25519.isNotEmpty) {
+        final senderEd25519Pk = senderMember.ed25519Pk;
+        if (senderEd25519Pk != null && senderEd25519Pk.isNotEmpty) {
+          final sigOk = SodiumFFI().verifyEd25519(
+              Uint8List.fromList(invite.membershipHash),
+              Uint8List.fromList(invite.membershipSigEd25519),
+              senderEd25519Pk);
+          if (!sigOk) {
+            _log.warn('GM-1: GROUP_INVITE Ed25519 sig INVALID from ${senderHex.substring(0, 8)} — rejected');
+            return;
+          }
+        }
+        if (invite.membershipSigMlDsa.isNotEmpty) {
+          final senderMlDsaPk = _contacts[senderHex]?.mlDsaPk;
+          if (senderMlDsaPk != null && senderMlDsaPk.isNotEmpty) {
+            final mlDsaOk = OqsFFI().mlDsaVerify(
+                Uint8List.fromList(invite.membershipHash),
+                Uint8List.fromList(invite.membershipSigMlDsa),
+                senderMlDsaPk);
+            if (!mlDsaOk) {
+              _log.warn('GM-1: GROUP_INVITE ML-DSA sig INVALID from ${senderHex.substring(0, 8)} — rejected');
+              return;
+            }
+          }
+        }
+        final expectedHash = _computeMembershipHash(wireEpoch, groupIdHex, members);
+        if (!_bytesEqual(Uint8List.fromList(invite.membershipHash), expectedHash)) {
+          _log.warn('GM-1: GROUP_INVITE hash mismatch from ${senderHex.substring(0, 8)} — rejected');
+          return;
+        }
+      } else if (wireEpoch == 0) {
+        _log.debug('GM-1: GROUP_INVITE without epoch/sig from ${senderHex.substring(0, 8)} — legacy-unverified');
+      }
+
+      newEpoch = wireEpoch > 0 ? wireEpoch : oldGroup.membershipEpoch;
+    } else {
+      newEpoch = invite.membershipEpoch.toInt() > 0
+          ? invite.membershipEpoch.toInt()
+          : 1;
+    }
+
     final group = GroupInfo(
       groupIdHex: groupIdHex,
       name: invite.groupName,
@@ -12885,9 +14627,9 @@ class CleonaService implements ICleonaService {
       pictureBase64: invite.groupPicture.isNotEmpty ? base64Encode(invite.groupPicture) : null,
       ownerNodeIdHex: ownerHex,
       members: members,
+      membershipEpoch: newEpoch,
     );
 
-    final isUpdate = _groups.containsKey(groupIdHex);
     _groups[groupIdHex] = group;
     _saveGroups();
 
@@ -12987,11 +14729,39 @@ class CleonaService implements ICleonaService {
       return;
     }
 
-    // Verify sender is owner or admin
+    // Verify sender is owner or admin (post permission)
     final senderMember = channel.members[senderHex];
     if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
       _log.warn('CHANNEL_POST from unauthorized sender $senderHex');
       return;
+    }
+
+    // GM-4 (§9.1.4): split-view detection on channel posts
+    bool isMembershipMismatch = false;
+    final wireEpoch = frame.groupMembershipEpoch.toInt();
+    if (wireEpoch > 0 && frame.groupMembershipHash.isNotEmpty) {
+      final wireHash = Uint8List.fromList(frame.groupMembershipHash);
+      final localEpoch = channel.membershipEpoch;
+      final localHash = _computeChannelMembershipHash(
+          localEpoch, channelIdHex, channel.members);
+      if (wireEpoch == localEpoch && !_bytesEqual(wireHash, localHash)) {
+        // Same epoch, different hash → split-view anomaly
+        _log.warn('GM-4: CHANNEL SPLIT-VIEW in "${channel.name}" — '
+            'local epoch=$localEpoch, wire epoch=$wireEpoch, hash mismatch '
+            'from ${senderHex.substring(0, 8)}');
+        isMembershipMismatch = true;
+      } else if (wireEpoch > localEpoch) {
+        // Sender has newer membership — edge-triggered resync to owner
+        final prevRequested = _resyncRequestedAtEpoch[channelIdHex] ?? 0;
+        if (wireEpoch > prevRequested) {
+          _resyncRequestedAtEpoch[channelIdHex] = wireEpoch;
+          _sendChannelResyncRequest(channel);
+        }
+      } else if (wireEpoch < localEpoch &&
+          !_bytesEqual(wireHash, _computeChannelMembershipHash(
+              wireEpoch, channelIdHex, channel.members))) {
+        isMembershipMismatch = true;
+      }
     }
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
@@ -13007,6 +14777,7 @@ class CleonaService implements ICleonaService {
       type: UiMessageType.channelPost,
       status: MessageStatus.delivered,
       isOutgoing: false,
+      membershipMismatch: isMembershipMismatch,
     );
 
     _addMessageToConversation(channelIdHex, msg, isChannel: true);
@@ -13045,6 +14816,70 @@ class CleonaService implements ICleonaService {
     final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
     final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
 
+    // GM-4 (§9.1.4): Authority gate for existing channels
+    final oldChannel = _channels[channelIdHex];
+    final isUpdate = oldChannel != null;
+    int newEpoch = 0;
+
+    if (isUpdate) {
+      final wireEpoch = invite.membershipEpoch.toInt();
+
+      if (wireEpoch > 0) {
+        // Sender must be owner or admin in the OLD state
+        final senderOldMember = oldChannel.members[senderHex];
+        if (senderOldMember == null ||
+            (senderOldMember.role != 'owner' && senderOldMember.role != 'admin')) {
+          _log.warn('GM-4: CHANNEL_INVITE from non-admin ${senderHex.substring(0, 8)} '
+              'in "${oldChannel.name}" — rejected');
+          return;
+        }
+
+        // Epoch must be strictly increasing
+        if (wireEpoch <= oldChannel.membershipEpoch) {
+          _log.warn('GM-4: CHANNEL_INVITE epoch $wireEpoch <= ${oldChannel.membershipEpoch} '
+              'in "${oldChannel.name}" — rejected (replay/downgrade)');
+          return;
+        }
+
+        // Verify hybrid signature over membership hash
+        final wireHash = Uint8List.fromList(invite.membershipHash);
+        final sigEd = Uint8List.fromList(invite.membershipSigEd25519);
+        final sigMl = Uint8List.fromList(invite.membershipSigMlDsa);
+        if (wireHash.isNotEmpty && sigEd.isNotEmpty) {
+          final senderEd25519Pk = senderOldMember.ed25519Pk;
+          if (senderEd25519Pk != null && senderEd25519Pk.isNotEmpty) {
+            if (!SodiumFFI().verifyEd25519(sigEd, wireHash, senderEd25519Pk)) {
+              _log.warn('GM-4: CHANNEL_INVITE Ed25519 sig invalid from ${senderHex.substring(0, 8)} — rejected');
+              return;
+            }
+          }
+          if (sigMl.isNotEmpty) {
+            final senderMlDsaPk = _contacts[senderHex]?.mlDsaPk;
+            if (senderMlDsaPk != null && senderMlDsaPk.isNotEmpty) {
+              if (!OqsFFI().mlDsaVerify(wireHash, sigMl, senderMlDsaPk)) {
+                _log.warn('GM-4: CHANNEL_INVITE ML-DSA sig invalid from ${senderHex.substring(0, 8)} — rejected');
+                return;
+              }
+            }
+          }
+          // Verify hash matches the member list
+          final expectedHash = _computeChannelMembershipHash(wireEpoch, channelIdHex, members);
+          if (!_bytesEqual(wireHash, expectedHash)) {
+            _log.warn('GM-4: CHANNEL_INVITE hash mismatch — tampered member list? Rejected.');
+            return;
+          }
+        }
+        newEpoch = wireEpoch;
+      } else {
+        // Legacy sender (no epoch) — accept as legacy-unverified
+        newEpoch = oldChannel.membershipEpoch;
+      }
+    } else {
+      // New channel — accept with wire epoch
+      newEpoch = invite.membershipEpoch.toInt();
+      if (newEpoch <= 0) newEpoch = 1;
+    }
+
     final channel = ChannelInfo(
       channelIdHex: channelIdHex,
       name: invite.channelName,
@@ -13055,9 +14890,9 @@ class CleonaService implements ICleonaService {
       isPublic: invite.isPublic,
       isAdult: invite.isAdult,
       language: invite.language.isNotEmpty ? invite.language : 'de',
+      membershipEpoch: newEpoch,
     );
 
-    final isUpdate = _channels.containsKey(channelIdHex);
     _channels[channelIdHex] = channel;
     _saveChannels();
 
@@ -13554,6 +15389,12 @@ class CleonaService implements ICleonaService {
             _log.error('DEVICE_ANNOUNCE processing failed: $e');
           }
           break;
+        case proto.TwinSyncType.ROTATION_APPROVAL_REQUEST:
+          _handleRotationApprovalRequest(sync.payload, senderDeviceId);
+          break;
+        case proto.TwinSyncType.ROTATION_APPROVAL_RESPONSE:
+          _handleRotationApprovalResponse(sync.payload, senderDeviceId);
+          break;
         default:
           _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
       }
@@ -13562,10 +15403,402 @@ class CleonaService implements ICleonaService {
       _log.error('TWIN_SYNC processing failed: $e');
     }
   }
-  void _handleDevicePairRequestV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: DEVICE_PAIR_REQUEST (C4)');
-  void _handleDevicePairApproveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: DEVICE_PAIR_APPROVE (C4)');
+
+  // §7.5: Co-Auth — collect approval tokens from linked devices during rotation.
+  Completer<void>? _rotationApprovalCompleter;
+  final List<RotationApprovalToken> _collectedApprovalTokens = [];
+  Uint8List? _pendingRotationHash;
+
+  /// §7.5: Linked Device receives ROTATION_APPROVAL_REQUEST from Primary.
+  /// Signs the rotation hash with Device-Sig keys and sends back.
+  void _handleRotationApprovalRequest(List<int> payload, Uint8List senderDeviceId) {
+    try {
+      final req = proto.RotationApprovalRequestPayload.fromBuffer(payload);
+      final rotationHash = Uint8List.fromList(req.rotationHash);
+      _log.info('§7.5 ROTATION_APPROVAL_REQUEST received — signing with Device-Sig keys');
+
+      final deviceKp = node.deviceKeyPair;
+      final ed25519Sig = SodiumFFI().signEd25519(rotationHash, deviceKp.ed25519PrivateKey);
+      final mlDsaSig = OqsFFI().mlDsaSign(rotationHash, deviceKp.mlDsaPrivateKey);
+
+      final token = proto.RotationApprovalToken()
+        ..deviceNodeId = identity.deviceNodeId
+        ..rotationHash = rotationHash
+        ..deviceEd25519Sig = ed25519Sig
+        ..deviceMlDsaSig = mlDsaSig;
+      final response = proto.RotationApprovalResponsePayload()
+        ..token = token
+        ..rejected = false;
+
+      _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_RESPONSE,
+          Uint8List.fromList(response.writeToBuffer()));
+      _log.info('§7.5 ROTATION_APPROVAL_RESPONSE sent (approved)');
+    } catch (e) {
+      _log.error('§7.5 ROTATION_APPROVAL_REQUEST handling failed: $e');
+    }
+  }
+
+  /// §7.5: Primary receives ROTATION_APPROVAL_RESPONSE from a Linked Device.
+  void _handleRotationApprovalResponse(List<int> payload, Uint8List senderDeviceId) {
+    try {
+      final resp = proto.RotationApprovalResponsePayload.fromBuffer(payload);
+      if (_pendingRotationHash == null) {
+        _log.warn('§7.5 ROTATION_APPROVAL_RESPONSE received but no rotation pending');
+        return;
+      }
+      final senderHex = bytesToHex(senderDeviceId);
+      if (resp.rejected) {
+        _log.warn('§7.5 Device ${senderHex.substring(0, 8)} REJECTED rotation — '
+            'sending ROTATION_REJECTION_ALERT to contacts');
+        _sendRotationRejectionAlert(senderDeviceId);
+        return;
+      }
+      if (!resp.hasToken()) {
+        _log.warn('§7.5 ROTATION_APPROVAL_RESPONSE without token from '
+            '${senderHex.substring(0, 8)} — skipped');
+        return;
+      }
+      _collectedApprovalTokens.add(RotationApprovalToken.fromProto(resp.token));
+      _log.info('§7.5 Collected approval ${_collectedApprovalTokens.length} '
+          'from ${senderHex.substring(0, 8)}');
+
+      final pub = _identityPublisher;
+      final totalDevices = (pub?.delegations.length ?? 0) + 1;
+      final required = rotationQuorum(totalDevices);
+      if (_collectedApprovalTokens.length + 1 >= required) {
+        _rotationApprovalCompleter?.complete();
+      }
+    } catch (e) {
+      _log.error('§7.5 ROTATION_APPROVAL_RESPONSE handling failed: $e');
+    }
+  }
+
+  /// §7.5: A Linked Device actively rejects the rotation — sends alert
+  /// DIRECTLY to all contacts (bypassing Primary, which may be compromised).
+  void _sendRotationRejectionAlert(Uint8List rejectingDeviceId) {
+    final rotHash = _pendingRotationHash ?? Uint8List(0);
+    final deviceKp = node.deviceKeyPair;
+    final alert = proto.RotationRejectionAlertPayload()
+      ..userId = identity.userId
+      ..deviceNodeId = rejectingDeviceId
+      ..rotationHash = rotHash
+      ..deviceEd25519Sig = SodiumFFI().signEd25519(rotHash, deviceKp.ed25519PrivateKey)
+      ..deviceMlDsaSig = OqsFFI().mlDsaSign(rotHash, deviceKp.mlDsaPrivateKey);
+
+    final payloadBytes = Uint8List.fromList(alert.writeToBuffer());
+    for (final contact in _contacts.values) {
+      if (contact.status != 'accepted') continue;
+      try {
+        sendToUser(
+          recipientUserId: contact.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_ROTATION_REJECTION_ALERT,
+          payload: payloadBytes,
+        );
+      } catch (e) {
+        _log.warn('§7.5 Failed to send ROTATION_REJECTION_ALERT to '
+            '${contact.displayName}: $e');
+      }
+    }
+  }
+
+  // §7.1 LD-2: Pending pair requests awaiting user approval on this (Primary) device.
+  final Map<String, proto.DevicePairRequestV3> _pendingPairRequests = {};
+
+  void _handleDevicePairRequestV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    try {
+      final request = proto.DevicePairRequestV3.fromBuffer(f.payload);
+      final deviceIdHex = bytesToHex(sd);
+      _log.info('DEVICE_PAIR_REQUEST from device $deviceIdHex');
+
+      if (identity.masterSeed == null) {
+        _log.warn('Ignoring pair request: this device is not the Primary (no seed)');
+        return;
+      }
+
+      // §7.1 LD-9: auto-approve renewal from known linked devices
+      final pub = _identityPublisher;
+      if (pub != null) {
+        final isKnownLinked = pub.delegations
+            .any((d) => bytesToHex(d.deviceId) == deviceIdHex);
+        if (isKnownLinked) {
+          _log.info('LD-9: auto-approving renewal for known linked device '
+              '${deviceIdHex.substring(0, 8)}');
+          _pendingPairRequests[deviceIdHex] = request;
+          approvePairRequest(deviceIdHex);
+          return;
+        }
+      }
+
+      _pendingPairRequests[deviceIdHex] = request;
+      onDevicePairRequest?.call(deviceIdHex);
+    } catch (e) {
+      _log.error('Failed to parse DEVICE_PAIR_REQUEST: $e');
+    }
+  }
+
+  /// §7.1 LD-11: Initiate pairing from this device (wants to become Linked).
+  /// Sends DEVICE_PAIR_REQUEST to our own userId — the Primary picks it up.
+  /// Also used for renewal (LD-9): already-linked devices can re-request to
+  /// get a fresh cert with a new 30-day window.
+  @override
+  Future<bool> sendDevicePairRequest() async {
+    final request = proto.DevicePairRequestV3()
+      ..deviceEd25519Pk = node.deviceKeyPair.ed25519PublicKey
+      ..deviceMlDsaPk = node.deviceKeyPair.mlDsaPublicKey
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
+
+    final sent = await sendToUser(
+      recipientUserId: identity.userId,
+      messageType: proto.MessageTypeV3.MTV3_DEVICE_PAIR_REQUEST,
+      payload: request.writeToBuffer(),
+    );
+
+    if (sent) {
+      _log.info('DEVICE_PAIR_REQUEST sent to own userId '
+          '(${identity.isLinkedDevice ? "renewal" : "initial pairing"})');
+    } else {
+      _log.warn('DEVICE_PAIR_REQUEST send failed — no route to Primary');
+    }
+    return sent;
+  }
+
+  void _handleDevicePairApproveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    try {
+      final approve = proto.DevicePairApproveV3.fromBuffer(f.payload);
+      final senderHex = bytesToHex(sd);
+      _log.info('DEVICE_PAIR_APPROVE from $senderHex — storing linked-device keys');
+
+      final parsed = DevicePairingService().parseApproval(approve);
+
+      if (!parsed.delegationCert.verify(
+          identity.ed25519PublicKey, identity.mlDsaPublicKey)) {
+        _log.error('DEVICE_PAIR_APPROVE: delegation cert signature INVALID — rejecting');
+        return;
+      }
+
+      LinkedDeviceKeysStore.save(
+        profileDir: profileDir,
+        fileEnc: _fileEnc,
+        keys: parsed,
+      );
+      applyLinkedDeviceKeys(parsed);
+      _log.info('DEVICE_PAIR_APPROVE accepted — persisted + applied, '
+          'caps=${parsed.delegationCert.capabilities}, '
+          'expiry=${parsed.delegationCert.maxValidUntilMs > 0 ? "${((parsed.delegationCert.maxValidUntilMs - DateTime.now().millisecondsSinceEpoch) / 86400000).toStringAsFixed(0)}d" : "none"}');
+    } catch (e) {
+      _log.error('Failed to process DEVICE_PAIR_APPROVE: $e');
+    }
+  }
+
+  /// §7.1 LD-2: Called from IPC when the user approves a pending pair request.
+  /// Builds the delegation material and sends DEVICE_PAIR_APPROVE to the requester.
+  Future<bool> approvePairRequest(String requestingDeviceIdHex) async {
+    final request = _pendingPairRequests.remove(requestingDeviceIdHex);
+    if (request == null) {
+      _log.warn('approvePairRequest: no pending request for $requestingDeviceIdHex');
+      return false;
+    }
+
+    final newDeviceId = hexToBytes(requestingDeviceIdHex);
+    final result = DevicePairingService().buildApproval(
+      identity: identity,
+      newDeviceId: newDeviceId,
+    );
+
+    // Send the approval (KEM-encrypted to the requesting device)
+    final sent = await sendToUser(
+      recipientUserId: identity.userId,
+      messageType: proto.MessageTypeV3.MTV3_DEVICE_PAIR_APPROVE,
+      payload: result.approvePayload.writeToBuffer(),
+    );
+
+    if (sent) {
+      _log.info('DEVICE_PAIR_APPROVE sent to $requestingDeviceIdHex');
+      // Update AuthManifest with the new delegation
+      _addDeviceDelegation(newDeviceId, result.delegationCert);
+      // §7.5: register linked device's Device-Sig pubkeys for Co-Auth
+      _identityPublisher?.addLinkedDeviceSigKeys(DeviceSigInfo(
+        deviceNodeId: newDeviceId,
+        deviceEd25519Pk: Uint8List.fromList(request.deviceEd25519Pk),
+        deviceMlDsaPk: Uint8List.fromList(request.deviceMlDsaPk),
+        isPrimary: false,
+      ));
+    }
+    return sent;
+  }
+
+  void _addDeviceDelegation(Uint8List deviceId, DeviceDelegation cert) {
+    // Add to authorized devices list (backward compat for old builds)
+    final deviceIdHex = bytesToHex(deviceId);
+    if (!_devices.containsKey(deviceIdHex)) {
+      final now = DateTime.now();
+      _devices[deviceIdHex] = DeviceRecord(
+        deviceId: deviceIdHex,
+        deviceName: 'Linked-${deviceIdHex.substring(0, 6)}',
+        platform: 'unknown',
+        firstSeen: now,
+        lastSeen: now,
+        deviceNodeIdHex: deviceIdHex,
+      );
+      _saveDevices();
+    }
+
+    // Republish AuthManifest with the new delegation cert
+    _identityPublisher?.addDelegation(cert);
+    _log.info('Added device delegation for ${deviceIdHex.substring(0, 8)}, '
+        'republishing AuthManifest');
+  }
+
+  /// §7.1 LD-7: Soft migration — apply LinkedDeviceKeys received via pairing
+  /// to this IdentityContext. Called when the user opts to convert a legacy
+  /// twin-device (seed-on-every-device) to the delegation model.
+  ///
+  /// After this call, [identity.isLinkedDevice] becomes true and all
+  /// Inner-Sigs use the delegated keys. The master seed is NOT wiped here
+  /// (that's a destructive operation requiring explicit user confirmation
+  /// in the GUI); it simply becomes unused for signing.
+  void applyLinkedDeviceKeys(LinkedDeviceKeys keys) {
+    identity.linkedDeviceKeys = keys;
+    _log.info('Applied linked-device delegation keys — '
+        'isLinkedDevice=${identity.isLinkedDevice}, '
+        'caps=${keys.delegationCert.capabilities}');
+  }
+
+  /// §7.1 LD-9: Periodic check — request renewal when cert expires within 7 days.
+  void _checkDelegationRenewal() {
+    if (!identity.isLinkedDevice) return;
+    final ldKeys = identity.linkedDeviceKeys;
+    if (ldKeys == null) return;
+    final cert = ldKeys.delegationCert;
+    if (cert.maxValidUntilMs == 0) return;
+    final remainingMs =
+        cert.maxValidUntilMs - DateTime.now().millisecondsSinceEpoch;
+    final remainingDays = remainingMs / (24 * 60 * 60 * 1000);
+    if (remainingDays <= 7 && remainingDays > 0) {
+      _log.info('LD-9: delegation cert expires in ${remainingDays.toStringAsFixed(1)} days — requesting renewal');
+      requestDelegationRenewal();
+    } else if (remainingDays <= 0) {
+      _log.warn('LD-9: delegation cert EXPIRED — requesting renewal');
+      requestDelegationRenewal();
+    }
+  }
+
+  /// §7.1 LD-8: Send per-device delegation rotation to a Linked Device.
+  /// Called from rotateIdentityKeys() BEFORE applying new keys locally,
+  /// so the TWIN_SYNC envelope is signed with the OLD User-Keys.
+  void _sendDelegationRotation({
+    required Uint8List targetDeviceId,
+    required int capabilities,
+    required int maxValidUntilMs,
+    required Uint8List newMasterSeed,
+    required Uint8List newEd25519Pk,
+    required Uint8List newMlDsaPk,
+    required Uint8List newX25519Pk,
+    required Uint8List newMlKemPk,
+    required Uint8List newX25519Sk,
+    required Uint8List newMlKemSk,
+  }) {
+    final delegEd = HdWallet.deriveDelegatedEd25519(newMasterSeed, targetDeviceId);
+    final mlDsaSeed = HdWallet.deriveDelegatedMlDsaSeed(newMasterSeed, targetDeviceId);
+    final delegMlDsa = OqsFFI().mlDsaKeypairDerand(mlDsaSeed);
+
+    // Cert signed with OLD User-Keys (Linked Device can verify)
+    final cert = DeviceDelegation.sign(
+      deviceId: targetDeviceId,
+      delegatedEd25519Pk: delegEd.publicKey,
+      delegatedMlDsaPk: delegMlDsa.publicKey,
+      capabilities: capabilities,
+      maxValidUntilMs: maxValidUntilMs,
+      userEd25519Sk: identity.ed25519SecretKey,
+      userMlDsaSk: identity.mlDsaSecretKey,
+    );
+
+    final payload = utf8.encode(jsonEncode({
+      'delegationRotation': true,
+      'targetDeviceId': bytesToHex(targetDeviceId),
+      'delegatedEd25519Pk': bytesToHex(delegEd.publicKey),
+      'delegatedEd25519Sk': bytesToHex(delegEd.secretKey),
+      'delegatedMlDsaPk': bytesToHex(delegMlDsa.publicKey),
+      'delegatedMlDsaSk': bytesToHex(delegMlDsa.secretKey),
+      'newUserEd25519Pk': bytesToHex(newEd25519Pk),
+      'newUserMlDsaPk': bytesToHex(newMlDsaPk),
+      'newUserX25519Pk': bytesToHex(newX25519Pk),
+      'newUserMlKemPk': bytesToHex(newMlKemPk),
+      'newUserX25519Sk': bytesToHex(newX25519Sk),
+      'newUserMlKemSk': bytesToHex(newMlKemSk),
+      'delegationCertProto': bytesToHex(cert.toProtoBytes()),
+    }));
+
+    _sendTwinSync(
+        proto.TwinSyncType.SETTINGS_CHANGED, Uint8List.fromList(payload));
+    _log.info('LD-8: delegation rotation sent to '
+        '${bytesToHex(targetDeviceId).substring(0, 8)}');
+  }
+
+  /// §7.1 LD-8: Handle delegation rotation on a Linked Device.
+  Future<void> _handleDelegationRotation(Map<String, dynamic> json) async {
+    final targetHex = json['targetDeviceId'] as String;
+    if (targetHex != bytesToHex(identity.deviceNodeId)) return;
+
+    if (!identity.isLinkedDevice) {
+      _log.warn('LD-8: received delegation rotation but not a Linked Device');
+      return;
+    }
+
+    final certBytes = hexToBytes(json['delegationCertProto'] as String);
+    final cert = DeviceDelegation.fromProtoBytes(certBytes);
+
+    if (!cert.verify(identity.ed25519PublicKey, identity.mlDsaPublicKey)) {
+      _log.error('LD-8: delegation rotation cert INVALID — rejecting');
+      return;
+    }
+
+    final newUserEd25519Pk = hexToBytes(json['newUserEd25519Pk'] as String);
+    final newUserMlDsaPk = hexToBytes(json['newUserMlDsaPk'] as String);
+    final newUserX25519Pk = hexToBytes(json['newUserX25519Pk'] as String);
+    final newUserMlKemPk = hexToBytes(json['newUserMlKemPk'] as String);
+    final newUserX25519Sk = hexToBytes(json['newUserX25519Sk'] as String);
+    final newUserMlKemSk = hexToBytes(json['newUserMlKemSk'] as String);
+
+    final newLinkedKeys = LinkedDeviceKeys(
+      delegatedEd25519Pk: hexToBytes(json['delegatedEd25519Pk'] as String),
+      delegatedEd25519Sk: hexToBytes(json['delegatedEd25519Sk'] as String),
+      delegatedMlDsaPk: hexToBytes(json['delegatedMlDsaPk'] as String),
+      delegatedMlDsaSk: hexToBytes(json['delegatedMlDsaSk'] as String),
+      userX25519Sk: newUserX25519Sk,
+      userMlKemSk: newUserMlKemSk,
+      delegationCert: cert,
+      userId: identity.userId,
+      displayName: identity.displayName,
+    );
+
+    LinkedDeviceKeysStore.save(
+      profileDir: profileDir,
+      fileEnc: _fileEnc,
+      keys: newLinkedKeys,
+    );
+
+    identity.rotateDelegation(
+      newUserEd25519Pk: newUserEd25519Pk,
+      newUserMlDsaPk: newUserMlDsaPk,
+      newUserX25519Pk: newUserX25519Pk,
+      newUserMlKemPk: newUserMlKemPk,
+      newUserX25519Sk: newUserX25519Sk,
+      newUserMlKemSk: newUserMlKemSk,
+      newLinkedKeys: newLinkedKeys,
+    );
+
+    node.broadcastAddressUpdate();
+    final pub = _identityPublisher;
+    if (pub != null) {
+      pub.stop();
+      unawaited(pub.start());
+    }
+    onStateChanged?.call();
+    _log.info('LD-8: delegation rotation applied from Primary — '
+        'chain length ${identity.rotationChain.length}');
+  }
+
   void _handleDeviceRevocationV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     // V3 direct: inner payload is the DeviceRecord protobuf, already
     // decrypted + authenticated by the V3 pipeline. §26 authorization check
@@ -14173,7 +16406,11 @@ class _JurySession {
   final List<String> jurorNodeIds;
   final bool isPlausibilityJury;
   final DateTime createdAt;
+  final int epochDay;
+  final int juryRound;
+  final Uint8List eligibilitySnapshotHash;
   final Map<String, JuryVoteResult> votes = {};
+  final Map<String, _JurorVerdictSigData> verdictSigs = {};
   bool isComplete = false;
 
   _JurySession({
@@ -14184,7 +16421,17 @@ class _JurySession {
     required this.jurorNodeIds,
     this.isPlausibilityJury = false,
     required this.createdAt,
+    required this.epochDay,
+    this.juryRound = 0,
+    required this.eligibilitySnapshotHash,
   });
+}
+
+class _JurorVerdictSigData {
+  final Uint8List sigEd25519;
+  final Uint8List sigMlDsa;
+  final int vote;
+  _JurorVerdictSigData({required this.sigEd25519, required this.sigMlDsa, required this.vote});
 }
 
 /// §2.2.4: V3-direct adapter (Welle 2A). IdentityPublisher hands us a

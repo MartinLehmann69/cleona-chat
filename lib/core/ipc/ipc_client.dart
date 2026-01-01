@@ -52,6 +52,7 @@ class IpcClient implements ICleonaService {
   Uint8List _deviceX25519Pk = Uint8List(0);
   Uint8List _deviceMlKemPk = Uint8List(0);
   Uint8List _userEd25519Pk = Uint8List(0);
+  Uint8List _foundingEd25519Pk = Uint8List(0);
   String _displayName = '';
   int _port = 0;
   int _peerCount = 0;
@@ -506,6 +507,40 @@ class IpcClient implements ICleonaService {
         final pendingCount = (event.data['pendingCount'] as num?)?.toInt() ?? 0;
         onKeyRotationPendingExpired?.call(contactHex, pendingCount);
         break;
+      case 'contact_identity_rotated':
+        // SR-1 (§7.4b step 6 / §8.3): a contact emergency-rotated; the
+        // verification level was reset. Surface the key-change warning.
+        final contactHex = event.data['contactNodeIdHex'] as String? ?? '';
+        final displayName = event.data['displayName'] as String? ?? '';
+        final wasVerified = event.data['wasVerified'] as bool? ?? false;
+        onContactIdentityRotated?.call(contactHex, displayName, wasVerified);
+        onStateChanged?.call();
+        break;
+      case 'contact_restore_detected':
+        // H-2 (§6.3.5): a contact restored their identity (new device).
+        final contactHex = event.data['contactNodeIdHex'] as String? ?? '';
+        final displayName = event.data['displayName'] as String? ?? '';
+        final keyChanged = event.data['identityKeyChanged'] as bool? ?? false;
+        onContactRestoreDetected?.call(contactHex, displayName, keyChanged);
+        onStateChanged?.call();
+        break;
+      case 'rotation_co_auth_warning':
+        // §7.5: rotation without device quorum — possible Primary theft.
+        final coAuthContactHex = event.data['contactNodeIdHex'] as String? ?? '';
+        final coAuthDisplayName = event.data['displayName'] as String? ?? '';
+        final tokensPresent = event.data['tokensPresent'] as int? ?? 0;
+        final tokensRequired = event.data['tokensRequired'] as int? ?? 0;
+        onRotationCoAuthWarning?.call(
+            coAuthContactHex, coAuthDisplayName, tokensPresent, tokensRequired);
+        onStateChanged?.call();
+        break;
+      case 'rotation_rejection_alert':
+        // §7.5: a linked device actively rejected a rotation.
+        final rejectContactHex = event.data['contactNodeIdHex'] as String? ?? '';
+        final rejectDisplayName = event.data['displayName'] as String? ?? '';
+        onRotationRejectionAlert?.call(rejectContactHex, rejectDisplayName);
+        onStateChanged?.call();
+        break;
       case 'nat_wizard_triggered':
         // §27.9: daemon detected sustained relay-only state. GUI decides
         // whether to show the dialog (home_screen listens).
@@ -515,6 +550,10 @@ class IpcClient implements ICleonaService {
         // User-initiated (connection-icon tap) — bypass the GUI's
         // auto-trigger latch so the dialog always opens on demand.
         onNatWizardUserRequested?.call();
+        break;
+      case 'device_pair_request':
+        final pairDeviceHex = event.data['deviceIdHex'] as String? ?? '';
+        onDevicePairRequest?.call(pairDeviceHex);
         break;
     }
   }
@@ -534,6 +573,13 @@ class IpcClient implements ICleonaService {
     if (epB64 != null && epB64.isNotEmpty) {
       try { _userEd25519Pk = base64Decode(epB64); } catch (_) {}
     }
+    // SR-2: founding anchor; old daemons without the field → getter falls
+    // back to ep (correct for never-rotated identities, which is all a
+    // pre-SR-2 daemon can host under the stable-anchor model).
+    final fpB64 = state['foundingEd25519PkB64'] as String?;
+    if (fpB64 != null && fpB64.isNotEmpty) {
+      try { _foundingEd25519Pk = base64Decode(fpB64); } catch (_) {}
+    }
     _displayName = state['displayName'] as String? ?? _displayName;
     _port = state['port'] as int? ?? _port;
     _peerCount = state['peerCount'] as int? ?? _peerCount;
@@ -541,6 +587,9 @@ class IpcClient implements ICleonaService {
     _mobileFallbackActive = state['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
     _fragmentCount = state['fragmentCount'] as int? ?? _fragmentCount;
     _isRunning = state['isRunning'] as bool? ?? _isRunning;
+    _isLinkedDevice = state['isLinkedDevice'] as bool? ?? _isLinkedDevice;
+    final lds = state['linkedDeviceStatus'] as Map<String, dynamic>?;
+    if (lds != null) _cachedLinkedDeviceStatus = LinkedDeviceStatus.fromJson(lds);
     _profilePictureBase64 = state['profilePicture'] as String?;
     _profileDescription = state['profileDescription'] as String?;
     _isGuardianSetUp = state['isGuardianSetUp'] as bool? ?? false;
@@ -804,6 +853,9 @@ class IpcClient implements ICleonaService {
   @override
   Uint8List get userEd25519Pk => _userEd25519Pk;
   @override
+  Uint8List get foundingEd25519Pk =>
+      _foundingEd25519Pk.isNotEmpty ? _foundingEd25519Pk : _userEd25519Pk;
+  @override
   String get displayName => _displayName;
   @override
   int get port => _port;
@@ -822,6 +874,22 @@ class IpcClient implements ICleonaService {
   int get fragmentCount => _fragmentCount;
   @override
   bool get isRunning => _isRunning;
+  @override
+  bool get isLinkedDevice => _isLinkedDevice;
+  bool _isLinkedDevice = false;
+
+  @override
+  LinkedDeviceStatus get linkedDeviceStatus {
+    if (!_isLinkedDevice) return LinkedDeviceStatus(isLinkedDevice: false);
+    return _cachedLinkedDeviceStatus ?? LinkedDeviceStatus(isLinkedDevice: true);
+  }
+  LinkedDeviceStatus? _cachedLinkedDeviceStatus;
+
+  @override
+  Future<bool> requestDelegationRenewal() async {
+    final resp = await _sendRequest('send_device_pair_request');
+    return resp.success;
+  }
   // sec-h5 §8.2 / T11 + Folge-Task 2026-04-26: reducedMode is a per-session
   // flag toggled by the GUI splash. On Desktop the splash runs in this GUI
   // process while CleonaService lives in the daemon — we mirror the bool
@@ -1890,6 +1958,8 @@ class IpcClient implements ICleonaService {
   String get localDeviceId => _localDeviceId;
 
   void Function()? onDevicesUpdated;
+  @override
+  void Function(String deviceIdHex)? onDevicePairRequest;
 
   @override
   void renameDevice(String deviceId, String newName) {
@@ -1910,6 +1980,27 @@ class IpcClient implements ICleonaService {
     if (resp.success) {
       _devices.removeWhere((d) => d.deviceId == deviceId);
     }
+    return resp.success;
+  }
+
+  /// §7.1: Approve a pending device-pairing request (Primary → Linked Device).
+  Future<bool> approveDevicePair(String deviceIdHex) async {
+    final resp = await _sendRequest('approve_device_pair', params: {
+      'deviceIdHex': deviceIdHex,
+    });
+    return resp.success;
+  }
+
+  /// §7.1: Query whether this identity runs as a Linked Device.
+  Future<Map<String, dynamic>> getLinkedDeviceStatus() async {
+    final resp = await _sendRequest('get_linked_device_status');
+    return resp.data;
+  }
+
+  /// §7.1: Initiate pairing (this device wants to become a Linked Device).
+  @override
+  Future<bool> sendDevicePairRequest() async {
+    final resp = await _sendRequest('send_device_pair_request');
     return resp.success;
   }
 
@@ -1959,6 +2050,23 @@ class IpcClient implements ICleonaService {
   @override
   void Function(String contactNodeIdHex, int pendingCount)?
       onKeyRotationPendingExpired;
+
+  @override
+  void Function(
+          String contactNodeIdHex, String displayName, bool wasVerified)?
+      onContactIdentityRotated;
+
+  @override
+  void Function(
+          String contactNodeIdHex, String displayName, bool identityKeyChanged)?
+      onContactRestoreDetected;
+
+  @override
+  void Function(String contactNodeIdHex, String displayName,
+      int tokensPresent, int tokensRequired)? onRotationCoAuthWarning;
+  @override
+  void Function(String contactNodeIdHex, String displayName)?
+      onRotationRejectionAlert;
 
   @override
   Future<String> createPoll({
@@ -2466,6 +2574,7 @@ class IpcClient implements ICleonaService {
   ///   - `uri` (String): `cleona://reconnect?b=<base64url>` URI
   ///   - `peerCount` (int): number of peers included in the bundle
   ///   - `createdAtMs` (int): creation timestamp in milliseconds since epoch
+  @override
   Future<Map<String, dynamic>?> exportPeerBundle() async {
     final resp = await _sendRequest('export_peer_bundle');
     if (!resp.success) return null;
@@ -2491,6 +2600,7 @@ class IpcClient implements ICleonaService {
   ///   - `ageHours` (double): bundle age in hours
   ///   - `peerCount` (int): number of peers in the bundle
   ///   - `peersContacted` (int): number of peer addresses contacted
+  @override
   Future<Map<String, dynamic>> importPeerBundle({
     String? uri,
     String? bundleBase64,

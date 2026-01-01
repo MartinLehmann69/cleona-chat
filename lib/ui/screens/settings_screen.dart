@@ -16,6 +16,7 @@ import 'package:cleona/core/archive/whisper_ffi.dart';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_service.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/ui/screens/device_management_screen.dart';
@@ -80,6 +81,43 @@ class SettingsScreen extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showPairRequestDialog(BuildContext context) {
+    final locale = AppLocale.read(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: Icon(Icons.link, size: 48,
+            color: Theme.of(ctx).colorScheme.primary),
+        title: Text(locale.get('linked_device_request_pairing')),
+        content: Text(locale.get('linked_device_pair_request_body')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(locale.get('cancel')),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.send),
+            label: Text(locale.get('linked_device_request_pairing')),
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              bool ok = false;
+              if (service is IpcClient) {
+                ok = await (service as IpcClient).sendDevicePairRequest();
+              } else if (service is CleonaService) {
+                ok = await (service as CleonaService).sendDevicePairRequest();
+              }
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get(
+                    ok ? 'linked_device_request_sent' : 'linked_device_rejected'))),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
@@ -209,6 +247,13 @@ class SettingsScreen extends StatelessWidget {
                   MaterialPageRoute(builder: (_) => DeviceManagementScreen(service: service)),
                 ),
               ),
+              if (!service.isLinkedDevice)
+                ListTile(
+                  leading: const Icon(Icons.link),
+                  title: Text(locale.get('linked_device_request_pairing')),
+                  subtitle: Text(locale.get('linked_device_request_pairing_subtitle')),
+                  onTap: () => _showPairRequestDialog(context),
+                ),
             ],
           ),
 

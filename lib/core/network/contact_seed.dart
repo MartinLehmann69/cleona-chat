@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/compression.dart';
 import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
 
@@ -55,6 +57,14 @@ class ContactSeed {
   /// code") from an offline target. Outside the integrity-check input.
   final int? createdAtMs;
 
+  /// SR-2 (§8.1.1 / §3.1 stable anchor): founding User-Ed25519 pubkey —
+  /// the key whose hash IS the userId. Only emitted when the identity has
+  /// soft-re-keyed (`fp != ep`); the integrity check then anchors on `fp`
+  /// instead of `ep`. The binding founding→current `ep` is proven by the
+  /// rotation chain in the D1-verified Auth-Manifest at first resolution
+  /// (§4.3 path 2). URI param `fp`, QR formats 0x09/0x0A.
+  final Uint8List? foundingEd25519Pk;
+
   ContactSeed({
     required this.nodeIdHex,
     required this.displayName,
@@ -66,7 +76,20 @@ class ContactSeed {
     this.deviceX25519Pk,
     this.deviceMlKemPk,
     this.createdAtMs,
+    this.foundingEd25519Pk,
   });
+
+  /// §8.1.1 integrity check (SR-2): `SHA-256(networkSecret + fp) == userId`
+  /// for rotated identities (fp present), else against `ep`. Returns null
+  /// when the seed carries no anchor at all (v1 legacy without ep — not
+  /// checkable, callers treat as pass for backward compat).
+  bool? verifyIntegrity() {
+    final anchor = foundingEd25519Pk ?? userEd25519Pk;
+    if (anchor == null || anchor.length != 32) return null;
+    final derived =
+        HdWallet.computeUserId(anchor, NetworkSecret.secret);
+    return bytesToHex(derived) == nodeIdHex.toLowerCase();
+  }
 
   /// Age of this seed if it carries a creation timestamp, else null.
   Duration? ageFrom(DateTime now) =>
@@ -96,6 +119,12 @@ class ContactSeed {
     // Creation timestamp (rev3): lets the scanner judge seed freshness.
     if (createdAtMs != null) {
       sb.write('&t=$createdAtMs');
+    }
+
+    // SR-2: founding pubkey — only for rotated identities (fp != ep).
+    final fp = foundingEd25519Pk;
+    if (fp != null && fp.length == 32 && !_sameBytes(fp, ep)) {
+      sb.write('&fp=${base64Url.encode(fp).replaceAll('=', '')}');
     }
 
     if (ownAddresses.isNotEmpty) {
@@ -204,6 +233,18 @@ class ContactSeed {
         createdAt = int.tryParse(tParam);
       }
 
+      // SR-2: founding pubkey (rotated identities only).
+      Uint8List? fp;
+      final fpParam = params['fp'];
+      if (fpParam != null && fpParam.isNotEmpty) {
+        try {
+          final decoded = base64Url.decode(base64Url.normalize(fpParam));
+          if (decoded.length == 32) {
+            fp = Uint8List.fromList(decoded);
+          }
+        } catch (_) {}
+      }
+
       return ContactSeed(
         nodeIdHex: nodeIdHex,
         displayName: name,
@@ -215,6 +256,7 @@ class ContactSeed {
         deviceX25519Pk: dxk,
         deviceMlKemPk: dmk,
         createdAtMs: createdAt,
+        foundingEd25519Pk: fp,
       );
     } catch (_) {
       return null;
@@ -286,13 +328,24 @@ class ContactSeed {
 
     bb.add(userEd25519Pk ?? Uint8List(32));
 
+    // SR-2: founding pubkey present and distinct from ep → format 0x09/0x0A
+    // (= 0x07/0x08 layout + 32B fp after the timestamp). The timestamp slot
+    // is then always written (0 when unset) so the layout stays fixed.
+    final hasFp = foundingEd25519Pk != null &&
+        foundingEd25519Pk!.length == 32 &&
+        !_sameBytes(foundingEd25519Pk!, userEd25519Pk);
+
     // rev3: 8-byte big-endian creation timestamp — only emitted in the new
-    // format bytes 0x07/0x08. Legacy 0x03/0x04 omit it (age then unknown).
-    final hasTs = createdAtMs != null;
+    // format bytes 0x07/0x08 (and always in 0x09/0x0A). Legacy 0x03/0x04
+    // omit it (age then unknown).
+    final hasTs = createdAtMs != null || hasFp;
     if (hasTs) {
       final tsBytes = Uint8List(8);
-      ByteData.view(tsBytes.buffer).setUint64(0, createdAtMs!, Endian.big);
+      ByteData.view(tsBytes.buffer).setUint64(0, createdAtMs ?? 0, Endian.big);
       bb.add(tsBytes);
+    }
+    if (hasFp) {
+      bb.add(foundingEd25519Pk!);
     }
 
     bb.addByte(channelTag == 'b' ? 0x62 : channelTag == 'l' ? 0x6C : 0x00);
@@ -326,9 +379,10 @@ class ContactSeed {
     }
 
     final raw = bb.toBytes();
-    // rev3 format bytes carry the timestamp; legacy bytes do not.
-    final fmtCompressed = hasTs ? 0x07 : 0x03;
-    final fmtUncompressed = hasTs ? 0x08 : 0x04;
+    // rev3 format bytes carry the timestamp; legacy bytes do not. SR-2
+    // format bytes additionally carry the founding pubkey.
+    final fmtCompressed = hasFp ? 0x09 : (hasTs ? 0x07 : 0x03);
+    final fmtUncompressed = hasFp ? 0x0A : (hasTs ? 0x08 : 0x04);
     try {
       final compressed = ZstdCompression.instance.compress(
           Uint8List.fromList(raw), level: 3);
@@ -349,10 +403,12 @@ class ContactSeed {
     if (data.length < 2) return null;
     final format = data[0];
     Uint8List payload;
-    // Compressed: 0x01 (v1), 0x03 (v2), 0x07 (v2+timestamp).
-    final isCompressed = format == 0x01 || format == 0x03 || format == 0x07;
-    // Uncompressed: 0x02 (v1), 0x04 (v2), 0x08 (v2+timestamp).
-    final isUncompressed = format == 0x02 || format == 0x04 || format == 0x08;
+    // Compressed: 0x01 (v1), 0x03 (v2), 0x07 (v2+timestamp), 0x09 (SR-2 +fp).
+    final isCompressed =
+        format == 0x01 || format == 0x03 || format == 0x07 || format == 0x09;
+    // Uncompressed: 0x02 (v1), 0x04 (v2), 0x08 (v2+timestamp), 0x0A (SR-2 +fp).
+    final isUncompressed =
+        format == 0x02 || format == 0x04 || format == 0x08 || format == 0x0A;
     if (isCompressed) {
       try {
         payload = ZstdCompression.instance.decompress(
@@ -363,14 +419,18 @@ class ContactSeed {
     } else {
       return null;
     }
-    final isV2 = format == 0x03 || format == 0x04 || format == 0x07 || format == 0x08;
-    final hasTs = format == 0x07 || format == 0x08;
-    return isV2 ? _parseBinaryPayloadV2(payload, hasTs) : _parseBinaryPayload(payload);
+    final isV1 = format == 0x01 || format == 0x02;
+    final hasTs = format == 0x07 || format == 0x08 || format == 0x09 || format == 0x0A;
+    final hasFp = format == 0x09 || format == 0x0A;
+    return isV1
+        ? _parseBinaryPayload(payload)
+        : _parseBinaryPayloadV2(payload, hasTs, hasFp);
   }
 
-  static ContactSeed? _parseBinaryPayloadV2(Uint8List p, [bool hasTs = false]) {
-    // v2: 32+32+32+1+1+1+1 = 100 bytes minimum (+8 when a timestamp is present)
-    if (p.length < (hasTs ? 108 : 100)) return null;
+  static ContactSeed? _parseBinaryPayloadV2(Uint8List p,
+      [bool hasTs = false, bool hasFp = false]) {
+    // v2: 32+32+32+1+1+1+1 = 100 bytes minimum (+8 timestamp, +32 fp)
+    if (p.length < (100 + (hasTs ? 8 : 0) + (hasFp ? 32 : 0))) return null;
     try {
       var off = 0;
 
@@ -385,12 +445,20 @@ class ContactSeed {
       off += 32;
       final allZeroEp = ep.every((b) => b == 0);
 
-      // rev3: 8-byte big-endian creation timestamp (format 0x07/0x08 only).
+      // rev3: 8-byte big-endian creation timestamp (format 0x07+ only).
       int? createdAt;
       if (hasTs) {
         createdAt = ByteData.view(p.buffer, p.offsetInBytes + off, 8)
             .getUint64(0, Endian.big);
         off += 8;
+        if (createdAt == 0) createdAt = null; // fp-only seed without ts
+      }
+
+      // SR-2: 32B founding pubkey (format 0x09/0x0A only).
+      Uint8List? fp;
+      if (hasFp) {
+        fp = Uint8List.fromList(p.sublist(off, off + 32));
+        off += 32;
       }
 
       final chByte = p[off++];
@@ -441,10 +509,19 @@ class ContactSeed {
         deviceIdHex: hasDeviceId ? deviceId : null,
         userEd25519Pk: allZeroEp ? null : ep,
         createdAtMs: createdAt,
+        foundingEd25519Pk: fp,
       );
     } catch (_) {
       return null;
     }
+  }
+
+  static bool _sameBytes(Uint8List a, Uint8List? b) {
+    if (b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   static ContactSeed? _parseBinaryPayload(Uint8List p) {

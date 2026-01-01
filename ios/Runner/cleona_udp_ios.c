@@ -40,7 +40,26 @@ int cleona_ios_find_udp_fd(int local_port) {
     return -1;
 }
 
-/* Send a UDP datagram via sendto() on the given fd.
+/* Find the file descriptor of an AF_INET6 UDP socket bound to the given port.
+ * Returns the fd on success, -1 if not found. */
+__attribute__((visibility("default"), used))
+int cleona_ios_find_udp6_fd(int local_port) {
+    for (int fd = 3; fd < 1024; fd++) {
+        struct sockaddr_in6 addr;
+        socklen_t len = sizeof(addr);
+        if (getsockname(fd, (struct sockaddr*)&addr, &len) != 0) continue;
+        if (addr.sin6_family != AF_INET6) continue;
+        if (ntohs(addr.sin6_port) != (uint16_t)local_port) continue;
+        int type = 0;
+        socklen_t tlen = sizeof(type);
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tlen) != 0) continue;
+        if (type != SOCK_DGRAM) continue;
+        return fd;
+    }
+    return -1;
+}
+
+/* Send a UDP datagram via sendto() on the given fd (IPv4).
  * Returns bytes sent (>0) on success, or -errno on failure. */
 __attribute__((visibility("default"), used))
 int cleona_ios_sendto(int fd, const char* dest_ip, int dest_port,
@@ -54,7 +73,26 @@ int cleona_ios_sendto(int fd, const char* dest_ip, int dest_port,
     ssize_t sent = sendto(fd, data, (size_t)len, 0,
                           (struct sockaddr*)&dest, sizeof(dest));
     if (sent < 0) {
-        /* Return -errno so Dart can log the actual error */
+        extern int errno;
+        return -errno;
+    }
+    return (int)sent;
+}
+
+/* Send a UDP datagram via sendto() on the given fd (IPv6).
+ * Returns bytes sent (>0) on success, or -errno on failure. */
+__attribute__((visibility("default"), used))
+int cleona_ios_sendto6(int fd, const char* dest_ip, int dest_port,
+                       const void* data, int len) {
+    struct sockaddr_in6 dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin6_family = AF_INET6;
+    dest.sin6_port = htons((uint16_t)dest_port);
+    if (inet_pton(AF_INET6, dest_ip, &dest.sin6_addr) != 1) return -22; /* EINVAL */
+
+    ssize_t sent = sendto(fd, data, (size_t)len, 0,
+                          (struct sockaddr*)&dest, sizeof(dest));
+    if (sent < 0) {
         extern int errno;
         return -errno;
     }

@@ -141,10 +141,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     if (confirmed != true || !mounted) return;
 
     try {
-      Map<String, dynamic>? bundleData;
-      if (svc is IpcClient) {
-        bundleData = await svc.exportPeerBundle();
-      }
+      final bundleData = await svc.exportPeerBundle();
 
       if (bundleData == null) {
         if (mounted) {
@@ -187,13 +184,10 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
       _importResult = null;
     });
     try {
-      Map<String, dynamic> result;
-      if (svc is IpcClient) {
-        result = await svc.importPeerBundle(uri: input.startsWith('cleona://') ? input : null,
-          bundleBase64: !input.startsWith('cleona://') ? input : null);
-      } else {
-        result = {'networkTagValid': false};
-      }
+      final result = await svc.importPeerBundle(
+        uri: input.startsWith('cleona://') ? input : null,
+        bundleBase64: !input.startsWith('cleona://') ? input : null,
+      );
 
       if (!mounted) return;
 

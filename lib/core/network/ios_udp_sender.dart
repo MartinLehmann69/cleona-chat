@@ -27,12 +27,14 @@ typedef _CreateSendSocketDart = int Function();
 
 class IosUdpSender {
   final int _fd;
+  final int _fd6;
   final _SendtoDart _sendto;
+  final _SendtoDart _sendto6;
   final _RecvPeekDart? _recvPeek;
-  IosUdpSender._(this._fd, this._sendto, this._recvPeek);
+  IosUdpSender._(this._fd, this._fd6, this._sendto, this._sendto6, this._recvPeek);
 
-  /// Attach to Dart's existing socket by scanning for a UDP fd on [localPort].
-  /// Used for the transport socket where the fd is stable.
+  /// Attach to Dart's existing sockets by scanning for UDP fds on [localPort].
+  /// Finds both IPv4 (AF_INET) and IPv6 (AF_INET6) sockets.
   static IosUdpSender? open(int localPort) {
     if (!Platform.isIOS) return null;
 
@@ -43,6 +45,15 @@ class IosUdpSender {
     final sendto =
         lib.lookupFunction<_SendtoC, _SendtoDart>('cleona_ios_sendto');
 
+    _FindUdpFdDart? findFd6;
+    _SendtoDart? sendto6;
+    try {
+      findFd6 = lib.lookupFunction<_FindUdpFdC, _FindUdpFdDart>(
+          'cleona_ios_find_udp6_fd');
+      sendto6 = lib.lookupFunction<_SendtoC, _SendtoDart>(
+          'cleona_ios_sendto6');
+    } catch (_) {}
+
     _RecvPeekDart? recvPeek;
     try {
       recvPeek = lib
@@ -52,7 +63,9 @@ class IosUdpSender {
     final fd = findFd(localPort);
     if (fd < 0) return null;
 
-    return IosUdpSender._(fd, sendto, recvPeek);
+    final fd6 = findFd6?.call(localPort) ?? -1;
+
+    return IosUdpSender._(fd, fd6, sendto, sendto6 ?? sendto, recvPeek);
   }
 
   /// Create a fresh native UDP socket for send-only use (broadcast+unicast).
@@ -71,10 +84,12 @@ class IosUdpSender {
     final fd = createSocket();
     if (fd < 0) return null;
 
-    return IosUdpSender._(fd, sendto, null);
+    return IosUdpSender._(fd, -1, sendto, sendto, null);
   }
 
   int get fd => _fd;
+  int get fd6 => _fd6;
+  bool get hasIpv6 => _fd6 >= 0;
 
   int send(String destIp, int destPort, Uint8List data) {
     final ipPtr = destIp.toNativeUtf8();
@@ -82,6 +97,19 @@ class IosUdpSender {
     try {
       dataPtr.asTypedList(data.length).setAll(0, data);
       return _sendto(_fd, ipPtr.cast(), destPort, dataPtr, data.length);
+    } finally {
+      calloc.free(ipPtr);
+      calloc.free(dataPtr);
+    }
+  }
+
+  int send6(String destIp, int destPort, Uint8List data) {
+    if (_fd6 < 0) return -97; // EAFNOSUPPORT
+    final ipPtr = destIp.toNativeUtf8();
+    final dataPtr = calloc<ffi.Uint8>(data.length);
+    try {
+      dataPtr.asTypedList(data.length).setAll(0, data);
+      return _sendto6(_fd6, ipPtr.cast(), destPort, dataPtr, data.length);
     } finally {
       calloc.free(ipPtr);
       calloc.free(dataPtr);

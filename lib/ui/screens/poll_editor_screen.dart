@@ -255,6 +255,7 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
           value: _anonymous,
           onChanged: (v) => setState(() => _anonymous = v),
         ),
+        if (_anonymous) _anonymityScopeHint(locale),
         SwitchListTile(
           title: Text(locale.get('poll_allow_vote_change')),
           value: _allowChange,
@@ -289,6 +290,27 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
             onChanged: (v) => _maxChoices = int.tryParse(v) ?? 0,
           ),
       ],
+    );
+  }
+
+  /// Honest anonymity-scope notice (Architecture §11.4.7): the ring signature
+  /// anonymizes results/persistence only — on the transport layer every
+  /// recipient currently still sees who voted and when.
+  Widget _anonymityScopeHint(AppLocale locale) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline, size: 14, color: colorScheme.outline),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(locale.get('poll_anonymity_scope_hint'),
+                style: TextStyle(fontSize: 11, color: colorScheme.outline)),
+          ),
+        ],
+      ),
     );
   }
 

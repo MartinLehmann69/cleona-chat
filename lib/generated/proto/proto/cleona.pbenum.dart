@@ -273,6 +273,32 @@ class DateAvailability extends $pb.ProtobufEnum {
   const DateAvailability._($core.int v, $core.String n) : super(v, n);
 }
 
+/// Capabilities bitmask for DeviceDelegationCert. Primary-only ops (rotate,
+/// revoke, pair, sign-manifest) are NOT representable — they require the
+/// master seed which linked devices never hold.
+class DeviceDelegationCapability extends $pb.ProtobufEnum {
+  static const DeviceDelegationCapability DDC_UNSPECIFIED = DeviceDelegationCapability._(0, _omitEnumNames ? '' : 'DDC_UNSPECIFIED');
+  static const DeviceDelegationCapability DDC_SEND_MESSAGES = DeviceDelegationCapability._(1, _omitEnumNames ? '' : 'DDC_SEND_MESSAGES');
+  static const DeviceDelegationCapability DDC_MANAGE_CONTACTS = DeviceDelegationCapability._(2, _omitEnumNames ? '' : 'DDC_MANAGE_CONTACTS');
+  static const DeviceDelegationCapability DDC_MANAGE_GROUPS = DeviceDelegationCapability._(4, _omitEnumNames ? '' : 'DDC_MANAGE_GROUPS');
+  static const DeviceDelegationCapability DDC_MANAGE_CHANNELS = DeviceDelegationCapability._(8, _omitEnumNames ? '' : 'DDC_MANAGE_CHANNELS');
+  static const DeviceDelegationCapability DDC_ALL_STANDARD = DeviceDelegationCapability._(15, _omitEnumNames ? '' : 'DDC_ALL_STANDARD');
+
+  static const $core.List<DeviceDelegationCapability> values = <DeviceDelegationCapability> [
+    DDC_UNSPECIFIED,
+    DDC_SEND_MESSAGES,
+    DDC_MANAGE_CONTACTS,
+    DDC_MANAGE_GROUPS,
+    DDC_MANAGE_CHANNELS,
+    DDC_ALL_STANDARD,
+  ];
+
+  static final $core.Map<$core.int, DeviceDelegationCapability> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static DeviceDelegationCapability? valueOf($core.int value) => _byValue[value];
+
+  const DeviceDelegationCapability._($core.int v, $core.String n) : super(v, n);
+}
+
 class PayloadTypeV3 extends $pb.ProtobufEnum {
   static const PayloadTypeV3 PAYLOAD_APPLICATION_FRAME = PayloadTypeV3._(0, _omitEnumNames ? '' : 'PAYLOAD_APPLICATION_FRAME');
   static const PayloadTypeV3 PAYLOAD_ONION_LAYER = PayloadTypeV3._(1, _omitEnumNames ? '' : 'PAYLOAD_ONION_LAYER');
@@ -333,6 +359,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_GROUP_INVITE = MessageTypeV3._(51, _omitEnumNames ? '' : 'MTV3_GROUP_INVITE');
   static const MessageTypeV3 MTV3_GROUP_LEAVE = MessageTypeV3._(52, _omitEnumNames ? '' : 'MTV3_GROUP_LEAVE');
   static const MessageTypeV3 MTV3_GROUP_KEY_UPDATE = MessageTypeV3._(53, _omitEnumNames ? '' : 'MTV3_GROUP_KEY_UPDATE');
+  static const MessageTypeV3 MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = MessageTypeV3._(54, _omitEnumNames ? '' : 'MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST');
   static const MessageTypeV3 MTV3_CHANNEL_CREATE = MessageTypeV3._(60, _omitEnumNames ? '' : 'MTV3_CHANNEL_CREATE');
   static const MessageTypeV3 MTV3_CHANNEL_POST = MessageTypeV3._(61, _omitEnumNames ? '' : 'MTV3_CHANNEL_POST');
   static const MessageTypeV3 MTV3_CHANNEL_INVITE = MessageTypeV3._(62, _omitEnumNames ? '' : 'MTV3_CHANNEL_INVITE');
@@ -432,6 +459,8 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_FIRST_CR_STORE = MessageTypeV3._(222, _omitEnumNames ? '' : 'MTV3_FIRST_CR_STORE');
   static const MessageTypeV3 MTV3_FIRST_CR_STORE_ACK = MessageTypeV3._(223, _omitEnumNames ? '' : 'MTV3_FIRST_CR_STORE_ACK');
   static const MessageTypeV3 MTV3_FIRST_CR_DELIVER = MessageTypeV3._(224, _omitEnumNames ? '' : 'MTV3_FIRST_CR_DELIVER');
+  static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT = MessageTypeV3._(225, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT');
+  static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT_ACK = MessageTypeV3._(226, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT_ACK');
 
   static const $core.List<MessageTypeV3> values = <MessageTypeV3> [
     MTV3_TEXT,
@@ -464,6 +493,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_GROUP_INVITE,
     MTV3_GROUP_LEAVE,
     MTV3_GROUP_KEY_UPDATE,
+    MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
     MTV3_CHANNEL_CREATE,
     MTV3_CHANNEL_POST,
     MTV3_CHANNEL_INVITE,
@@ -563,6 +593,8 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_FIRST_CR_STORE,
     MTV3_FIRST_CR_STORE_ACK,
     MTV3_FIRST_CR_DELIVER,
+    MTV3_POLL_ANON_SUBMIT,
+    MTV3_POLL_ANON_SUBMIT_ACK,
   ];
 
   static final $core.Map<$core.int, MessageTypeV3> _byValue = $pb.ProtobufEnum.initByValue(values);

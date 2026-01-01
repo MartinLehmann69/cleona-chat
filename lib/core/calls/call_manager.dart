@@ -507,8 +507,8 @@ class CallManager {
         ..payload = reject.writeToBuffer();
       final innerBytes = V3FrameCodec.buildAndEncryptInner(
         inner: inner,
-        senderUserEd25519Sk: identity.ed25519SecretKey,
-        senderUserMlDsaSk: identity.mlDsaSecretKey,
+        senderUserEd25519Sk: identity.signingEd25519Sk,
+        senderUserMlDsaSk: identity.signingMlDsaSk,
         recipientUserX25519Pk: contact.x25519Pk!,
         recipientUserMlKemPk: contact.mlKemPk!,
       );

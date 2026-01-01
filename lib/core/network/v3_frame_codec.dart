@@ -138,6 +138,33 @@ class V3FrameCodec {
     return kemV3.writeToBuffer();
   }
 
+  /// §11.4.8: Build a de-attributed inner ApplicationFrame — empty
+  /// senderUserId, no user signatures. Authenticity is carried by the
+  /// ring signature in the payload. KEM-encrypted under recipient user PKs.
+  static Uint8List buildDeAttributedInner({
+    required proto.ApplicationFrameV3 inner,
+    required Uint8List recipientUserX25519Pk,
+    required Uint8List recipientUserMlKemPk,
+  }) {
+    inner.clearSenderUserId();
+    inner.clearUserEd25519Sig();
+    inner.clearUserMlDsaSig();
+    final plainBytes = inner.writeToBuffer();
+    final compressed = ZstdCompression.instance.compress(plainBytes);
+    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
+      plaintext: compressed,
+      recipientX25519Pk: recipientUserX25519Pk,
+      recipientMlKemPk: recipientUserMlKemPk,
+    );
+    final kemV3 = proto.PerMessageKemV3()
+      ..x25519Ciphertext = kemHeader.ephemeralX25519Pk
+      ..mlKemCiphertext = kemHeader.mlKemCiphertext
+      ..aeadCiphertext = ciphertext
+      ..aeadNonce = kemHeader.aesNonce
+      ..version = kemHeader.version;
+    return kemV3.writeToBuffer();
+  }
+
   // ───────────────────────── Sender (Outer) ─────────────────────────
 
   /// Build a NetworkPacketV3 with all routing fields, payload, PoW and
@@ -278,6 +305,13 @@ class V3FrameCodec {
     /// body-agnostic — message-type-specific extraction lives in cleona_service.
     ({Uint8List edPk, Uint8List mlDsaPk})? Function(proto.ApplicationFrameV3 frame)?
         trustBootstrapPubkeys,
+    /// §7.1 LD-4: Linked-Device delegation fallback. If the User-Sig
+    /// verification fails against the User-PK, this callback is consulted
+    /// to check if the signer is a delegated device. Returns a list of
+    /// (Ed25519-PK, ML-DSA-PK) pairs from the sender's AuthManifest
+    /// delegation certs; the codec tries each until one verifies.
+    List<({Uint8List edPk, Uint8List mlDsaPk})> Function(Uint8List senderUserId)?
+        lookupDelegatedKeys,
   }) {
     // 1. Parse outer payload as PerMessageKemV3.
     final proto.PerMessageKemV3 kemV3;
@@ -326,8 +360,17 @@ class V3FrameCodec {
       return const InnerVerifyResult.fail(InnerVerifyError.parseFailed);
     }
 
-    // 5. User-Sig-Verify over canonical "frame minus sig-fields" bytes.
+    // 5a. §11.4.8 de-attributed anonymous vote: empty senderUserId means
+    //     the ring signature is the sole authenticator — skip user-sig verify.
+    //     Strictly limited to the two anonymous poll types.
     final senderUserId = Uint8List.fromList(frame.senderUserId);
+    if (senderUserId.isEmpty &&
+        (frame.messageType == proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS ||
+         frame.messageType == proto.MessageTypeV3.MTV3_POLL_REVOKE)) {
+      return InnerVerifyResult.ok(frame);
+    }
+
+    // 5b. User-Sig-Verify over canonical "frame minus sig-fields" bytes.
     Uint8List? edPk = lookupUserEd25519Pk?.call(senderUserId);
     Uint8List? mlPk = lookupUserMlDsaPk?.call(senderUserId);
     // §8.1.1 Trust-Bootstrap: the lookup convention is to return Uint8List(0)
@@ -352,13 +395,21 @@ class V3FrameCodec {
     frame.userEd25519Sig = edSig;
     frame.userMlDsaSig = mlSig;
 
-    if (!device_sig.verifyEd25519(edSig, signedBytes, edPk)) {
-      return const InnerVerifyResult.fail(InnerVerifyError.userSigInvalid);
+    final edOk = device_sig.verifyEd25519(edSig, signedBytes, edPk);
+    final mlOk = edOk && device_sig.verifyMlDsa(mlSig, signedBytes, mlPk);
+    if (edOk && mlOk) return InnerVerifyResult.ok(frame);
+
+    // §7.1 LD-4: User-Sig failed → try delegated keys from AuthManifest.
+    if (lookupDelegatedKeys != null) {
+      final delegated = lookupDelegatedKeys(senderUserId);
+      for (final d in delegated) {
+        if (device_sig.verifyEd25519(edSig, signedBytes, d.edPk) &&
+            device_sig.verifyMlDsa(mlSig, signedBytes, d.mlDsaPk)) {
+          return InnerVerifyResult.ok(frame);
+        }
+      }
     }
-    if (!device_sig.verifyMlDsa(mlSig, signedBytes, mlPk)) {
-      return const InnerVerifyResult.fail(InnerVerifyError.userSigInvalid);
-    }
-    return InnerVerifyResult.ok(frame);
+    return const InnerVerifyResult.fail(InnerVerifyError.userSigInvalid);
   }
 
   // ─────────────────── Sender (Infrastructure path, §2.4.1) ──────────────
@@ -799,6 +850,9 @@ bool isInfrastructureMessageTypeV3(proto.MessageTypeV3 type) {
     case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
     case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
     case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
+    // §11.4.8: Anonymous Vote Re-Broadcaster — voter→R bundle + R→voter ACK
+    case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
+    case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
       return true;
     default:
       return false;

@@ -512,7 +512,10 @@ class _MultiServiceDaemon {
           mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
           // §8.1.1 rev3: Deferred Key Exchange (step 1b)
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
+          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER ||
+          // §11.4.8: Anonymous Vote Re-Broadcaster
+          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT ||
+          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK;
       if (!isServiceRouted) {
         log.debug('V3 INFRA hook drop: messageType=${mt.name} '
             'has no service-side handler');
@@ -598,6 +601,13 @@ class _MultiServiceDaemon {
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
             service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
             break;
+          case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
+            service.handleIncomingPollAnonSubmit(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
+            service.handleIncomingPollAnonSubmitAck(frame, senderDeviceId);
+            break;
           default:
             break;
         }
@@ -610,6 +620,11 @@ class _MultiServiceDaemon {
         service.onStateChanged?.call();
       }
     };
+
+    // Windows: ensure firewall allows inbound UDP for the daemon process.
+    if (Platform.isWindows) {
+      await _ensureWindowsFirewallRule(nodePort);
+    }
 
     // Start the shared node
     await node.startQuick();
@@ -706,6 +721,19 @@ class _MultiServiceDaemon {
         log.debug('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
       }
       _node?.transport.checkReceiveHealth();
+
+      // Firewall blockade detection: after 60s of uptime, if zero external
+      // packets were received, the local firewall is likely blocking inbound
+      // UDP. Warn once per session so the user (or their log) can diagnose.
+      final transport = _node?.transport;
+      if (_heartbeatTick == 12 && transport != null &&
+          !transport.firewallWarningEmitted &&
+          transport.externalPacketsReceived == 0) {
+        transport.firewallWarningEmitted = true;
+        log.warn('FIREWALL? 60s uptime, 0 inbound external UDP packets. '
+            'If connectivity fails, check that the OS firewall allows '
+            'inbound UDP for this process.');
+      }
     });
 
     _startNetworkMonitor();
@@ -939,6 +967,35 @@ class _MultiServiceDaemon {
     // The stale PID in the file is detected by the GUI via kill -0.
     tray.dispose();
     exit(0);
+  }
+
+  /// Windows: add an inbound UDP firewall rule for the daemon executable.
+  /// Runs once per installation (marker file prevents re-running). Gracefully
+  /// handles non-admin mode (netsh fails → log + continue).
+  Future<void> _ensureWindowsFirewallRule(int port) async {
+    final marker = File('${config.baseDir}/firewall_rule_added');
+    if (marker.existsSync()) return;
+
+    final exe = Platform.resolvedExecutable;
+    log.info('Windows: adding inbound UDP firewall rule for $exe');
+    try {
+      final result = await Process.run('netsh', [
+        'advfirewall', 'firewall', 'add', 'rule',
+        'name=Cleona Messenger',
+        'dir=in', 'action=allow', 'protocol=UDP',
+        'program=$exe',
+        'enable=yes',
+      ]);
+      if (result.exitCode == 0) {
+        marker.writeAsStringSync('added');
+        log.info('Windows: firewall rule added successfully');
+      } else {
+        log.warn('Windows: netsh firewall rule failed (exit ${result.exitCode}, '
+            'likely non-admin): ${result.stderr}');
+      }
+    } catch (e) {
+      log.warn('Windows: could not add firewall rule: $e');
+    }
   }
 
   /// Event-driven network change detection.

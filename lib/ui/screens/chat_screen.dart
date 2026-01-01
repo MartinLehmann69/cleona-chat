@@ -2691,6 +2691,7 @@ class _MessageBubble extends StatelessWidget {
         // the accepted/active config (conv.config) — a pending proposal lives
         // separately in conv.pendingConfigProposal and must NOT light this up.
         expiryActive: chatConfig?.expiryDurationMs != null,
+        membershipMismatch: message.membershipMismatch,
         onActionsPressed: _hasMenu
             ? () => _showMessageActions(context)
             : null,
@@ -2861,6 +2862,29 @@ class _MessageBubble extends StatelessWidget {
                 if (message.hasLinkPreview)
                   _buildLinkPreviewCard(context),
               ],
+              if (message.membershipMismatch && !deleted)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.warning_amber_rounded, size: 12,
+                          color: Colors.orange.shade300),
+                      const SizedBox(width: 3),
+                      Flexible(
+                        child: Text(
+                          locale.get('group_membership_mismatch'),
+                          style: TextStyle(
+                            color: Colors.orange.shade300,
+                            fontSize: 10,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               if (message.reactions.isNotEmpty && !deleted)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),

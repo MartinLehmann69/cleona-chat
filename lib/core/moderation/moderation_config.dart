@@ -97,6 +97,18 @@ class ModerationConfig {
   /// Juror must have "Review channel reports" enabled.
   final bool jurorRequiresReviewEnabled;
 
+  // ── Deterministic jury selection (§9.3.1a) ────────────────────
+
+  /// Tolerance factor for verdict verification: a juror is accepted
+  /// if within top (toleranceFactor × jurySize) closest to H.
+  final int jurorSetToleranceFactor;
+
+  /// Max replacement rounds for non-responding jurors.
+  final int juryReplacementRounds;
+
+  /// CSAM Stage 3 objection window before Tombstone is written.
+  final Duration csamObjectionWindow;
+
   // ── Anti-Sybil ──────────────────────────────────────────────────
 
   /// Social Graph Reachability Check enabled.
@@ -124,6 +136,12 @@ class ModerationConfig {
 
   /// Minimum age of identity for channel creation.
   final Duration channelCreationMinAge;
+
+  // ── Anonymous polls (§11.4.6) ───────────────────────────────────────
+
+  /// Max random send delay for anonymous poll votes so arrival order does
+  /// not hint at the voter (timing analysis, §11.4.6). Zero disables.
+  final Duration anonVoteJitterMax;
 
   const ModerationConfig({
     // Jury
@@ -160,6 +178,10 @@ class ModerationConfig {
     this.jurorMinAge = const Duration(days: 7),
     this.jurorRequiresAdult = true,
     this.jurorRequiresReviewEnabled = true,
+    // Deterministic jury selection
+    this.jurorSetToleranceFactor = 2,
+    this.juryReplacementRounds = 2,
+    this.csamObjectionWindow = const Duration(days: 14),
     // Anti-Sybil
     this.reachabilityEnabled = true,
     this.reachabilityThreshold = 0.60,
@@ -171,6 +193,8 @@ class ModerationConfig {
     this.directContactsAlwaysConnected = true,
     // Squatting
     this.channelCreationMinAge = const Duration(days: 7),
+    // Anonymous polls
+    this.anonVoteJitterMax = const Duration(seconds: 30),
   });
 
   /// Production configuration with the values from docs/CHANNELS.md.
@@ -208,6 +232,9 @@ class ModerationConfig {
         jurorMinAge: Duration.zero,
         jurorRequiresAdult: true,
         jurorRequiresReviewEnabled: true,
+        jurorSetToleranceFactor: 2,
+        juryReplacementRounds: 2,
+        csamObjectionWindow: Duration(seconds: 30),
         reachabilityEnabled: true,
         reachabilityThreshold: 0.60,
         reachabilityMaxHops: 5,
@@ -216,6 +243,7 @@ class ModerationConfig {
         independenceGroupFactor: 0.05,
         directContactsAlwaysConnected: true,
         channelCreationMinAge: Duration.zero,
+        anonVoteJitterMax: Duration(seconds: 2),
       );
 
   /// Test configuration with greatly shortened timeouts and disabled barriers.
@@ -254,6 +282,10 @@ class ModerationConfig {
         jurorMinAge: Duration.zero,
         jurorRequiresAdult: false,
         jurorRequiresReviewEnabled: false,
+        // Deterministic selection — same tolerance, fast replacement
+        jurorSetToleranceFactor: 2,
+        juryReplacementRounds: 2,
+        csamObjectionWindow: Duration(seconds: 10),
         // Anti-Sybil — disabled in test
         reachabilityEnabled: false,
         reachabilityThreshold: 0.0,
@@ -265,6 +297,8 @@ class ModerationConfig {
         directContactsAlwaysConnected: true,
         // Squatting — disabled
         channelCreationMinAge: Duration.zero,
+        // Anonymous polls — no jitter in tests
+        anonVoteJitterMax: Duration.zero,
       );
 
   // ── Calculation methods ─────────────────────────────────────────
@@ -299,10 +333,30 @@ class ModerationConfig {
   }
 
   /// Whether a jury vote has the required majority.
+  ///
+  /// NOTE: For resolving a jury verdict, [totalVotes] must be the
+  /// **nominal** jury size (number of selected jurors), never the number
+  /// of responders — see [juryApproved] / architecture §9.3.4.
   bool hasJuryMajority(int votesFor, int totalVotes) {
     if (totalVotes == 0) return false;
     return votesFor / totalVotes >= juryMajority;
   }
+
+  /// Hard quorum (architecture §9.3.4): minimum number of approvals
+  /// required for a jury verdict, computed against the **nominal** jury
+  /// size (number of selected jurors). Rejections, abstentions and
+  /// timeouts never lower the bar.
+  ///
+  /// Production (majority 2/3, 5 jurors) → 4 approvals;
+  /// test preset (3 jurors) → 2 approvals.
+  int juryHardQuorum(int nominalJurySize) =>
+      (juryMajority * nominalJurySize).ceil();
+
+  /// Whether a jury verdict is approved under the hard quorum
+  /// (architecture §9.3.4). [nominalJurySize] is the number of selected
+  /// jurors, NOT the number of jurors that responded.
+  bool juryApproved({required int approvals, required int nominalJurySize}) =>
+      nominalJurySize > 0 && approvals >= juryHardQuorum(nominalJurySize);
 
   /// Whether a juror timeout has expired.
   bool isJuryVoteExpired(DateTime voteSentAt) {

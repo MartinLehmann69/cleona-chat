@@ -264,6 +264,11 @@ message GroupInviteV3 {
   repeated GroupMemberV3 members = 4;
   bytes group_picture = 5;
   string group_description = 6;
+  // GM-1 (§9.1.4): monotonic epoch + canonical membership hash + hybrid sig
+  uint64 membership_epoch = 7;
+  bytes membership_hash = 8;          // SHA-256(epoch || groupId || sorted members)
+  bytes membership_sig_ed25519 = 9;   // 64 bytes, over membership_hash
+  bytes membership_sig_ml_dsa = 10;   // ~3300 bytes, over membership_hash
 }
 
 message GroupMemberV3 {
@@ -273,6 +278,12 @@ message GroupMemberV3 {
   bytes ed25519_public_key = 4;
   bytes x25519_public_key = 5;
   bytes ml_kem_public_key = 6;
+}
+
+// GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
+message GroupMembershipResyncRequest {
+  bytes group_id = 1;
+  uint64 local_epoch = 2;
 }
 
 message GroupKeyUpdate {
@@ -318,6 +329,11 @@ message ChannelInvite {
   bool is_public = 9;
   bool is_adult = 10;
   string language = 11;
+  // GM-4 (§9.1.4): monotonic epoch + canonical membership hash + hybrid sig
+  uint64 membership_epoch = 12;
+  bytes membership_hash = 13;          // SHA-256(epoch || channelId || sorted members)
+  bytes membership_sig_ed25519 = 14;   // 64 bytes, over membership_hash
+  bytes membership_sig_ml_dsa = 15;    // ~3300 bytes, over membership_hash
 }
 
 message ChannelRoleUpdate {
@@ -363,7 +379,8 @@ message RestoreBroadcast {
   bytes new_ml_dsa_pk = 6;
   string display_name = 7;
   uint64 timestamp = 8;
-  bytes signature = 9;           // signed with old key (proves ownership)
+  bytes signature = 9;           // signed with old Ed25519 key (proves ownership)
+  bytes signature_ml_dsa = 10;   // H-2: hybrid — signed with old ML-DSA-65 key (PQ proof; absent on pre-H-2 senders)
 }
 
 message RestoreResponse {
@@ -556,6 +573,9 @@ message JuryRequestMsg {
   string report_description = 6;
   string channel_name = 7;
   string channel_language = 8;
+  uint32 epoch_day = 9;
+  uint32 jury_round = 10;
+  bytes eligibility_snapshot_hash = 11;
 }
 
 message JuryVoteMsg {
@@ -563,6 +583,10 @@ message JuryVoteMsg {
   bytes report_id = 2;
   uint32 vote = 3;                // 0=approve, 1=reject, 2=abstain
   string reason = 4;
+  bytes sig_ed25519 = 5;          // hybrid sig over canonical verdict core
+  bytes sig_ml_dsa = 6;
+  uint32 jury_round = 7;
+  uint32 epoch_day = 8;           // UTC day the jury was initiated
 }
 
 message JuryResultMsg {
@@ -574,6 +598,54 @@ message JuryResultMsg {
   uint32 votes_reject = 6;
   uint32 votes_abstain = 7;
   uint32 new_bad_badge_level = 8;
+  repeated JurorVerdictSig juror_sigs = 9;
+  bytes eligibility_snapshot_hash = 10;
+  uint32 epoch_day = 11;
+  uint32 jury_round = 12;
+}
+
+message JurorVerdictSig {
+  bytes juror_user_id = 1;
+  bytes sig_ed25519 = 2;
+  bytes sig_ml_dsa = 3;
+  uint32 vote = 4;                // mirrored from the juror's JuryVoteMsg
+}
+
+// ── Juror Availability Registry (DHT) ─────────────────────────────────
+
+message JurorAvailabilityRecord {
+  bytes user_pub_key_ed25519 = 1;
+  bytes user_pub_key_ml_dsa = 2;
+  uint64 creation_epoch_ms = 3;   // identity creation timestamp
+  bytes self_sig_ed25519 = 4;     // hybrid self-sig over fields 1-3
+  bytes self_sig_ml_dsa = 5;
+  uint64 published_at_ms = 6;    // record publish timestamp
+}
+
+// ── Moderation Proof (DHT, on-demand) ─────────────────────────────────
+
+message ModerationProofRecord {
+  bytes channel_id = 1;
+  bytes jury_id = 2;
+  bytes report_id = 3;
+  uint32 consequence = 4;
+  uint32 epoch_day = 5;
+  uint32 jury_round = 6;
+  repeated JurorVerdictSig juror_sigs = 7;
+  bytes eligibility_snapshot_hash = 8;
+}
+
+message CsamReporterQuorumProof {
+  bytes channel_id = 1;
+  repeated CsamReportSig reporter_sigs = 2;
+}
+
+message CsamReportSig {
+  bytes reporter_user_id = 1;
+  bytes sig_ed25519 = 2;
+  bytes sig_ml_dsa = 3;
+  bytes report_id = 4;
+  uint64 reported_at_ms = 5;
 }
 
 // ── DHT Channel Index ─────────────────────────────────────────────────
@@ -591,6 +663,7 @@ message ChannelIndexEntryProto {
   bytes owner_node_id = 10;
   uint64 created_at_ms = 11;
   bytes owner_signature = 12;     // proves ownership
+  bytes moderation_proof_hash = 13; // SHA-256 of ModerationProofRecord (on-demand DHT fetch)
 }
 
 // Reachability check for anti-Sybil
@@ -937,6 +1010,8 @@ enum TwinSyncType {
   DEVICE_ANNOUNCE = 9;
   DEVICE_RENAMED = 10;
   TWIN_DEVICE_REVOKED = 11;
+  ROTATION_APPROVAL_REQUEST = 12;   // §7.5: Primary → Linked: countersign this rotation
+  ROTATION_APPROVAL_RESPONSE = 13;  // §7.5: Linked → Primary: Device-Sig countersig token
 }
 
 enum DevicePlatform {
@@ -974,6 +1049,9 @@ message KeyRotationBroadcast {
   bytes new_ml_kem_pk = 4;         // ML-KEM-768 public key
   bytes old_signature_ed25519 = 5; // Signature with OLD key (proves ownership)
   bytes new_signature_ed25519 = 6; // Signature with NEW key (proves new identity)
+  // §7.5 Device Co-Authorization: Device-Sig countersigs from authorized devices
+  repeated RotationApprovalToken approval_tokens = 7;
+  uint32 pre_rotation_device_count = 8;
 }
 
 // ── Calendar (§23) ─────────────────────────────────────────────────────
@@ -1192,6 +1270,29 @@ message PollVoteRevokeMsg {
   int64 revoked_at = 5;
 }
 
+// ── Anonymous Vote Re-Broadcaster (§11.4.8) ──────────────────────────
+//
+// Voter bundles pre-encrypted per-recipient KEM blobs and sends them to
+// a random DHT peer R via InfrastructureFrame. R re-originates each entry
+// as a fresh APPLICATION_FRAME under its own device identity.
+message PollAnonSubmitEntry {
+  bytes  recipient_user_id    = 1;  // 32 bytes — who to deliver to
+  bytes  kem_blob             = 2;  // pre-encrypted PerMessageKemV3 (inner = de-attributed ApplicationFrame)
+  repeated bytes device_ids   = 3;  // cached recipient device IDs for routing
+}
+
+message PollAnonSubmitMsg {
+  bytes                        poll_id  = 1;
+  repeated PollAnonSubmitEntry entries  = 2;
+  uint64                       pow_nonce = 3;  // PoW over serialized bundle
+}
+
+message PollAnonSubmitAckMsg {
+  bytes  poll_id       = 1;
+  bool   accepted      = 2;
+  string reject_reason = 3;
+}
+
 // ── 2D-DHT Identity Resolution (§2.2.4) ──────────────────────────────
 
 // D1 (§4.3 Trust anchor): one soft-re-key link old→new. Link shape mirrors
@@ -1206,6 +1307,40 @@ message RotationChainLinkProto {
   bytes new_ed25519_pk = 2;        // 32 bytes — successor user pubkey
   bytes new_ml_dsa_pk = 3;         // ML-DSA-65 successor pubkey
   bytes old_signature_ed25519 = 4; // OLD key's sig over (new_ed25519_pk || new_ml_dsa_pk)
+}
+
+// ── Linked-Device Delegation (§7.1 LD-1) ───────────────────────────────
+//
+// A DeviceDelegationCert authorizes a Linked Device to act for the user
+// identity with bounded capabilities. The cert is signed by the User-Key
+// (hybrid Ed25519 + ML-DSA) and carried inside the AuthManifest so
+// receivers can verify delegated Inner-Frame signatures.
+//
+// Security model: the Linked Device holds a per-device delegated Sig-Key
+// (derived via HKDF from the master seed, deterministic per device_id) +
+// the User-KEM-SK for message decryption. It does NOT hold the master
+// seed, the User-Sig-SK, or the ability to rotate/revoke.
+message DeviceDelegationCertProto {
+  bytes  device_id              = 1;  // 32 bytes — the delegated device
+  bytes  delegated_ed25519_pk   = 2;  // 32 bytes — per-device sig subkey
+  bytes  delegated_ml_dsa_pk    = 3;  // 1952 bytes — per-device PQ sig subkey
+  uint32 capabilities           = 4;  // bitmask (DeviceDelegationCapability)
+  uint64 issued_at_ms           = 5;  // when Primary issued this cert
+  uint64 max_valid_until_ms     = 6;  // dead-man-switch expiry (0 = no expiry)
+  bytes  user_ed25519_sig       = 7;  // User-Key sig over fields 1-6
+  bytes  user_ml_dsa_sig        = 8;  // User-Key PQ sig over fields 1-6
+}
+
+// Capabilities bitmask for DeviceDelegationCert. Primary-only ops (rotate,
+// revoke, pair, sign-manifest) are NOT representable — they require the
+// master seed which linked devices never hold.
+enum DeviceDelegationCapability {
+  DDC_UNSPECIFIED       = 0;
+  DDC_SEND_MESSAGES     = 1;  // sign ApplicationFrames with delegated key
+  DDC_MANAGE_CONTACTS   = 2;  // accept/reject contact requests
+  DDC_MANAGE_GROUPS     = 4;  // create groups, admin ops
+  DDC_MANAGE_CHANNELS   = 8;  // channel admin ops
+  DDC_ALL_STANDARD      = 15; // all non-primary capabilities
 }
 
 message AuthManifestProto {
@@ -1224,6 +1359,18 @@ message AuthManifestProto {
   // Founding-key → current-key continuity after soft re-key (§7.4b). Empty
   // unless the identity has rotated.
   repeated RotationChainLinkProto rotation_chain = 10;
+  // LD-1 (§7.1 Linked-Device): delegation certificates for linked devices.
+  // Empty on single-device identities and pre-LD builds. A device present in
+  // authorized_device_node_ids but NOT in device_delegations is the Primary
+  // (seed-holder) or a legacy full-authority device. A device present in BOTH
+  // is a Linked Device with bounded capabilities. Old builds silently ignore
+  // this field (unknown proto field).
+  repeated DeviceDelegationCertProto device_delegations = 11;
+  // §7.5: Device-Sig pubkeys for all authorized devices (Primary + Linked).
+  // Enables receiver-enforced co-authorization of emergency key rotations.
+  repeated AuthorizedDeviceSigningKeys device_sig_keys = 12;
+  // §7.5: Proof that device-set shrinks were co-authorized by remaining devices.
+  DeviceSetChangeProof device_set_change_proof = 13;
 }
 
 message LivenessRecordProto {
@@ -1338,6 +1485,10 @@ message ApplicationFrameV3 {
   // Receiver dispatches to the matching group/channel conversation. Calendar/Polls
   // payload-internal group_ids are semantically distinct (linked-event association).
   bytes                  group_id            = 17;
+
+  // GM-1 (§9.1.4): sender's local group membership state for split-view detection
+  uint64 group_membership_epoch = 18;
+  bytes  group_membership_hash  = 19; // 32 bytes SHA-256
 }
 
 // ── KEM-Header v3 (Sec H-5 v2) ──────────────────────────────────────────
@@ -1446,6 +1597,7 @@ enum MessageTypeV3 {
   MTV3_GROUP_INVITE               = 51;
   MTV3_GROUP_LEAVE                = 52;
   MTV3_GROUP_KEY_UPDATE           = 53;
+  MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = 54; // §9.1.4 GM-2: request current member list from owner
 
   // ── Channels ────────────────────────────────────────────────
   MTV3_CHANNEL_CREATE             = 60;
@@ -1552,6 +1704,7 @@ enum MessageTypeV3 {
   MTV3_DEVICE_PAIR_REQUEST        = 181;
   MTV3_DEVICE_PAIR_APPROVE        = 182;
   MTV3_DEVICE_REVOCATION          = 183;
+  MTV3_ROTATION_REJECTION_ALERT   = 184;   // §7.5: Linked → Contacts: "I reject this rotation"
 
   // ── Calendar (§11.1) ────────────────────────────────────────
   MTV3_CALENDAR_INVITE            = 190;
@@ -1584,6 +1737,10 @@ enum MessageTypeV3 {
   MTV3_FIRST_CR_STORE              = 222;
   MTV3_FIRST_CR_STORE_ACK          = 223;
   MTV3_FIRST_CR_DELIVER            = 224;
+
+  // Anonymous Vote Re-Broadcaster (§11.4.8)
+  MTV3_POLL_ANON_SUBMIT            = 225;
+  MTV3_POLL_ANON_SUBMIT_ACK        = 226;
 }
 
 // ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────
@@ -1736,5 +1893,94 @@ message FirstCrDeliverV3 {
   bytes   encrypted_cr_blob   = 1;   // same blob from FIRST_CR_STORE
   bytes   sender_device_id    = 2;   // original sender
   uint64  stored_at_ms        = 3;   // when the SeedPeer received the STORE
+}
+
+// ── Linked-Device Pairing (§7.1 LD-2) ──────────────────────────────────
+//
+// New pairing flow: the Primary does NOT transfer the master seed. Instead
+// it issues a DeviceDelegationCert + per-device sig keys + User-KEM-SK.
+// The entire payload is KEM-encrypted under the new device's ephemeral
+// X25519+ML-KEM PK from the signedPairToken.
+
+// New device → Primary: "I want to pair, here are my device keys"
+message DevicePairRequestV3 {
+  bytes   device_ed25519_pk     = 1;  // 32B — new device's Device-Sig PK
+  bytes   device_ml_dsa_pk      = 2;  // 1952B — new device's Device-Sig PQ PK
+  bytes   pair_token_signature  = 3;  // proves possession of the pairToken
+  uint64  timestamp_ms          = 4;
+}
+
+// Primary → New device: delegation material (KEM-encrypted end-to-end)
+message DevicePairApproveV3 {
+  // Delegated Sig keys (per-device, derived from seed via HKDF)
+  bytes  delegated_ed25519_pk   = 1;  // 32B
+  bytes  delegated_ed25519_sk   = 2;  // 64B (Ed25519 expanded secret)
+  bytes  delegated_ml_dsa_pk    = 3;  // 1952B
+  bytes  delegated_ml_dsa_sk    = 4;  // 4032B
+
+  // User-KEM secret keys (for decrypting incoming Per-Message-KEM)
+  bytes  user_x25519_sk         = 5;  // 32B
+  bytes  user_ml_kem_sk         = 6;  // 2400B
+
+  // The signed delegation certificate (to be embedded in AuthManifest)
+  DeviceDelegationCertProto delegation_cert = 7;
+
+  // Identity metadata for the linked device to display
+  bytes  user_id                = 8;  // 32B
+  string display_name           = 9;
+  bytes  profile_picture        = 10; // optional
+}
+
+// ── §7.5 Device Co-Authorization (Rotation Quorum) ────────────────────
+
+// Device-Sig pubkeys embedded in AuthManifest for all authorized devices.
+// Enables contacts to verify Device-Sig countersigs on rotation broadcasts.
+// Device-Sig keys are locally generated (NOT seed-derived) — a seed thief
+// cannot forge them.
+message AuthorizedDeviceSigningKeys {
+  bytes device_node_id    = 1;  // SHA-256(network_secret || ed25519_device_pk)
+  bytes device_ed25519_pk = 2;  // 32B — Device-Sig Ed25519 pubkey
+  bytes device_ml_dsa_pk  = 3;  // 1952B — Device-Sig ML-DSA-65 pubkey
+  bool  is_primary        = 4;  // true = seed-holder device
+}
+
+// A single device's countersig on an emergency key rotation.
+message RotationApprovalToken {
+  bytes  device_node_id     = 1;  // countersigning device
+  bytes  rotation_hash      = 2;  // SHA-256(new_ed25519_pk || new_ml_dsa_pk || new_x25519_pk || new_ml_kem_pk || userId)
+  bytes  device_ed25519_sig = 3;  // Device-Sig Ed25519 over rotation_hash
+  bytes  device_ml_dsa_sig  = 4;  // Device-Sig ML-DSA-65 over rotation_hash
+}
+
+// TwinSync payload for ROTATION_APPROVAL_REQUEST (Primary → Linked).
+message RotationApprovalRequestPayload {
+  bytes rotation_hash    = 1;  // the hash to countersign
+  bytes new_ed25519_pk   = 2;  // new User-PKs (for display in approval dialog)
+  bytes new_ml_dsa_pk    = 3;
+  bytes new_x25519_pk    = 4;
+  bytes new_ml_kem_pk    = 5;
+}
+
+// TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).
+message RotationApprovalResponsePayload {
+  RotationApprovalToken token = 1;
+  bool rejected = 2;  // true = active rejection (not just timeout)
+}
+
+// Linked device → all contacts: "I am actively rejecting a rotation"
+message RotationRejectionAlertPayload {
+  bytes user_id           = 1;  // the identity being rotated
+  bytes device_node_id    = 2;  // this device (the rejector)
+  bytes rotation_hash     = 3;  // the rotation being rejected
+  bytes device_ed25519_sig = 4; // Device-Sig Ed25519 over rotation_hash
+  bytes device_ml_dsa_sig  = 5; // Device-Sig ML-DSA-65 over rotation_hash
+}
+
+// Proof that a device-set shrink was co-authorized by remaining devices.
+// Embedded in AuthManifest (field 13) when devices are removed.
+message DeviceSetChangeProof {
+  uint32 previous_device_count = 1;
+  bytes  change_hash = 2;  // SHA-256(userId || sorted(new_device_node_ids) || new_seq)
+  repeated RotationApprovalToken approvals = 3;
 }
 

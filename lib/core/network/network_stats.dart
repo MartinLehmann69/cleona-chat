@@ -79,6 +79,18 @@ class NetworkStats {
   final int idPowVerifiedPeers;
   final int idPowNoncePeers;
 
+  /// D4 (§4.3 Publisher self-verify): Zyklen-Telemetrie — wie oft hat der
+  /// Post-Publish-Self-Lookup das eigene Auth-Manifest bei den Replikatoren
+  /// bestaetigt / vermisst (Miss → genau ein Re-Publish).
+  final int idSelfVerifyOk;
+  final int idSelfVerifyMiss;
+
+  /// D5 (§13.1.3 Collective quota): Drops aus der kollektiven Pool-Slice
+  /// fuer nicht-introduced Sources — Wire-Layer-RateLimiter bzw.
+  /// Relay-Forward-Slice (§5.3). 0 im Normalbetrieb; >0 = anonymer Flood.
+  final int poolDropsRate;
+  final int poolDropsRelay;
+
   final String natType;
   final String? publicIp;
   final int? publicPort;
@@ -126,6 +138,10 @@ class NetworkStats {
     this.totalKnownPeers = 0,
     this.idPowVerifiedPeers = 0,
     this.idPowNoncePeers = 0,
+    this.idSelfVerifyOk = 0,
+    this.idSelfVerifyMiss = 0,
+    this.poolDropsRate = 0,
+    this.poolDropsRelay = 0,
     this.natType = 'unknown',
     this.publicIp,
     this.publicPort,
@@ -162,6 +178,10 @@ class NetworkStats {
         'totalKnownPeers': totalKnownPeers,
         'idPowVerifiedPeers': idPowVerifiedPeers,
         'idPowNoncePeers': idPowNoncePeers,
+        'idSelfVerifyOk': idSelfVerifyOk,
+        'idSelfVerifyMiss': idSelfVerifyMiss,
+        'poolDropsRate': poolDropsRate,
+        'poolDropsRelay': poolDropsRelay,
         'natType': natType,
         'publicIp': publicIp,
         'publicPort': publicPort,
@@ -197,6 +217,10 @@ class NetworkStats {
         totalKnownPeers: json['totalKnownPeers'] as int? ?? 0,
         idPowVerifiedPeers: json['idPowVerifiedPeers'] as int? ?? 0,
         idPowNoncePeers: json['idPowNoncePeers'] as int? ?? 0,
+        idSelfVerifyOk: json['idSelfVerifyOk'] as int? ?? 0,
+        idSelfVerifyMiss: json['idSelfVerifyMiss'] as int? ?? 0,
+        poolDropsRate: json['poolDropsRate'] as int? ?? 0,
+        poolDropsRelay: json['poolDropsRelay'] as int? ?? 0,
         natType: json['natType'] as String? ?? 'unknown',
         publicIp: json['publicIp'] as String?,
         publicPort: json['publicPort'] as int?,
@@ -330,6 +354,10 @@ class NetworkStatsCollector {
   int _dhtBytes = 0;
   int _relayBytes = 0;
   int _messagesRelayed = 0;
+  // D4 (§4.3 Publisher self-verify): per-cycle outcome counters, fed by
+  // IdentityPublisher.onSelfVerifyResult (wired in cleona_service).
+  int _idSelfVerifyOk = 0;
+  int _idSelfVerifyMiss = 0;
   DateTime? _lastDayReset;
 
   // Peer history (sampled periodically)
@@ -367,6 +395,15 @@ class NetworkStatsCollector {
   /// Increment relay counter without adding bytes (for relay-only counting).
   void addRelayEvent() => _messagesRelayed++;
 
+  /// D4 (§4.3): record one publisher self-verify cycle outcome.
+  void recordIdSelfVerify(bool ok) {
+    if (ok) {
+      _idSelfVerifyOk++;
+    } else {
+      _idSelfVerifyMiss++;
+    }
+  }
+
   /// Call periodically to record peer count history.
   void recordPeerCount(int count) {
     _peerHistory.add(PeerHealthEntry(timestamp: DateTime.now(), peerCount: count));
@@ -400,6 +437,11 @@ class NetworkStatsCollector {
     required bool isRunning,
     String? profileDir,
     int? confirmedPeerCount,
+    // D5 (§13.1.3): collective-quota drop counters, passed in by the
+    // service layer from RateLimiter.poolDroppedPackets /
+    // CleonaNode.relayPoolDrops.
+    int poolDropsRate = 0,
+    int poolDropsRelay = 0,
   }) {
     _checkDayReset();
 
@@ -467,6 +509,10 @@ class NetworkStatsCollector {
           .where((p) =>
               p.deviceIdPowNonce != null && p.deviceIdPowNonce!.isNotEmpty)
           .length,
+      idSelfVerifyOk: _idSelfVerifyOk,
+      idSelfVerifyMiss: _idSelfVerifyMiss,
+      poolDropsRate: poolDropsRate,
+      poolDropsRelay: poolDropsRelay,
       natType: natTraversal.natType.name,
       publicIp: natTraversal.publicIp,
       publicPort: natTraversal.publicPort,

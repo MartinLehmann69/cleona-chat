@@ -272,6 +272,8 @@ class UiMessage {
   String? linkPreviewThumbnailBase64; // JPEG base64, max 64KB
   // Poll (§24): pollId set on chat cards rendered from POLL_CREATE.
   String? pollId;
+  // GM-2 (§9.1.4): true when sender's membership hash differs at same/lower epoch
+  bool membershipMismatch;
 
   /// Emoji reactions: emoji → set of senderNodeIdHex.
   /// Example: {"👍": {"aabb...", "ccdd..."}, "❤️": {"aabb..."}}
@@ -308,6 +310,7 @@ class UiMessage {
     this.linkPreviewSiteName,
     this.linkPreviewThumbnailBase64,
     this.pollId,
+    this.membershipMismatch = false,
     Map<String, Set<String>>? reactions,
   }) : reactions = reactions ?? {};
 
@@ -619,6 +622,7 @@ class GroupInfo {
   final Map<String, GroupMemberInfo> members; // nodeIdHex -> member
   String ownerNodeIdHex;
   DateTime createdAt;
+  int membershipEpoch;
 
   GroupInfo({
     required this.groupIdHex,
@@ -628,6 +632,7 @@ class GroupInfo {
     Map<String, GroupMemberInfo>? members,
     required this.ownerNodeIdHex,
     DateTime? createdAt,
+    this.membershipEpoch = 0,
   })  : members = members ?? {},
         createdAt = createdAt ?? DateTime.now();
 
@@ -639,6 +644,7 @@ class GroupInfo {
         'ownerNodeIdHex': ownerNodeIdHex,
         'createdAt': createdAt.millisecondsSinceEpoch,
         'members': members.map((k, v) => MapEntry(k, v.toJson())),
+        'membershipEpoch': membershipEpoch,
       };
 
   static GroupInfo fromJson(Map<String, dynamic> json) {
@@ -657,6 +663,7 @@ class GroupInfo {
       ownerNodeIdHex: json['ownerNodeIdHex'] as String? ?? '',
       createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int? ?? 0),
       members: membersMap,
+      membershipEpoch: json['membershipEpoch'] as int? ?? 0,
     );
   }
 }
@@ -719,12 +726,21 @@ class ChannelInfo {
   DateTime? badBadgeSince;
   /// Whether admin submitted a correction after bad badge.
   bool correctionSubmitted;
-  /// Temporarily hidden due to CSAM reports.
+  /// Temporarily hidden due to CSAM reports (Stage 2).
   bool isCsamHidden;
   /// When CSAM hiding started.
   DateTime? csamHiddenSince;
+  /// CSAM Stage 3: extended-hidden, objection window active.
+  bool csamStage3Active;
+  /// CSAM Stage 3: when the objection window ends (14d after threshold).
+  DateTime? csamObjectionWindowEnd;
+  /// CSAM Stage 3: jury ID of the plausibility jury (if active).
+  String? csamObjectionJuryId;
   /// Permanently tombstoned (jury verdict: deleteChannel).
   bool tombstoned;
+
+  /// GM-4 (§9.1.4): monotonic membership epoch for consistency detection.
+  int membershipEpoch;
 
   ChannelInfo({
     required this.channelIdHex,
@@ -742,7 +758,11 @@ class ChannelInfo {
     this.correctionSubmitted = false,
     this.isCsamHidden = false,
     this.csamHiddenSince,
+    this.csamStage3Active = false,
+    this.csamObjectionWindowEnd,
+    this.csamObjectionJuryId,
     this.tombstoned = false,
+    this.membershipEpoch = 0,
   })  : members = members ?? {},
         createdAt = createdAt ?? DateTime.now();
 
@@ -762,7 +782,11 @@ class ChannelInfo {
         if (correctionSubmitted) 'correctionSubmitted': true,
         if (isCsamHidden) 'isCsamHidden': true,
         if (csamHiddenSince != null) 'csamHiddenSince': csamHiddenSince!.millisecondsSinceEpoch,
+        if (csamStage3Active) 'csamStage3Active': true,
+        if (csamObjectionWindowEnd != null) 'csamObjectionWindowEnd': csamObjectionWindowEnd!.millisecondsSinceEpoch,
+        if (csamObjectionJuryId != null) 'csamObjectionJuryId': csamObjectionJuryId,
         if (tombstoned) 'tombstoned': true,
+        if (membershipEpoch > 0) 'membershipEpoch': membershipEpoch,
       };
 
   static ChannelInfo fromJson(Map<String, dynamic> json) {
@@ -793,7 +817,13 @@ class ChannelInfo {
       csamHiddenSince: json['csamHiddenSince'] != null
           ? DateTime.fromMillisecondsSinceEpoch(json['csamHiddenSince'] as int)
           : null,
+      csamStage3Active: json['csamStage3Active'] as bool? ?? false,
+      csamObjectionWindowEnd: json['csamObjectionWindowEnd'] != null
+          ? DateTime.fromMillisecondsSinceEpoch(json['csamObjectionWindowEnd'] as int)
+          : null,
+      csamObjectionJuryId: json['csamObjectionJuryId'] as String?,
       tombstoned: json['tombstoned'] as bool? ?? false,
+      membershipEpoch: json['membershipEpoch'] as int? ?? 0,
     );
   }
 }
@@ -968,6 +998,8 @@ class JuryRequest {
   final String? channelLanguage;
   final String? requesterNodeIdHex;
   final DateTime sentAt;
+  final int epochDay;
+  final int juryRound;
   JuryVoteResult? vote;
   DateTime? votedAt;
 
@@ -982,6 +1014,8 @@ class JuryRequest {
     this.channelLanguage,
     this.requesterNodeIdHex,
     DateTime? sentAt,
+    this.epochDay = 0,
+    this.juryRound = 0,
     this.vote,
     this.votedAt,
   }) : sentAt = sentAt ?? DateTime.now();
@@ -997,6 +1031,8 @@ class JuryRequest {
         if (channelLanguage != null) 'channelLanguage': channelLanguage,
         if (requesterNodeIdHex != null) 'requesterNodeIdHex': requesterNodeIdHex,
         'sentAt': sentAt.millisecondsSinceEpoch,
+        'epochDay': epochDay,
+        'juryRound': juryRound,
         if (vote != null) 'vote': vote!.index,
         if (votedAt != null) 'votedAt': votedAt!.millisecondsSinceEpoch,
       };
@@ -1014,6 +1050,8 @@ class JuryRequest {
         channelLanguage: json['channelLanguage'] as String?,
         requesterNodeIdHex: json['requesterNodeIdHex'] as String?,
         sentAt: DateTime.fromMillisecondsSinceEpoch(json['sentAt'] as int? ?? 0),
+        epochDay: json['epochDay'] as int? ?? 0,
+        juryRound: json['juryRound'] as int? ?? 0,
         vote: json['vote'] != null ? JuryVoteResult.values[json['vote'] as int] : null,
         votedAt: json['votedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['votedAt'] as int)
@@ -1186,6 +1224,68 @@ class ContactInfo {
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,
         seedEpB64: json['seedEpB64'] as String?,
+      );
+}
+
+/// §7.1 LD-9/LD-11: Delegation status for the local device.
+class LinkedDeviceStatus {
+  final bool isLinkedDevice;
+  final int capabilities;
+  final int issuedAtMs;
+  final int maxValidUntilMs;
+  final bool isExpired;
+
+  LinkedDeviceStatus({
+    required this.isLinkedDevice,
+    this.capabilities = 0,
+    this.issuedAtMs = 0,
+    this.maxValidUntilMs = 0,
+    this.isExpired = false,
+  });
+
+  bool get hasCert => isLinkedDevice && issuedAtMs > 0;
+
+  int get daysRemaining {
+    if (maxValidUntilMs == 0) return -1;
+    final remaining = maxValidUntilMs - DateTime.now().millisecondsSinceEpoch;
+    return (remaining / (24 * 60 * 60 * 1000)).ceil();
+  }
+
+  bool get expiresWithin7Days {
+    final d = daysRemaining;
+    return d >= 0 && d <= 7;
+  }
+
+  String get expiryDate {
+    if (maxValidUntilMs == 0) return '';
+    final dt = DateTime.fromMillisecondsSinceEpoch(maxValidUntilMs);
+    return '${dt.day}.${dt.month}.${dt.year}';
+  }
+
+  List<String> get capabilityNames {
+    final names = <String>[];
+    if (capabilities & 1 != 0) names.add('send');
+    if (capabilities & 2 != 0) names.add('contacts');
+    if (capabilities & 4 != 0) names.add('groups');
+    if (capabilities & 8 != 0) names.add('channels');
+    return names;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'isLinkedDevice': isLinkedDevice,
+        'capabilities': capabilities,
+        'issuedAtMs': issuedAtMs,
+        'maxValidUntilMs': maxValidUntilMs,
+        'isExpired': isExpired,
+      };
+
+  static LinkedDeviceStatus fromJson(Map<String, dynamic> json) =>
+      LinkedDeviceStatus(
+        isLinkedDevice: json['isLinkedDevice'] as bool? ?? false,
+        capabilities: json['capabilities'] as int? ?? 0,
+        issuedAtMs: json['issuedAtMs'] as int? ?? 0,
+        maxValidUntilMs: json['maxValidUntilMs'] as int? ?? 0,
+        isExpired: json['isExpired'] as bool? ?? false,
       );
 }
 

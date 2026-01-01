@@ -75,6 +75,10 @@ class Contact {
 
   String get nodeIdHex => bytesToHex(nodeId);
 
+  /// §7.1 LD-4: cached delegated signing keys from the contact's AuthManifest.
+  /// Transient (not persisted) — repopulated on each AuthManifest reception.
+  List<({Uint8List edPk, Uint8List mlDsaPk})> delegatedKeys = [];
+
   /// Whether this contact's key has changed since verification.
   /// Only meaningful for [VerificationLevel.verified] or [VerificationLevel.trusted].
   bool get hasKeyChanged {

@@ -26,9 +26,9 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<!-- Export compliance: Cleona uses non-exempt encryption (post-quantum
 	     ML-KEM/ML-DSA via liboqs + libsodium for core E2E messaging).
-	     ITSAppUsesNonExemptEncryption omitted for initial TestFlight upload —
-	     Apple will prompt on ASC website. Once answered, add back with
-	     ITSEncryptionExportComplianceCode from ASC to skip future prompts. -->
+	     Compliance documentation configured on ASC (2026-06-12). -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

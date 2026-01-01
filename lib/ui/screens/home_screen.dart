@@ -6,6 +6,7 @@ import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/service/service_types.dart';
@@ -710,6 +711,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               // Try as ContactSeed URI first
               if (input.startsWith('cleona://')) {
                 seed = ContactSeed.fromUri(input);
+                // §8.1.1 integrity check (SR-2): manipulated URI → invalid.
+                if (seed != null && seed.verifyIntegrity() == false) {
+                  seed = null;
+                }
               }
 
               // Fall back to plain 64-char hex Node-ID

@@ -90,4 +90,35 @@ class HdWallet {
       ...masterSeed,
     ]));
   }
+
+  // ── Linked-Device Delegation (§7.1 LD-1) ─────────────────────────────
+
+  /// Derive a per-device delegated Ed25519 sig keypair for a Linked Device.
+  /// Deterministic: same (masterSeed, deviceId) always yields the same keys.
+  static ({Uint8List publicKey, Uint8List secretKey}) deriveDelegatedEd25519(
+    Uint8List masterSeed,
+    Uint8List deviceId,
+  ) {
+    final sodium = SodiumFFI();
+    final info = Uint8List.fromList([
+      ...'cleona-deleg-ed25519-v1'.codeUnits,
+      ...deviceId,
+    ]);
+    final seed = sodium.hkdfSha256(masterSeed, info: info, length: 32);
+    return sodium.generateEd25519KeyPairFromSeed(seed);
+  }
+
+  /// Derive the HKDF seed for deterministic ML-DSA-65 delegation keygen.
+  /// The actual keypair generation requires OQS_SIG_keypair_derand (LD-2).
+  static Uint8List deriveDelegatedMlDsaSeed(
+    Uint8List masterSeed,
+    Uint8List deviceId,
+  ) {
+    final sodium = SodiumFFI();
+    final info = Uint8List.fromList([
+      ...'cleona-deleg-mldsa-v1'.codeUnits,
+      ...deviceId,
+    ]);
+    return sodium.hkdfSha256(masterSeed, info: info, length: 64);
+  }
 }

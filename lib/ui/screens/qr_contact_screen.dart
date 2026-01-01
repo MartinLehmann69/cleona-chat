@@ -104,12 +104,16 @@ class _QrShowScreenState extends State<QrShowScreen> {
         .toList();
     final peers = <dynamic>[];
     final seenNodeIds = <String>{};
-    // Slot 1: guaranteed relay-capable peer (has public IP in allAddresses).
+    // Slot 1: guaranteed relay-capable peer (has public IP or global IPv6).
     // This ensures scanners on different networks can reach at least one peer.
     for (final p in validPeers) {
       final hasPublic = p.allAddresses.any((a) {
-        final ip = a.contains('[') ? a.substring(1, a.indexOf(']')) : a.split(':').first;
-        return !_isPrivateIp(ip) && !ip.contains(':');
+        if (a.startsWith('[')) {
+          final ip = a.substring(1, a.indexOf(']'));
+          return !ip.startsWith('fe80:') && !ip.startsWith('fd') && !ip.startsWith('fc');
+        }
+        final ip = a.split(':').first;
+        return !_isPrivateIp(ip);
       });
       if (hasPublic && seenNodeIds.add(p.nodeIdHex)) {
         peers.add(p);
@@ -127,10 +131,24 @@ class _QrShowScreenState extends State<QrShowScreen> {
       peers.add(p);
       if (peers.length >= 5) break;
     }
-    // Own addresses: up to 2 private + public IP (if confirmed)
-    final ownAddrs = service.localIps.take(2).map((ip) => '$ip:${service.port}').toList();
+    // Own addresses: up to 2 private IPv4 + public IPv4 (if confirmed)
+    // + first global IPv6 (DS-Lite bypass: IPv6-only mobiles can reach us
+    // end-to-end without NAT traversal).
+    final ownAddrs = service.localIps
+        .where((ip) => !ip.contains(':'))
+        .take(2)
+        .map((ip) => '$ip:${service.port}')
+        .toList();
     if (service.publicIp != null && service.publicPort != null) {
       ownAddrs.add('${service.publicIp}:${service.publicPort}');
+    }
+    final globalV6 = service.localIps.firstWhere(
+      (ip) => ip.contains(':') && !ip.startsWith('fe80:') &&
+              !ip.startsWith('fd') && !ip.startsWith('fc'),
+      orElse: () => '',
+    );
+    if (globalV6.isNotEmpty) {
+      ownAddrs.add('[$globalV6]:${service.port}');
     }
     final seedPeerList = peers.map((p) {
       // Sort addresses: public IPv4 first (reachable from mobile/CGNAT),
@@ -287,6 +305,15 @@ class _QrScanScreenState extends State<QrScanScreen> {
                   }
                 }
 
+                // §8.1.1 integrity check (SR-2): SHA-256(secret + fp|ep) must
+                // equal the userId — a manipulated/corrupted code is treated
+                // like an unparseable one (scanning continues).
+                if (seed != null && seed.verifyIntegrity() == false) {
+                  debugPrint('[QR-SCAN] integrity check FAILED for '
+                      '${seed.nodeIdHex.substring(0, 8)} — ignored');
+                  seed = null;
+                }
+
                 if (seed != null) {
                   for (final sp in seed.seedPeers) {
                     debugPrint('[QR-SCAN]   Seed: ${sp.nodeIdHex.substring(0, 8)} @ ${sp.addresses}');
@@ -354,6 +381,10 @@ class _QrScanScreenState extends State<QrScanScreen> {
               final input = _manualController.text.trim();
               // Try as ContactSeed URI
               var seed = ContactSeed.fromUri(input);
+              // §8.1.1 integrity check (SR-2): manipulated URI → invalid.
+              if (seed != null && seed.verifyIntegrity() == false) {
+                seed = null;
+              }
               // Try as plain Node-ID hex
               if (seed == null && input.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(input)) {
                 seed = ContactSeed(nodeIdHex: input, displayName: '');

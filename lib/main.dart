@@ -42,6 +42,7 @@ import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/ui/components/connection_sheet.dart';
 import 'package:cleona/ui/components/crash_report_dialog.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart' as pp;
@@ -1765,6 +1766,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           ));
         }
         break;
+      case 'open_connection_sheet':
+        if (_service != null) {
+          showConnectionSheet(nav.context, _service!);
+        }
+        break;
+
       case 'go_back':
         if (nav.canPop()) {
           nav.pop();

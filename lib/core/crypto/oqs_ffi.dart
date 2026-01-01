@@ -11,6 +11,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'package:cleona/core/crypto/sodium_ffi.dart' show SodiumFFI;
+
 // ---------------------------------------------------------------------------
 // liboqs C function typedefs (native + dart)
 // ---------------------------------------------------------------------------
@@ -84,6 +86,18 @@ typedef _SigKeypairDart = int Function(
   Pointer<Uint8> publicKey,
   Pointer<Uint8> secretKey,
 );
+
+// OQS_randombytes_custom_algorithm
+typedef _RandCustomNative = Void Function(
+  Pointer<NativeFunction<Void Function(Pointer<Uint8>, Size)>> algorithmPtr,
+);
+typedef _RandCustomDart = void Function(
+  Pointer<NativeFunction<Void Function(Pointer<Uint8>, Size)>> algorithmPtr,
+);
+
+// OQS_randombytes_switch_algorithm
+typedef _RandSwitchNative = Int32 Function(Pointer<Utf8> algorithm);
+typedef _RandSwitchDart = int Function(Pointer<Utf8> algorithm);
 
 // OQS_SIG_sign
 typedef _SigSignNative = Int32 Function(
@@ -221,6 +235,8 @@ class OqsFFI {
   late final _SigKeypairDart _sigKeypair;
   late final _SigSignDart _sigSign;
   late final _SigVerifyDart _sigVerify;
+  late final _RandCustomDart _randCustom;
+  late final _RandSwitchDart _randSwitch;
 
   bool _initialized = false;
 
@@ -246,6 +262,10 @@ class OqsFFI {
         _lib.lookupFunction<_SigSignNative, _SigSignDart>('OQS_SIG_sign');
     _sigVerify = _lib
         .lookupFunction<_SigVerifyNative, _SigVerifyDart>('OQS_SIG_verify');
+    _randCustom = _lib.lookupFunction<_RandCustomNative, _RandCustomDart>(
+        'OQS_randombytes_custom_algorithm');
+    _randSwitch = _lib.lookupFunction<_RandSwitchNative, _RandSwitchDart>(
+        'OQS_randombytes_switch_algorithm');
   }
 
   // --------------------------------------------------------------------------
@@ -430,6 +450,95 @@ class OqsFFI {
       calloc.free(sk);
       _sigFree(sig);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Deterministic ML-DSA-65 keygen (§7.1 Linked-Device delegation)
+  // --------------------------------------------------------------------------
+
+  // Seed buffer for the custom DRBG callback. Only valid during
+  // mlDsaKeypairDerand — set before keygen, cleared after.
+  static Uint8List _derandSeed = Uint8List(0);
+  static int _derandOffset = 0;
+
+  /// NativeCallable-compatible DRBG: expand _derandSeed via SHA-256
+  /// counter-mode into the requested buffer. Thread-safety: Dart is
+  /// single-threaded per isolate, and OQS keygen is synchronous.
+  static void _derandCallback(Pointer<Uint8> buf, int len) {
+    final sodium = SodiumFFI();
+    var produced = 0;
+    while (produced < len) {
+      final counterBytes = Uint8List(4)
+        ..buffer.asByteData().setUint32(0, _derandOffset, Endian.big);
+      final block = Uint8List(_derandSeed.length + 4)
+        ..setAll(0, _derandSeed)
+        ..setAll(_derandSeed.length, counterBytes);
+      final hash = sodium.sha256(block);
+      final take = (len - produced) < 32 ? (len - produced) : 32;
+      for (var i = 0; i < take; i++) {
+        buf[produced + i] = hash[i];
+      }
+      produced += take;
+      _derandOffset++;
+    }
+  }
+
+  static NativeCallable<Void Function(Pointer<Uint8>, Size)>? _derandCallable;
+
+  /// Generate a deterministic ML-DSA-65 keypair from a 64-byte seed.
+  ///
+  /// Uses OQS_randombytes_custom_algorithm to inject a seeded PRNG,
+  /// then restores the system DRBG. The seed MUST be derived via HKDF
+  /// and unique per device — reuse across devices breaks key separation.
+  ({Uint8List publicKey, Uint8List secretKey}) mlDsaKeypairDerand(
+      Uint8List seed) {
+    _ensureInitialized();
+    if (seed.length != 64) {
+      throw ArgumentError('seed must be 64 bytes, got ${seed.length}');
+    }
+
+    // Set up the seeded PRNG
+    _derandSeed = Uint8List.fromList(seed);
+    _derandOffset = 0;
+    _derandCallable ??= NativeCallable<Void Function(Pointer<Uint8>, Size)>
+        .isolateLocal(_derandCallback);
+    _randCustom(_derandCallable!.nativeFunction);
+
+    final methodName = _sigAlgorithm.toNativeUtf8();
+    final sig = _sigNew(methodName);
+    calloc.free(methodName);
+
+    if (sig == nullptr) {
+      _restoreSystemDrbg();
+      throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
+    }
+
+    final pk = calloc<Uint8>(mlDsaPublicKeyLength);
+    final sk = calloc<Uint8>(mlDsaSecretKeyLength);
+
+    try {
+      final status = _sigKeypair(sig, pk, sk);
+      if (status != OqsStatus.success) {
+        throw StateError('OQS_SIG_keypair (derand) failed with status $status');
+      }
+      return (
+        publicKey: _copyToUint8List(pk, mlDsaPublicKeyLength),
+        secretKey: _copyToUint8List(sk, mlDsaSecretKeyLength),
+      );
+    } finally {
+      calloc.free(pk);
+      calloc.free(sk);
+      _sigFree(sig);
+      _restoreSystemDrbg();
+    }
+  }
+
+  void _restoreSystemDrbg() {
+    final sysAlg = 'system'.toNativeUtf8();
+    _randSwitch(sysAlg);
+    calloc.free(sysAlg);
+    _derandSeed = Uint8List(0);
+    _derandOffset = 0;
   }
 
   /// Sign a message with an ML-DSA-65 secret key.

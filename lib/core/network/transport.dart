@@ -17,6 +17,10 @@ const List<int> cleoMagic = [0x43, 0x4C, 0x45, 0x4F];
 const List<int> cprbMagic = [0x43, 0x50, 0x52, 0x42];
 const int cprbPacketSize = 20; // 4 magic + 16 probe_id
 
+/// Magic bytes for EPOCH_EXPIRED hint: "CEEP" (Cleona Epoch Expired)
+/// Packet format: [8B HMAC][4B "CEEP"][2B minVersionLE][2B epochLE] = 16 bytes
+const List<int> ceepMagic = [0x43, 0x45, 0x45, 0x50];
+
 /// CLEO discovery packet size: 8B HMAC + 4B magic + 32B nodeId + 2B port = 46 bytes.
 const int cleoPacketSize = 46;
 
@@ -59,6 +63,8 @@ class Transport {
   int _lastUdpReceiveMs = 0;
   int _startedAtMs = 0;
   bool _selfProbeAcked = false;
+  int externalPacketsReceived = 0;
+  bool firewallWarningEmitted = false;
   SecureServerSocket? _tlsServer;
   SecureServerSocket? _tlsServer6; // IPv6 TLS (§27)
   Timer? _tlsRebindTimer;
@@ -155,6 +161,14 @@ class Transport {
   void Function(int bytes)? onBytesSent;
   void Function(int bytes)? onBytesReceived;
 
+  /// Callback when an EPOCH_EXPIRED hint is received from a newer peer.
+  /// [minVersion] is the minimum secret version the network now requires.
+  void Function(int minVersion)? onEpochExpired;
+
+  /// Rate-limit EPOCH_EXPIRED hint responses: max 1 per source IP per hour.
+  final Map<String, int> _epochExpiredSentAt = {};
+
+
   Transport({required this.port, String? profileDir})
       : _profileDir = profileDir,
         _log = CLogger.get('transport', profileDir: profileDir);
@@ -171,18 +185,8 @@ class Transport {
     // Increase receive buffer to prevent drops under load (relay nodes).
     // Default 208KB is too small for bursty relay traffic with fragmentation.
     // Socket constants differ: Linux SOL_SOCKET=1/SO_RCVBUF=8,
-    // BSD/macOS/iOS SOL_SOCKET=0xFFFF/SO_RCVBUF=0x1002.
-    try {
-      final size = 2 * 1024 * 1024; // 2 MB
-      final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
-      final isBsd = Platform.isMacOS || Platform.isIOS;
-      final solSocket = isBsd ? 0xFFFF : 1;
-      final soRcvBuf = isBsd ? 0x1002 : 8;
-      _udpSocket!.setRawOption(RawSocketOption(solSocket, soRcvBuf, sizeBytes));
-      _log.info('UDP receive buffer set to 2MB');
-    } catch (e) {
-      _log.debug('Could not set UDP receive buffer: $e');
-    }
+    // Windows+BSD/macOS/iOS SOL_SOCKET=0xFFFF/SO_RCVBUF=0x1002.
+    _setRecvBuffer(_udpSocket!);
     _udpSocket!.listen(
       _onUdpEvent,
       onError: (e) {
@@ -202,7 +206,7 @@ class Transport {
       try {
         _iosUdpSender = IosUdpSender.open(port);
         if (_iosUdpSender != null) {
-          _log.info('iOS native sendto() activated on fd=${_iosUdpSender!.fd} (port $port)');
+          _log.info('iOS native sendto() activated on fd=${_iosUdpSender!.fd} fd6=${_iosUdpSender!.fd6} (port $port)');
         } else {
           _log.warn('iOS native sendto(): could not find UDP fd for port $port');
         }
@@ -484,12 +488,13 @@ class Transport {
       final m2 = data[10];
       final m3 = data[11];
       final isDiscoveryMagic =
-          // CLEO / CPRB / CFRA / CFNK all start with 'C' (0x43)
+          // CLEO / CPRB / CFRA / CFNK / CEEP all start with 'C' (0x43)
           m0 == 0x43 &&
               ((m1 == cleoMagic[1] && m2 == cleoMagic[2] && m3 == cleoMagic[3]) ||
                   (m1 == cprbMagic[1] && m2 == cprbMagic[2] && m3 == cprbMagic[3]) ||
                   (m1 == fragmentMagic[1] && m2 == fragmentMagic[2] && m3 == fragmentMagic[3]) ||
-                  (m1 == fragmentNackMagic[1] && m2 == fragmentNackMagic[2] && m3 == fragmentNackMagic[3]));
+                  (m1 == fragmentNackMagic[1] && m2 == fragmentNackMagic[2] && m3 == fragmentNackMagic[3]) ||
+                  (m1 == ceepMagic[1] && m2 == ceepMagic[2] && m3 == ceepMagic[3]));
       if (isDiscoveryMagic) {
         _processPrefixWrappedPacket(data, datagram.address, datagram.port);
         return;
@@ -507,8 +512,7 @@ class Transport {
       Uint8List data, InternetAddress remoteAddress, int remotePort) {
     final payload = NetworkSecret.unwrapPacket(data);
     if (payload == null) {
-      // Silent drop — invalid HMAC. No error response to avoid revealing our
-      // existence to forked/scanning nodes.
+      _maybeSendEpochExpiredHint(data, remoteAddress, remotePort);
       return;
     }
 
@@ -545,6 +549,21 @@ class Transport {
       return;
     }
 
+    // EPOCH_EXPIRED hint (CEEP magic) — a newer peer tells us our build
+    // is expired. Parse and notify via callback.
+    if (payload.length >= 8 &&
+        payload[0] == ceepMagic[0] &&
+        payload[1] == ceepMagic[1] &&
+        payload[2] == ceepMagic[2] &&
+        payload[3] == ceepMagic[3]) {
+      final minVer = NetworkSecret.parseEpochExpiredPayload(payload);
+      if (minVer != null) {
+        _log.warn('EPOCH_EXPIRED from $remoteAddress: network requires secret version $minVer (ours: ${NetworkSecret.currentSecretVersion})');
+        onEpochExpired?.call(minVer);
+      }
+      return;
+    }
+
     // Fragment (CFRA magic) — accumulate, dispatch when complete
     if (UdpFragmenter.isFragment(payload)) {
       onBytesReceived?.call(payload.length);
@@ -575,13 +594,19 @@ class Transport {
     onBytesReceived?.call(bytes.length);
     final packet = parseAndVerifyNetworkPacketV3(bytes);
     if (packet == null) {
-      _log.debug('NetworkPacketV3 parse/HMAC fail from $remoteAddress:$remotePort');
+      // Self-probe is a 4-byte raw packet to loopback — too short for V3
+      // parsing. Suppress misleading HMAC-fail log for it.
+      if (!(remoteAddress.isLoopback && bytes.length <= 4)) {
+        _log.debug('NetworkPacketV3 parse/HMAC fail from $remoteAddress:$remotePort');
+        if (isUdp) _maybeSendEpochExpiredHintV3(bytes, remoteAddress, remotePort);
+      }
       return;
     }
     if (onPacketV3 == null) {
       _log.warn('V3 onPacketV3 not wired — packet dropped from $remoteAddress:$remotePort');
       return;
     }
+    if (!remoteAddress.isLoopback) externalPacketsReceived++;
     _log.debug('V3 dispatch: HMAC ok, ${bytes.length}B from $remoteAddress:$remotePort isUdp=$isUdp');
     onPacketV3!.call(packet, remoteAddress, remotePort, isUdp: isUdp);
   }
@@ -635,8 +660,15 @@ class Transport {
   int _udpSendRaw(Uint8List data, InternetAddress address, int remotePort,
       RawDatagramSocket socket) {
     // iOS native sendto() — same fd as Dart socket, bypasses broken send()
-    if (_iosUdpSender != null && address.type == InternetAddressType.IPv4) {
-      return _iosUdpSender!.send(address.address, remotePort, data);
+    if (_iosUdpSender != null) {
+      if (address.type == InternetAddressType.IPv6) {
+        if (_iosUdpSender!.hasIpv6) {
+          return _iosUdpSender!.send6(address.address, remotePort, data);
+        }
+        // No IPv6 fd — fall through to Dart socket (best effort)
+      } else {
+        return _iosUdpSender!.send(address.address, remotePort, data);
+      }
     }
     if (_nativeSender != null && address.type == InternetAddressType.IPv4) {
       final sent = _nativeSender!.send(address.address, remotePort, data);
@@ -1308,6 +1340,20 @@ class Transport {
     }
   }
 
+  void _setRecvBuffer(RawDatagramSocket socket) {
+    try {
+      final size = 2 * 1024 * 1024; // 2 MB
+      final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
+      // Winsock uses the same SOL_SOCKET/SO_RCVBUF values as BSD.
+      final isLinux = !Platform.isMacOS && !Platform.isIOS && !Platform.isWindows;
+      final solSocket = isLinux ? 1 : 0xFFFF;
+      final soRcvBuf = isLinux ? 8 : 0x1002;
+      socket.setRawOption(RawSocketOption(solSocket, soRcvBuf, sizeBytes));
+    } catch (e) {
+      _log.debug('Could not set UDP receive buffer: $e');
+    }
+  }
+
   /// Windows UDP receive watchdog. Dart's IOCP-based RawDatagramSocket
   /// silently stops delivering RawSocketEvent.read after sustained traffic
   /// bursts — same defect class as the send-path 87.9% drop that
@@ -1377,11 +1423,7 @@ class Transport {
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
       _udpSocket!.broadcastEnabled = true;
       _udpSocket!.readEventsEnabled = true;
-      try {
-        final size = 2 * 1024 * 1024;
-        final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
-        _udpSocket!.setRawOption(RawSocketOption(1, 8, sizeBytes));
-      } catch (_) {}
+      _setRecvBuffer(_udpSocket!);
       _udpSocket!.listen(
         _onUdpEvent,
         onError: (e) => _log.warn('UDP socket error: $e'),
@@ -1390,11 +1432,7 @@ class Transport {
       try {
         _udpSocket6 = await RawDatagramSocket.bind(InternetAddress.anyIPv6, port);
         _udpSocket6!.readEventsEnabled = true;
-        try {
-          final size = 2 * 1024 * 1024;
-          final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
-          _udpSocket6!.setRawOption(RawSocketOption(1, 8, sizeBytes));
-        } catch (_) {}
+        _setRecvBuffer(_udpSocket6!);
         _udpSocket6!.listen(
           _onUdpEvent6,
           onError: (e) => _log.warn('UDP6 socket error: $e'),
@@ -1413,7 +1451,7 @@ class Transport {
         try {
           _iosUdpSender = IosUdpSender.open(port);
           if (_iosUdpSender != null) {
-            _log.info('iOS native sendto() reattached on fd=${_iosUdpSender!.fd}');
+            _log.info('iOS native sendto() reattached on fd=${_iosUdpSender!.fd} fd6=${_iosUdpSender!.fd6}');
           }
         } catch (e) {
           _log.warn('iOS native sendto() reattach failed: $e');
@@ -1491,6 +1529,55 @@ class Transport {
     await _tlsServer6?.close();
     _tlsServer6 = null;
     _log.info('Transport stopped');
+  }
+
+  // ── EPOCH_EXPIRED hint (§13.2) ──────────────────────────────────────
+
+  /// When prefix-wrapped or V3 HMAC verification fails, check if the
+  /// sender is using an expired secret. If so, respond with an
+  /// EPOCH_EXPIRED hint (wrapped with their old secret so they can parse
+  /// it). Rate-limited to 1 per source IP per hour.
+  void _maybeSendEpochExpiredHint(
+      Uint8List rawData, InternetAddress remoteAddress, int remotePort) {
+    if (!NetworkSecret.verifyPrefixHmacWithExpiredHint(rawData)) return;
+    _sendEpochExpiredHint(remoteAddress, remotePort);
+  }
+
+  void _maybeSendEpochExpiredHintV3(Uint8List rawData,
+      InternetAddress remoteAddress, int remotePort) {
+    try {
+      final packet = proto.NetworkPacketV3.fromBuffer(rawData);
+      final tag = Uint8List.fromList(packet.networkTag);
+      if (tag.length != NetworkSecret.networkTagLength) return;
+      packet.clearNetworkTag();
+      final probeBytes = packet.writeToBuffer();
+      if (!NetworkSecret.verifyNetworkTagWithExpiredHint(tag, probeBytes)) {
+        return;
+      }
+      _sendEpochExpiredHint(remoteAddress, remotePort);
+    } catch (_) {
+      // Not parseable as V3 at all — not an expired peer, just garbage
+    }
+  }
+
+  void _sendEpochExpiredHint(InternetAddress remoteAddress, int remotePort) {
+    final ip = remoteAddress.address;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final lastSent = _epochExpiredSentAt[ip];
+    if (lastSent != null && nowMs - lastSent < 3600000) return;
+    final hint = NetworkSecret.buildEpochExpiredPacket();
+    if (hint == null) return;
+    _epochExpiredSentAt[ip] = nowMs;
+    // Prune stale entries (keep map bounded)
+    if (_epochExpiredSentAt.length > 100) {
+      _epochExpiredSentAt.removeWhere((_, ts) => nowMs - ts > 3600000);
+    }
+    final socket = _udpSocket;
+    if (socket == null) return;
+    try {
+      _udpSendRaw(hint, remoteAddress, remotePort, socket);
+      _log.info('EPOCH_EXPIRED hint sent to $ip:$remotePort');
+    } catch (_) {}
   }
 
   bool get isRunning => _udpSocket != null;

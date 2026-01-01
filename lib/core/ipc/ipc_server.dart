@@ -415,6 +415,77 @@ class IpcServer {
       ));
     };
 
+    // SR-1 (§7.4b step 6 / §8.3): a contact emergency-rotated their identity
+    // key. The receiver applied the new keys but reset the verification
+    // level — the GUI must surface a key-change warning so the soft re-key
+    // is not followed silently.
+    final originalOnContactRotated = service.onContactIdentityRotated;
+    service.onContactIdentityRotated =
+        (contactNodeIdHex, displayName, wasVerified) {
+      originalOnContactRotated?.call(
+          contactNodeIdHex, displayName, wasVerified);
+      _broadcastEvent(IpcEvent(
+        event: 'contact_identity_rotated',
+        data: {
+          'contactNodeIdHex': contactNodeIdHex,
+          'displayName': displayName,
+          'wasVerified': wasVerified,
+        },
+        identityId: identityId,
+      ));
+    };
+
+    // H-2 (§6.3.5): a contact restored their identity (set up a new device).
+    // The GUI shows a notification; if the identity key changed, it escalates
+    // to a key-change warning (verification was reset daemon-side).
+    final originalOnRestoreDetected = service.onContactRestoreDetected;
+    service.onContactRestoreDetected =
+        (contactNodeIdHex, displayName, identityKeyChanged) {
+      originalOnRestoreDetected?.call(
+          contactNodeIdHex, displayName, identityKeyChanged);
+      _broadcastEvent(IpcEvent(
+        event: 'contact_restore_detected',
+        data: {
+          'contactNodeIdHex': contactNodeIdHex,
+          'displayName': displayName,
+          'identityKeyChanged': identityKeyChanged,
+        },
+        identityId: identityId,
+      ));
+    };
+
+    // §7.5: escalated warning when rotation Co-Auth quorum is not met.
+    final originalOnCoAuthWarning = service.onRotationCoAuthWarning;
+    service.onRotationCoAuthWarning =
+        (contactNodeIdHex, displayName, tokensPresent, tokensRequired) {
+      originalOnCoAuthWarning?.call(
+          contactNodeIdHex, displayName, tokensPresent, tokensRequired);
+      _broadcastEvent(IpcEvent(
+        event: 'rotation_co_auth_warning',
+        data: {
+          'contactNodeIdHex': contactNodeIdHex,
+          'displayName': displayName,
+          'tokensPresent': tokensPresent,
+          'tokensRequired': tokensRequired,
+        },
+        identityId: identityId,
+      ));
+    };
+
+    // §7.5: a linked device actively rejected a rotation — strongest theft signal.
+    final originalOnRejectionAlert = service.onRotationRejectionAlert;
+    service.onRotationRejectionAlert = (contactNodeIdHex, displayName) {
+      originalOnRejectionAlert?.call(contactNodeIdHex, displayName);
+      _broadcastEvent(IpcEvent(
+        event: 'rotation_rejection_alert',
+        data: {
+          'contactNodeIdHex': contactNodeIdHex,
+          'displayName': displayName,
+        },
+        identityId: identityId,
+      ));
+    };
+
     // §27.9 NAT-Troubleshooting-Wizard: push event when the 10-min trigger
     // fires so the GUI can show the wizard dialog. The event carries no
     // payload — the GUI fetches current stats via get_network_stats if it
@@ -455,6 +526,17 @@ class IpcServer {
           'devices': service.devices.map((d) => d.toJson()).toList(),
           'localDeviceId': service.localDeviceId,
         },
+        identityId: identityId,
+      ));
+    };
+
+    // §7.1 Linked-Device: push event when a pairing request arrives
+    final originalOnDevicePairRequest = service.onDevicePairRequest;
+    service.onDevicePairRequest = (requestingDeviceIdHex) {
+      originalOnDevicePairRequest?.call(requestingDeviceIdHex);
+      _broadcastEvent(IpcEvent(
+        event: 'device_pair_request',
+        data: {'deviceIdHex': requestingDeviceIdHex},
         identityId: identityId,
       ));
     };
@@ -2014,6 +2096,10 @@ class IpcServer {
               oldEd25519Pk: service.identity.ed25519PublicKey,
               oldNodeId: service.identity.userId,
               oldContacts: service.acceptedContacts,
+              // H-2: deterministic same-seed recovery → re-derived ML-DSA
+              // key equals the old one (§6.3.5), so the current secret key
+              // is the correct hybrid signer.
+              oldMlDsaSk: service.identity.mlDsaSecretKey,
             );
             _sendResponse(client, IpcResponse(id: req.id, success: ok));
           }
@@ -2036,11 +2122,18 @@ class IpcServer {
           final oldContacts = contactsJson
               .map((c) => ContactInfo.fromJson(c as Map<String, dynamic>))
               .toList();
+          // H-2: optional explicit old ML-DSA sk (hex); default to the
+          // current re-derived key (identical on deterministic same-seed
+          // recovery, §6.3.5).
+          final oldMlDsaSkHex = req.params['oldMlDsaSk'] as String?;
           final rbResult = await service.sendRestoreBroadcast(
             oldEd25519Sk: hexToBytes(oldSkHex),
             oldEd25519Pk: hexToBytes(oldPkHex),
             oldNodeId: hexToBytes(oldNidHex),
             oldContacts: oldContacts,
+            oldMlDsaSk: oldMlDsaSkHex != null
+                ? hexToBytes(oldMlDsaSkHex)
+                : service.identity.mlDsaSecretKey,
           );
           _sendResponse(client, IpcResponse(id: req.id, success: rbResult));
           break;
@@ -2596,6 +2689,54 @@ class IpcServer {
           }
           final revoked = await service.revokeDevice(revokeDeviceId);
           _sendResponse(client, IpcResponse(id: req.id, success: revoked));
+          break;
+
+        case 'approve_device_pair':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final pairDeviceId = req.params['deviceIdHex'] as String?;
+          if (pairDeviceId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: deviceIdHex'));
+            break;
+          }
+          final approved = await service.approvePairRequest(pairDeviceId);
+          _sendResponse(client, IpcResponse(id: req.id, success: approved));
+          break;
+
+        case 'get_linked_device_status':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final isLinked = service.identity.isLinkedDevice;
+          final ldKeys = service.identity.linkedDeviceKeys;
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {
+              'isLinkedDevice': isLinked,
+              if (isLinked && ldKeys != null) ...{
+                'capabilities': ldKeys.delegationCert.capabilities,
+                'issuedAtMs': ldKeys.delegationCert.issuedAtMs,
+                'maxValidUntilMs': ldKeys.delegationCert.maxValidUntilMs,
+                'isExpired': ldKeys.delegationCert.isExpired(),
+              },
+            },
+          ));
+          break;
+
+        case 'send_device_pair_request':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final pairSent = await service.sendDevicePairRequest();
+          _sendResponse(client, IpcResponse(id: req.id, success: pairSent));
           break;
 
         case 'rotate_identity_keys':

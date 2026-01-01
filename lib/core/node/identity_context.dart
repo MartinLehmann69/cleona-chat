@@ -9,6 +9,42 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/identity_resolution/linked_device_keys.dart';
+
+/// One persisted soft-re-key link old→new (§7.4b / SR-2). Plain data holder
+/// in this file (auth_manifest.dart imports identity_context — defining the
+/// link here avoids the import cycle); the IdentityPublisher maps it to the
+/// wire-level `RotationChainLink` when embedding the chain in Auth-Manifests.
+/// The OLD key signs `newEd25519Pk || newMlDsaPk` (the §4.3 link shape).
+class StoredRotationLink {
+  final Uint8List oldEd25519Pk;
+  final Uint8List newEd25519Pk;
+  final Uint8List newMlDsaPk;
+  final Uint8List oldSignatureEd25519;
+
+  StoredRotationLink({
+    required this.oldEd25519Pk,
+    required this.newEd25519Pk,
+    required this.newMlDsaPk,
+    required this.oldSignatureEd25519,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'old_ed25519_pk': bytesToHex(oldEd25519Pk),
+        'new_ed25519_pk': bytesToHex(newEd25519Pk),
+        'new_ml_dsa_pk': bytesToHex(newMlDsaPk),
+        'old_signature_ed25519': bytesToHex(oldSignatureEd25519),
+      };
+
+  static StoredRotationLink fromJson(Map<String, dynamic> json) =>
+      StoredRotationLink(
+        oldEd25519Pk: hexToBytes(json['old_ed25519_pk'] as String),
+        newEd25519Pk: hexToBytes(json['new_ed25519_pk'] as String),
+        newMlDsaPk: hexToBytes(json['new_ml_dsa_pk'] as String),
+        oldSignatureEd25519:
+            hexToBytes(json['old_signature_ed25519'] as String),
+      );
+}
 
 /// Holds all cryptographic keys and identity for one user profile.
 /// Multiple IdentityContexts can share a single CleonaNode.
@@ -35,6 +71,34 @@ class IdentityContext {
   Uint8List? previousMlKemSk;
   DateTime? keyRotatedAt;
   DateTime? keysCreatedAt;
+
+  // §7.1 LD-3: Inner-Sig signing keys.
+  // Linked Device → delegated keys; Primary/legacy → User-Keys.
+  Uint8List get signingEd25519Sk =>
+      linkedDeviceKeys?.delegatedEd25519Sk ?? ed25519SecretKey;
+  Uint8List get signingMlDsaSk =>
+      linkedDeviceKeys?.delegatedMlDsaSk ?? mlDsaSecretKey;
+  Uint8List get signingEd25519Pk =>
+      linkedDeviceKeys?.delegatedEd25519Pk ?? ed25519PublicKey;
+  Uint8List get signingMlDsaPk =>
+      linkedDeviceKeys?.delegatedMlDsaPk ?? mlDsaPublicKey;
+  bool get isLinkedDevice => linkedDeviceKeys != null;
+
+  /// SR-2 (§3.1 stable anchor / §7.4b): persisted founding→current rotation
+  /// chain. Empty unless the identity has soft-re-keyed. The userId is
+  /// derived from [foundingEd25519Pk], NOT from the current key — it never
+  /// changes across rotations. The IdentityPublisher embeds this chain in
+  /// every Auth-Manifest so resolvers verify via §4.3 path 2.
+  final List<StoredRotationLink> rotationChain = [];
+
+  /// The founding Ed25519 pubkey — the key whose hash IS the userId.
+  /// Equals the current key for never-rotated identities.
+  Uint8List get foundingEd25519Pk => rotationChain.isEmpty
+      ? ed25519PublicKey
+      : rotationChain.first.oldEd25519Pk;
+
+  /// True once this identity has soft-re-keyed at least once.
+  bool get hasRotated => rotationChain.isNotEmpty;
 
   /// User-ID: stable identity across all devices = SHA-256(network_secret + ed25519_pk).
   /// Used for contact lookup, sender_id in envelopes, S&F storage key.
@@ -129,6 +193,9 @@ class IdentityContext {
   /// Master seed for HD-Wallet derivation (null = legacy).
   final Uint8List? masterSeed;
 
+  // §7.1 LD-3: delegation keys for Linked Devices (null = Primary or legacy).
+  LinkedDeviceKeys? linkedDeviceKeys;
+
   /// When this identity was created (from IdentityManager).
   final DateTime createdAt;
 
@@ -193,7 +260,17 @@ class IdentityContext {
         keysCreatedAt = DateTime.now();
         _saveKeys(fileEnc);
       }
-      _log.info('Keys loaded from disk');
+      // SR-2: load the persisted rotation chain (empty = never rotated).
+      rotationChain.clear();
+      final chainJson = json['rotation_chain'] as List<dynamic>?;
+      if (chainJson != null) {
+        for (final l in chainJson) {
+          rotationChain
+              .add(StoredRotationLink.fromJson(l as Map<String, dynamic>));
+        }
+      }
+      _log.info('Keys loaded from disk'
+          '${rotationChain.isNotEmpty ? ' (rotation chain: ${rotationChain.length} link(s))' : ''}');
     } else {
       await _generateKeysAsync();
       keysCreatedAt = DateTime.now();
@@ -201,8 +278,11 @@ class IdentityContext {
       _log.info('New keys generated');
     }
 
-    // Compute User-ID: SHA-256(network_secret + ed25519PublicKey) — stable identity
-    userId = HdWallet.computeUserId(ed25519PublicKey, NetworkSecret.secret);
+    // Compute User-ID: SHA-256(network_secret + FOUNDING ed25519 pk) —
+    // stable anchor (§3.1 / SR-2). For never-rotated identities the founding
+    // key IS the current key (byte-identical to the previous behaviour);
+    // after a soft re-key the userId stays pinned to the chain's first link.
+    userId = HdWallet.computeUserId(foundingEd25519Pk, NetworkSecret.secret);
 
     // Compute Device-Node-ID from the daemon-global Device-Sig keypair
     // (§3.1, §3.5). Multi-Identity sharing: all IdentityContexts in this
@@ -263,6 +343,11 @@ class IdentityContext {
     if (previousMlKemSk != null) data['prev_ml_kem_sk'] = bytesToHex(previousMlKemSk!);
     if (keyRotatedAt != null) data['key_rotated_at'] = keyRotatedAt!.millisecondsSinceEpoch;
     if (keysCreatedAt != null) data['keys_created_at'] = keysCreatedAt!.millisecondsSinceEpoch;
+    // SR-2: persist the rotation chain (absent = never rotated).
+    if (rotationChain.isNotEmpty) {
+      data['rotation_chain'] =
+          rotationChain.map((l) => l.toJson()).toList();
+    }
     fileEnc.writeJsonFile('$profileDir/keys.json', data);
   }
 
@@ -316,6 +401,22 @@ class IdentityContext {
   }) {
     final fileEnc = FileEncryption(baseDir: _baseDir);
 
+    // SR-2 (§3.1 stable anchor / §7.4b step 4): append the continuity link
+    // BEFORE replacing keys — the OLD secret key signs the successor pubkeys
+    // (`newEd25519Pk || newMlDsaPk`, the §4.3 RotationChainLink shape).
+    // Ed25519 signing is deterministic, so a twin device re-deriving the
+    // same new keys from the synced entropy produces a byte-identical link.
+    final linkContent = Uint8List(newEd25519Pk.length + newMlDsaPk.length);
+    linkContent.setRange(0, newEd25519Pk.length, newEd25519Pk);
+    linkContent.setRange(newEd25519Pk.length, linkContent.length, newMlDsaPk);
+    rotationChain.add(StoredRotationLink(
+      oldEd25519Pk: ed25519PublicKey,
+      newEd25519Pk: newEd25519Pk,
+      newMlDsaPk: newMlDsaPk,
+      oldSignatureEd25519:
+          SodiumFFI().signEd25519(linkContent, ed25519SecretKey),
+    ));
+
     // Keep old KEM secret keys for transit messages (7-day retention)
     previousX25519Sk = x25519SecretKey;
     previousMlKemSk = mlKemSecretKey;
@@ -332,13 +433,61 @@ class IdentityContext {
 
     keyRotatedAt = DateTime.now();
 
-    // Recompute User-ID with new Ed25519 public key.
-    // DeviceID is unchanged: it's derived from the daemon-global Device-Sig
-    // keypair (§3.1, §3.5), which is independent of any User-keypair rotation.
-    userId = HdWallet.computeUserId(ed25519PublicKey, NetworkSecret.secret);
+    // SR-2: the User-ID is NOT recomputed — it stays pinned to the founding
+    // key (§3.1 stable anchor); the chain above proves founding→current.
+    // (The pre-SR-2 implementation recomputed it from the new key here —
+    // that contradicted §3.1, left the D1 chain path unused, and made
+    // rotation a free identity reset.) DeviceID is likewise unchanged: it
+    // derives from the daemon-global Device-Sig keypair (§3.1, §3.5).
 
     _saveKeys(fileEnc);
-    _log.info('Full identity rotation complete. New User-ID: ${userIdHex.substring(0, 16)}...');
+    _log.info('Full identity rotation complete (stable anchor): User-ID '
+        '${userIdHex.substring(0, 16)}... unchanged, '
+        'chain length ${rotationChain.length}');
+  }
+
+  /// §7.1 LD-8: Linked-Device delegation rotation after Primary's emergency
+  /// key rotation. Updates User-PKs, User-KEM-SK, delegation keys, and
+  /// rotation chain — WITHOUT receiving the master seed.
+  void rotateDelegation({
+    required Uint8List newUserEd25519Pk,
+    required Uint8List newUserMlDsaPk,
+    required Uint8List newUserX25519Pk,
+    required Uint8List newUserMlKemPk,
+    required Uint8List newUserX25519Sk,
+    required Uint8List newUserMlKemSk,
+    required LinkedDeviceKeys newLinkedKeys,
+  }) {
+    final fileEnc = FileEncryption(baseDir: _baseDir);
+
+    final linkContent = Uint8List(newUserEd25519Pk.length + newUserMlDsaPk.length);
+    linkContent.setRange(0, newUserEd25519Pk.length, newUserEd25519Pk);
+    linkContent.setRange(newUserEd25519Pk.length, linkContent.length, newUserMlDsaPk);
+    rotationChain.add(StoredRotationLink(
+      oldEd25519Pk: ed25519PublicKey,
+      newEd25519Pk: newUserEd25519Pk,
+      newMlDsaPk: newUserMlDsaPk,
+      oldSignatureEd25519:
+          SodiumFFI().signEd25519(linkContent, ed25519SecretKey),
+    ));
+
+    previousX25519Sk = x25519SecretKey;
+    previousMlKemSk = mlKemSecretKey;
+
+    ed25519PublicKey = newUserEd25519Pk;
+    mlDsaPublicKey = newUserMlDsaPk;
+    x25519PublicKey = newUserX25519Pk;
+    x25519SecretKey = newUserX25519Sk;
+    mlKemPublicKey = newUserMlKemPk;
+    mlKemSecretKey = newUserMlKemSk;
+
+    linkedDeviceKeys = newLinkedKeys;
+    keyRotatedAt = DateTime.now();
+
+    _saveKeys(fileEnc);
+    _log.info('Delegation rotation complete (LD-8): User-ID '
+        '${userIdHex.substring(0, 16)}... unchanged, '
+        'chain length ${rotationChain.length}');
   }
 
   /// Discard previous keys if retention period (7 days) has passed.

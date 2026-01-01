@@ -32,11 +32,14 @@ enum NetworkChannel {
 /// Nodes without the correct secret cannot parse, generate, or respond to
 /// Cleona network traffic — they are cryptographically isolated.
 ///
-/// Secret Rotation (Architecture 17.5.5):
+/// Secret Rotation (Architecture §13.2):
 /// - Each major release rotates the secret version
-/// - During transition (90 days), both current and previous secrets are accepted
-/// - Outgoing packets always use the current secret
-/// - After 90 days, the previous secret is dropped
+/// - During transition, both current and previous secrets are accepted
+/// - Outgoing packets use the PREVIOUS secret (backward-compatible with
+///   un-updated peers); after transition ends, outgoing uses the current
+/// - A one-generation-old "expired hint" secret is kept solely to detect
+///   peers whose secret has fully expired and send them an EPOCH_EXPIRED
+///   update hint (wrapped with their old secret so they can parse it)
 class NetworkSecret {
   /// The active channel, determined at compile time via --dart-define.
   /// On Android: automatically inferred from package name suffix (.beta → beta).
@@ -70,6 +73,13 @@ class NetworkSecret {
   /// Set to currentSecretVersion - 1 during transition periods.
   /// Set to 0 to disable dual-secret acceptance.
   static const int previousSecretVersion = 0;
+
+  /// Expired-hint secret version: the most recent secret we no longer ACCEPT
+  /// but still keep to DETECT expired peers and send them an EPOCH_EXPIRED
+  /// update hint. Set to the old previousSecretVersion when closing a
+  /// transition window (e.g. current=2, previous=0, expiredHint=1).
+  /// 0 = no expired hint secret available.
+  static const int expiredHintSecretVersion = 0;
 
   /// Transition period in days. After this many days since build,
   /// the previous secret is no longer accepted.
@@ -110,11 +120,12 @@ class NetworkSecret {
   // 1. Generate new secret: HMAC-SHA256(maintainer_key, "cleona-network-beta-v2")[:16]
   // 2. Add V2 fragments below (XOR-masked as usual)
   // 3. Set currentSecretVersion = 2, previousSecretVersion = 1
-  // 4. After 90 days: remove V1 fragments, set previousSecretVersion = 0
+  // 4. After 90 days: set previousSecretVersion = 0, expiredHintSecretVersion = 1
   // ---------------------------------------------------------------------------
 
   static Uint8List? _cached;
   static Uint8List? _cachedPrevious;
+  static Uint8List? _cachedExpiredHint;
 
   /// Returns the 16-byte network secret for the current version.
   /// Reassembled from XOR-masked fragments at runtime.
@@ -131,8 +142,21 @@ class NetworkSecret {
     return _cachedPrevious;
   }
 
+  /// Returns the expired-hint secret, or null if not configured.
+  static Uint8List? get expiredHintSecret {
+    if (expiredHintSecretVersion == 0) return null;
+    _cachedExpiredHint ??= _secretForVersion(expiredHintSecretVersion);
+    return _cachedExpiredHint;
+  }
+
   /// Whether dual-secret acceptance is active.
   static bool get isInTransition => previousSecretVersion > 0;
+
+  /// The secret to use for all outbound packets.
+  /// During transition: the PREVIOUS (old) secret — ensures backward
+  /// compatibility with un-updated peers who only know the old secret.
+  /// After transition: the CURRENT secret.
+  static Uint8List get outboundSecret => previousSecret ?? secret;
 
   /// Returns the secret for the given version.
   static Uint8List _secretForVersion(int version) {
@@ -176,18 +200,18 @@ class NetworkSecret {
 
   /// Compute 8-byte truncated HMAC-SHA256 for packet authentication.
   /// Prepended to every outgoing UDP packet (Architecture 17.5.4).
-  /// Always uses the CURRENT secret.
+  /// Uses [outboundSecret] (old secret during transition for compat).
   static Uint8List computePacketHmac(Uint8List payload) {
-    return _truncate(_computeHmacFull(secret, payload), hmacPrefixLength);
+    return _truncate(_computeHmacFull(outboundSecret, payload), hmacPrefixLength);
   }
 
   /// Compute the 16-byte in-frame network_tag for a NetworkPacketV3.
   /// Input must be the protobuf serialization of the packet WITHOUT the
-  /// network_tag field set (Architecture v3.0 §2.4 [11]). Always uses the
-  /// CURRENT secret.
+  /// network_tag field set (Architecture v3.0 §2.4 [11]).
+  /// Uses [outboundSecret] (old secret during transition for compat).
   static Uint8List computeNetworkTag(Uint8List frameBytesWithoutTag) {
     return _truncate(
-        _computeHmacFull(secret, frameBytesWithoutTag), networkTagLength);
+        _computeHmacFull(outboundSecret, frameBytesWithoutTag), networkTagLength);
   }
 
   /// Verify the 16-byte network_tag of a received NetworkPacketV3.
@@ -279,9 +303,74 @@ class NetworkSecret {
     return null;
   }
 
+  // ── EPOCH_EXPIRED hint (§13.2) ──────────────────────────────────────
+  // Format: [8B HMAC(old_secret, payload)][payload]
+  // Payload: [4B magic "CEEP"][2B minVersionLE][2B currentEpochLE]
+  // Total: 16 bytes on wire (8 HMAC + 8 payload).
+
+  /// Magic for EPOCH_EXPIRED hint packets: "CEEP" (Cleona Epoch Expired)
+  static const epochExpiredMagic = [0x43, 0x45, 0x45, 0x50];
+
+  /// Build an EPOCH_EXPIRED hint packet wrapped with [hintSecret].
+  /// Returns null if no hint secret is available.
+  static Uint8List? buildEpochExpiredPacket() {
+    final hint = expiredHintSecret;
+    if (hint == null) return null;
+    final payload = Uint8List(8);
+    payload[0] = epochExpiredMagic[0];
+    payload[1] = epochExpiredMagic[1];
+    payload[2] = epochExpiredMagic[2];
+    payload[3] = epochExpiredMagic[3];
+    payload[4] = currentSecretVersion & 0xFF;
+    payload[5] = (currentSecretVersion >> 8) & 0xFF;
+    payload[6] = currentSecretVersion & 0xFF; // epoch = version for now
+    payload[7] = (currentSecretVersion >> 8) & 0xFF;
+    final hmac = _truncate(_computeHmacFull(hint, payload), hmacPrefixLength);
+    final packet = Uint8List(hmacPrefixLength + payload.length);
+    packet.setRange(0, hmacPrefixLength, hmac);
+    packet.setRange(hmacPrefixLength, packet.length, payload);
+    return packet;
+  }
+
+  /// Try to parse an EPOCH_EXPIRED hint from an already-unwrapped payload.
+  /// Returns the minimum required version, or null if not an EPOCH_EXPIRED.
+  static int? parseEpochExpiredPayload(Uint8List payload) {
+    if (payload.length < 8) return null;
+    if (payload[0] != epochExpiredMagic[0] ||
+        payload[1] != epochExpiredMagic[1] ||
+        payload[2] != epochExpiredMagic[2] ||
+        payload[3] != epochExpiredMagic[3]) {
+      return null;
+    }
+    return payload[4] | (payload[5] << 8);
+  }
+
+  /// Check raw prefix-wrapped packet bytes against the expired-hint secret.
+  /// Used when both current and previous HMAC verification failed — if this
+  /// succeeds, the sender is running an expired build and we should respond
+  /// with a hint. Returns true on match.
+  static bool verifyPrefixHmacWithExpiredHint(Uint8List packet) {
+    final hint = expiredHintSecret;
+    if (hint == null) return false;
+    if (packet.length <= hmacPrefixLength) return false;
+    final hmac = Uint8List.fromList(packet.sublist(0, hmacPrefixLength));
+    final payload = Uint8List.fromList(packet.sublist(hmacPrefixLength));
+    return _verifyHmacWith(hint, hmac, payload);
+  }
+
+  /// Check a V3 in-frame network_tag against the expired-hint secret.
+  static bool verifyNetworkTagWithExpiredHint(
+      Uint8List tag, Uint8List frameBytesWithoutTag) {
+    final hint = expiredHintSecret;
+    if (hint == null) return false;
+    if (tag.length != networkTagLength) return false;
+    return _verifyTagWith(hint, tag, frameBytesWithoutTag);
+  }
+
   /// Clear cached secrets (for testing).
   static void clearCache() {
     _cached = null;
     _cachedPrevious = null;
+    _cachedExpiredHint = null;
   }
 }

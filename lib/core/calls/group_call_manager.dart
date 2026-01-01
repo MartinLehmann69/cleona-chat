@@ -1115,8 +1115,8 @@ class GroupCallManager {
         ..payload = payload;
       final innerBytes = V3FrameCodec.buildAndEncryptInner(
         inner: inner,
-        senderUserEd25519Sk: identity.ed25519SecretKey,
-        senderUserMlDsaSk: identity.mlDsaSecretKey,
+        senderUserEd25519Sk: identity.signingEd25519Sk,
+        senderUserMlDsaSk: identity.signingMlDsaSk,
         recipientUserX25519Pk: peerX25519Pk,
         recipientUserMlKemPk: peerMlKemPk,
       );

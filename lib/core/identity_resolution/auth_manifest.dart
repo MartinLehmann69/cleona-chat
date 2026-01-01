@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/identity_resolution/device_delegation.dart';
+import 'package:cleona/core/identity_resolution/rotation_co_auth.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
@@ -83,6 +85,16 @@ class AuthManifest {
   /// Empty unless the identity has rotated.
   final List<RotationChainLink> rotationChain;
 
+  /// LD-1 (§7.1): delegation certificates for Linked Devices. Empty on
+  /// single-device identities and pre-LD builds.
+  final List<DeviceDelegation> deviceDelegations;
+
+  /// §7.5: Device-Sig pubkeys for all authorized devices (Primary + Linked).
+  final List<DeviceSigInfo> deviceSigKeys;
+
+  /// §7.5: Proof that device-set shrinks were co-authorized.
+  final DeviceSetChangeProof? deviceSetChangeProof;
+
   Uint8List ed25519Sig;
   Uint8List mlDsaSig;
 
@@ -97,11 +109,29 @@ class AuthManifest {
     Uint8List? userEd25519Pk,
     Uint8List? userMlDsaPk,
     this.rotationChain = const [],
+    this.deviceDelegations = const [],
+    this.deviceSigKeys = const [],
+    this.deviceSetChangeProof,
   })  : userEd25519Pk = userEd25519Pk ?? Uint8List(0),
         userMlDsaPk = userMlDsaPk ?? Uint8List(0);
 
   bool get hasEmbeddedKeys =>
       userEd25519Pk.isNotEmpty && userMlDsaPk.isNotEmpty;
+
+  bool get hasDelegations => deviceDelegations.isNotEmpty;
+
+  /// Look up the delegation cert for [deviceId]. Returns null if the device
+  /// is Primary (no delegation) or if this is a pre-LD manifest.
+  DeviceDelegation? delegationFor(Uint8List deviceId) {
+    for (final d in deviceDelegations) {
+      if (_bytesEqual(d.deviceId, deviceId)) return d;
+    }
+    return null;
+  }
+
+  /// Returns true if [deviceId] is a Linked Device (has a delegation cert).
+  /// False means Primary or legacy full-authority.
+  bool isLinkedDevice(Uint8List deviceId) => delegationFor(deviceId) != null;
 
   /// Build canonical bytes-to-sign: deterministische Serialisierung WITHOUT
   /// signature fields. Signing-side and verifying-side muessen denselben Pfad
@@ -119,6 +149,16 @@ class AuthManifest {
     if (rotationChain.isNotEmpty) {
       unsigned.rotationChain.addAll(rotationChain.map((l) => l.toProto()));
     }
+    if (deviceDelegations.isNotEmpty) {
+      unsigned.deviceDelegations.addAll(
+          deviceDelegations.map((d) => d.toProto()));
+    }
+    if (deviceSigKeys.isNotEmpty) {
+      unsigned.deviceSigKeys.addAll(deviceSigKeys.map((d) => d.toProto()));
+    }
+    if (deviceSetChangeProof != null) {
+      unsigned.deviceSetChangeProof = deviceSetChangeProof!.toProto();
+    }
     return Uint8List.fromList(unsigned.writeToBuffer());
   }
 
@@ -131,6 +171,9 @@ class AuthManifest {
     required int ttlSeconds,
     required int sequenceNumber,
     List<RotationChainLink> rotationChain = const [],
+    List<DeviceDelegation> deviceDelegations = const [],
+    List<DeviceSigInfo> deviceSigKeys = const [],
+    DeviceSetChangeProof? deviceSetChangeProof,
     Uint8List? userId,
   }) {
     final publishedAtMs = DateTime.now().millisecondsSinceEpoch;
@@ -143,6 +186,9 @@ class AuthManifest {
       userEd25519Pk: id.ed25519PublicKey,
       userMlDsaPk: id.mlDsaPublicKey,
       rotationChain: rotationChain,
+      deviceDelegations: deviceDelegations,
+      deviceSigKeys: deviceSigKeys,
+      deviceSetChangeProof: deviceSetChangeProof,
       ed25519Sig: Uint8List(0),
       mlDsaSig: Uint8List(0),
     );
@@ -247,6 +293,15 @@ class AuthManifest {
     if (rotationChain.isNotEmpty) {
       p.rotationChain.addAll(rotationChain.map((l) => l.toProto()));
     }
+    if (deviceDelegations.isNotEmpty) {
+      p.deviceDelegations.addAll(deviceDelegations.map((d) => d.toProto()));
+    }
+    if (deviceSigKeys.isNotEmpty) {
+      p.deviceSigKeys.addAll(deviceSigKeys.map((d) => d.toProto()));
+    }
+    if (deviceSetChangeProof != null) {
+      p.deviceSetChangeProof = deviceSetChangeProof!.toProto();
+    }
     return p;
   }
 
@@ -262,6 +317,13 @@ class AuthManifest {
       userMlDsaPk: Uint8List.fromList(p.userMlDsaPk),
       rotationChain:
           p.rotationChain.map(RotationChainLink.fromProto).toList(),
+      deviceDelegations:
+          p.deviceDelegations.map(DeviceDelegation.fromProto).toList(),
+      deviceSigKeys:
+          p.deviceSigKeys.map(DeviceSigInfo.fromProto).toList(),
+      deviceSetChangeProof: p.hasDeviceSetChangeProof()
+          ? DeviceSetChangeProof.fromProto(p.deviceSetChangeProof)
+          : null,
       ed25519Sig: Uint8List.fromList(p.ed25519Sig),
       mlDsaSig: Uint8List.fromList(p.mlDsaSig),
     );
