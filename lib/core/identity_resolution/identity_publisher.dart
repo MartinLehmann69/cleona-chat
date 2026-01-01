@@ -54,18 +54,6 @@ class IdentityPublisher {
   /// tests inject simple in-memory recorders.
   final IdentityPublisherSender sender;
 
-  /// D4 (§4.3 Publisher self-verify): request/response channel for the
-  /// post-publish self-lookup. Production wiring is `CleonaNode.dhtRpc`
-  /// (shape: `Future<DhtRpcResponse?> sendAndWait(MTV3, body, peer)`); kept
-  /// `dynamic` so test mocks don't implement DhtRpc's full surface — same
-  /// pattern as `IdentityResolver.dhtRpc`. Null → self-verify skipped.
-  final dynamic dhtRpc;
-
-  /// D4 observability hook: fired once per self-verify cycle with the
-  /// outcome. Production wiring increments the
-  /// `idSelfVerifyOk`/`idSelfVerifyMiss` network-stats counters.
-  void Function(bool ok)? onSelfVerifyResult;
-
   // Adaptive TTL config
   static const Duration foregroundLiveTtl = Duration(minutes: 15);
   static const Duration backgroundLiveTtl = Duration(hours: 1);
@@ -94,10 +82,6 @@ class IdentityPublisher {
   static const Duration coldStartRetry = Duration(seconds: 60);
   static const Duration addressFlapDebounce = Duration(seconds: 5);
 
-  /// D4 (§4.3): delay between Auth-publish and the one self-verify lookup —
-  /// lets the replicator stores land before we probe them.
-  static const Duration selfVerifyDelay = Duration(seconds: 10);
-
   bool _foreground = true;
   bool _running = false;
   Timer? _liveTimer;
@@ -108,10 +92,6 @@ class IdentityPublisher {
   // peer-join wakeup gate from "peerThreshold reached" to "any peer
   // available" — see `onPeerJoined()` and `_waitForPeersThenPublish()`.
   bool _coldStartTimedOut = false;
-  // D4: one-shot self-verify per Auth-publish cycle. The timer is replaced
-  // on every new publish cycle and cancelled on stop().
-  Timer? _selfVerifyTimer;
-  AuthManifest? _lastAuthManifest;
   DateTime? _lastPublishedAt;
   List<proto.PeerAddressProto> _lastPublishedAddrs =
       const <proto.PeerAddressProto>[];
@@ -163,7 +143,6 @@ class IdentityPublisher {
     required this.routingTable,
     required this.sender,
     this.dhtHandler,
-    this.dhtRpc,
   }) : _log = CLogger.get('publisher', profileDir: identity.profileDir) {
     // 2026-05-08 diagnostic wave: emit an "alive" marker at construction
     // time so every newly-instantiated publisher leaves a trace in the
@@ -208,7 +187,6 @@ class IdentityPublisher {
     _kemTimer?.cancel();
     _coldStartRetryTimer?.cancel();
     _addressFlapDebounceTimer?.cancel();
-    _selfVerifyTimer?.cancel();
     _coldStartTimedOut = false;
   }
 
@@ -398,14 +376,6 @@ class IdentityPublisher {
       sequenceNumber: seq,
     );
     await _broadcastAuthManifest(manifest);
-    // D4 (§4.3 Publisher self-verify): exactly ONE delayed self-lookup per
-    // Auth-publish cycle. A new cycle replaces a still-pending timer.
-    _lastAuthManifest = manifest;
-    _selfVerifyTimer?.cancel();
-    _selfVerifyTimer = Timer(selfVerifyDelay, () {
-      _selfVerifyTimer = null;
-      unawaited(_selfVerifyAuth(manifest));
-    });
     _scheduleAuthRefresh();
     _scheduleLiveness(initialDelay: livenessInitialOffset);
     // Ersten Liveness-Publish sofort nach dem Auth durchziehen (dasselbe
@@ -428,10 +398,8 @@ class IdentityPublisher {
     // doesn't have the record we just published.
     dhtHandler?.handleAuthPublish(m);
     final authKey = _authKey(identity.userId);
-    // D4 (§4.3): subnet-diverse replicator selection — eclipse cost binding.
     final closest = routingTable.findClosestPeers(authKey,
-        count: targetK,
-        maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+        count: targetK);
     final payload = Uint8List.fromList(m.toProto().writeToBuffer());
     for (final peer in closest) {
       // V3-direct: sender (CleonaNode.sendInfraTo) wraps in
@@ -453,96 +421,6 @@ class IdentityPublisher {
       if (!_running) return;
       await _publishAuthAndStartLiveness();
     });
-  }
-
-  /// D4 (§4.3 Publisher self-verify): one self-lookup per Auth-publish
-  /// cycle. Fans `IDENTITY_AUTH_RETRIEVE` out to the current K-closest
-  /// replicators — deliberately BYPASSING the local self-store (asking the
-  /// local DhtHandler would trivially succeed). Pass: >= 1 response carries
-  /// the manifest at the just-published seq (or newer — a refresh may have
-  /// raced). Miss: warn + exactly ONE re-publish to a freshly computed
-  /// replicator set; edge-triggered, no retry timer.
-  ///
-  /// Honest limitation (documented §4.3): a replicator that serves the
-  /// publisher but censors third parties is indistinguishable from an
-  /// honest one here — the structural defense is the subnet-diverse
-  /// selection.
-  Future<void> _selfVerifyAuth(AuthManifest published) async {
-    if (!_running) return;
-    if (dhtRpc == null) {
-      _log.debug('D4 self-verify skipped: no dhtRpc wired');
-      return;
-    }
-    final authKey = _authKey(identity.userId);
-    final closest = routingTable.findClosestPeers(authKey,
-        count: targetK,
-        maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-    if (closest.isEmpty) {
-      // No remote replicators — nothing the publish could have landed on;
-      // not a censorship signal, so no miss counter.
-      _log.debug('D4 self-verify skipped: no replicators known');
-      return;
-    }
-
-    final body = Uint8List.fromList(
-        (proto.IdentityAuthRetrieveRequest()..userId = identity.userId)
-            .writeToBuffer());
-    var confirmed = 0;
-    var responded = 0;
-    await Future.wait(closest.map((peer) async {
-      try {
-        final response = await dhtRpc.sendAndWait(
-            proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE, body, peer);
-        if (response == null) return;
-        if (response.type !=
-            proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE) {
-          return;
-        }
-        responded++;
-        final m = AuthManifest.fromProto(
-            proto.AuthManifestProto.fromBuffer(response.payload));
-        if (_bytesEqual(m.userId, identity.userId) &&
-            m.sequenceNumber >= published.sequenceNumber) {
-          confirmed++;
-        }
-      } catch (_) {
-        // Per-peer failures squashed — a single bad replicator must not
-        // fail the verify; the aggregate decides.
-      }
-    }));
-
-    if (confirmed > 0) {
-      _log.info('D4 self-verify OK: $confirmed/${closest.length} replicators '
-          'serve AuthManifest seq>=${published.sequenceNumber}');
-      onSelfVerifyResult?.call(true);
-      return;
-    }
-    _log.warn('D4 self-verify MISS: 0/${closest.length} replicators serve '
-        'AuthManifest seq=${published.sequenceNumber} '
-        '($responded responded) — one re-publish to fresh set');
-    onSelfVerifyResult?.call(false);
-    if (!_running) return;
-    // Exactly one re-publish (same record, no seq bump) to a freshly
-    // computed diverse replicator set. NOT followed by another self-verify —
-    // the next regular publish cycle verifies again.
-    await _broadcastAuthManifest(published);
-  }
-
-  /// Test-Hook: triggert den D4-Self-Verify direkt, ohne Timer-Wartezeit.
-  /// `manifest` default: der zuletzt publizierte.
-  @visibleForTesting
-  Future<void> selfVerifyAuthNowForTest({AuthManifest? manifest}) async {
-    final m = manifest ?? _lastAuthManifest;
-    if (m == null) return;
-    await _selfVerifyAuth(m);
-  }
-
-  bool _bytesEqual(Uint8List a, Uint8List b) {
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i++) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
   }
 
   void _scheduleLiveness({Duration? initialDelay}) {
@@ -575,10 +453,8 @@ class IdentityPublisher {
     // Self-store: see `_broadcastAuthManifest` for rationale.
     dhtHandler?.handleLivePublish(r);
     final liveKey = _liveKey(identity.userId, identity.deviceNodeId);
-    // D4 (§4.3): subnet-diverse replicator selection.
     final closest = routingTable.findClosestPeers(liveKey,
-        count: targetK,
-        maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+        count: targetK);
     final payload = Uint8List.fromList(r.toProto().writeToBuffer());
     for (final peer in closest) {
       try {
@@ -664,10 +540,8 @@ class IdentityPublisher {
     // Self-store: see `_broadcastAuthManifest` for rationale.
     dhtHandler?.handleKemPublish(record);
     final kemKey = _kemKey(identity.userId, identity.deviceNodeId);
-    // D4 (§4.3): subnet-diverse replicator selection.
     final closest = routingTable.findClosestPeers(kemKey,
-        count: targetK,
-        maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+        count: targetK);
     final payload = Uint8List.fromList(record.toProto().writeToBuffer());
     _log.info('DeviceKem publish: targets=${closest.length} peers '
         '(routingTable.peerCount=${routingTable.peerCount}, targetK=$targetK)');

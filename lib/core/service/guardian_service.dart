@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/shamir_sss.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/node/cleona_node.dart';
@@ -260,9 +259,7 @@ class GuardianService {
     // — TODO when the recovering side wires the V3 retrieve path it
     // must adapt to the un-wrapped payload shape).
     final recoveryMailboxId = hexToBytes(recoveryMailboxIdHex);
-    // D4 (§4.3): subnet-diverse replicator selection.
-    final peers = node.routingTable.findClosestPeers(recoveryMailboxId,
-        count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+    final peers = node.routingTable.findClosestPeers(recoveryMailboxId, count: 10);
 
     // Synthesize a deterministic messageId for the FragmentStore so the
     // recovering side can de-dup across peers (hashed from

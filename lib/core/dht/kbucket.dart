@@ -454,28 +454,12 @@ class RoutingTable {
     if (list.isEmpty) _byUserIdHex.remove(hex);
   }
 
-  /// D4 (§4.3): default per-IP-group cap for diversity-aware replicator
-  /// selection. With K=10 and cap 2, an attacker confined to one IP group
-  /// holds at most 2 replicator slots while >= 8 candidates from other
-  /// groups exist.
-  static const int diversityMaxPerIpGroup = 2;
-
   /// Find the K closest peers to a target ID.
   /// Partitions into recent (seen < 10 min) and stale, preferring recent.
-  ///
-  /// `maxPerIpGroup` (D4, §4.3 Replicator & lookup diversity): when set,
-  /// the selection prefers IP-subnet diversity — at most that many peers
-  /// per `PeerInfo.ipDiversityGroup` are taken in preference order; the
-  /// remaining slots are filled with the closest skipped peers, so the
-  /// selection NEVER returns fewer peers than the undiversified one
-  /// (single-subnet LANs keep full replication). Used by the identity
-  /// publish/lookup paths and the fragment-store replicator selections;
-  /// the DHT FIND_NODE response path stays distance-pure (null).
   List<PeerInfo> findClosestPeers(Uint8List targetId,
       {int count = kBucketSize,
       bool Function(PeerInfo)? filter,
-      bool includeStale = false,
-      int? maxPerIpGroup}) {
+      bool includeStale = false}) {
     final now = DateTime.now();
     final recentCutoff = now.subtract(const Duration(minutes: 10));
 
@@ -499,46 +483,11 @@ class RoutingTable {
     final recent = allPeers.where((p) => p.lastSeen.isAfter(recentCutoff)).toList();
     final stale = allPeers.where((p) => !p.lastSeen.isAfter(recentCutoff)).toList();
 
-    // D4: diversity-aware take over the preference ordering (recent in
-    // distance order, then stale in distance order).
-    if (maxPerIpGroup != null) {
-      return _diverseTake(
-          <PeerInfo>[...recent, ...stale], count, maxPerIpGroup);
-    }
-
     // Prefer recent peers
     final result = <PeerInfo>[];
     result.addAll(recent.take(count));
     if (result.length < count) {
       result.addAll(stale.take(count - result.length));
-    }
-    return result;
-  }
-
-  /// D4 greedy diversity selection: walk `ordered` (already in preference
-  /// order), take a peer unless its IP group already holds `maxPerGroup`
-  /// picks; afterwards fill remaining slots with the closest skipped peers
-  /// in order. Total count is always `min(count, ordered.length)` — exactly
-  /// what the undiversified take returns.
-  static List<PeerInfo> _diverseTake(
-      List<PeerInfo> ordered, int count, int maxPerGroup) {
-    final result = <PeerInfo>[];
-    final skipped = <PeerInfo>[];
-    final groupCounts = <String, int>{};
-    for (final p in ordered) {
-      if (result.length >= count) break;
-      final g = p.ipDiversityGroup;
-      final c = groupCounts[g] ?? 0;
-      if (c >= maxPerGroup) {
-        skipped.add(p);
-        continue;
-      }
-      groupCounts[g] = c + 1;
-      result.add(p);
-    }
-    for (final p in skipped) {
-      if (result.length >= count) break;
-      result.add(p);
     }
     return result;
   }
