@@ -122,7 +122,7 @@ build_libsodium() {
         --disable-dependency-tracking
     make -j"$(sysctl -n hw.ncpu)"
     make install
-    cp "$BUILD_DIR/install-sodium/lib/libsodium."*.dylib "$OUT_DIR/libsodium.dylib"
+    cp "$(find "$BUILD_DIR/install-sodium/lib" -name 'libsodium.*.dylib' -not -type l | head -1)" "$OUT_DIR/libsodium.dylib"
     rewrite_install_name "$OUT_DIR/libsodium.dylib"
     cd "$PROJECT_DIR"
 }
@@ -147,7 +147,7 @@ build_liboqs() {
         -DOQS_DIST_BUILD=ON \
         ..
     ninja install
-    cp "$BUILD_DIR/install-oqs/lib/liboqs."*.dylib "$OUT_DIR/liboqs.dylib"
+    cp "$(find "$BUILD_DIR/install-oqs/lib" -name 'liboqs.*.dylib' -not -type l | head -1)" "$OUT_DIR/liboqs.dylib"
     rewrite_install_name "$OUT_DIR/liboqs.dylib"
     cd "$PROJECT_DIR"
 }
@@ -172,7 +172,7 @@ build_libzstd() {
         -DZSTD_BUILD_TESTS=OFF \
         ..
     ninja install
-    cp "$BUILD_DIR/install-zstd/lib/libzstd."*.dylib "$OUT_DIR/libzstd.dylib"
+    cp "$(find "$BUILD_DIR/install-zstd/lib" -name 'libzstd.*.dylib' -not -type l | head -1)" "$OUT_DIR/libzstd.dylib"
     rewrite_install_name "$OUT_DIR/libzstd.dylib"
     cd "$PROJECT_DIR"
 }
@@ -191,7 +191,7 @@ build_liberasurecode() {
         --disable-static --enable-shared
     make -j"$(sysctl -n hw.ncpu)"
     make install
-    cp "$BUILD_DIR/install-ec/lib/liberasurecode."*.dylib "$OUT_DIR/liberasurecode.dylib"
+    cp "$(find "$BUILD_DIR/install-ec/lib" -name 'liberasurecode.*.dylib' -not -type l | head -1)" "$OUT_DIR/liberasurecode.dylib"
     rewrite_install_name "$OUT_DIR/liberasurecode.dylib"
     cd "$PROJECT_DIR"
 }
@@ -211,7 +211,7 @@ build_libopus() {
         --disable-doc --disable-extra-programs
     make -j"$(sysctl -n hw.ncpu)"
     make install
-    cp "$BUILD_DIR/install-opus/lib/libopus."*.dylib "$OUT_DIR/libopus.dylib"
+    cp "$(find "$BUILD_DIR/install-opus/lib" -name 'libopus.*.dylib' -not -type l | head -1)" "$OUT_DIR/libopus.dylib"
     rewrite_install_name "$OUT_DIR/libopus.dylib"
     cd "$PROJECT_DIR"
 }
@@ -244,7 +244,8 @@ build_whisper() {
     ninja install
     for lib in libwhisper libggml libggml-base libggml-cpu; do
         if ls "$BUILD_DIR/install-whisper/lib/$lib."*.dylib 2>/dev/null; then
-            cp "$BUILD_DIR/install-whisper/lib/$lib."*.dylib "$OUT_DIR/$lib.dylib"
+            local real; real="$(find "$BUILD_DIR/install-whisper/lib" -name "${lib}.*.dylib" -not -type l | head -1)"
+            [ -n "$real" ] && cp "$real" "$OUT_DIR/$lib.dylib"
             rewrite_install_name "$OUT_DIR/$lib.dylib"
         fi
     done

@@ -2,11 +2,12 @@
 # CleonaNative — umbrella podspec for prebuilt native C libraries.
 #
 # The static .a files are built by scripts/build-ios-libs.sh and output as
-# XCFrameworks in build/ios-frameworks/. This podspec links them into the
-# Runner binary so dart:ffi's DynamicLibrary.process() can resolve symbols.
+# XCFrameworks in build/ios-frameworks/. The CI workflow downloads them into
+# ios/CleonaNative/Frameworks/ before pod install.
 #
-# In CI the XCFrameworks are downloaded as artifacts before `pod install`.
-# Locally: run `./scripts/build-ios-libs.sh` on a Mac first.
+# Locally: run ./scripts/build-ios-libs.sh, then:
+#   mkdir -p ios/CleonaNative/Frameworks
+#   cp -R build/ios-frameworks/*.xcframework ios/CleonaNative/Frameworks/
 #
 Pod::Spec.new do |s|
   s.name         = 'CleonaNative'
@@ -19,19 +20,17 @@ Pod::Spec.new do |s|
   s.platform     = :ios, '13.0'
   s.static_framework = true
 
-  xcfw_dir = File.expand_path('../../build/ios-frameworks', __dir__)
-
-  # Collect all XCFrameworks that were built
-  xcframeworks = Dir.glob("#{xcfw_dir}/*.xcframework").map { |f| f }
+  frameworks_dir = File.join(__dir__, 'Frameworks')
+  xcframeworks = Dir.glob("#{frameworks_dir}/*.xcframework").map { |f|
+    Pathname.new(f).relative_path_from(Pathname.new(__dir__)).to_s
+  }
 
   if xcframeworks.any?
     s.vendored_frameworks = xcframeworks
   end
 
-  # Apple frameworks required by the native libs
-  s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFAudio', 'Accelerate', 'Metal', 'MetalKit'
+  s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation', 'Accelerate', 'Metal', 'MetalKit'
 
-  # Force-load all static libs so dart:ffi DynamicLibrary.process() finds symbols
   s.pod_target_xcconfig = {
     'OTHER_LDFLAGS' => '-ObjC -all_load',
   }

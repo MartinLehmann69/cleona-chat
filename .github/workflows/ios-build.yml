@@ -92,7 +92,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-xcframeworks
-          path: build/ios-frameworks/
+          path: ios/CleonaNative/Frameworks/
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
