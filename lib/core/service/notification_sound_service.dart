@@ -176,7 +176,29 @@ class NotificationSoundService {
   bool _vibrateLoopActive = false;
 
   /// Android: callback for one-shot sound playback via platform channel.
-  Future<void> Function(String filename)? onPlaySoundAndroid;
+  /// [notification] is true for the sound of a notification
+  /// ([playMessageSound]): the native side plays it as a notification, so it
+  /// follows the ringer mode and "Do not disturb" (§22.8 platform gates,
+  /// S422 T-3); every other sound (preview, call tones) stays audible.
+  Future<void> Function(String filename, bool notification)? onPlaySoundAndroid;
+
+  /// iOS: callback for one-shot sound playback via platform channel
+  /// (`AppDelegate.swift` `playSound`, a system sound that follows the
+  /// ring/silent switch). [filename] is the `.caf` file
+  /// ([iosSoundFile]): iOS plays no Ogg (S422 T-1).
+  Future<void> Function(String filename)? onPlaySoundIos;
+
+  /// The standard message sound.
+  static const String messageSoundFile = 'message.ogg';
+
+  /// The iOS form of a sound file: every `assets/sounds/*.ogg` lies beside
+  /// it as `.caf` (IMA4) — Apple's notification and system sounds take
+  /// "Linear PCM, MA4 (IMA/ADPCM), µLaw, aLaw" in aiff, wav or caf
+  /// (https://developer.apple.com/documentation/usernotifications/unnotificationsound),
+  /// Ogg Vorbis is not among them.
+  static String iosSoundFile(String oggFilename) => oggFilename.endsWith('.ogg')
+      ? '${oggFilename.substring(0, oggFilename.length - 4)}.caf'
+      : oggFilename;
 
   /// Android: callback for looping sound playback (ringtone/ringback).
   Future<void> Function(String filename)? onStartLoopSoundAndroid;
@@ -287,6 +309,24 @@ class NotificationSoundService {
   static List<String> windowsPlayerArgs(String path, double volume) =>
       [path, '--volume', volume.clamp(0.0, 1.0).toStringAsFixed(3)];
 
+  /// The same player for a voice message in the chat (`--media`, decoded by
+  /// Media Foundation, `windows/cleona_play/cleona_play_media.cpp`): Windows
+  /// has no `ffprobe`/`ffplay`, and §27.7 allows it only the bundled helpers
+  /// (S422 WIN 33a.W02). [url] is the `MediaVault` loopback URL. The probe
+  /// prints the duration in milliseconds.
+  static List<String> windowsMediaProbeArgs(String url) =>
+      ['--media', url, '--probe'];
+
+  /// Plays [url] from [start] on; ending the process ends the sound.
+  static List<String> windowsMediaPlayArgs(String url, Duration start) =>
+      ['--media', url, '--start', '${start.inMilliseconds}'];
+
+  /// Parses the probe output ([windowsMediaProbeArgs]); null if unreadable.
+  static Duration? parseWindowsMediaProbe(String stdout) {
+    final ms = int.tryParse(stdout.trim());
+    return ms == null || ms <= 0 ? null : Duration(milliseconds: ms);
+  }
+
   /// Player program and argument list for one sound file on the desktop —
   /// a real argument list, no shell interpolation. The one place that
   /// decides how a sound is started; [_playOnce], [_startLoop] and
@@ -330,8 +370,9 @@ class NotificationSoundService {
   /// here instead of starting a player. Never set in the product.
   void Function(String filename)? playProbe;
 
-  /// Play a sound file once — fire and forget.
-  Future<void> _playOnce(String filename) async {
+  /// Play a sound file once — fire and forget. [notification]: the sound of
+  /// a notification (see [onPlaySoundAndroid]).
+  Future<void> _playOnce(String filename, {bool notification = false}) async {
     final probe = playProbe;
     if (probe != null) {
       probe(filename);
@@ -341,7 +382,17 @@ class NotificationSoundService {
     // Android: play via platform channel (assets, not filesystem)
     if (Platform.isAndroid) {
       if (onPlaySoundAndroid != null) {
-        try { await onPlaySoundAndroid!(filename); } catch (_) {}
+        try { await onPlaySoundAndroid!(filename, notification); } catch (_) {}
+      }
+      return;
+    }
+
+    // iOS: no processes; a system sound from the `.caf` beside the Ogg file
+    // (S422 T-1).
+    if (Platform.isIOS) {
+      final ios = onPlaySoundIos;
+      if (ios != null) {
+        try { await ios(iosSoundFile(filename)); } catch (_) {}
       }
       return;
     }
@@ -432,9 +483,9 @@ class NotificationSoundService {
     if (!_settings.soundEnabled || !_settings.messageSoundEnabled) return;
     if (soundName != null) {
       final rt = Ringtone.fromName(soundName);
-      await _playOnce(rt.filename);
+      await _playOnce(rt.filename, notification: true);
     } else {
-      await _playOnce('message.ogg');
+      await _playOnce(messageSoundFile, notification: true);
     }
   }
 
@@ -450,7 +501,7 @@ class NotificationSoundService {
   Future<int> _playOnceSync(String filename) async {
     if (Platform.isAndroid) {
       if (onPlaySoundAndroid != null) {
-        try { await onPlaySoundAndroid!(filename); return 0; } catch (_) { return -1; }
+        try { await onPlaySoundAndroid!(filename, true); return 0; } catch (_) { return -1; }
       }
       return -3;
     }
@@ -548,10 +599,14 @@ class NotificationSoundService {
     await _stopLoop();
   }
 
-  /// Trigger vibration (Android only — no-op on Linux/Windows).
+  /// Trigger vibration (Android; iOS for messages only — no-op on
+  /// Linux/Windows/macOS).
   Future<void> vibrate(VibrationType type) async {
     if (!_settings.vibrationEnabled) return;
-    if (!Platform.isAndroid) return;
+    if (!vibratesOn(type,
+        android: Platform.isAndroid, ios: Platform.isIOS)) {
+      return;
+    }
     if (type == VibrationType.call) {
       _vibrateLoopActive = true;
       _runVibrateLoop();
@@ -561,6 +616,13 @@ class NotificationSoundService {
       }
     }
   }
+
+  /// Whether this platform vibrates for [type]. iOS vibrates for a message
+  /// (S422 N-3, `AppDelegate.swift` answers `vibrate`); the ringing of a
+  /// call is CallKit's there (`CallKitHandler.swift`), so no loop of its own.
+  static bool vibratesOn(VibrationType type,
+          {required bool android, required bool ios}) =>
+      android || (ios && type != VibrationType.call);
 
   void _runVibrateLoop() async {
     while (_vibrateLoopActive) {

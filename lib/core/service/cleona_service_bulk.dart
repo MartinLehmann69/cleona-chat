@@ -200,10 +200,12 @@ extension CleonaServiceBulk on CleonaService {
         'size=${a.length} holders=${a.holders.length} stream=${a.stream} '
         'preview=${a.preview.length} B');
     if (isNew &&
-        !_shouldSuppressNotification(
-            conversationId, _claimedSendTimeMs(event))) {
-      notificationSound.playMessageSound(
-          soundName: conversations[conversationId]?.notificationSoundName);
+        !_shouldSuppressNotification(conversationId)) {
+      // The sound only, as before S422 — through the one helper, so the
+      // rule of §22.8/D-125 decides who plays it.
+      _signalNotification(
+          soundName: conversations[conversationId]?.notificationSoundName,
+          vibrate: false);
       final senderName =
           _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
       _postAndroidNotification(senderName, '📎 ${metadata.filename}', conversationId);
@@ -271,6 +273,9 @@ extension CleonaServiceBulk on CleonaService {
     final key = tagHex(tag);
     final e = _bulkIncoming[key];
     if (e == null || _disposed) return false;
+    // S422: an attachment bundle of the initial reconciliation from an own
+    // device (`cleona_service_reconcile.dart`) — no message, no receipt.
+    if (reconcileBundleArrived(key, e, object)) return true;
     final conversationId = e['conv'] as String;
     final msgId = e['msg'] as String;
     final msg = _bulkMessage(conversationId, msgId);
@@ -407,6 +412,8 @@ extension CleonaServiceBulk on CleonaService {
     final key = tagHex(tag);
     final e = _bulkIncoming[key];
     if (e == null || _disposed) return false;
+    // S422: an attachment bundle of the initial reconciliation failed.
+    if (reconcileBundleFailed(key, e)) return true;
     // D-34's one exception: an image asks its sender once for the stripes
     // whose kept pieces were lost (`cleona_service_image_again.dart`).
     if (_imageAskAgain(key, e, why)) return true;

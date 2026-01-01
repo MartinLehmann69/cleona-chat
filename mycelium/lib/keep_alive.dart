@@ -332,6 +332,11 @@ class KeepAlive {
       ..setRange(0, _k.devicesCode.length, _k.devicesCode)
       ..setRange(_k.devicesCode.length, _k.devicesCode.length + 8, token);
     if (!_send((n.address, n.port), content)) return false;
+    // One line per keep-alive (every 30 s at most): S422-RCA-E2E-LAUF-4.2.8
+    // R-12 could not tell from either end whether a device in the
+    // background still kept its path to the fixed neighbour open.
+    _k.report('TRACE keep-alive ${n.address.type.name} to '
+        '${n.address.address}:${n.port}');
     _sentAt[n.key] = now;
     _tokens.add((_hex(token), n.address.type));
     while (_tokens.length > kTokensKept) {

@@ -3,6 +3,7 @@ import UIKit
 import BackgroundTasks
 import UserNotifications
 import Network
+import AudioToolbox
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -51,6 +52,14 @@ import Network
     // Request notification permission for background-fetched messages.
     BackgroundFetchHandler.shared.requestNotificationAuthorization()
 
+    // S422 N-2: the delegate of the notification center, set before the
+    // launch ends (Apple:
+    // https://developer.apple.com/documentation/usernotifications/unusernotificationcenter/delegate).
+    // Without it iOS shows no notification of an app in the foreground —
+    // and `inactive` (Control Center over the app) is foreground for iOS
+    // but not "resumed" for Cleona's L5 gate.
+    UNUserNotificationCenter.current().delegate = self
+
     // Trigger the Local Network permission dialog. This MUST happen before
     // the Dart node opens UDP sockets, otherwise iOS silently drops inbound
     // packets (sends work, receives don't — the classic iOS UDP gotcha).
@@ -61,6 +70,60 @@ import Network
     CaptureCover.shared.start()
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // S422 N-2: a notification arriving while the app is in the foreground for
+  // iOS. Shown only when the running app's Dart service handed it over
+  // (`BackgroundFetchHandler.postedByDartKey`): the service's L5 gate
+  // already decided (§22.8) — it lets a notification through only when the
+  // app is not "resumed" (e.g. `inactive`, Control Center over the app).
+  // `override`: `FlutterAppDelegate` carries the method (it forwards it to
+  // plugins, `FlutterAppDelegate.mm`).
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let userInfo = notification.request.content.userInfo
+    if userInfo[BackgroundFetchHandler.postedByDartKey] as? Bool == true {
+      completionHandler([.banner, .list, .sound])
+    } else {
+      completionHandler([])
+    }
+  }
+
+  /// §22.8 (D-125 (3)): the conversation and identity of a tapped
+  /// notification, drained by Dart via `consumeNotificationTap` on
+  /// `chat.cleona/notification`. The channel is kept to signal the tap
+  /// (`notificationTapped`) while the engine runs.
+  private var pendingNotificationTap: [String: String]?
+  private var notificationChannel: FlutterMethodChannel?
+
+  // S422 N-2, D-125 (3): the user tapped a notification. iOS brings the app
+  // to the front; the tap is stashed for Dart, which opens the conversation
+  // on its home screen (Dart decides: not the batch notification, not a
+  // reminder). Also the cold start through a tap arrives here: the delegate
+  // is set before the launch ends (see above). The completion handler is
+  // called on every way out (`defer`), as Apple requires
+  // (https://developer.apple.com/documentation/usernotifications/unusernotificationcenterdelegate/usernotificationcenter(_:didreceive:withcompletionhandler:)).
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    defer { completionHandler() }
+    guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+    let info = response.notification.request.content.userInfo
+    guard let conversationId = info["conversationId"] as? String, !conversationId.isEmpty else { return }
+    pendingNotificationTap = [
+      "conversationId": conversationId,
+      "identity": info["identity"] as? String ?? "",
+    ]
+    // No id in the log line (§22.8: what a notification shows goes nowhere else).
+    NSLog("[Notification] tap stashed")
+    // Engine running: Dart drains now. At a cold start before the engine,
+    // the channel is nil and Dart drains after its first frame.
+    notificationChannel?.invokeMethod("notificationTapped", arguments: nil)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
@@ -145,6 +208,75 @@ import Network
             "manufacturer": "Apple",
             "model": UIDevice.current.model,
           ])
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+    }
+
+    // S420 IB-1: the app icon badge, on the same channel and with the same
+    // arguments as Android's `MainActivity.kt` (`updateBadge`: `count`,
+    // `conversationIds`). Dart sends it on every unread change and on every
+    // return to the front (`main.dart` `_updateAndroidBadge`); the number is
+    // the unread sum over every identity without the system channels.
+    //
+    // S422 (N-1, N-3): the same channel carries the system notification the
+    // Dart service formed (`postNotification`, `cancelNotification` — one per
+    // conversation, `main.dart` `onPostNotificationIos`) and the vibration of
+    // a message (`vibrate`); S422 T-1 adds the app's own sound (`playSound`).
+    // Android's other methods of this channel (loop sounds, call audio mode,
+    // incoming call) are never sent on iOS.
+    if let notificationRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "NotificationBadgeHandler") {
+      let notificationChannel = FlutterMethodChannel(
+        name: "chat.cleona/notification",
+        binaryMessenger: notificationRegistrar.messenger()
+      )
+      self.notificationChannel = notificationChannel
+      // S422 T-1: the `.caf` sounds into `Library/Sounds` for the
+      // notifications; the registrar finds them among the Flutter assets.
+      BackgroundFetchHandler.shared.installNotificationSounds(
+        assetKey: { notificationRegistrar.lookupKey(forAsset: $0) })
+      notificationChannel.setMethodCallHandler { [weak self] (call, result) in
+        let args = call.arguments as? [String: Any]
+        if call.method == "consumeNotificationTap" {
+          // §22.8: the stashed tap, handed over once.
+          let tap = self?.pendingNotificationTap
+          self?.pendingNotificationTap = nil
+          result(tap)
+        } else if call.method == "updateBadge" {
+          let count = args?["count"] as? Int ?? 0
+          BackgroundFetchHandler.shared.applyBadge(count: count)
+          result(nil)
+        } else if call.method == "postNotification" {
+          BackgroundFetchHandler.shared.postNotification(
+            title: args?["title"] as? String ?? "",
+            body: args?["body"] as? String ?? "",
+            conversationId: args?["conversationId"] as? String ?? "",
+            identity: args?["identity"] as? String ?? "",
+            soundName: args?["soundName"] as? String)
+          result(nil)
+        } else if call.method == "playSound" {
+          // S422 T-1: the app's own sound in the foreground, a `.caf` asset.
+          BackgroundFetchHandler.shared.playSound(asset: args?["asset"] as? String ?? "")
+          result(nil)
+        } else if call.method == "scheduleReminders" {
+          // §18.1.6, D-125 (2): reminders scheduled with the system ahead.
+          BackgroundFetchHandler.shared.scheduleReminders(
+            args?["reminders"] as? [[String: Any]] ?? [])
+          result(nil)
+        } else if call.method == "withdrawReminder" {
+          BackgroundFetchHandler.shared.withdrawReminder(
+            id: args?["id"] as? String ?? "")
+          result(nil)
+        } else if call.method == "cancelNotification" {
+          BackgroundFetchHandler.shared.cancelNotification(
+            conversationId: args?["conversationId"] as? String ?? "")
+          result(nil)
+        } else if call.method == "vibrate" {
+          // The system's vibration; the duration Android takes has no
+          // counterpart here (https://developer.apple.com/documentation/audiotoolbox/1405248-audioservicesplaysystemsound).
+          AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+          result(nil)
         } else {
           result(FlutterMethodNotImplemented)
         }

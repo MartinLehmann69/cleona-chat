@@ -172,3 +172,20 @@ String? impossibleTarget(InternetAddress target, int targetPort, int payload) {
   }
   return null;
 }
+
+/// "No route" as the operating system reports a send for which this machine
+/// has no way out — per platform, because the numbers mean other things
+/// elsewhere: Linux and Android ENETUNREACH 101 (measured S390, field S407)
+/// and EHOSTUNREACH 113 (`asm-generic/errno.h`); iOS and macOS ENETUNREACH 51
+/// and EHOSTUNREACH 65 (`sys/errno.h`; field S422: "No route to host, errno =
+/// 65"); Windows WSAENETUNREACH 10051 and WSAEHOSTUNREACH 10065. A fresh
+/// socket on the same network meets it again 1.2 ms later (field S422).
+final Set<int> _noRoute = Platform.isIOS || Platform.isMacOS
+    ? const {51, 65}
+    : Platform.isWindows
+        ? const {10051, 10065}
+        : const {101, 113};
+
+/// Whether [e], from a socket's error stream, says "no route" ([_noRoute]).
+bool noRoute(Object e) =>
+    e is SocketException && _noRoute.contains(e.osError?.errorCode);

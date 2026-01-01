@@ -143,8 +143,21 @@ Uint8List ownIpv4(List<NetworkInterface> interfaces) =>
 /// as public makes no sense! Do not publish"). A host
 /// that has ONLY fe80 has nothing it could offer — for it
 /// the second socket is a socket without purpose.
+///
+/// ── MOBILE DATA IS THE LAST CHOICE (§31.1 E-41, §23.1, S422) ─────────────
+///
+/// „If Wi-Fi, Ethernet, or VPN are available, all traffic runs over them."
+/// While such an interface holds a usable address, an IPv6 address on a
+/// mobile-data interface is no way out: a phone in an IPv4-only Wi-Fi keeps
+/// the global IPv6 of its mobile data, and every send over it met „No route
+/// to host" (field S422, iPhone 4.2.5: 87 errors in 3 s).
 bool usableIpv6Present(List<NetworkInterface> interfaces) {
+  bool preferred(NetworkInterface s) =>
+      linkKindFrom(s.name).priority > LinkKind.unknown.priority &&
+      s.addresses.any((a) => rankTheAddress(a) >= 0);
+  final onPreferred = interfaces.any(preferred);
   for (final s in interfaces) {
+    if (onPreferred && linkKindFrom(s.name) == LinkKind.cellular) continue;
     for (final a in s.addresses) {
       if (a.rawAddress.length == 16 && rankTheAddress(a) >= 1) return true;
     }

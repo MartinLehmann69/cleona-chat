@@ -38,8 +38,8 @@ class SystemChannels {
   // ── Storage limits ────────────────────────────────────────────────
 
   static const int maxChannelStorageBytes = 25 * 1024 * 1024;
-  static const int maxAutoReportBytes = 256 * 1024;
-  static const int maxManualPostBytes = 2 * 1024 * 1024;
+  // The size of one object has ONE limit, `kDurableObjectAtMost`
+  // (`mycelium/lib/durable_packets.dart`, D-123 (10)).
 
   // ── Rate limits ───────────────────────────────────────────────────
 

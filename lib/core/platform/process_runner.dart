@@ -41,6 +41,14 @@ class ProcessRunner {
     } catch (_) {
       return null;
     }
+    // Nothing is ever written to the child: close its stdin at once. An open
+    // stdin pipe keeps waiting tools alive until
+    // the deadline kills them — `sftp` without a batch file reads its
+    // commands from stdin, and Windows OpenSSH's `ssh` does not exit before
+    // stdin closes even with a remote command. Measured on the Windows VM
+    // (S422 re-test 2, WIN 23.W01): stdin open → still running after 15 s;
+    // closed → exit 0 after 1.2 s. "Verbindung testen" was refused for that.
+    unawaited(proc.stdin.close().catchError((_) {}));
     final stdoutBytes = <int>[];
     final stderrBytes = <int>[];
     // Drain both pipes concurrently — an undrained pipe buffer would block the

@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:a709cc057490, 2026-11-10). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:4ca080c4eb3f, 2026-11-14). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -4664,6 +4664,10 @@ reaches them as Type 17. Enrolling a device adds it to every identity
 device locked out of one identity alone would keep reading the others.
 Each identity then rotates its keys and announces it to its own
 contacts (§14.5); one approval per device counts for all identities.
+A device that learns it has been locked out (Type 11 naming itself)
+deletes every identity on itself as a deletion from another own device
+does (§21.5.2), and the interface says why; a key change in which it
+stays in the set never makes it delete anything.
 
 **Rotation.** The shared key is rerolled on **every change to the
 device set** and rewrapped for the then-valid set:
@@ -5144,6 +5148,9 @@ case that would otherwise be unsolvable:
   Without it, the countersigning device would describe every request as
   a key rotation, and the approval would have been obtained under a
   false description.
+- **A round the initiating device cancels is withdrawn** on the other
+  own devices with the same request marked withdrawn; a withdrawn
+  request is no longer shown, and an approval of it counts nowhere.
 
 **With exactly one device, the rule does not apply** — that one device
 is sufficient there (§14.4).
@@ -7969,7 +7976,12 @@ group setting for it.
   place and the callee learns of it by a message (below).
 - **Not sent again at an edge.** Each of the two steps sends a call
   signal; without its acknowledgement it is repeated while the call rings
-  (§11.3a). It is not sent again at the edges of §8.2 (§9.3): it ends with its
+  (§11.3a). For the invitation, "its acknowledgement" is the callee's
+  (§9.2): the caller sends the invitation again on step 3, at most three
+  times (0.5 s, 1.5 s and 3.5 s after the first sending, as SIP, RFC 3261
+  §17.1.1.2), until the callee acknowledges it or the call stops ringing;
+  each repeat plans its first hop anew. Signals of a running call stay
+  single. It is not sent again at the edges of §8.2 (§9.3): it ends with its
   acknowledgement (§9.2) or with its call, whichever comes first. It has
   no delivery display (§12.2); what the user sees is the state of the
   call.
@@ -8668,7 +8680,11 @@ be a change to §8.2 and belongs there, not here.
 The ReminderService runs in the daemon, fires system notification,
 sound, and vibration — even with the GUI closed —, supports multiple
 reminder offsets per event, recurring events, and snooze, and has no
-network dependency.
+network dependency. Where no daemon runs (Android, iOS), it runs in the
+app's own services. On iOS, whose system suspends a backgrounded app,
+every upcoming reminder is additionally scheduled with the system in
+advance and withdrawn when its event changes or is cancelled; the system
+keeps at most the 64 soonest of them.
 
 **Explicitly noted** (because it would otherwise read as a gap): the
 reminder itself stays latency-free. Only *shared state changes* ("event
@@ -10472,7 +10488,15 @@ start-menu entry, optional desktop shortcut, optional daemon autostart
 via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; follow-up
 updates run via the in-network update path, not via a new installer
 run). Daemon `cleona-daemon.exe`, GUI `cleona.exe`, IPC via TCP
-127.0.0.1 (§22.1), tray via Win32 FFI, toast notifications, sounds via the
+127.0.0.1 (§22.1), tray via Win32 FFI, toast notifications through the
+bundled helper `cleona-notify.exe` (one process per notification; title and
+text over its standard input, never as an argument, §22.8; the sender
+identity is registered per user under `HKCU\Software\Classes\AppUserModelId`
+and carried by the start-menu entry, which Windows requires for a toast from
+a desktop application — the setup creates the entry with the identity, and
+the helper restores it, with the identity, when it is missing or differs,
+because follow-up updates and the ZIP never run the setup),
+sounds via the
 bundled helper `cleona-play.exe` (one process per sound, like `pw-play`
 under Linux; decoder libogg/libvorbis, output through `PlaySound`). The
 setup asks once for administrator rights, for one step only: it sets the
@@ -10669,6 +10693,14 @@ in this order, and the first hit suppresses:
   (`_isAppResumed`), the system banner is suppressed, but not the
   in-app sound/vibration.
 
+On Android and iOS a system notification alone carries sound and
+vibration while the app is in the background; in the foreground only
+the app plays them. On the desktop the notification is silent and
+Cleona plays its own sound (D-116).
+
+Tapping a message notification opens its conversation; the batch
+notification opens the app.
+
 Below these lie the platform gates outside Cleona's control (system DND,
 notification-channel settings, POST_NOTIFICATIONS on Android 13+), as
 well as the rule that notifications are held back during an active call.
@@ -10684,8 +10716,10 @@ local user could read it.
 
 **A notification without content.** One setting, device-wide and off
 by default, reduces every message notification to the fact that a
-message arrived — no sender, no text, no file name — and every
-reminder to the fact that a reminder is due. A call keeps showing the
+message arrived — no sender, no text, no file name — every
+invitation to a group or channel to the fact that an invitation
+arrived, and every reminder to the fact that a reminder is due. A call
+keeps showing the
 caller's name. The reason for the setting: what is handed to the
 platform's notification service is readable by every application the
 user has granted notification access, by a paired watch, and on the
@@ -10705,12 +10739,12 @@ transition `searching`/`connecting` → `ready`: a bundled batch
 notification instead of N individual sounds. Every subsequent collection:
 individual notifications, regardless of the message's age.
 
-**OPEN (§22-O-2):** the concrete bundling rule. Options: **(a)** one
-batch notification per first collection ("N new messages in M
-conversations"); **(b)** individual notifications up to an upper bound,
-bundling above it; **(c)** bundling only when the first collection lies
-further back than a duration yet to be determined. To be decided based
-on measured behavior in the lab.
+**Bundling rule (§22-O-2, decided D-124):** the first collection after a
+start reports one batch notification ("N new messages in M
+conversations"); every later collection reports individually. The same
+on every platform; on iOS it also covers a start of the app in the
+background, where the running services report and the native side only
+sets the badge.
 
 Ringtones (6 predefined sounds plus a custom file; the same sound pool
 for call ringtone and message sounds), per-conversation settings, global
@@ -10794,7 +10828,7 @@ exist in all 34 locales (§24).
 | # | Topic | Options |
 |---|---|---|
 | ~~§22-O-1~~ | ~~Whether a device-addressed send is needed to reach a single device (§22.5.2)~~ | **Decided: (b), restricted to one's own devices** (§22.5.2): a single own device can be named for per-device payloads (§14.6.1 step 4, Type 16); contacts are never addressed per device (§14.2). The own-device line: §14.7 |
-| §22-O-2 | Bundling rule for the first-collection notification (§22.8) | (a) one batch notification; (b) individual notifications up to an upper bound; (c) time-dependent. To be decided based on lab behavior |
+| §22-O-2 | Bundling rule for the first-collection notification (§22.8) | **decided (D-124):** (a) one batch notification per first collection |
 | ~~§22-O-3~~ | ~~Text of the Android foreground notification (§22.9)~~ | **Decided: (a)** three fixed texts, followed by the connection kind (§22.9) |
 | ~~§22-O-4~~ | ~~Whether the entry cascade carries a bundled entry-record format as its own module (§22.4.4)~~ | **Decided by E-60 in favor of (b):** one format in one module for addresses that travel between nodes — the address entries of cover and board, written with the card's address codec (§5.5, §11.8a, §15.2; §22.4.4) |
 | ~~§22-O-5~~ | ~~Directory name of the device-identity module (§22.4.2)~~ | **Decided:** no module of its own; the files live in `lib/core/identity/` and `lib/core/crypto/` (§22.4.2) |
@@ -11496,7 +11530,7 @@ restart possible in the first place.
 | RTL first | Right-to-left is not an afterthought: the entire widget tree sits inside a `Directionality` widget that switches between `TextDirection.ltr` and `TextDirection.rtl` |
 | Complete coverage | Every key carries a real string in all 34 locales (normative, detailed in §24.2) |
 | API | `AppLocale.get` / `tr(key, params)` / `setLocale(code)` / `isRtl` / `textDirection` (`lib/core/i18n/app_locale.dart`, language list starting at `:16`) |
-| Persistence | The chosen language is stored in `SharedPreferences` under `cleona_locale`; it is loaded at start, otherwise system-language detection runs |
+| Persistence | The chosen language is stored in the device database (`device.db`, area `areaSettings`, row `gui`, field `locale`; §4.5.2); it is loaded at start, otherwise system-language detection runs. Before the first setup there is no device database; a choice made then stays in memory until a service can store it |
 
 **The 34 languages:**
 
@@ -13143,7 +13177,7 @@ Optional, each for one function: `nmcli`, `tracepath`, `wl-clipboard`/`xclip`
 build time, the rest listed with its code location); AppImage and tar.gz cannot,
 there the app names a missing program when the function is used. The lab
 installs the same list (`scripts/vm/vm-deploy.sh`). **Windows:** the bundled
-`cleona-play.exe` (§22.6). No network relevance.
+`cleona-play.exe` and `cleona-notify.exe` (§22.6). No network relevance.
 
 ---
 
@@ -14222,30 +14256,33 @@ In addition:
   nothing for others and occupies no bulk-cache role. That is not a
   misconfiguration, but the role.
 
-**Four Dart-socket quirks apply on iOS** — they are operating-system
-behavior and independent of the transport model:
+**Four Dart-socket quirks were observed on iOS in the 3.x line** —
+operating-system behavior, independent of the transport model. The 3.x
+line answered them with machinery of its own (native `sendto()` via
+`IosUdpSender`, a 50 ms native `recvfrom()` poll as the primary receive
+path, `recvPeek()` every 10 s, a 30-second silence watchdog). That
+machinery left with the 3.x code (cut of 31.08.2026); **4.2 does not carry
+it**. What holds for 4.2:
 
-*Send path.* `RawDatagramSocket.send()` silently returns 0 for all
-destinations (errno 64/65 from the kqueue path). `IosUdpSender` calls
-native `sendto()` on the file descriptor of the Dart socket.
+*Send path.* 4.2 sends through Dart's `RawDatagramSocket.send()` on iOS.
+The 3.x observation "returns 0 for all destinations (errno 64/65)" does
+not hold throughout (field 11.11.2026: a handshake from an iPhone reached
+the bootstrap). Every send the kernel does not accept whole is counted
+and said once per series (S420, S422).
 
-*Receive path (kqueue stall).* After a series of native `sendto()`
-calls, Dart's kqueue loop no longer delivers any
-`RawSocketEvent.read`; the kernel receive buffer fills up without a
-handler ever firing. Fix: a 50 ms polling timer that calls native
-`recvfrom()` on the IPv4 and the IPv6 descriptor. This is the **primary**
-receive path on iOS; the Dart kqueue handlers are only a secondary path
-that occasionally works. Diagnosis every 10 s via `recvPeek()` on both
-descriptors; EBADF (-9) triggers socket recovery. In addition, a
-30-second silence watchdog triggers the same recovery if not a single
-packet arrives over either path for 30 seconds.
+*Receive path.* 4.2 receives only through Dart's read events. The 3.x
+stall followed series of native `sendto()` calls, which 4.2 does not
+make; whether it occurs without them is not measured.
 
 *Death of the file descriptor.* iOS closes Dart's UDP descriptors about
 40–60 s after app start (EBADF, errno 9, on IPv4 and IPv6), apparently in
-connection with the finalization of the Wi-Fi route. The gap between
-descriptor death and recovery is at most one timer tick (10 s); the
-sockets' `onError` streams form a faster parallel detection path for
-the same situation.
+connection with the finalization of the Wi-Fi route (3.x measurement). In
+4.2 a socket is dead when its `onError` stream reports an error, **or when
+the operating system closes it without one — Dart's `readClosed` or
+`closed` event, or the end of its event stream — on every platform**
+(field 11.11. and 12.11.2026: two iPhones, no packet from the data port at
+the bootstrap, no error line in the app log). No timer checks the
+descriptor.
 
 *Asynchronous errors.* Fire-and-forget sends throw `SocketException`
 **asynchronously** over the socket's error stream, not synchronously
@@ -14253,13 +14290,25 @@ from `send()`. Every `RawDatagramSocket.listen()` call in
 iOS-reachable code MUST have an `onError` handler.
 
 **Recovery after death of the file descriptor.** The procedure is:
-**bind fresh sockets and re-read the descriptor** (§11.1). Unsent messages sit in the outbox and are offered again on the next
+**bind fresh sockets and re-read the descriptor** (§11.1); the bind is
+repeated briefly while the closed descriptor may still linger, as at
+start (§11.1). Unsent messages sit in the outbox and are offered again on the next
 opportunity (§21.2) — there is no persistent SendQueue and no
-timer-based retry.
+timer-based retry. On iOS a return from sleep (§11.8.2) **and every
+network change (§11.8.2)** starts with this fresh binding, before the
+network change sends anything — whether the app was woken by a
+background task, opened by the user, or moved to another network while
+open.
 
-These four quirks concern only the foreground session. The BGTask path
-opens fresh sockets on every wake cycle and closes them before
-completion, thereby avoiding the descriptor problem entirely.
+These four quirks concern the sockets of the running app. A background
+task wakes the app in the same process whenever iOS resumes it; it then
+works through the app's running node — no second node, no second socket
+set on the port (§11.1) — and first binds that node's data-port sockets
+afresh on the same port, the recovery above, because iOS may have closed
+them while the app was suspended. It then runs the edge of §8.2 (what
+rests goes again, the post box is asked) and stops nothing. Only when the
+process holds no running node does the task start its own, opening fresh
+sockets and closing them before completion.
 
 ### 31.4 Summary
 
@@ -14443,7 +14492,7 @@ is measurement and build work:
 - The build order (§30) and its release criteria G-1…G-5 (§28.10); a
   further pass over §8; the test area at T-3 (§28.11); the
   review items from §30.3 A (optional, E-47); UI/i18n determinations
-  (§22-O-2, §22-O-6, K23-2, I-3, §25-O-2…O-4/O-6,
+  (§22-O-6, K23-2, I-3, §25-O-2…O-4/O-6,
   CAL-3/CAL-4, L-4); the threat-model document must be
   kept in step with this chapter.
 

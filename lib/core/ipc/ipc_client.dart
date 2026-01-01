@@ -1028,6 +1028,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
     _masterMute = state['masterMute'] as bool? ?? _masterMute;
+    _notificationWithoutContent =
+        state['notificationWithoutContent'] as bool? ??
+            _notificationWithoutContent;
     final gds = state['guiDeviceSettings'] as Map?;
     if (gds != null) _guiDeviceSettings = Map<String, dynamic>.from(gds);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
@@ -1078,6 +1081,15 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList(growable: false);
     }
+    // §14.9.2 (S422): the co-signing round; `null` = none open.
+    final round = state['coSignRound'];
+    _coSignRound =
+        round is Map ? Map<String, dynamic>.from(round) : null;
+    // §14.6.3 (S422): an older daemon sends none — then nothing runs.
+    final rec = state['reconcile'];
+    _reconcile = rec is Map
+        ? Map<String, dynamic>.from(rec)
+        : const {'running': false, 'offers': []};
 
     // Update active identity
     if (state['activeIdentityId'] != null) {
@@ -2713,6 +2725,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
+  bool _notificationWithoutContent = false;
+
+  @override
+  bool get notificationWithoutContent => _notificationWithoutContent;
+
+  @override
+  Future<bool> setNotificationWithoutContent(bool on) async {
+    final resp = await _sendRequest('set_notification_without_content',
+        params: {'on': on});
+    if (resp.success) {
+      _notificationWithoutContent = on;
+      onStateChanged?.call();
+    }
+    return resp.success;
+  }
+
   Map<String, dynamic> _guiDeviceSettings = <String, dynamic>{};
 
   @override
@@ -3348,11 +3376,39 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final resp = await _sendRequest('revoke_device', params: {
       'deviceId': deviceId,
     });
-    if (resp.success) {
-      _devices.removeWhere((d) => d.deviceId == deviceId);
-    }
+    // S422: the device stays in the list until the quorum of the remaining
+    // devices is reached — the next snapshot shows the round and, once it
+    // took effect, the list without the device. No optimistic removal.
     return resp.success;
   }
+
+  Map<String, dynamic>? _coSignRound;
+
+  @override
+  Map<String, dynamic>? get coSignRoundView => _coSignRound;
+
+  @override
+  Future<int> cancelCoSign() async {
+    final resp = await _sendRequest('co_sign_cancel');
+    return resp.success ? (resp.data['cancelled'] as int? ?? 0) : 0;
+  }
+
+  Map<String, dynamic> _reconcile = const {'running': false, 'offers': []};
+
+  @override
+  Map<String, dynamic> get reconcileView => _reconcile;
+
+  @override
+  Future<bool> reconcileFetchHistoryOf(String conversationId) async =>
+      (await _sendRequest('reconcile_fetch_history',
+              params: {'conversationId': conversationId}))
+          .success;
+
+  @override
+  Future<bool> reconcileFetchAttachmentsOf(String conversationId) async =>
+      (await _sendRequest('reconcile_fetch_attachments',
+              params: {'conversationId': conversationId}))
+          .success;
 
   @override
   Future<void> rotateIdentityKeys() async {

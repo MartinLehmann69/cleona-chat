@@ -4,7 +4,7 @@
 // Owner requirement (S410 E1, 29.10.2026): the app icon carries a badge only
 // while there is really something unread. On Android every active
 // notification in a channel that shows a badge puts the badge on the icon
-// (the message channel `cleona_messages`, `setShowBadge(true)` in
+// (the message channel `cleona_messages_sound`, `setShowBadge(true)` in
 // `MainActivity.kt`). So "badge only while unread" means two things:
 //
 //   * the number is the sum over EVERY identity in the process (one icon,
@@ -23,6 +23,12 @@
 //
 // Pure Dart: no channel is called here; `main.dart` (`_updateAndroidBadge`)
 // sends [AndroidBadge.toArguments] over `chat.cleona/notification`.
+//
+// iOS uses the same derivation since S420 (IB-1): `main.dart` sends it on the
+// same channel (`AppDelegate.swift` sets the number, at 0 it removes the
+// delivered notifications), and the iOS wake-up hands its `count` to the
+// notifications it posts (`ios_background_fetch.dart`). The file keeps its
+// name; the number is the one the icon shows on both phones.
 
 import '../channels/system_channels.dart';
 import '../service/service_types.dart';

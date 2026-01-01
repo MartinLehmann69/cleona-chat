@@ -29,7 +29,10 @@ import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/post_box_proof_of_work.dart' show kProofOfWorkLength;
 
 /// The largest object the class carries: 64 KB (a report is ≈ 10 KB,
-/// §5.6). Larger is refused before it is offered to the application.
+/// §5.6). Larger is refused before it is offered to the application; a
+/// holder answers such a deposit with `0x94` ([depositOversizeRead]), and
+/// the author's application refuses such an object before its preview
+/// (`system_object_store.dart`, D-123 (10)).
 const int kDurableObjectAtMost = 64 * 1024;
 
 /// Length of the state root in `0x95`.
@@ -69,6 +72,16 @@ Uint8List depositPacket(int channel, Uint8List proof, Uint8List object) {
     proof: Uint8List.fromList(p.sublist(2, head)),
     object: Uint8List.fromList(p.sublist(head)),
   );
+}
+
+/// The identifier of a `0x90` whose object is above [kDurableObjectAtMost]
+/// — the holder answers it with `0x94` (§16.7 "refuses it — … or a limit —
+/// answers `0x94`") — or `null` for any other packet.
+DurableId? depositOversizeRead(Uint8List p) {
+  const head = 2 + kProofOfWorkLength;
+  if (p.isEmpty || p[0] != kinds.kDurableDeposit) return null;
+  if (p.length - head <= kDurableObjectAtMost) return null;
+  return DurableId.of(p[1], Uint8List.sublistView(p, head));
 }
 
 Uint8List depositedPacket(int channel, Uint8List hash) =>

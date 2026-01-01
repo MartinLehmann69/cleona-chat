@@ -54,6 +54,7 @@ import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/storage/encrypted_store.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:mycelium/durable_id.dart';
+import 'package:mycelium/durable_packets.dart' show kDurableObjectAtMost;
 
 /// The outcome of an admission. [reason] names why an object was refused.
 class SystemAdmission {
@@ -357,6 +358,13 @@ class SystemObjectStore {
     if (_held[o.channel]?.containsKey(hashHex) ?? false) return null;
     if (_rejected[o.channel]?.containsKey(hashHex) ?? false) {
       return 'rejected before';
+    }
+    // The one size limit of a system object (D-123 (10)): above it no
+    // holder takes it (`durable_packets.dart`), so the author's device
+    // refuses it before the preview. [offer] needs no such check — the
+    // transport hands it nothing larger.
+    if (bytes.length > kDurableObjectAtMost) {
+      return 'larger than the transport carries';
     }
     return _check(o.channel, bytes, hashHex);
   }

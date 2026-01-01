@@ -28,6 +28,7 @@ import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/screens/group_profile_screen.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
+import 'package:cleona/ui/components/reconcile_widgets.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
@@ -382,6 +383,18 @@ class _ChatScreenState extends State<ChatScreen> {
   final _boundaryNav = MessageBoundaryNav();
   int _messageCountWhenScrolledUp = -1;
   bool _suppressScrollNav = false;
+  // Hysteresis of the jump-down button (docs/UI.md "Chat-Scroll-Navigation"):
+  // shown from 200 px above the end, hidden below 80 px.
+  static const double _jumpDownShowDistance = 200;
+  static const double _jumpDownHideDistance = 80;
+  // True while the reader stands at the end of the history, i.e. closer to
+  // it than the button's hide distance. Updated on every change of the scroll
+  // offset (_onScrollChanged). When the content extent grows without an
+  // offset change — an image that gets its height after the first layout, a
+  // keyboard that shrinks the viewport — a reader who was at the end stays
+  // there (_onScrollMetricsChanged). S419-RCA-37W03.md 37W03-A.
+  bool _stickToBottom = true;
+  double _lastSeenMaxExtent = 0;
 
   @override
   void initState() {
@@ -651,6 +664,9 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Column(
             children: [
+              // §14.6.3 (S422): the full history and the attachments of this
+              // conversation, offered with size and way — never taken.
+              if (service != null) _buildReconcileOffer(context, service),
               // Pending DM config proposal banner (show when PEER proposed, not when WE proposed)
               if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
                 _buildConfigProposalBanner(context, conv!, service),
@@ -672,7 +688,11 @@ class _ChatScreenState extends State<ChatScreen> {
                             style: TextStyle(color: Theme.of(context).colorScheme.outline),
                           ),
                         )
-                      : ListView.builder(
+                      // A reader at the end stays there when a bubble grows
+                      // after the first layout (_onScrollMetricsChanged).
+                      : NotificationListener<ScrollMetricsNotification>(
+                        onNotification: _onScrollMetricsChanged,
+                        child: ListView.builder(
                           controller: _scrollController,
                           keyboardDismissBehavior:
                               ScrollViewKeyboardDismissBehavior.onDrag,
@@ -733,6 +753,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             return _boundaryNav.anchor(index: index, child: bubble);
                           },
                         ),
+                      ),
                     ),
                     Positioned(
                       bottom: 8,
@@ -1745,9 +1766,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     );
                   },
                 ),
+              // Every change in this dialog takes effect at once; this
+              // button discards nothing, so it reads "close" (S420).
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: Text(locale.get('cancel')),
+                child: Text(locale.get('close')),
               ),
               TextButton.icon(
                 icon: Icon(Icons.exit_to_app, size: 18, color: Theme.of(context).colorScheme.error),
@@ -2078,9 +2101,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     );
                   },
                 ),
+              // Every change in this dialog takes effect at once; this
+              // button discards nothing, so it reads "close" (S420).
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: Text(locale.get('cancel')),
+                child: Text(locale.get('close')),
               ),
               TextButton.icon(
                 icon: Icon(Icons.exit_to_app, size: 18, color: Theme.of(context).colorScheme.error),
@@ -2224,6 +2249,28 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// §14.6.3 (S422): the offer card of this conversation, or nothing.
+  Widget _buildReconcileOffer(BuildContext context, ICleonaService service) {
+    final offers = service.reconcileView['offers'];
+    if (offers is! List) return const SizedBox.shrink();
+    final offer = offers
+        .whereType<Map>()
+        .where((o) => o['conversationId'] == widget.conversationId)
+        .firstOrNull;
+    if (offer == null) return const SizedBox.shrink();
+    final o = Map<String, dynamic>.from(offer);
+    return ReconcileOfferCard(
+      offer: o,
+      onFetchHistory: () =>
+          service.reconcileFetchHistoryOf(widget.conversationId),
+      onFetchAttachments: () async {
+        if (await showReconcileAttachmentsConsent(context, o)) {
+          await service.reconcileFetchAttachmentsOf(widget.conversationId);
+        }
+      },
     );
   }
 
@@ -3148,37 +3195,60 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         _scrollController.jumpTo(after);
         _suppressScrollNav = false;
-        _scheduleLateContentRecheck(after);
+        // Content that grows later (images that load after the jump) is
+        // followed by _onScrollMetricsChanged, not by a timed recheck.
       }
     });
   }
 
-  void _scheduleLateContentRecheck(double stableExtent) {
-    Future.delayed(const Duration(milliseconds: 300), () {
-      if (!mounted || !_scrollController.hasClients) return;
-      final pos = _scrollController.position;
-      if (pos.maxScrollExtent > stableExtent + 0.5 && _isNearBottom()) {
-        _jumpToBottomRepeatedly(remainingAttempts: 4);
-      }
-    });
+  /// Follows a growth of the content extent that comes without a change of
+  /// the scroll offset. Such a growth notifies no scroll listener (Flutter
+  /// SDK, class documentation of ScrollPosition); the scrollable reports it
+  /// as a [ScrollMetricsNotification] after the frame. A reader who stood at
+  /// the end stays at the end; any other reader keeps the position, and the
+  /// jump-down button is evaluated against the new distance.
+  /// S419-RCA-37W03.md 37W03-A: after a restart the image bubbles get their
+  /// height only when the media reader has delivered the picture, after the
+  /// jump to the end, and the newest messages ended below the input field.
+  bool _onScrollMetricsChanged(ScrollMetricsNotification notification) {
+    // Only the message list itself, not a scrollable inside a bubble.
+    if (notification.depth != 0) return false;
+    final extent = notification.metrics.maxScrollExtent;
+    final previous = _lastSeenMaxExtent;
+    _lastSeenMaxExtent = extent;
+    // The notification also comes for every offset change; those are the
+    // scroll listener's business.
+    if ((extent - previous).abs() <= 0.5) return false;
+    if (!mounted || !_scrollController.hasClients) return false;
+    if (extent > previous && _stickToBottom && !_isSearching) {
+      // Dispatched from a microtask after the frame, outside build and
+      // layout, so the jump may happen here; it schedules the next frame.
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    } else {
+      _onScrollChanged();
+    }
+    return false;
   }
 
   void _onScrollChanged() {
-    if (_suppressScrollNav) return;
     if (!_scrollController.hasClients) return;
     final pos = _scrollController.position;
     final distFromBottom = pos.maxScrollExtent - pos.pixels;
+    // Kept up to date also while a jump suppresses the button logic: the
+    // jump itself is what puts the reader at the end.
+    _stickToBottom = distFromBottom < _jumpDownHideDistance;
+    if (_suppressScrollNav) return;
     final isShowing = _scrollNavNotifier.value;
     // Hysteresis: show at 200px, hide at 80px — prevents rapid toggling
     // when the user scrolls near the threshold.
     // The badge base is kept when an arrival below the viewport already set
     // it (build()), and dropped whenever the reader is back at the end.
-    if (!isShowing && distFromBottom >= 200) {
+    if (!isShowing && distFromBottom >= _jumpDownShowDistance) {
       if (_messageCountWhenScrolledUp < 0) {
         _messageCountWhenScrolledUp = _lastRenderedMessageCount;
       }
       _scrollNavNotifier.value = true;
-    } else if (distFromBottom < 80) {
+    } else if (distFromBottom < _jumpDownHideDistance) {
       if (isShowing) {
         _boundaryNav.reset();
         _scrollNavNotifier.value = false;
@@ -3434,6 +3504,28 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
   }
 
   Future<void> _probeDesktopDuration() async {
+    if (Platform.isWindows) {
+      // S422 WIN 33a.W02: Windows has no `ffprobe`; the bundled player reads
+      // the loopback URL through Media Foundation (§27.7).
+      try {
+        final result = await Process.run(
+          NotificationSoundService.windowsPlayerPath(AppPaths.bundleDir),
+          NotificationSoundService.windowsMediaProbeArgs(
+              _url ?? widget.filePath),
+        );
+        if (!mounted) return;
+        final d = NotificationSoundService.parseWindowsMediaProbe(
+            result.stdout as String);
+        if (d != null) {
+          setState(() => _duration = d);
+        } else {
+          debugPrint('[audio] cleona-play --probe exit ${result.exitCode}');
+        }
+      } catch (e) {
+        debugPrint('[audio] cleona-play --probe failed: $e');
+      }
+      return;
+    }
     try {
       // S362: the loopback URL instead of the path — `ffprobe` reads no
       // `.cmenc`. On the argument list as a leak point: see `MediaVault`.
@@ -3456,11 +3548,18 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
         ? ['-ss', '${_playStartOffset.inSeconds}.${(_playStartOffset.inMilliseconds % 1000).toString().padLeft(3, '0')}']
         : <String>[];
     try {
-      _ffplayProcess = await Process.start(
-        'ffplay',
-        ['-nodisp', '-autoexit', '-loglevel', 'error', ...ssArg,
-          _url ?? widget.filePath],
-      );
+      _ffplayProcess = Platform.isWindows
+          // S422 WIN 33a.W02: the bundled player (Media Foundation), §27.7.
+          ? await Process.start(
+              NotificationSoundService.windowsPlayerPath(AppPaths.bundleDir),
+              NotificationSoundService.windowsMediaPlayArgs(
+                  _url ?? widget.filePath, _playStartOffset),
+            )
+          : await Process.start(
+              'ffplay',
+              ['-nodisp', '-autoexit', '-loglevel', 'error', ...ssArg,
+                _url ?? widget.filePath],
+            );
       _playStartedAt = DateTime.now();
       setState(() => _playing = true);
       _positionTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -3473,12 +3572,17 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
           setState(() => _position = elapsed);
         }
       });
-      _ffplayProcess!.exitCode.then((_) {
+      _ffplayProcess!.exitCode.then((code) {
+        // A player that ends with an error leaves a line — S422: the missing
+        // player on Windows left none, and the position just stood at 00:00.
+        if (code != 0) debugPrint('[audio] desktop player exit $code');
         if (!mounted) return;
         _positionTimer?.cancel();
         if (_playing) setState(() { _playing = false; _position = Duration.zero; _playStartOffset = Duration.zero; });
       });
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[audio] desktop player could not be started: $e');
+    }
   }
 
   Future<void> _desktopStop() async {

@@ -21,6 +21,8 @@ import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/identity/identity_remote_deletion.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/service/notification_content.dart'
+    show notificationProductName;
 import 'package:cleona/core/ipc/ipc_probe.dart';
 import 'package:cleona/core/ipc/ipc_secret.dart';
 import 'package:cleona/core/ipc/ipc_server.dart';
@@ -33,12 +35,11 @@ import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/profile_move.dart';
 import 'package:cleona/core/platform/daemon_stdio.dart';
 import 'package:cleona/core/platform/linux_native_libraries.dart';
-import 'package:cleona/core/calendar/calendar_manager.dart';
-import 'package:cleona/core/calendar/reminder_service.dart';
-import 'package:cleona/core/calendar/reminder_text.dart';
+import 'package:cleona/core/service/calendar_wiring.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/calendar/sync/caldav_server_setting.dart';
 import 'package:cleona/core/platform/desktop_notifier.dart';
+import 'package:cleona/core/platform/windows_toast_notifier.dart';
 import 'package:cleona/core/platform/windows_firewall.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
@@ -663,17 +664,32 @@ class _MultiServiceDaemon {
   UpdateOffer<CleonaService>? _updateOffer;
   final Map<String, IdentityContext> _contexts = {}; // nodeIdHex → context
   IpcServer? _ipcServer;
-  ReminderService? _reminderService;
+  /// Reminders and the external-sync cadence (§18.1.6, §18.2) — the same
+  /// wiring the app process uses (`calendar_wiring.dart`).
+  CalendarWiring? _calendar;
 
-  /// §22.6 "notifications via `notify-send`/D-Bus" — Linux only. Windows
-  /// (toast) and macOS have no backend yet; there a service posts nothing.
-  late final DesktopNotifier? _desktopNotifier = Platform.isLinux
-      ? DesktopNotifier(
-          warn: log.warn,
-          appName: activeNetworkChannel == NetworkChannel.beta
-              ? 'Cleona Beta'
-              : 'Cleona Chat')
-      : null;
+  /// §22.6 — Linux: "notifications via `notify-send`/D-Bus" (the session
+  /// bus, no program); Windows: "toast notifications" through the bundled
+  /// helper `cleona-notify.exe` (one process per notification, title and
+  /// text over its standard input). macOS has no backend yet; there a
+  /// service posts nothing.
+  late final SystemNotifier? _desktopNotifier = Platform.isLinux
+      ? DesktopNotifier(warn: log.warn, appName: _productName)
+      : Platform.isWindows
+          ? WindowsToastNotifier(
+              appId: WindowsToastNotifier.appIdFor(activeNetworkChannel),
+              displayName: _productName,
+              iconPath: WindowsToastNotifier.iconPathFor(
+                  AppPaths.bundleDir, activeNetworkChannel),
+              helperPath:
+                  WindowsToastNotifier.helperPathFor(AppPaths.bundleDir),
+              warn: log.warn)
+          : null;
+
+  /// The product name the system notifications are shown under — the
+  /// `ProductName` of the Windows setup (`cleona-setup.iss`).
+  /// The same name a notification without content carries as its title.
+  String get _productName => notificationProductName(activeNetworkChannel);
 
   /// Language of the text this process words itself — how long until a
   /// reminded event starts: that of the operating system until the GUI
@@ -682,8 +698,9 @@ class _MultiServiceDaemon {
 
   /// One way for incoming messages and due reminders (§22.8 "What a system
   /// notification shows"): the title and the text the service decided on —
-  /// the same two the Android notification gets — go to the desktop's
-  /// notification service over the session bus, and nowhere else. A later
+  /// the same two the Android notification gets — go to the platform's
+  /// notification service (the session bus on Linux, the toast helper on
+  /// Windows), and nowhere else. A later
   /// notification under the same identifier (a conversation, a reminder)
   /// replaces the earlier one.
   void _bindDesktopNotifications(CleonaService service) {
@@ -696,14 +713,6 @@ class _MultiServiceDaemon {
         notifier.post(summary: title, body: body, key: notificationId);
   }
 
-  /// How long until the event starts, for the notification of a reminder
-  /// that fires [minutesBefore] it — in the words the event editor uses for
-  /// the same reminder, in [_notificationLocale].
-  String _reminderLeadText(int minutesBefore) {
-    final (:key, :count) = reminderOffsetText(minutesBefore);
-    final text = trayTranslate(key, _notificationLocale);
-    return count == null ? text : text.replaceAll('{count}', '$count');
-  }
   CalDAVServer? _caldavServer;
   Timer? _statusTimer;
   Timer? _networkPollTimer; // Windows-only: 30s poll fallback for network changes
@@ -1017,7 +1026,7 @@ class _MultiServiceDaemon {
         final mgr = svc.binaryUpdateManager;
         if (mgr == null) {
           log.warn('apply_update: no binaryUpdateManager');
-          return false;
+          return UpdateInstall.notReady;
         }
         log.info('apply_update: user agreed — installing '
             'v${mgr.targetVersion}');
@@ -1242,11 +1251,10 @@ class _MultiServiceDaemon {
 
     // PID file already written early (Guard 0 needs it before init completes).
 
-    // Calendar reminder service (§23) — checks all identity calendars
-    _startReminderService();
-
-    // Calendar external sync (§23.8 — CalDAV + Google) per identity
-    _startCalendarSyncServices();
+    // Calendar reminders (§18.1.6) and the external-sync cadence (§18.2)
+    // for every identity — the one wiring shared with the app process.
+    _calendar = CalendarWiring(services: () => _services, report: log.info)
+      ..start();
 
     // Local CalDAV server (§23.8.7) — exposes each identity's calendar as
     // a CalDAV endpoint on 127.0.0.1 so desktop calendar apps (Thunderbird
@@ -1457,6 +1465,10 @@ class _MultiServiceDaemon {
     // Update IPC server
     _ipcServer?.addService(ctx.userIdHex, service);
 
+    // Its external-sync cadence (§18.2); until S422 an identity added at
+    // runtime had none until the daemon restarted.
+    _calendar?.identityAdded(service);
+
     // If the local CalDAV server is running, register the new identity
     // so desktop apps can immediately discover its calendar.
     _caldavServer?.registerIdentity(CalDAVServerIdentity(
@@ -1476,6 +1488,8 @@ class _MultiServiceDaemon {
   Future<void> removeIdentity(String nodeIdHex) async {
     final service = _services.remove(nodeIdHex);
     if (service != null) {
+      // Its sync clock stops with it — `CleonaService.stop` does not (S422).
+      _calendar?.identityRemoved(service);
       await service.stop();
     }
     _contexts.remove(nodeIdHex);
@@ -1755,8 +1769,8 @@ class _MultiServiceDaemon {
     _networkPollTimer = null;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
-    _reminderService?.dispose();
-    _reminderService = null;
+    _calendar?.dispose();
+    _calendar = null;
     await _stopLocalCalDAVServer();
     _networkMonitor?.kill();
     _networkMonitor = null;
@@ -1870,55 +1884,6 @@ class _MultiServiceDaemon {
         _windowsFirewallCheck = null;
       }
     }();
-  }
-
-  /// Event-driven network change detection.
-  /// Start the ReminderService for all identity calendars.
-  void _startReminderService() {
-    final reminderService = ReminderService();
-    // Build a live getter so identities added at runtime get reminders too.
-    Map<String, CalendarManager> getCalendars() {
-      final calendars = <String, CalendarManager>{};
-      for (final entry in _services.entries) {
-        calendars[entry.key] = entry.value.calendarManager;
-      }
-      return calendars;
-    }
-
-    reminderService.onReminderDue = (identityId, reminder) {
-      // The event's identifier, not its title: the title is what the
-      // notification shows, and that is "not written to a log" (§22.8).
-      log.info('Reminder due: event ${reminderLogName(reminder.eventId)} '
-          '(identity=$identityId, ${reminder.minutesBefore}min before event)');
-      final service = _services[identityId];
-      if (service == null) return;
-
-      // 1. IPC event → GUI (for in-app dialog / list highlight)
-      service.onCalendarReminderDue?.call(
-          reminder.eventId, reminder.title, reminder.minutesBefore);
-
-      // 2. System notification, sound and vibration (§18.1.6) — with only
-      //    the daemon running, too. The service hands it to the same
-      //    platform way as an incoming message; in this process that is the
-      //    desktop notifier (`_bindDesktopNotifications`). §22.8: "A
-      //    reminder shows the event's title and how long until it starts."
-      final notificationId = 'reminder:${reminder.eventId}:${reminder.eventStart}';
-      service.notifyReminderDue(reminder.title,
-          _reminderLeadText(reminder.minutesBefore), notificationId);
-    };
-    final initialCalendars = getCalendars();
-    reminderService.start(initialCalendars, calendarGetter: getCalendars);
-    _reminderService = reminderService;
-    log.info('Reminder service started for ${initialCalendars.length} identity calendars');
-  }
-
-  /// Start the CalendarSyncService for each identity. No-op if no provider
-  /// is configured; the service wakes up when the user configures CalDAV or Google.
-  void _startCalendarSyncServices() {
-    for (final svc in _services.values) {
-      svc.calendarSyncService.start();
-    }
-    log.info('Calendar sync service started for ${_services.length} identities');
   }
 
   // ── Local CalDAV server (§23.8.7) ───────────────────────────────────
@@ -2446,13 +2411,13 @@ Future<void> _restartSelfLinux(CLogger log) async {
       mode: ProcessStartMode.detached);
 }
 
-Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void> Function() shutdownAll) async {
+Future<UpdateInstall> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void> Function() shutdownAll) async {
   try {
     final path = await mgr.getVerifiedBinaryPath(
         Platform.operatingSystem, mgr.targetVersion ?? '');
     if (path == null) {
       log.warn('getVerifiedBinaryPath returned null');
-      return false;
+      return UpdateInstall.notReady;
     }
     final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
     if (ok) {
@@ -2471,14 +2436,14 @@ Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void>
       }
       log.info('Shutting down daemon before exit...');
       await shutdownAll();
-      return true;
+      return UpdateInstall.carriedOut;
     } else {
       log.warn('applyDesktopUpdate returned false');
-      return false;
+      return UpdateInstall.failed;
     }
   } catch (e) {
     log.error('Apply error: $e');
-    return false;
+    return UpdateInstall.failed;
   }
 }
 

@@ -13,6 +13,7 @@ import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/components/language_selector.dart';
+import 'package:cleona/ui/components/reconcile_widgets.dart';
 import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 class SetupScreen extends StatefulWidget {
@@ -60,6 +61,28 @@ class _SetupScreenState extends State<SetupScreen> {
     setState(() => _retired = const []);
   }
 
+  /// §14.4 (S422): this device was locked out by the user's other devices
+  /// and removed every identity on itself — the interface says why, once.
+  late bool _lockedOut = _lockedOutUnseen();
+
+  bool _lockedOutUnseen() {
+    try {
+      final n = IdentityManager().lockedOutSelf();
+      return n != null && !n.seen;
+    } on Object {
+      return false;
+    }
+  }
+
+  void _lockedOutDismiss() {
+    try {
+      IdentityManager().lockedOutSelfSeen();
+    } on Object {
+      // Not writable: the notice comes again at the next start.
+    }
+    setState(() => _lockedOut = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -103,6 +126,8 @@ class _SetupScreenState extends State<SetupScreen> {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
+                if (_lockedOut)
+                  LockedOutNotice(onDismiss: _lockedOutDismiss),
                 for (var i = 0; i < _retired.length; i++)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 16),

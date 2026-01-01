@@ -7,7 +7,6 @@ import 'package:cleona/core/channels/system_channel_api.dart';
 import 'package:cleona/core/channels/system_channels.dart' show LogReport;
 import 'package:cleona/core/channels/system_object.dart' show SystemVote;
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/platform/app_screenshot.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/system_channel_post.dart';
@@ -115,24 +114,6 @@ class _SystemChannelScreenState extends State<SystemChannelScreen> {
   bool _showsNew(SystemReportView r) =>
       r.isNew || _newThisVisit.contains(r.idHex);
 
-  Future<void> _screenshot() async {
-    final locale = AppLocale.read(context);
-    final messenger = ScaffoldMessenger.of(context);
-    final result = await AppScreenshot.capture();
-    if (!mounted) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          locale.get(
-            result.saved && result.uri != null
-                ? 'screenshot_saved'
-                : 'screenshot_failed',
-          ),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -146,14 +127,8 @@ class _SystemChannelScreenState extends State<SystemChannelScreen> {
               onPressed: () => Navigator.pop(context),
             )
           : null,
-      actions: [
-        if (AppScreenshot.isOffered)
-          IconButton(
-            icon: const Icon(Icons.screenshot),
-            tooltip: locale.get('screenshot_action'),
-            onPressed: _screenshot,
-          ),
-      ],
+      // No own screenshot button: AppBarScaffold puts the one of §23.10 in
+      // every header (S420, field report 11.11.2026: two buttons here).
       body: SafeArea(
         top: false,
         child: Column(

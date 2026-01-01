@@ -6,10 +6,48 @@ import 'package:cleona/core/crypto/key_migration.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/mycelium_seam.dart';
+import 'package:cleona/core/service/notification_content.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/android_badge.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:mycelium/host.dart';
+
+/// What a wake-up needs from the app's RUNNING delivery (S420 IB-2,
+/// variant B, owner decision 11.11.2026). `main.dart` sets it once its
+/// services and its host stand ([IosBackgroundFetch.inProcess]) and clears
+/// it when it stops the host.
+///
+/// Why: the wake-up runs in the SAME process as the app whenever iOS
+/// resumes a suspended app for a `BGTask` — the app's services and host
+/// are alive then. Until S420 the wake-up built a second `CleonaService` per
+/// identity and a second host on the same port beside them; what that
+/// second instance counted, the screen never saw (report
+/// `S420-RCA-FELD-IPHONE-BADGE.md`, IB-2).
+class IosFetchInProcess {
+  /// The services of every identity in the app process; empty when the app
+  /// has no host (then the wake-up takes the cold-start path).
+  final List<CleonaService> Function() services;
+
+  /// The data port of the app's host.
+  final int Function() port;
+
+  /// Binds the host's data port sockets afresh on the same port
+  /// (`Host.socketsReopen`, §11.1, §31.3).
+  final Future<({bool ipv4, bool? ipv6})> Function() socketsReopen;
+
+  /// What rests goes again, then the post box is asked (§8.2) —
+  /// `Host.applicationOpened`, the same edge the app's own return runs.
+  final Future<void> Function() collect;
+
+  const IosFetchInProcess({
+    required this.services,
+    required this.port,
+    required this.socketsReopen,
+    required this.collect,
+  });
+}
 
 /// iOS Background Fetch integration via BGTaskScheduler (Architecture S12.5).
 ///
@@ -103,6 +141,21 @@ class IosBackgroundFetch {
   static int gateSkipCount = 0;
   @visibleForTesting
   static int pastGateCount = 0;
+
+  /// Which of the two paths behind the gate a wake-up took (S420): through
+  /// the app's running services, or the cold start that builds its own.
+  @visibleForTesting
+  static int inProcessRuns = 0;
+  @visibleForTesting
+  static int coldStartRuns = 0;
+
+  /// The wait window instead of 20 s / 120 s — probes only.
+  @visibleForTesting
+  static Duration? windowForTest;
+
+  /// The app's running delivery, or `null` (no app host in this process:
+  /// cold start). Set and cleared by `main.dart` — see [IosFetchInProcess].
+  static IosFetchInProcess? inProcess;
 
   /// Whether a foreground run is currently holding the hold.
   ///
@@ -226,7 +279,8 @@ class IosBackgroundFetch {
   /// [taskType] is "refresh" (BGAppRefreshTask, ~30s window, peer budget 3)
   /// or "processing" (BGProcessingTask, minutes-long window, peer budget 10).
   ///
-  /// Returns a map: {messageCount: int, senderNames: [String], previews: [String]}
+  /// Returns a map: {messageCount: int, badgeCount: int, senderNames:
+  /// [String], previews: [String]} (`badgeCount` since S420, see [_result]).
   ///
   /// ── THE WAKE-UP CHAIN, SWITCHED TO V4.1 (CUT, 31.08.) ───────────────
   ///
@@ -277,6 +331,25 @@ class IosBackgroundFetch {
     _isFetching = true;
     debugPrint('[ios-bg-fetch] Starting background fetch '
         '(type=$taskType, wait=${waitSeconds}s)...');
+    final window = windowForTest ?? Duration(seconds: waitSeconds);
+
+    // ── THE APP LIVES IN THIS PROCESS: ITS SERVICES, NO SECOND ONE (S420) ──
+    //
+    // Variant B (IB-2): with the app's services and host alive, the wake-up
+    // builds nothing of its own and stops nothing — they belong to the app.
+    // Only without them (no app host in the process) the cold start below
+    // runs as before.
+    final live = inProcess;
+    final liveServices = live?.services() ?? const <CleonaService>[];
+    if (live != null && liveServices.isNotEmpty) {
+      try {
+        return await _fetchInProcess(live, liveServices, taskType, window);
+      } finally {
+        _isFetching = false;
+        debugPrint('[ios-bg-fetch] Background fetch complete (in-process)');
+      }
+    }
+    coldStartRuns++;
 
     final services = <CleonaService>[];
     // The ONE mycelium host of this wake-up (S387) — declared before the try,
@@ -284,7 +357,13 @@ class IosBackgroundFetch {
     // wire and the state checker; a host not stopped would keep
     // the Dart VM alive, and iOS only ends the run when it reports.
     Host? host;
-    final newMessages = <_FetchedMessage>[];
+    // Conversations with new unread — for the wake-up line only; the
+    // notifications come from the services (§22.8, D-124).
+    var newConversations = 0;
+    // The unread sum the icon shows (IB-1) and where the wake-up line goes.
+    var badgeCount = 0;
+    String? logDir;
+    var failed = false;
 
     try {
       // Step 1: load identities and contexts
@@ -294,6 +373,7 @@ class IosBackgroundFetch {
         debugPrint('[ios-bg-fetch] No identities, aborting');
         return {'messageCount': 0, 'senderNames': <String>[], 'previews': <String>[]};
       }
+      logDir = identities.first.profileDir;
 
       final masterSeed = mgr.loadMasterSeed();
       // `final firstId = identities.first;` was dropped with S374 — the
@@ -348,6 +428,12 @@ class IosBackgroundFetch {
           displayName: ctx.displayName,
           port: devicesPort,
         );
+        // §22.8, D-124: the service forms and gates every notification of
+        // this run itself — in the background (L5 open), behind quiet hours,
+        // mute and L1–L4, the first collection as one batch — and hands it
+        // to the system through the same channel as the running app.
+        service.setAppResumed(false, triggerNodeHarvest: false);
+        service.onPostNotificationIos = systemNotificationReceiver(service);
         await service.startService();
         services.add(service);
       }
@@ -386,14 +472,7 @@ class IosBackgroundFetch {
       // (A-4): asked inside `hostStart`, laid down by `Host.stop` ([step 7]).
 
       // Record baseline unread counts per conversation
-      final baselineUnread = <String, Map<String, int>>{};
-      for (final service in services) {
-        final counts = <String, int>{};
-        for (final entry in service.conversations.entries) {
-          counts[entry.key] = entry.value.unreadCount;
-        }
-        baselineUnread[service.nodeIdHex] = counts;
-      }
+      final baselineUnread = _unreadBaseline(services);
 
       // Step 4: wait out the window. In V3 peers were
       // radioed here; in V4.1 there is nothing to do — the `SlotDriver` in the
@@ -401,39 +480,18 @@ class IosBackgroundFetch {
       // in giving it time.
       // BGAppRefreshTask: ~30 s window → 20 s. BGProcessingTask: minutes → 120 s.
       debugPrint('[ios-bg-fetch] Waiting for message retrieval (${waitSeconds}s)...');
-      await Future<void>.delayed(Duration(seconds: waitSeconds));
+      await Future<void>.delayed(window);
 
-      // Step 5: collect the newly added unread ones
+      // Step 5: the first collection ends with the window (iOS suspends the
+      // process when the run reports): its batch notification goes now.
+      // Then count the conversations with new unread for the line.
       for (final service in services) {
-        final baseline = baselineUnread[service.nodeIdHex] ?? {};
-        for (final entry in service.conversations.entries) {
-          final convId = entry.key;
-          final conv = entry.value;
-          final previousUnread = baseline[convId] ?? 0;
-          final newCount = conv.unreadCount - previousUnread;
-          if (newCount > 0) {
-            // S366, stage B: without this call `conv.messages` carries
-            // only the youngest message. If that is outgoing,
-            // `incomingMsgs` would be EMPTY — although `newCount > 0` just says
-            // that unread messages have been added. The user would then get
-            // no notification and would not know why.
-            service.ensureLoaded(convId);
-            // Get the latest incoming messages
-            final incomingMsgs = conv.messages
-                .where((m) => !m.isOutgoing)
-                .toList();
-            if (incomingMsgs.isNotEmpty) {
-              final latest = incomingMsgs.last;
-              newMessages.add(_FetchedMessage(
-                senderName: conv.displayName,
-                preview: _messagePreview(latest),
-              ));
-            }
-          }
-        }
+        service.endFirstCollection();
       }
+      newConversations = _newUnreadSince(services, baselineUnread);
+      badgeCount = AndroidBadge.of(services.map((s) => s.conversations)).count;
 
-      debugPrint('[ios-bg-fetch] Found ${newMessages.length} new message(s)');
+      debugPrint('[ios-bg-fetch] $newConversations conversation(s) with new unread');
 
       // Step 6: save state.
       //
@@ -446,6 +504,7 @@ class IosBackgroundFetch {
       }
 
     } catch (e, stack) {
+      failed = true;
       debugPrint('[ios-bg-fetch] Error: $e\n$stack');
     } finally {
       // Step 7: stop the host FIRST, then the services. The other way round
@@ -470,13 +529,154 @@ class IosBackgroundFetch {
 
     // Step 8: result to the native side (which schedules the next
     // run and posts the notifications)
-    final totalCount = newMessages.length;
-    return {
-      'messageCount': totalCount,
-      'senderNames': newMessages.map((m) => m.senderName).toList(),
-      'previews': newMessages.map((m) => m.preview).toList(),
-    };
+    await _wakeLine(logDir, taskType, 'cold start', newConversations,
+        badgeCount, failed: failed);
+    return _result(newConversations, badgeCount);
   }
+
+  /// The wake-up through the app's running services (S420 IB-2, variant B).
+  ///
+  /// 1. Bind the data port's sockets afresh on the same port. iOS closes the
+  ///    descriptors of a suspended app (§31.3 "Death of the file
+  ///    descriptor"), and a closed one neither sends nor receives — without
+  ///    this the wake-up would be deaf. Until S420 the second host of the
+  ///    wake-up bound its own fresh sockets; this replaces that (§31.3
+  ///    "Recovery": "bind fresh sockets and re-read the descriptor").
+  /// 2. Baseline, then the edge of §8.2: what rests goes again, the post box
+  ///    is asked (`Host.applicationOpened`) — the same that the second host
+  ///    did at its start, so no traffic is added.
+  /// 3. Wait out the window, collect what is new, save — and stop nothing:
+  ///    services and host belong to the app.
+  static Future<Map<String, dynamic>> _fetchInProcess(IosFetchInProcess live,
+      List<CleonaService> services, String taskType, Duration window) async {
+    inProcessRuns++;
+    final logDir = services.first.profileDir;
+    final log = CLogger.get('bg-fetch', profileDir: logDir);
+    var newConversations = 0;
+    var badgeCount = 0;
+    var failed = false;
+    try {
+      final port = live.port();
+      final r = await live.socketsReopen();
+      String said(bool? fresh) =>
+          fresh == null ? 'no socket' : (fresh ? 'bound afresh' : 'NOT bound afresh');
+      log.info('bg-fetch: data port $port — IPv4 ${said(r.ipv4)}, '
+          'IPv6 ${said(r.ipv6)} (§31.3)');
+      final baseline = _unreadBaseline(services);
+      unawaited(live.collect().catchError(
+          (Object e) => log.warn('bg-fetch: collection failed: $e')));
+      await Future<void>.delayed(window);
+      // A start straight into the background (D-124): the first collection
+      // of the app's services ends with the window, its batch goes now.
+      // No-op for services whose first collection ended long ago.
+      for (final service in services) {
+        service.endFirstCollection();
+      }
+      newConversations = _newUnreadSince(services, baseline);
+      badgeCount = AndroidBadge.of(services.map((s) => s.conversations)).count;
+      // Saved as on the way into the background (`main.dart`, `paused`): iOS
+      // may end the suspended process without a further word. One
+      // identity's failure does not keep the others from saving.
+      for (final service in services) {
+        try {
+          service.saveState();
+        } catch (e) {
+          log.warn('bg-fetch: saving an identity failed: $e');
+        }
+      }
+    } catch (e, stack) {
+      failed = true;
+      debugPrint('[ios-bg-fetch] Error (in-process): $e\n$stack');
+    }
+    await _wakeLine(logDir, taskType, 'in-process', newConversations,
+        badgeCount, failed: failed);
+    // The running services notified each arrival themselves, behind the
+    // gates of §22.8, through their iOS receiver (`main.dart`,
+    // `onPostNotificationIos`); the native side only sets the badge (S422
+    // N-4, D-124).
+    return _result(newConversations, badgeCount);
+  }
+
+  /// The answer to the native side. `badgeCount` is the unread sum over
+  /// every identity without the system channels — the number the app icon
+  /// shows (IB-1, the same derivation as `main.dart` sends on every change).
+  /// No titles, no texts: the services posted their notifications
+  /// themselves (D-124); `messageCount` is the number of conversations with
+  /// new unread, for the native log line.
+  static Map<String, dynamic> _result(int newConversations, int badgeCount) =>
+      {
+        'messageCount': newConversations,
+        'badgeCount': badgeCount,
+      };
+
+  /// ONE line per wake-up into the app log (S420): counts only — no name, no
+  /// text, no address (§22.8: the text goes to the notification service and
+  /// nowhere else). Until S420 a wake-up wrote only to `debugPrint`/`NSLog`,
+  /// neither of which reaches `/Documents/logs/`. Flushed at once: iOS
+  /// suspends the process as soon as the native side completes the task.
+  static Future<void> _wakeLine(String? logDir, String taskType, String path,
+      int conversations, int badge, {required bool failed}) async {
+    if (logDir == null) return; // no identity: nothing was fetched
+    CLogger.get('bg-fetch', profileDir: logDir).info(
+        'bg-fetch: wake-up ($taskType, $path) — $conversations '
+        'conversation(s) with new unread, badge $badge'
+        '${failed ? ', ended with an error' : ''}');
+    await CLogger.flushAll();
+  }
+
+  /// The unread count per conversation, per identity — before the window.
+  static Map<String, Map<String, int>> _unreadBaseline(
+          List<CleonaService> services) =>
+      {
+        for (final service in services)
+          service.nodeIdHex: {
+            for (final entry in service.conversations.entries)
+              entry.key: entry.value.unreadCount,
+          },
+      };
+
+  /// The number of conversations whose unread count grew since [baseline] —
+  /// for the wake-up line only. Until S422 this formed the notifications
+  /// Swift posted; since D-124 the services post them themselves.
+  static int _newUnreadSince(List<CleonaService> services,
+      Map<String, Map<String, int>> baselineUnread) {
+    var grown = 0;
+    for (final service in services) {
+      final baseline = baselineUnread[service.nodeIdHex] ?? {};
+      for (final entry in service.conversations.entries) {
+        if (entry.value.unreadCount > (baseline[entry.key] ?? 0)) grown++;
+      }
+    }
+    return grown;
+  }
+
+  /// The receiver of a service's system notification on iOS: title and text
+  /// as the service formed them (`_postSystemNotification`), to
+  /// UNUserNotificationCenter through `chat.cleona/notification`
+  /// (`AppDelegate.swift`) — one per conversation. The ONE receiver for the
+  /// running app (`main.dart`) and the cold start of the wake-up (D-124:
+  /// the native side forms nothing and only sets the badge). `identity` is
+  /// the posting identity, so a tap opens the conversation in it (§22.8,
+  /// D-125 (3)). `soundName` is the `.caf` the notification rings with, or
+  /// `null` for a silent one (§22.8, D-125: the system notification rings
+  /// only while the app does not); a reminder or the batch carry no
+  /// conversation and ring with the standard sound.
+  static Future<void> Function(String title, String body, String id)
+      systemNotificationReceiver(CleonaService service) =>
+          (title, body, id) async {
+            await _notificationChannel.invokeMethod('postNotification', {
+              'title': title,
+              'body': body,
+              'conversationId': id,
+              'identity': service.nodeIdHex,
+              'soundName': iosNotificationSoundName(
+                  bySystem: service.notificationSoundBySystem,
+                  soundName:
+                      service.conversations[id]?.notificationSoundName),
+            });
+          };
+
+  static const _notificationChannel = MethodChannel('chat.cleona/notification');
 
   // ── `_routeInfraFrame` HAS BEEN REMOVED (CUT, 31.08.) ─────────────────
   //
@@ -486,27 +686,4 @@ class IosBackgroundFetch {
   // `cleona_service_v3_fragments.dart` or `_sf.dart`. Caller
   // (`host.wireReceive`) and callees have fallen together.
 
-  /// Generate a short preview string from a message.
-  static String _messagePreview(dynamic msg) {
-    try {
-      final text = msg.text as String?;
-      if (text != null && text.isNotEmpty) {
-        return text.length > 100 ? '${text.substring(0, 100)}...' : text;
-      }
-      // Fallback for media messages
-      if (msg.mediaPath != null) return '[Media]';
-      if (msg.isVoiceMessage == true) return '[Sprachnachricht]';
-      return '[Nachricht]';
-    } catch (_) {
-      return '[Nachricht]';
-    }
-  }
-}
-
-/// Internal helper to collect fetched message info for notification posting.
-class _FetchedMessage {
-  final String senderName;
-  final String preview;
-
-  _FetchedMessage({required this.senderName, required this.preview});
 }

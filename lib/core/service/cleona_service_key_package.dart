@@ -83,6 +83,9 @@ extension CleonaServiceKeyPackage on CleonaService {
             'package\'s keys (§4.5.4) — NOT taken');
         return;
       }
+      // D-109 B-3 (S422): siblings that have not taken their package yet
+      // still sign with the previous keys — accepted for 7 days.
+      _ownPreviousNote();
       identity.adoptSiblingRotation(
         chain: pkg.chain,
         ed25519Pk: pkg.ed25519Pk,

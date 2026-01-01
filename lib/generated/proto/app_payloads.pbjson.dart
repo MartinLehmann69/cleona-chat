@@ -1863,6 +1863,7 @@ const ReconcileFrame$json = {
     {'1': 'deliver', '3': 5, '4': 1, '5': 11, '6': '.cleona.ReconcileDeliver', '9': 0, '10': 'deliver'},
     {'1': 'progress', '3': 6, '4': 1, '5': 11, '6': '.cleona.ReconcileProgress', '9': 0, '10': 'progress'},
     {'1': 'cancel', '3': 7, '4': 1, '5': 11, '6': '.cleona.ReconcileCancel', '9': 0, '10': 'cancel'},
+    {'1': 'attachment', '3': 8, '4': 1, '5': 11, '6': '.cleona.ReconcileAttachment', '9': 0, '10': 'attachment'},
   ],
   '8': [
     {'1': 'kind'},
@@ -1877,7 +1878,8 @@ final $typed_data.Uint8List reconcileFrameDescriptor = $convert.base64Decode(
     'NoGAQgASgLMhYuY2xlb25hLlJlY29uY2lsZUZldGNoSABSBWZldGNoEjQKB2RlbGl2ZXIYBSAB'
     'KAsyGC5jbGVvbmEuUmVjb25jaWxlRGVsaXZlckgAUgdkZWxpdmVyEjcKCHByb2dyZXNzGAYgAS'
     'gLMhkuY2xlb25hLlJlY29uY2lsZVByb2dyZXNzSABSCHByb2dyZXNzEjEKBmNhbmNlbBgHIAEo'
-    'CzIXLmNsZW9uYS5SZWNvbmNpbGVDYW5jZWxIAFIGY2FuY2VsQgYKBGtpbmQ=');
+    'CzIXLmNsZW9uYS5SZWNvbmNpbGVDYW5jZWxIAFIGY2FuY2VsEj0KCmF0dGFjaG1lbnQYCCABKA'
+    'syGy5jbGVvbmEuUmVjb25jaWxlQXR0YWNobWVudEgAUgphdHRhY2htZW50QgYKBGtpbmQ=');
 
 @$core.Deprecated('Use reconcileHeaderDescriptor instead')
 const ReconcileHeader$json = {
@@ -1911,6 +1913,8 @@ const ReconcileChat$json = {
     {'1': 'count', '3': 9, '4': 1, '5': 4, '10': 'count'},
     {'1': 'oldest_ms', '3': 10, '4': 1, '5': 3, '10': 'oldestMs'},
     {'1': 'bytes', '3': 11, '4': 1, '5': 4, '10': 'bytes'},
+    {'1': 'files', '3': 12, '4': 1, '5': 13, '10': 'files'},
+    {'1': 'file_bytes', '3': 13, '4': 1, '5': 4, '10': 'fileBytes'},
   ],
 };
 
@@ -1922,7 +1926,8 @@ final $typed_data.Uint8List reconcileChatDescriptor = $convert.base64Decode(
     'lzQ2hhbm5lbBIfCgtpc19mYXZvcml0ZRgGIAEoCFIKaXNGYXZvcml0ZRIhCgx1bnJlYWRfY291'
     'bnQYByABKA1SC3VucmVhZENvdW50Eh8KC2NvbmZpZ19qc29uGAggASgMUgpjb25maWdKc29uEh'
     'QKBWNvdW50GAkgASgEUgVjb3VudBIbCglvbGRlc3RfbXMYCiABKANSCG9sZGVzdE1zEhQKBWJ5'
-    'dGVzGAsgASgEUgVieXRlcw==');
+    'dGVzGAsgASgEUgVieXRlcxIUCgVmaWxlcxgMIAEoDVIFZmlsZXMSHQoKZmlsZV9ieXRlcxgNIA'
+    'EoBFIJZmlsZUJ5dGVz');
 
 @$core.Deprecated('Use reconcileManifestDescriptor instead')
 const ReconcileManifest$json = {
@@ -1996,6 +2001,7 @@ const ReconcileFetch_Kind$json = {
     {'1': 'MESSAGES', '2': 1},
     {'1': 'NEWEST', '2': 2},
     {'1': 'SINCE', '2': 3},
+    {'1': 'ATTACHMENTS', '2': 4},
   ],
 };
 
@@ -2005,8 +2011,8 @@ final $typed_data.Uint8List reconcileFetchDescriptor = $convert.base64Decode(
     'gOMhsuY2xlb25hLlJlY29uY2lsZUZldGNoLktpbmRSBGtpbmQSGQoIY29udl9pZHMYAyADKAxS'
     'B2NvbnZJZHMSGwoJYmVmb3JlX21zGAQgASgDUghiZWZvcmVNcxIQCgNpZHMYBSADKAxSA2lkcx'
     'IWCgZuZXdlc3QYBiABKA1SBm5ld2VzdBIWCgZ3aW5kb3cYByABKA1SBndpbmRvdxIZCghzaW5j'
-    'ZV9tcxgIIAEoA1IHc2luY2VNcyI5CgRLaW5kEgwKCE1BTklGRVNUEAASDAoITUVTU0FHRVMQAR'
-    'IKCgZORVdFU1QQAhIJCgVTSU5DRRAD');
+    'ZV9tcxgIIAEoA1IHc2luY2VNcyJKCgRLaW5kEgwKCE1BTklGRVNUEAASDAoITUVTU0FHRVMQAR'
+    'IKCgZORVdFU1QQAhIJCgVTSU5DRRADEg8KC0FUVEFDSE1FTlRTEAQ=');
 
 @$core.Deprecated('Use reconcileDeliverDescriptor instead')
 const ReconcileDeliver$json = {
@@ -2095,6 +2101,32 @@ const ReconcileCancel$json = {
 final $typed_data.Uint8List reconcileCancelDescriptor = $convert.base64Decode(
     'Cg9SZWNvbmNpbGVDYW5jZWw=');
 
+@$core.Deprecated('Use reconcileAttachmentDescriptor instead')
+const ReconcileAttachment$json = {
+  '1': 'ReconcileAttachment',
+  '2': [
+    {'1': 'fetch_id', '3': 1, '4': 1, '5': 12, '10': 'fetchId'},
+    {'1': 'message_id', '3': 2, '4': 1, '5': 12, '10': 'messageId'},
+    {'1': 'conv_id', '3': 3, '4': 1, '5': 12, '10': 'convId'},
+    {'1': 'part', '3': 4, '4': 1, '5': 13, '10': 'part'},
+    {'1': 'parts', '3': 5, '4': 1, '5': 13, '10': 'parts'},
+    {'1': 'data', '3': 6, '4': 1, '5': 12, '10': 'data'},
+    {'1': 'size', '3': 7, '4': 1, '5': 4, '10': 'size'},
+    {'1': 'seq', '3': 8, '4': 1, '5': 13, '10': 'seq'},
+    {'1': 'complete', '3': 9, '4': 1, '5': 8, '10': 'complete'},
+    {'1': 'bulk_announcement', '3': 10, '4': 1, '5': 12, '10': 'bulkAnnouncement'},
+  ],
+};
+
+/// Descriptor for `ReconcileAttachment`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List reconcileAttachmentDescriptor = $convert.base64Decode(
+    'ChNSZWNvbmNpbGVBdHRhY2htZW50EhkKCGZldGNoX2lkGAEgASgMUgdmZXRjaElkEh0KCm1lc3'
+    'NhZ2VfaWQYAiABKAxSCW1lc3NhZ2VJZBIXCgdjb252X2lkGAMgASgMUgZjb252SWQSEgoEcGFy'
+    'dBgEIAEoDVIEcGFydBIUCgVwYXJ0cxgFIAEoDVIFcGFydHMSEgoEZGF0YRgGIAEoDFIEZGF0YR'
+    'ISCgRzaXplGAcgASgEUgRzaXplEhAKA3NlcRgIIAEoDVIDc2VxEhoKCGNvbXBsZXRlGAkgASgI'
+    'Ughjb21wbGV0ZRIrChFidWxrX2Fubm91bmNlbWVudBgKIAEoDFIQYnVsa0Fubm91bmNlbWVudA'
+    '==');
+
 @$core.Deprecated('Use twinSyncEnvelopeDescriptor instead')
 const TwinSyncEnvelope$json = {
   '1': 'TwinSyncEnvelope',
@@ -2162,6 +2194,7 @@ const KeyRotationBroadcast$json = {
     {'1': 'pre_rotation_device_count', '3': 8, '4': 1, '5': 13, '10': 'preRotationDeviceCount'},
     {'1': 'mode', '3': 9, '4': 1, '5': 14, '6': '.cleona.KeyRotationMode', '10': 'mode'},
     {'1': 'emergency', '3': 10, '4': 1, '5': 8, '10': 'emergency'},
+    {'1': 'remaining_device_node_ids', '3': 11, '4': 3, '5': 12, '10': 'remainingDeviceNodeIds'},
   ],
   '9': [
     {'1': 5, '2': 6},
@@ -2178,8 +2211,9 @@ final $typed_data.Uint8List keyRotationBroadcastDescriptor = $convert.base64Deco
     'JGCg9hcHByb3ZhbF90b2tlbnMYByADKAsyHS5jbGVvbmEuUm90YXRpb25BcHByb3ZhbFRva2Vu'
     'Ug5hcHByb3ZhbFRva2VucxI5ChlwcmVfcm90YXRpb25fZGV2aWNlX2NvdW50GAggASgNUhZwcm'
     'VSb3RhdGlvbkRldmljZUNvdW50EisKBG1vZGUYCSABKA4yFy5jbGVvbmEuS2V5Um90YXRpb25N'
-    'b2RlUgRtb2RlEhwKCWVtZXJnZW5jeRgKIAEoCFIJZW1lcmdlbmN5SgQIBRAGSgQIBhAHUhVvbG'
-    'Rfc2lnbmF0dXJlX2VkMjU1MTlSFW5ld19zaWduYXR1cmVfZWQyNTUxOQ==');
+    'b2RlUgRtb2RlEhwKCWVtZXJnZW5jeRgKIAEoCFIJZW1lcmdlbmN5EjkKGXJlbWFpbmluZ19kZX'
+    'ZpY2Vfbm9kZV9pZHMYCyADKAxSFnJlbWFpbmluZ0RldmljZU5vZGVJZHNKBAgFEAZKBAgGEAdS'
+    'FW9sZF9zaWduYXR1cmVfZWQyNTUxOVIVbmV3X3NpZ25hdHVyZV9lZDI1NTE5');
 
 @$core.Deprecated('Use calendarReminderOffsetDescriptor instead')
 const CalendarReminderOffset$json = {
@@ -2741,6 +2775,11 @@ const RotationApprovalRequestPayload$json = {
     {'1': 'new_ml_kem_pk', '3': 5, '4': 1, '5': 12, '10': 'newMlKemPk'},
     {'1': 'approval_kind', '3': 6, '4': 1, '5': 14, '6': '.cleona.ApprovalKind', '10': 'approvalKind'},
     {'1': 'new_device_node_ids', '3': 7, '4': 3, '5': 12, '10': 'newDeviceNodeIds'},
+    {'1': 'change_hash', '3': 8, '4': 1, '5': 12, '10': 'changeHash'},
+    {'1': 'change_seq', '3': 9, '4': 1, '5': 13, '10': 'changeSeq'},
+    {'1': 'round_id', '3': 10, '4': 1, '5': 12, '10': 'roundId'},
+    {'1': 'locked_out_device_id', '3': 11, '4': 1, '5': 12, '10': 'lockedOutDeviceId'},
+    {'1': 'withdrawn', '3': 12, '4': 1, '5': 8, '10': 'withdrawn'},
   ],
 };
 
@@ -2751,7 +2790,10 @@ final $typed_data.Uint8List rotationApprovalRequestPayloadDescriptor = $convert.
     'bmV3X21sX2RzYV9waxgDIAEoDFIKbmV3TWxEc2FQaxIiCg1uZXdfeDI1NTE5X3BrGAQgASgMUg'
     'tuZXdYMjU1MTlQaxIhCg1uZXdfbWxfa2VtX3BrGAUgASgMUgpuZXdNbEtlbVBrEjkKDWFwcHJv'
     'dmFsX2tpbmQYBiABKA4yFC5jbGVvbmEuQXBwcm92YWxLaW5kUgxhcHByb3ZhbEtpbmQSLQoTbm'
-    'V3X2RldmljZV9ub2RlX2lkcxgHIAMoDFIQbmV3RGV2aWNlTm9kZUlkcw==');
+    'V3X2RldmljZV9ub2RlX2lkcxgHIAMoDFIQbmV3RGV2aWNlTm9kZUlkcxIfCgtjaGFuZ2VfaGFz'
+    'aBgIIAEoDFIKY2hhbmdlSGFzaBIdCgpjaGFuZ2Vfc2VxGAkgASgNUgljaGFuZ2VTZXESGQoIcm'
+    '91bmRfaWQYCiABKAxSB3JvdW5kSWQSLwoUbG9ja2VkX291dF9kZXZpY2VfaWQYCyABKAxSEWxv'
+    'Y2tlZE91dERldmljZUlkEhwKCXdpdGhkcmF3bhgMIAEoCFIJd2l0aGRyYXdu');
 
 @$core.Deprecated('Use rotationApprovalResponsePayloadDescriptor instead')
 const RotationApprovalResponsePayload$json = {
@@ -2759,6 +2801,8 @@ const RotationApprovalResponsePayload$json = {
   '2': [
     {'1': 'token', '3': 1, '4': 1, '5': 11, '6': '.cleona.RotationApprovalToken', '10': 'token'},
     {'1': 'rejected', '3': 2, '4': 1, '5': 8, '10': 'rejected'},
+    {'1': 'change_token', '3': 3, '4': 1, '5': 11, '6': '.cleona.RotationApprovalToken', '10': 'changeToken'},
+    {'1': 'rotation_hash', '3': 4, '4': 1, '5': 12, '10': 'rotationHash'},
   ],
 };
 
@@ -2766,7 +2810,8 @@ const RotationApprovalResponsePayload$json = {
 final $typed_data.Uint8List rotationApprovalResponsePayloadDescriptor = $convert.base64Decode(
     'Ch9Sb3RhdGlvbkFwcHJvdmFsUmVzcG9uc2VQYXlsb2FkEjMKBXRva2VuGAEgASgLMh0uY2xlb2'
     '5hLlJvdGF0aW9uQXBwcm92YWxUb2tlblIFdG9rZW4SGgoIcmVqZWN0ZWQYAiABKAhSCHJlamVj'
-    'dGVk');
+    'dGVkEkAKDGNoYW5nZV90b2tlbhgDIAEoCzIdLmNsZW9uYS5Sb3RhdGlvbkFwcHJvdmFsVG9rZW'
+    '5SC2NoYW5nZVRva2VuEiMKDXJvdGF0aW9uX2hhc2gYBCABKAxSDHJvdGF0aW9uSGFzaA==');
 
 @$core.Deprecated('Use rotationRejectionAlertPayloadDescriptor instead')
 const RotationRejectionAlertPayload$json = {

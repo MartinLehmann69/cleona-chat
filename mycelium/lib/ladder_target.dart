@@ -53,6 +53,14 @@ class Target {
   /// a contact's signal as for one over a group pair (§4.3).
   final bool signal;
 
+  /// A CALL INVITATION (§17.2): a [signal] whose step 3 is sent again until
+  /// the callee acknowledges it (§9.2) or the call stops ringing, at most
+  /// three times (`ladder.dart`). Only the application can tell an invitation
+  /// from the other call signals — the delivery layer carries opaque content —
+  /// so the application says it at the seam (`MailboxSignal.signal`). Every
+  /// other signal, and every message, leaves step 3 once.
+  final bool callInvitation;
+
   /// A message's [sendingSeed] (`post_box_proof_of_work.dart`): step 4 forms
   /// its deposit id from this instead of the bytes, which are sealed anew at
   /// every sending (§8.2, §9.3). `null`: the id hangs on the bytes.
@@ -81,7 +89,7 @@ class Target {
 
   const Target({this.lan, this.neighbour, this.code, this.identifier,
       this.postBoxApplicable = true, this.neighbours = const [], this.boxValue, this.public,
-      this.recipientOwn = const [], this.signal = false, this.sending});
+      this.recipientOwn = const [], this.signal = false, this.callInvitation = false, this.sending});
 
   /// §7.2: "A send has no way when the recipient holds no address at all —
   /// none of their own, neither from the card nor observed, and no neighbour
@@ -110,6 +118,7 @@ class Target {
           Uint8List? boxValue,
           List<CardAddress> recipientOwn = const [],
           bool signal = false,
+          bool callInvitation = false,
           Uint8List? sending}) =>
       Target(
         lan: lan ?? w?.lan,
@@ -122,6 +131,7 @@ class Target {
         public: w?.public,
         recipientOwn: recipientOwn,
         signal: signal,
+        callInvitation: callInvitation,
         sending: sending,
       );
 

@@ -74,6 +74,10 @@ class Host {
 
   int get port => node.port;
 
+  /// Binds the data port's sockets afresh on the same port (§11.1; §31.3:
+  /// iOS closes them while the app sleeps) — [Wire.reopen].
+  Future<({bool ipv4, bool? ipv6})> socketsReopen() => node.socketsReopen();
+
   /// The readiness state (V4.2 §22.7.1) — LIVE, not a flag. The
   /// names of the values are the ones that IPC and `waitForReady` carry.
   ReadinessState get readiness => node.readiness.state;

@@ -401,11 +401,16 @@ extension CleonaServiceIdentitySet on CleonaService {
   List<String> _identitySetJoinKnown() {
     final i = identity.hdIndex;
     if (i == null) return const [];
+    // §14.4 (D-109, S422): while a lock-out waits for its quorum the set does
+    // not grow.
+    if (coSignLockOutPendingOnHost) return const [];
     final added = <String>[];
     for (final s in _identitySetServices) {
       if (identical(s, this)) continue;
       for (final r in s._devices.values) {
         if (r.isThisDevice) continue;
+        // §14.4 (S422): a locked-out device never comes back from a list.
+        if (_lockOutMarked(r)) continue;
         final u = r.identitySet?['$i'];
         if (u == null || u.length != 32 || _devices.containsKey(u)) continue;
         final now = DateTime.now();
@@ -565,6 +570,12 @@ extension CleonaServiceIdentitySet on CleonaService {
     final received = identitySetEntriesOf(j);
     final rec = _devices[fromHex];
     if (received == null || rec == null) return;
+    if (_lockOutMarked(rec)) {
+      _log.warn('Identity list (§14.7 Type 23) from device '
+          '${CleonaService._hexShort(from)}: the device was locked out '
+          '(§14.4) — discarded');
+      return;
+    }
     // §4.1 (D-106): `node` is the node identifier of the sending device, one
     // for all its identities — kept beside the identifier of this identity's
     // set, never in its place.
@@ -739,6 +750,8 @@ extension CleonaServiceIdentitySet on CleonaService {
     _log.info('Identity list (§14.7 Type 23): handover of index $i '
         '(${body.length} B) in $count piece(s) to device '
         '${toHex.substring(0, 8)}');
+    // §14.7 Type 23 "followed by the initial reconciliation" (S422).
+    y.reconcileBegin(toHex);
   }
 
   /// A handover piece: put together per sender and handover; a complete one

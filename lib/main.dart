@@ -29,6 +29,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/gui_device_setting.dart';
 import 'package:cleona/core/calls/call_integration_channel.dart';
 import 'package:cleona/core/calls/session_behaviour_channel.dart';
+import 'package:cleona/core/service/calendar_wiring.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/channels/crash_report_builder.dart';
 import 'package:cleona/core/channels/system_channel_api.dart'
@@ -77,7 +78,11 @@ import 'package:cleona/core/platform/device_name.dart' show PlatformDeviceName;
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/log/redacted_debug_print.dart';
+import 'package:cleona/ui/flutter_error_route.dart';
+import 'package:cleona/ui/focus_trace.dart';
 import 'package:cleona/core/platform/lifecycle_drain_observer.dart';
+import 'package:cleona/core/platform/notification_tap.dart';
+import 'package:cleona/core/platform/notification_tap_receiver.dart';
 import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
@@ -415,13 +420,48 @@ void main() async {
   // again when a view returns — see `_keepSemanticsOn`.
   _keepSemanticsOn();
 
+  // S420 N2-1C04: the desktop window logs every change of the primary focus
+  // (kind of node, never a text) and every platform channel error the
+  // framework caught, into the profile's log — see `lib/ui/focus_trace.dart`.
+  void Function(String line)? guiInputNote;
+  if (Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
+    final guiInputLog = CLogger.get('gui-input', profileDir: AppPaths.dataDir);
+    FocusTrace(guiInputLog.info).install();
+    guiInputNote = budgetedNote(guiInputLog.warn);
+  }
+
+  // S420 N2-1C04, owner decision variant B: a platform channel error the
+  // framework caught is offered through `handleCrash` once no text field
+  // holds the focus — on every platform, a soft keyboard loses the typing
+  // the same way. It waits while no place to send the report to exists
+  // (else `handleCrash` would park it in `_pendingCrashes`, which the
+  // connection drains regardless of the focus) and while another crash
+  // popup is open (`_scheduleCrashDialog` would drop it).
+  final deferredCrashOffer = DeferredCrashOffer(
+    offer: (error, stack) =>
+        CleonaAppState._instance?.handleCrash(error, stack),
+    canOffer: () {
+      final app = CleonaAppState._instance;
+      return app != null &&
+          app._crashReportApi != null &&
+          !app._crashDialogShowing;
+    },
+    note: guiInputNote,
+  )..install();
+
   // H7 (#U17): global error handlers — uncaught exceptions otherwise crash
   // Android silently. Mirror of the pattern from service_daemon.dart.
+  // Every report goes into crash.log; the crash popup opens for every report
+  // with a stack — a platform channel error the framework caught itself
+  // only later, when no text field holds the focus (S420 N2-1C04,
+  // `lib/ui/flutter_error_route.dart`).
   FlutterError.onError = (details) {
-    _logCrash('FlutterError', details.exception, details.stack);
-    if (details.stack != null) {
-      CleonaAppState._instance?.handleCrash(details.exception, details.stack!);
-    }
+    routeFlutterError(details,
+        logCrash: _logCrash,
+        openCrashPopup: CleonaAppState._instance?.handleCrash,
+        deferCrashPopup: deferredCrashOffer.defer,
+        note: guiInputNote,
+        focus: () => describeFocusNode(FocusManager.instance.primaryFocus));
     FlutterError.presentError(details);
   };
   PlatformDispatcher.instance.onError = (error, stack) {
@@ -670,7 +710,9 @@ class _CleonaAppState extends State<CleonaApp> {
           LifecycleDrainObserver.register(
             contextProvider: () => navigatorKey.currentContext!,
             serviceProvider: () => state.service,
+            onNotificationTap: state.requestOpenFromNotification,
           );
+          NotificationTapReceiver.install(state.requestOpenFromNotification);
           return state;
         }),
         ChangeNotifierProvider.value(value: _appLocale),
@@ -1302,6 +1344,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   final Map<String, CleonaService> _inProcessServices = {};
   final Map<String, IdentityContext> _inProcessContexts = {};
 
+  /// Reminders and the external-sync cadence of the in-process services
+  /// (§18.1.6, §18.2, D-125) — the same wiring the daemon uses.
+  CalendarWiring? _calendar;
+
   /// Is the app in the foreground? The edge counter for the catch-up harvest.
   ///
   /// SINCE S376 IT LIES HERE and no longer only in every service: the
@@ -1570,6 +1616,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       service.setAppResumed(isResumed, triggerNodeHarvest: false);
     }
     _service?.setAppResumed(isResumed, triggerNodeHarvest: false);
+    // §18.2 cadence: 3 min only while the app is in front. `inactive` (the
+    // notification shade, a system dialog) stays in front, so pulling the
+    // shade does not cost a sync round on the return.
+    _calendar?.appResumed(isResumed || state == AppLifecycleState.inactive);
 
     // ── THE EDGE, ONCE PER PROCESS ───────────────────────────────
     //
@@ -1586,6 +1636,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // same edge, over the loopback only — no network, no clock.
     if (isResumed && !beforeFront) {
       unawaited(MediaVault.instance.ensureRunning());
+      // S420 IB-1: every return to the front sets the iOS icon to the unread
+      // sum — a number a wake-up's notification left behind is corrected
+      // here. Android keeps its own path (the count changes set it).
+      if (Platform.isIOS) _updateAndroidBadge();
     }
     final host = _host;
     if (isResumed && !beforeFront && host != null) {
@@ -1656,6 +1710,40 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Counter incremented by go_back to signal HomeScreen to reset to "Aktuell" tab.
   int _goBackCounter = 0;
   int get goBackCounter => _goBackCounter;
+
+  /// The conversation of a tapped system notification, kept until the home
+  /// screen stands (§22.8, D-125 (3)). Only [HomeScreen] runs it
+  /// ([runPendingNotificationOpen]) — never over the mandatory update, the
+  /// wipe notice, the keychain takeover, the keyring warning, the loading
+  /// screen or the setup, none of which is the home screen.
+  NotificationTap? _pendingNotificationOpen;
+  NotificationTap? get pendingNotificationOpen => _pendingNotificationOpen;
+
+  /// Remembers [tap]; a later tap replaces an earlier one not yet opened.
+  void requestOpenFromNotification(NotificationTap tap) {
+    _pendingNotificationOpen = tap;
+    debugPrint('[notification] tap stashed for the home screen');
+    notifyListeners();
+  }
+
+  /// Opens the remembered conversation, in the identity that posted it.
+  /// Every identity's service has joined before the home screen exists
+  /// (`_isInitialized` follows the service loop). A notification of an
+  /// identity no longer on this device opens nothing — the app is open.
+  Future<void> runPendingNotificationOpen() async {
+    final tap = _pendingNotificationOpen;
+    if (tap == null) return;
+    _pendingNotificationOpen = null;
+    if (tap.identity.isNotEmpty &&
+        !IdentityManager()
+            .loadIdentities()
+            .any((i) => i.nodeIdHex == tap.identity)) {
+      debugPrint('[notification] tap of an identity no longer present');
+      return;
+    }
+    await openConversation(tap.conversationId,
+        identityId: tap.identity.isEmpty ? null : tap.identity);
+  }
 
   /// Counter incremented by test-only `gui_action('reset_nat_wizard_latch')`
   /// AND by user-initiated re-triggers (connection-icon tap) to signal
@@ -1869,6 +1957,22 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  /// §14.8: a request its device withdrew is no longer shown. A withdrawal
+  /// arrives as a state change of the daemon, not as an event of its own;
+  /// while a request is listed, every state change re-reads the list (one
+  /// local IPC request, nothing on the network) — the list in Settings →
+  /// Devices and an open approval dialog then drop it. Without a listed
+  /// request nothing is asked.
+  void _pendingRotationApprovalsRecheck() {
+    if (_pendingRotationApprovals.isEmpty) return;
+    unawaited(refreshPendingSecurityRequests());
+  }
+
+  /// Whether the request [rotationHashHex] is still listed (§14.8).
+  bool rotationApprovalStillPending(String rotationHashHex) =>
+      _pendingRotationApprovals
+          .any((e) => e['rotationHashHex'] == rotationHashHex);
+
   /// §7.5: dismiss a co-auth warning banner. Purely a UI acknowledgement —
   /// there is nothing to answer (unlike the pairing/rotation prompts), so
   /// this never touches the service.
@@ -1892,7 +1996,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     final entry = _pendingRotationApprovals
         .firstWhereOrNull((e) => e['rotationHashHex'] == rotationHashHex);
     if (entry == null) return; // already answered/expired before we refreshed
-    final expiresAtMs = entry['expiresAtMs'] as int;
+    // S422: a request waits for the user's decision without a clock — a
+    // daemon of this version sends no `expiresAtMs`.
+    final expiresAtMs = entry['expiresAtMs'] as int?;
     // Until the dialog labels the occasion, it at least stays traceable in the log
     // — a device-set change must not pass unnoticed as a
     // key rotation (§7.5).
@@ -1906,6 +2012,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         rotationHashHex: rotationHashHex,
         requestingDeviceIdHex: requestingDeviceIdHex,
         expiresAtMs: expiresAtMs,
+        pendingChanged: this,
+        stillPending: () => rotationApprovalStillPending(rotationHashHex),
       ).whenComplete(() {
         _showingGlobalRotationDialog = false;
         unawaited(refreshPendingSecurityRequests());
@@ -2065,10 +2173,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// In-process: installs the checked, ready update. Called
   /// exclusively from [UpdateOffer.consent], i.e. after the click.
-  /// `true` only if the installation has been carried out; on Android
-  /// the system installer returns, and an abort there leaves the banner
-  /// standing — hence `false` there, a second click remains possible.
-  Future<bool> _installInProcess(CleonaService source) async {
+  /// Names what happened ([UpdateInstall]); only a carried-out installation
+  /// counts as done. On Android the system installer returns, and an abort
+  /// there leaves the banner standing — hence [UpdateInstall.handedToSystem]
+  /// there (not done), a second click remains possible.
+  Future<UpdateInstall> _installInProcess(CleonaService source) async {
     if (Platform.isAndroid) {
       // ── BACK IN OPERATION (2026-09-01, gap G-7) ───────────────────
       //
@@ -2086,7 +2195,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // silently take it along again.
       final mgr = source.binaryUpdateManager;
       final store = source.updateBinaryStore;
-      if (mgr == null || store == null) return false;
+      if (mgr == null || store == null) return UpdateInstall.notReady;
       _updateNeedsInstallPermission = false;
       // The state stays `ready` — the update IS ready. Earlier
       // `verifying` stood here, and the banner (only visible on `ready`)
@@ -2097,34 +2206,39 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       try {
         final completePath = store.completePath(
             Platform.operatingSystem, mgr.targetVersion ?? '');
-        if (!File(completePath).existsSync()) return false;
+        if (!File(completePath).existsSync()) return UpdateInstall.fileMissing;
         var hasPermission = await ApkInstaller.canInstallPackages();
         if (!hasPermission) {
           hasPermission = await ApkInstaller.requestInstallPermission();
         }
         if (!hasPermission) {
           _updateNeedsInstallPermission = true;
-          return false;
+          return UpdateInstall.noPermission;
         }
         await ApkInstaller.installApk(completePath);
-        return false;
+        return UpdateInstall.handedToSystem;
       } finally {
         _updateApplyPending = false;
         notifyListeners();
       }
     } else {
       final mgr = source.binaryUpdateManager;
-      if (mgr == null) return false;
+      if (mgr == null) return UpdateInstall.notReady;
       _updateApplyPending = true;
       notifyListeners();
       final path = await mgr.getVerifiedBinaryPath(
           Platform.operatingSystem, mgr.targetVersion ?? '');
       final ok = path != null &&
           await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
-      if (ok) exit(0);
+      if (ok) {
+        // The process ends here, so `consent` never writes the line.
+        _updateOffer.noteInstall(UpdateInstall.carriedOut);
+        await CLogger.flushAll();
+        exit(0);
+      }
       _updateApplyPending = false;
       notifyListeners();
-      return false;
+      return path == null ? UpdateInstall.notReady : UpdateInstall.failed;
     }
   }
 
@@ -2902,6 +3016,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onStateChanged = () {
           _guiAdopt();
           notifyListeners();
+          _pendingRotationApprovalsRecheck();
         };
         ipcClient.onNewMessage = (convId, msg) => notifyListeners();
         ipcClient.onContactRequestReceived = (nodeId, name) => notifyListeners();
@@ -3368,6 +3483,30 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       debugPrint('[main] Service started:${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
 
+    // Reminders and calendar sync (§18.1.6, §18.2, D-125): no network
+    // dependency of their own, so before the host.
+    _calendarStop();
+    const notificationChannel = MethodChannel('chat.cleona/notification');
+    _calendar = CalendarWiring(
+        services: () => _inProcessServices,
+        report: CLogger.get('calendar', profileDir: AppPaths.dataDir).info,
+        // iOS suspends a backgrounded app: every upcoming reminder is also
+        // scheduled with the system ahead (§18.1.6, D-125 (2)).
+        scheduleAhead: Platform.isIOS
+            ? (set) => notificationChannel.invokeMethod<void>(
+                'scheduleReminders',
+                {'reminders': [for (final r in set) r.toArguments()]})
+            : null,
+        withdrawAhead: Platform.isIOS
+            ? (id) => notificationChannel
+                .invokeMethod<void>('withdrawReminder', {'id': id})
+            : null)
+      ..appResumed(switch (WidgetsBinding.instance.lifecycleState) {
+        null || AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+        _ => false,
+      })
+      ..start();
+
     // ── THE ONE HOST, ONE MAILBOX PER IDENTITY (S387) ─────────────
     //
     // Replaces `startV41Node` + `attachV41` per identity. AFTER the
@@ -3426,6 +3565,27 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // the same hold once more on every exit — releasing twice
     // is a no-op.
     IosBackgroundFetch.releaseForegroundInitEarly();
+    // S420 IB-2 (variant B): a wake-up in this process goes through THESE
+    // services and THIS host — no second service, no second host on the
+    // port. Read live: without a host the wake-up takes its cold start.
+    // Cleared in [_hostStop].
+    if (Platform.isIOS) {
+      // S420 G1-7 A (§31.3, D-120): every return from sleep on iOS starts
+      // with the fresh binding of the data port, before the network change
+      // sends anything — whether the user opened the app (the heartbeat
+      // below sees the return) or a background task woke it. Both ask the
+      // same `NetworkWatch.wake`: one binding per return.
+      _host!.network.watch.rebind = _host!.socketsReopen;
+      IosBackgroundFetch.inProcess = IosFetchInProcess(
+        services: () => _host == null
+            ? const <CleonaService>[]
+            : _inProcessServices.values.toList(),
+        port: () => _host?.port ?? 0,
+        socketsReopen: () async =>
+            await _host?.network.watch.wake() ?? (ipv4: false, ipv6: null),
+        collect: () async => _host?.applicationOpened(),
+      );
+    }
     // The HTTP delivery at the host port (§26.6.5, S386 part A).
     _delivery = await deliveryForServices(
         _host!, _inProcessServices.values,
@@ -3761,6 +3921,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// one number; S410 E1 — a badge only while something is unread, see
   /// `android_badge.dart`).
   ///
+  /// iOS since S420 (IB-1): the same derivation over the same channel
+  /// (`AppDelegate.swift` answers `updateBadge`: the number on the icon, and
+  /// at 0 the delivered Cleona notifications go). Until S420 nothing on iOS
+  /// ever set the icon back — a number a wake-up had set stayed.
+  ///
   /// The result is a function of [_inProcessServices]. It is therefore
   /// recomputed on both kinds of change: a member's count changes (its
   /// `onBadgeCountChanged`, wired in [_wireServiceCallbacks]) and the
@@ -3774,7 +3939,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// a sum over part of the identities would cancel the notifications of
   /// the ones not yet started. The start computes it once at its end.
   void _updateAndroidBadge() {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     if (!_isInitialized) return;
     final badge = AndroidBadge.of(
         _inProcessServices.values.map((svc) => svc.conversations));
@@ -3785,8 +3950,37 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// An identity's service joins the process. The one place where
   /// [_inProcessServices] gains a member (apart from the map literal).
   void _inProcessServiceAdd(String nodeIdHex, CleonaService service) {
+    _takeForegroundState(service);
     _inProcessServices[nodeIdHex] = service;
     _updateAndroidBadge();
+    _calendar?.identityAdded(service); // null during the start loop
+  }
+
+  /// Stops reminders and calendar sync of this process (§18.1.6, §18.2) —
+  /// at `dispose` and when the last identity left; a new start builds them
+  /// again.
+  void _calendarStop() {
+    _calendar?.dispose();
+    _calendar = null;
+  }
+
+  /// The calendar screen is shown or closed: foreground sync cadence of
+  /// §18.2 while it is open and the app is in front (the desktop GUI says
+  /// the same to the daemon over IPC).
+  void calendarSyncForeground(bool open) => _calendar?.calendarOpen(open);
+
+  /// The foreground state the L5 gate of a joining [service] sees (§22.8).
+  /// A service starts at "resumed" (`CleonaService._isAppResumed`), and
+  /// [didChangeAppLifecycleState] only reaches the services already in
+  /// [_inProcessServices] — one that joins after the last life-cycle message
+  /// kept "resumed" whatever the app's state, e.g. after iOS started the app
+  /// straight into the background (S422). Without a message yet (null) the
+  /// next one reaches it through the map.
+  void _takeForegroundState(CleonaService service) {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == null) return;
+    service.setAppResumed(lifecycle == AppLifecycleState.resumed,
+        triggerNodeHarvest: false);
   }
 
   /// An identity's service leaves the process (deleted here or from another
@@ -3803,6 +3997,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     final service = _inProcessServices.remove(nodeIdHex);
     _updateAndroidBadge();
     if (service != null) {
+      _calendar?.identityRemoved(service);
       await service.stop();
     }
     _inProcessContexts.remove(nodeIdHex);
@@ -3861,6 +4056,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onStateChanged = () {
       _guiAdopt();
       notifyListeners();
+      if (identical(service, _service)) _pendingRotationApprovalsRecheck();
     };
     service.onNewMessage = (convId, msg) => notifyListeners();
     service.onContactRequestReceived = (nodeId, name) => notifyListeners();
@@ -4001,17 +4197,39 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       debugPrint('[video] $reason');
     };
 
+    // Badge count (Android, and iOS since S420 IB-1): sum across ALL
+    // identities, not just the one that fired. The system Launcher-Badge is
+    // a single number per app, so the last-writer-wins per-identity callback
+    // (#U3) showed only the firing identity's count and lost the others.
+    //
+    // Only while the service is a member: `startService` reports its
+    // loaded count BEFORE the service is put into the map (that is done
+    // by [_inProcessServiceAdd], which recomputes), and a removed,
+    // stopped service must not bring its count back.
+    if (Platform.isAndroid || Platform.isIOS) {
+      service.onBadgeCountChanged = (_) {
+        if (_inProcessServices.containsValue(service)) {
+          _updateAndroidBadge();
+        }
+      };
+    }
+
     // Android: inject platform-specific callbacks
     if (Platform.isAndroid) {
       service.setPlatformAudioDecoder(_androidDecodeToWav);
 
       // Notification: post system notification for incoming messages
+      // `identity`: the posting identity, so a tap opens the conversation
+      // in it (§22.8, D-125 (3)).
       service.onPostNotificationAndroid = (title, body, convId) async {
         const channel = MethodChannel('chat.cleona/notification');
         await channel.invokeMethod('postNotification', {
           'title': title,
           'body': body,
           'conversationId': convId,
+          'identity': service.nodeIdHex,
+          // §22.8, D-125: the channel rings only while the app does not.
+          'silent': !service.notificationSoundBySystem,
         });
       };
 
@@ -4021,25 +4239,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         channel.invokeMethod('cancelNotification', {'conversationId': convId});
       };
 
-      // Badge count: sum across ALL identities, not just the one that fired.
-      // The system Launcher-Badge is a single number per app, so the last-
-      // writer-wins per-identity callback (#U3) showed only the firing
-      // identity's count and lost the others.
-      //
-      // Only while the service is a member: `startService` reports its
-      // loaded count BEFORE the service is put into the map (that is done
-      // by [_inProcessServiceAdd], which recomputes), and a removed,
-      // stopped service must not bring its count back.
-      service.onBadgeCountChanged = (_) {
-        if (_inProcessServices.containsValue(service)) {
-          _updateAndroidBadge();
-        }
-      };
-
       // Sound playback via platform channel
-      service.notificationSound.onPlaySoundAndroid = (filename) async {
+      service.notificationSound.onPlaySoundAndroid =
+          (filename, notification) async {
         const channel = MethodChannel('chat.cleona/notification');
-        await channel.invokeMethod('playSound', {'asset': 'assets/sounds/$filename'});
+        await channel.invokeMethod('playSound', {
+          'asset': 'assets/sounds/$filename',
+          'notification': notification,
+        });
       };
       service.notificationSound.onStartLoopSoundAndroid = (asset) async {
         const channel = MethodChannel('chat.cleona/notification');
@@ -4081,6 +4288,37 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       service.onCancelCallNotificationAndroid = () {
         const channel = MethodChannel('chat.cleona/notification');
         channel.invokeMethod('cancelIncomingCall');
+      };
+    }
+
+    // iOS (§22.8 "The same on every platform", S422 N-1): the notification
+    // the service formed in `_postSystemNotification` goes to
+    // UNUserNotificationCenter (`AppDelegate.swift`) — one per conversation,
+    // a later one replaces it, as on Android. The text comes from the
+    // service only (the "notification without content" setting applies
+    // there); the badge stays with `updateBadge`.
+    if (Platform.isIOS) {
+      // The one iOS receiver, shared with the cold start of the background
+      // wake-up (D-124).
+      service.onPostNotificationIos =
+          IosBackgroundFetch.systemNotificationReceiver(service);
+      service.onCancelNotificationIos = (convId) {
+        const channel = MethodChannel('chat.cleona/notification');
+        unawaited(channel
+            .invokeMethod('cancelNotification', {'conversationId': convId})
+            .catchError((Object _) => null));
+      };
+      // Vibration over the same channel as Android's message vibration
+      // (S422 N-3): answered by `AppDelegate.swift` with the system's
+      // vibration. The sound (S422 T-1): the `.caf` beside each Ogg file,
+      // played by `AppDelegate.swift` as a system sound.
+      service.notificationSound.onVibrateAndroid = (durationMs) async {
+        const channel = MethodChannel('chat.cleona/notification');
+        await channel.invokeMethod('vibrate', {'duration': durationMs});
+      };
+      service.notificationSound.onPlaySoundIos = (filename) async {
+        const channel = MethodChannel('chat.cleona/notification');
+        await channel.invokeMethod('playSound', {'asset': 'assets/sounds/$filename'});
       };
     }
   }
@@ -4253,6 +4491,68 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  /// The one way to open a conversation from outside the lists: a tapped
+  /// system notification ([runPendingNotificationOpen], §22.8) and the test
+  /// action `open_chat`. Switches to [identityId] first when it is given and
+  /// not the active identity.
+  Future<void> openConversation(String convId, {String? identityId}) async {
+    if (_service == null) return;
+    // `switch_active` on the IPC server is scoped to the caller's connection,
+    // so an IPC client that switched identity cannot implicitly drive the GUI's
+    // view. If `identityId` is supplied and differs from the GUI's active
+    // identity, switch first so `_service.conversations[convId]` resolves.
+    //
+    // `identityId` may be either the identityId (UUID) or the
+    // nodeIdHex — historically tests pass the identity UUID (returned
+    // by listIdentities), but the lookup also has to support nodeIdHex
+    // for callers that fetch via getState. Match against both.
+    if (identityId != null) {
+      final active = IdentityManager().getActiveIdentity();
+      final activeMatches = active != null &&
+          (active.nodeIdHex == identityId || active.id == identityId);
+      if (!activeMatches) {
+        final match = IdentityManager()
+            .loadIdentities()
+            .where((i) => i.nodeIdHex == identityId || i.id == identityId)
+            .toList();
+        if (match.isNotEmpty) {
+          await switchIdentity(match.first);
+        }
+      }
+    }
+    // B-33: the conversation may not be in the GUI's IpcClient cache yet
+    // (a just-arrived message whose new_message event hasn't landed, or a
+    // debounced refreshState). Kick an immediate refresh and poll briefly
+    // rather than silently giving up — otherwise ChatScreen never opens
+    // and the receiver "sees nothing".
+    var conv = _service?.conversations[convId];
+    if (conv == null) {
+      unawaited(_ipcClient?.refreshState() ?? Future<void>.value());
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      while (conv == null && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        conv = _service?.conversations[convId];
+      }
+    }
+    final resolved = conv;
+    final service = _service;
+    if (resolved == null || service == null) return;
+    final navState = navigatorKey.currentState;
+    if (navState == null) return;
+    navState.push(MaterialPageRoute(
+      builder: (_) => ChangeNotifierProvider.value(
+        value: this,
+        child: systemChannelPage(service, convId, resolved.displayName) ??
+            ChatScreen(
+              conversationId: convId,
+              displayName: resolved.displayName,
+              isGroup: resolved.isGroup,
+              isChannel: resolved.isChannel,
+            ),
+      ),
+    ));
+  }
+
   Future<void> _handleGuiAction(Map<String, dynamic> data) async {
     final action = data['action'] as String?;
     if (action == null) return;
@@ -4401,65 +4701,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         final convId = data['conversationId'] as String?;
         final targetIdentityId = data['identityId'] as String?;
         if (convId == null || _service == null) break;
-        // `switch_active` on the IPC server is scoped to the caller's connection,
-        // so an IPC client that switched identity cannot implicitly drive the GUI's
-        // view. If `identityId` is supplied and differs from the GUI's active
-        // identity, switch first so `_service.conversations[convId]` resolves.
-        //
-        // `targetIdentityId` may be either the identityId (UUID) or the
-        // nodeIdHex — historically tests pass the identity UUID (returned
-        // by listIdentities), but the lookup also has to support nodeIdHex
-        // for callers that fetch via getState. Match against both.
-        unawaited(() async {
-          if (targetIdentityId != null) {
-            final active = IdentityManager().getActiveIdentity();
-            final activeMatches = active != null &&
-                (active.nodeIdHex == targetIdentityId ||
-                    active.id == targetIdentityId);
-            if (!activeMatches) {
-              final match = IdentityManager()
-                  .loadIdentities()
-                  .where((i) =>
-                      i.nodeIdHex == targetIdentityId ||
-                      i.id == targetIdentityId)
-                  .toList();
-              if (match.isNotEmpty) {
-                await switchIdentity(match.first);
-              }
-            }
-          }
-          // B-33: the conversation may not be in the GUI's IpcClient cache yet
-          // (a just-arrived message whose new_message event hasn't landed, or a
-          // debounced refreshState). Kick an immediate refresh and poll briefly
-          // rather than silently giving up — otherwise ChatScreen never opens
-          // and the receiver "sees nothing".
-          var conv = _service!.conversations[convId];
-          if (conv == null) {
-            unawaited(_ipcClient?.refreshState() ?? Future<void>.value());
-            final deadline = DateTime.now().add(const Duration(seconds: 3));
-            while (conv == null && DateTime.now().isBefore(deadline)) {
-              await Future<void>.delayed(const Duration(milliseconds: 250));
-              conv = _service?.conversations[convId];
-            }
-          }
-          final resolved = conv;
-          if (resolved == null) return;
-          final navState = navigatorKey.currentState;
-          if (navState == null) return;
-          navState.push(MaterialPageRoute(
-            builder: (_) => ChangeNotifierProvider.value(
-              value: this,
-              child: systemChannelPage(
-                      _service!, convId, resolved.displayName) ??
-                  ChatScreen(
-                    conversationId: convId,
-                    displayName: resolved.displayName,
-                    isGroup: resolved.isGroup,
-                    isChannel: resolved.isChannel,
-                  ),
-            ),
-          ));
-        }());
+        unawaited(openConversation(convId, identityId: targetIdentityId));
         break;
 
       case 'open_poll_editor':
@@ -4524,60 +4766,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           if (!nav.mounted) break;
           final words = access.words;
           if (words != null) {
+            // The user's dialog (settings row "Recovery-Phrase anzeigen"),
+            // not a second one: until S422 this built its own dialog with
+            // fixed German texts and no "Drucken" (working rule 7;
+            // S422-RCA-E2E-LAUF-4.2.8 R-5, side finding).
             showDialog(
               context: nav.context,
-              builder: (dialogCtx) => AlertDialog(
-                title: const Text('Recovery Phrase'),
-                content: SizedBox(
-                  width: 400,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.red.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.warning_amber, color: Colors.red),
-                            const SizedBox(width: 8),
-                            Expanded(
-                                child: Text(
-                                    AppLocale.read(dialogCtx)
-                                        .get('recovery_phrase_never_share'),
-                                    style: const TextStyle(fontSize: 13))),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: List.generate(words.length, (i) {
-                          return Chip(label: Text('${i + 1}. ${words[i]}',
-                              style: const TextStyle(fontFamily: 'monospace', fontSize: 13)));
-                        }),
-                      ),
-                    ],
-                  ),
-                ),
-                actions: [
-                  TextButton.icon(
-                    icon: const Icon(Icons.copy, size: 16),
-                    label: const Text('Kopieren'),
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: words.join(' ')));
-                    },
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogCtx).pop(),
-                    child: const Text('Schließen'),
-                  ),
-                ],
-              ),
+              builder: (_) => SeedPhraseDialog(words: words),
             );
           } else {
             // The reason belongs in the dialog. Three exits that a
@@ -4927,6 +5122,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// saves the neighbours and closes wire and state checker — an
   /// open timer would keep the Dart VM alive.
   void _hostStop() {
+    IosBackgroundFetch.inProcess = null; // S420: a wake-up builds its own again
     _delivery?.close();
     _delivery = null;
     // The port mapping is laid down by `Host.stop` itself (S408 P15). Not
@@ -4983,6 +5179,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // (`_initInProcessBody` -> `startV41Node`), and a still
         // bound socket would turn that into a start error.
         _hostStop();
+        _calendarStop();
         _service = null;
         // `_isInitialized` and `_hasProfile` are the two switches
         // from which `CleonaApp` chooses its screen (`main.dart`
@@ -5025,6 +5222,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // In-process: THE HOST FIRST (S387), then the services — the other way round
       // the still running host would deliver to a stopped service.
       _hostStop();
+      _calendarStop(); // while the services are still in the map
       for (final service in _inProcessServices.values) {
         service.stop();
       }

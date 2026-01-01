@@ -9,9 +9,16 @@
 // keys. Two sounds at once mix, because each one is its own process.
 //
 // Usage:   cleona-play <file.ogg> [--volume <0..1>] [--check]
+//          cleona-play --media <url> [--start <ms>] [--volume <0..1>]
+//          cleona-play --media <url> --probe
 //   --volume  linear gain applied to the decoded samples, default 1.0
 //   --check   decode only, do not open an output device (bundle self-test,
 //             and the only mode on platforms other than Windows)
+//   --media   Windows only: a voice message (AAC/MPEG-4 or anything Media
+//             Foundation decodes) from a file path or a loopback URL of
+//             `MediaVault`, decoded by Windows itself and played from --start
+//             on; with --probe its duration in milliseconds goes to stdout
+//             instead (cleona_play_media.cpp, S422 WIN 33a.W02)
 //
 // Exit codes (the daemon logs them, the E2E sound test asserts on 0):
 //   0  played to the end (or decoded to the end with --check)
@@ -21,6 +28,7 @@
 //   5  the output device refused the sound (PlaySound returned FALSE)
 //   6  format not supported: channel count, sample rate, or longer than the cap
 //   7  out of memory
+//   8  --media: Media Foundation cannot be started on this system
 //
 // Decoder: libogg + libvorbis (Xiph, BSD-3-Clause), pinned in CMakeLists.txt.
 // Output: PlaySound with an in-memory WAV image (winmm) -- no device code of
@@ -32,6 +40,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include "cleona_play_media.h"
 #endif
 
 #include <stdint.h>
@@ -217,11 +226,25 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
   if (argv == NULL) return kExitUsage;
 
   const wchar_t* path = NULL;
+  const wchar_t* media = NULL;
   double volume = 1.0;
   int check_only = 0;
+  int probe_only = 0;
+  long long start_ms = 0;
   for (int i = 1; i < argc; i++) {
     if (wcscmp(argv[i], L"--check") == 0) {
       check_only = 1;
+    } else if (wcscmp(argv[i], L"--probe") == 0) {
+      probe_only = 1;
+    } else if (wcscmp(argv[i], L"--media") == 0 && i + 1 < argc) {
+      media = argv[++i];
+    } else if (wcscmp(argv[i], L"--start") == 0 && i + 1 < argc) {
+      wchar_t* end = NULL;
+      start_ms = _wcstoi64(argv[++i], &end, 10);
+      if (end == NULL || *end != L'\0' || start_ms < 0) {
+        LocalFree(argv);
+        return kExitUsage;
+      }
     } else if (wcscmp(argv[i], L"--volume") == 0 && i + 1 < argc) {
       char narrow[64];
       const int n = WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, narrow,
@@ -237,7 +260,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line,
       return kExitUsage;
     }
   }
-  if (path == NULL) {
+  if (media != NULL) {
+    if (path != NULL || check_only) {
+      LocalFree(argv);
+      return kExitUsage;
+    }
+    const int played = cleona_play_media(media, probe_only, start_ms, volume);
+    LocalFree(argv);
+    return played;
+  }
+  if (path == NULL || probe_only || start_ms != 0) {
     LocalFree(argv);
     return kExitUsage;
   }

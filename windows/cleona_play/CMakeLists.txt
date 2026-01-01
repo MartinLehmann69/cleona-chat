@@ -10,7 +10,7 @@
 # helper program. Its presence in the bundle is checked by
 # windows/verify_bundle_dlls.cmake (-DEXPECTED_PROGRAMS).
 cmake_minimum_required(VERSION 3.14)
-project(cleona_play LANGUAGES C)
+project(cleona_play LANGUAGES C CXX)
 
 include(FetchContent)
 
@@ -105,12 +105,18 @@ endif()
 
 # WIN32: Windows subsystem, entry WinMain -- no console window per sound.
 add_executable(cleona-play WIN32 cleona_play.c)
+if(WIN32)
+  # --media: voice messages through the decoder of Windows (Media Foundation),
+  # S422 WIN 33a.W02. System libraries only, nothing bundled.
+  target_sources(cleona-play PRIVATE cleona_play_media.cpp)
+endif()
 target_link_libraries(cleona-play PRIVATE cleona_vorbis_decoder)
 if(MSVC)
   # Own code: /W4 and warnings as errors, like the runner.
   target_compile_options(cleona-play PRIVATE /W4 /WX)
   target_compile_definitions(cleona-play PRIVATE _CRT_SECURE_NO_WARNINGS)
-  target_link_libraries(cleona-play PRIVATE winmm shell32)
+  target_link_libraries(cleona-play PRIVATE winmm shell32 ole32 mfplat
+      mfreadwrite mfuuid)
 else()
   target_compile_options(cleona-play PRIVATE -Wall -Wextra -Werror)
 endif()

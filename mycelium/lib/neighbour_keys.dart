@@ -111,13 +111,36 @@ extension NeighbourKeysContact on Mailbox {
 
   /// The own fixed neighbours as a message or acknowledgement to [to]
   /// names them (§9.2), and whether with keys.
-  ({List<CardAddress> list, bool keys}) namedFor(Address to) =>
-      (list: ownNeighboursFor(to), keys: readsKeysOf(to)); // D-92 B
+  ({List<CardAddress> list, bool keys}) namedFor(Address to) {
+    final list = ownNeighboursFor(to);
+    _traceNamed(to, list);
+    return (list: list, keys: readsKeysOf(to)); // D-92 B
+  }
 
   /// A list came from [from] in a message or acknowledgement; [keyed]: it
   /// carried the bit.
   void neighboursCame(Address from, List<CardAddress> list, bool keyed) {
     if (keyed) readsKeysShown(from);
-    if (list.isNotEmpty) neighboursHeard(from, list);
+    if (list.isEmpty) return;
+    // S420 (71.A1): which message made a contact's list name a neighbour.
+    if (neighboursHeard(from, list)) {
+      report?.call('TRACE neighbours of ${identifierFrom(from).substring(0, 8)} '
+          'adopted from its message: ${list.join(', ')}');
+    }
+  }
+
+  /// S420 (71.A1, `S420-RCA-NACHTEST3-71.md`): the list this mailbox names
+  /// to [to], logged only when it differs from the last one named to [to] —
+  /// one line per change, not per message.
+  void _traceNamed(Address to, List<CardAddress> list) {
+    final id = identifierFrom(to);
+    final shown = list.join(', ');
+    final last = (_named[this] ??= {});
+    if (last[id] == shown) return;
+    last[id] = shown;
+    report?.call('TRACE neighbours named to ${id.substring(0, 8)}: '
+        '${shown.isEmpty ? 'none' : shown}');
   }
 }
+
+final Expando<Map<String, String>> _named = Expando('neighbour lists named');

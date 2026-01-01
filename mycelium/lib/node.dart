@@ -99,7 +99,7 @@ class Node {
   /// send callback synchronously within [send]; afterwards they are reset.
   Address? _targetNow;
   Uint8List? _identifierNow;
-  bool _signalNow = false;
+  bool _signalNow = false, _inviteNow = false; // _inviteNow: a call invitation ([send] `callInvitation`)
 
   /// Remembered ones and what the call finds; cap and displacement: [Neighbourhood] (§11.8).
   final Neighbourhood neighbourhood = Neighbourhood();
@@ -126,8 +126,8 @@ class Node {
       this.onReaction,
       this.onEdit,
       this.onReadMark});
-
   int get port => _wire.port;
+  Future<({bool ipv4, bool? ipv6})> socketsReopen() => _wire.reopen(); // §11.1, §31.3
   WireCounters get wireCounters => _wire.counters; // §25.5, read on looking
   bool linkLive(Neighbour n) => n.addresses.any((a) => stands(a.address, a.port)); // OP-23
   bool stands(InternetAddress a, int port) => _shell.stands(a, port); // a link to this address stands
@@ -320,7 +320,7 @@ class Node {
         packet,
         receipt
             ? receiptTarget(three, destination, c, target.identifier)
-            : sendingTarget(three, destination, c, target, from, identifier, signal: _signalNow),
+            : sendingTarget(three, destination, c, target, from, identifier, signal: _signalNow, callInvitation: _inviteNow),
         answered: identifier != null || waits, local: hostsOther(target, from)); // §11.3a; §4.5.1
     if (identifier != null) {
       _shipments[hexFrom(identifier)] = s;
@@ -346,13 +346,13 @@ class Node {
 
   /// Sends [content] to a contact — raw bytes (`message.dart`). [destination] may be `null`:
   /// §8.2 needs no address of the recipient. [under]: the identifier of a message sent again (§9.3).
-  /// [signal]: a call signal — its [Target.signal] keeps it off step 4 (§17.2).
+  /// [signal]: a call signal — its [Target.signal] keeps it off step 4 (§17.2); [callInvitation]: step 3 repeats.
   /// [once]: an ephemeral message (§9.3): steps 1 and 3, nothing waits, nothing stays.
-  Outbound send(Uint8List content, Address to, CardAddress? destination,
-      {Identity? forField, int? kind, Uint8List? under, bool signal = false, bool once = false}) {
+  Outbound send(Uint8List content, Address to, CardAddress? destination, {Identity? forField, int? kind,
+      Uint8List? under, bool signal = false, bool callInvitation = false, bool once = false}) {
     final asValue = forField ?? main;
     final identifier = under ?? roll(8);
-    _targetNow = to; _identifierNow = once ? null : identifier; _signalNow = signal || once;
+    _targetNow = to; _identifierNow = once ? null : identifier; _signalNow = signal || once; _inviteNow = callInvitation;
     try {
       final out = asValue.messages.ship(content, to, destination, identifier: identifier, kind: kind, once: once);
       // Remember the own message (a pair notice, [kind], has no
@@ -360,7 +360,7 @@ class Node {
       if (kind == null && !once) asValue.author[hexFrom(identifier)] = (who: asValue.postBox.address, at: DateTime.now());
       return out;
     } finally {
-      _targetNow = null; _identifierNow = null; _signalNow = false;
+      _targetNow = null; _identifierNow = null; _signalNow = false; _inviteNow = false;
     }
   }
 

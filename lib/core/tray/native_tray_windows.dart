@@ -114,6 +114,12 @@ typedef _DestroyIconDart = int Function(int);
 typedef _GetSystemMetricsC = Int32 Function(Int32);
 typedef _GetSystemMetricsDart = int Function(int);
 
+// GetLastError / IsWindow — measurement of a rejected NIM_MODIFY (D-123 11a).
+typedef _GetLastErrorC = Uint32 Function();
+typedef _GetLastErrorDart = int Function();
+typedef _IsWindowC = Int32 Function(IntPtr);
+typedef _IsWindowDart = int Function(int);
+
 // ── NOTIFYICONDATAW struct (simplified, 64-bit) ─────────────────────
 // We use a raw byte buffer since Dart FFI structs can't easily handle
 // the complex NOTIFYICONDATAW with its embedded arrays.
@@ -280,6 +286,49 @@ void _showContextMenu(int hwnd) {
 /// success instead.
 bool trayIconAccepted(int shellNotifyIconResult) => shellNotifyIconResult != 0;
 
+/// Measurement line for a rejected `NIM_MODIFY` (S420 G3 11a, D-123).
+///
+/// The cause of the rejections seen in the lab (first `NIM_MODIFY` after
+/// the service starts, `S420-RCA-WIN-35-W02.md` finding B) is not proven;
+/// this line carries what tells the candidates apart: the error code
+/// (Microsoft Learn, `Shell_NotifyIconW`: "Returns TRUE if successful, or
+/// FALSE otherwise. … you can call GetLastError for more specific
+/// information"), whether the owning window still exists (`IsWindow`), the
+/// time since `NIM_ADD` and how many rejections in a row. The error code is
+/// read right after the call; the Dart VM does not promise to keep the
+/// thread's last error across an FFI call, so a 0 here is "no code", not
+/// "no error".
+String trayModifyRejectedLine({
+  required int lastError,
+  required bool windowAlive,
+  required Duration sinceAdd,
+  required int inARow,
+}) =>
+    'Shell_NotifyIcon(NIM_MODIFY) rejected — tooltip and icon stay at the '
+    'old state (GetLastError=$lastError, window alive=$windowAlive, '
+    '${sinceAdd.inSeconds} s after NIM_ADD, rejection $inARow in a row).';
+
+/// Measurement line for an accepted `NIM_MODIFY`: once for the first
+/// acceptance after `NIM_ADD`, and once when acceptance returns after
+/// rejections — never for every accepted change (null then).
+String? trayModifyAcceptedLine({
+  required bool firstEver,
+  required int rejectedBefore,
+  required Duration sinceAdd,
+}) {
+  if (firstEver) {
+    return 'Shell_NotifyIcon(NIM_MODIFY) accepted for the first time '
+        '(${sinceAdd.inSeconds} s after NIM_ADD, after $rejectedBefore '
+        'rejection(s)).';
+  }
+  if (rejectedBefore > 0) {
+    return 'Shell_NotifyIcon(NIM_MODIFY) accepted again after '
+        '$rejectedBefore rejection(s) (${sinceAdd.inSeconds} s after '
+        'NIM_ADD).';
+  }
+  return null;
+}
+
 /// The text of the tooltip (szTip) for an unread state.
 ///
 /// The same rule the Linux branch uses for the tray TITLE
@@ -397,6 +446,13 @@ class NativeTrayWindows {
 
   _DestroyIconDart? _destroyIcon;
 
+  // Measurement of `NIM_MODIFY` (see [trayModifyRejectedLine]).
+  _GetLastErrorDart? _getLastError;
+  _IsWindowDart? _isWindow;
+  final Stopwatch _sinceAdd = Stopwatch();
+  bool _modifyEverAccepted = false;
+  int _modifyRejectedInARow = 0;
+
   // Callbacks
   void Function()? onShowWindow;
   void Function()? onStop;
@@ -467,6 +523,9 @@ class NativeTrayWindows {
           'PostMessageW');
       final getModuleHandle = kernel32.lookupFunction<_GetModuleHandleWC, _GetModuleHandleWDart>(
           'GetModuleHandleW');
+      _getLastError =
+          kernel32.lookupFunction<_GetLastErrorC, _GetLastErrorDart>('GetLastError');
+      _isWindow = user32.lookupFunction<_IsWindowC, _IsWindowDart>('IsWindow');
 
       final hInstance = getModuleHandle(nullptr);
 
@@ -599,6 +658,9 @@ class NativeTrayWindows {
             'started). NO icon will appear.');
         return false;
       }
+      _sinceAdd
+        ..reset()
+        ..start();
 
       // Message pump timer
       final msg = calloc<Uint8>(48); // MSG struct
@@ -682,9 +744,26 @@ class NativeTrayWindows {
     // notification area takes over the whole record anew — now including
     // a changed icon.
     if (_shellNotifyIcon(_NIM_MODIFY, _nid) == 0) {
-      _logger?.call('warn',
-          'Shell_NotifyIcon(NIM_MODIFY) rejected — tooltip and icon '
-          'stay at the old state.');
+      // Read first: any further call may overwrite the thread's last error.
+      final lastError = _getLastError?.call() ?? -1;
+      _modifyRejectedInARow++;
+      _logger?.call(
+          'warn',
+          trayModifyRejectedLine(
+            lastError: lastError,
+            windowAlive: (_isWindow?.call(_trayHwnd) ?? 0) != 0,
+            sinceAdd: _sinceAdd.elapsed,
+            inARow: _modifyRejectedInARow,
+          ));
+    } else {
+      final line = trayModifyAcceptedLine(
+        firstEver: !_modifyEverAccepted,
+        rejectedBefore: _modifyRejectedInARow,
+        sinceAdd: _sinceAdd.elapsed,
+      );
+      _modifyEverAccepted = true;
+      _modifyRejectedInARow = 0;
+      if (line != null) _logger?.call('info', line);
     }
   }
 

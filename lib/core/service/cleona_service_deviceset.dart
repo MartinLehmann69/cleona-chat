@@ -173,7 +173,15 @@ extension DeviceSetAnnouncementOps on CleonaService {
   /// device set**", and the contact only holds the state if it gets it
   /// delivered (§14.5: "every contact holds the state locally and learns
   /// of changes to it because they are delivered to it").
-  void _announceDeviceSetToContacts({required String occasion}) {
+  ///
+  /// [seq] and [approvals] (S422): a lock-out reserved its number when its
+  /// co-signing round began, and the remaining devices countersigned the
+  /// change hash over exactly that number (§14.5, §14.8) — the announcement
+  /// carries those countersignatures, one per device.
+  void _announceDeviceSetToContacts(
+      {required String occasion,
+      int? seq,
+      List<RotationApprovalToken>? approvals}) {
     final record = _announceableDeviceSet();
     if (record == null) {
       _log.warn('§14.5 path 2: NO device set announcement ($occasion) — '
@@ -184,15 +192,15 @@ extension DeviceSetAnnouncementOps on CleonaService {
       return;
     }
 
-    final seq = _nextDeviceSetSeq();
+    final number = seq ?? _nextDeviceSetSeq();
     final changeHash = computeDeviceSetChangeHash(
       userId: Uint8List.fromList(identity.userId),
       newDeviceNodeIds: record.map((d) => d.deviceNodeId).toList(),
-      newSeq: seq,
+      newSeq: number,
     );
 
     final ann = proto.DeviceSetAnnounce()
-      ..seq = seq
+      ..seq = number
       ..issuedAtMs = Int64(DateTime.now().millisecondsSinceEpoch)
       ..previousDeviceCount = _devices.length
       ..changeHash = changeHash;
@@ -200,9 +208,14 @@ extension DeviceSetAnnouncementOps on CleonaService {
 
     // §14.5: "the countersignatures of the remaining devices … These very
     // countersignatures are the quorum from §14.4." With M=1 that is, per
-    // §14.8 ("M = 1 → 1"), exactly one — that of this device.
-    final token = _ownApprovalToken(changeHash);
-    if (token != null) {
+    // §14.8 ("M = 1 → 1"), exactly one — that of this device; at a lock-out
+    // with more remaining devices the round's (S422). A token over another
+    // hash is not attached: it would prove nothing here.
+    final tokens = approvals ?? [?_ownApprovalToken(changeHash)];
+    final seen = <String>{};
+    for (final token in tokens) {
+      if (!_bytesSame(token.rotationHash, changeHash)) continue;
+      if (!seen.add(bytesToHex(token.deviceNodeId))) continue;
       ann.approvals.add(token.toProto());
     }
 
@@ -227,9 +240,9 @@ extension DeviceSetAnnouncementOps on CleonaService {
             payload: payload,
           ));
     }
-    _log.info('§14.5 path 2: device set announcement ($occasion) seq=$seq, '
+    _log.info('§14.5 path 2: device set announcement ($occasion) seq=$number, '
         '${record.length} device(s), ${ann.approvals.length} co-signature(s), '
-        'pairwise to $sent contact(s).');
+        '${payload.length} B, pairwise to $sent contact(s).');
   }
 
   // ── EMPFANGSSEITE ─────────────────────────────────────────────────────

@@ -26,14 +26,20 @@ Future<void> showRotationApprovalDialog({
   required ICleonaService service,
   required String rotationHashHex,
   required String requestingDeviceIdHex,
-  required int expiresAtMs,
+  int? expiresAtMs,
+  Listenable? pendingChanged,
+  bool Function()? stillPending,
 }) async {
   final locale = AppLocale.read(context);
   final messenger = ScaffoldMessenger.maybeOf(context);
 
   String requesterLabel = requestingDeviceIdHex;
+  // S422: the requesting device is named by its DeviceID (Type 12 on the
+  // own line); a record keyed by its node id is matched as before.
   final known = service.devices
-      .where((d) => d.deviceNodeIdHex == requestingDeviceIdHex)
+      .where((d) =>
+          d.deviceId == requestingDeviceIdHex ||
+          d.deviceNodeIdHex == requestingDeviceIdHex)
       .toList();
   if (known.isNotEmpty) {
     requesterLabel = '${known.first.deviceName} (${requestingDeviceIdHex.substring(0, 12)}…)';
@@ -51,6 +57,8 @@ Future<void> showRotationApprovalDialog({
       rotationHashHex: rotationHashHex,
       requesterLabel: requesterLabel,
       expiresAtMs: expiresAtMs,
+      pendingChanged: pendingChanged,
+      stillPending: stillPending,
     ),
   );
 }
@@ -67,7 +75,9 @@ class _RotationApprovalDialogContent extends StatefulWidget {
   final ICleonaService service;
   final String rotationHashHex;
   final String requesterLabel;
-  final int expiresAtMs;
+
+  /// `null` (S422): the request waits without a clock — no countdown.
+  final int? expiresAtMs;
 
   const _RotationApprovalDialogContent({
     required this.locale,
@@ -76,7 +86,15 @@ class _RotationApprovalDialogContent extends StatefulWidget {
     required this.rotationHashHex,
     required this.requesterLabel,
     required this.expiresAtMs,
+    this.pendingChanged,
+    this.stillPending,
   });
+
+  /// §14.8 (S422): fires when the list of open requests changed; with
+  /// [stillPending] `false` the request was withdrawn by the device that
+  /// asked, and the dialog closes without an answer.
+  final Listenable? pendingChanged;
+  final bool Function()? stillPending;
 
   @override
   State<_RotationApprovalDialogContent> createState() =>
@@ -86,14 +104,18 @@ class _RotationApprovalDialogContent extends StatefulWidget {
 class _RotationApprovalDialogContentState
     extends State<_RotationApprovalDialogContent> {
   Timer? _timer;
-  late int _remainingMs =
-      widget.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+  late int _remainingMs = widget.expiresAtMs == null
+      ? 1
+      : widget.expiresAtMs! - DateTime.now().millisecondsSinceEpoch;
 
   @override
   void initState() {
     super.initState();
+    widget.pendingChanged?.addListener(_withdrawnCheck);
+    final until = widget.expiresAtMs;
+    if (until == null) return; // S422: no clock, no countdown
     _timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      final left = widget.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+      final left = until - DateTime.now().millisecondsSinceEpoch;
       if (left <= 0) t.cancel();
       if (mounted) setState(() => _remainingMs = left);
     });
@@ -101,14 +123,28 @@ class _RotationApprovalDialogContentState
 
   @override
   void dispose() {
+    widget.pendingChanged?.removeListener(_withdrawnCheck);
     _timer?.cancel();
     super.dispose();
+  }
+
+  bool _closed = false;
+
+  /// §14.8: a withdrawn request is no longer shown — the dialog closes.
+  void _withdrawnCheck() {
+    final still = widget.stillPending;
+    if (_closed || !mounted || still == null || still()) return;
+    _closed = true;
+    _timer?.cancel();
+    Navigator.of(context).pop();
   }
 
   /// Cancels the timer and pops the dialog, then performs the caller's
   /// decision. The daemon call happens AFTER the pop so the dialog never
   /// waits on network round-trips.
   Future<void> _decide({required bool approve}) async {
+    if (_closed) return;
+    _closed = true;
     _timer?.cancel();
     Navigator.of(context).pop();
     final ok = approve
@@ -150,19 +186,21 @@ class _RotationApprovalDialogContentState
             ),
             Text(widget.requesterLabel,
                 style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
-            const SizedBox(height: 12),
-            Text(
-              expired
-                  ? locale.get('device_rotation_approval_expired')
-                  : locale.tr(
-                      'device_rotation_approval_remaining', {'time': timeLabel}),
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: expired
-                    ? Theme.of(context).colorScheme.error
-                    : Theme.of(context).colorScheme.onSurface,
+            if (widget.expiresAtMs != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                expired
+                    ? locale.get('device_rotation_approval_expired')
+                    : locale.tr('device_rotation_approval_remaining',
+                        {'time': timeLabel}),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: expired
+                      ? Theme.of(context).colorScheme.error
+                      : Theme.of(context).colorScheme.onSurface,
+                ),
               ),
-            ),
+            ],
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(10),

@@ -22,8 +22,11 @@
 /// most [kDepositHolders] are asked.
 ///
 /// Each question is sent once and waits for its answer ([DurableAsk]); the
-/// repeats on silence belong to the transport (§11.3a). A question that
-/// failed marks the node as failed and goes to the next capable one.
+/// repeats on silence belong to the transport (§11.3a). A question the node
+/// took and left unanswered marks it as failed (§16.0 "Older 4.2 versions");
+/// a question that never reached the node (handshake unanswered) skips it
+/// only until the next edge or opening (S420, BL-2). Either way the question
+/// goes to the next capable node.
 library;
 
 import 'dart:async';
@@ -38,6 +41,7 @@ import 'package:mycelium/durable_node.dart';
 import 'package:mycelium/durable_packets.dart';
 import 'package:mycelium/durable_serve.dart' show stateRootOf;
 import 'package:mycelium/durable_stock.dart';
+import 'package:mycelium/durable_trace.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 
 class _Fingerprint {
@@ -66,6 +70,11 @@ class DurableQuestions {
   final Map<String, _Fingerprint> _prints = {};
   bool _edgePending = false;
 
+  /// Capable nodes a stock question did not reach since the last edge or
+  /// opening: skipped by [ask] until then, so a failed question does not
+  /// go to the same node again at once, and the capability memory stays.
+  final Set<String> _unreached = {};
+
   /// Diagnostics.
   int stockAsked = 0;
   int sameAnswers = 0;
@@ -76,6 +85,7 @@ class DurableQuestions {
   /// application: held channels are asked and fetched, read channels (a
   /// phone) only learned.
   void edge() {
+    _unreached.clear();
     if (d.capableNodes.isEmpty) {
       _edgePending = true;
       return;
@@ -104,6 +114,12 @@ class DurableQuestions {
   /// Channels the user opened while no capable node was known.
   final Set<int> _openPending = {};
 
+  /// The user opened [channel] — an edge for every capable node (§16.0).
+  void opened(int channel) {
+    _unreached.clear();
+    ask(channel, fetch: true);
+  }
+
   /// "Identifiers of channel [channel] since T" to the most recent capable
   /// node — unless such a question for [channel] is already running.
   void ask(int channel, {required bool fetch}) {
@@ -113,8 +129,15 @@ class DurableQuestions {
       if (fetch && !running.$3) _stock[channel] = (running.$1, running.$2, true);
       return;
     }
-    final to = d.capableNodes.firstOrNull;
+    final capable = d.capableNodes;
+    final to = capable
+        .where((c) => !_unreached.contains(nodeKey(c)))
+        .firstOrNull;
+    // Capable nodes exist, but none was reached since the last edge: the
+    // next edge or opening asks again (§16.0, no clock).
+    if (to == null && capable.isNotEmpty) return;
     if (to == null) {
+      durableTraceStockAsk(d.report, channel, null);
       if (fetch && !d.stock.heldChannels().contains(channel)) {
         _openPending.add(channel);
       } else {
@@ -132,15 +155,20 @@ class DurableQuestions {
             ? kSinceBeginning
             : DateTime.now().difference(learned).inHours + 1;
     final p = stockAskPacket(channel, since, stateRootOf(d.stock, channel));
-    final a = DurableAsk(() => d.send(p, to), (why) {
+    final a = DurableAsk(() => d.send(p, to), (why, reached) {
       final f = _stock.remove(channel)?.$3 ?? fetch;
       d.report('Durable: stock question to ${nodeKey(to)} failed — $why');
-      d.failed(to);
+      if (reached) {
+        d.failed(to);
+      } else {
+        _unreached.add(nodeKey(to));
+      }
       ask(channel, fetch: f); // the next capable node, if any
     });
     _stock[channel] = (to, a, fetch);
     stockAsked++;
     a.start();
+    durableTraceStockAsk(d.report, channel, to, since: since, fetch: fetch);
   }
 
   Future<FingerprintAnswer> fingerprint(int channel, Uint8List fingerprint) {
@@ -161,9 +189,9 @@ class DurableQuestions {
     f.at = to;
     f.ask = DurableAsk(
         () => d.send(fingerprintAskPacket(f.channel, r, f.fingerprint), to),
-        (_) {
+        (_, reached) {
       _prints.remove(key);
-      d.failed(to);
+      if (reached) d.failed(to);
       _printNext(f);
     });
     _prints[key] = f;
@@ -179,6 +207,8 @@ class DurableQuestions {
       run.$2.answered();
       _stock.remove(a.channel);
       d.capable(from);
+      durableTraceStockAnswer(d.report, a.channel, from,
+          same: a.same, ids: a.ids.length);
       if (a.same) {
         sameAnswers++;
         return;

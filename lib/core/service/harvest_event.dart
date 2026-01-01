@@ -102,9 +102,10 @@ class HarvestEvent {
   /// The sender's own assertion, with no evidence behind it. Anyone who sorts
   /// by this sorts by something the sender is free to choose (§22.5.3).
   ///
-  /// One reader remains, neither display, sorting nor expiry: the
-  /// notification quiet rule of the start phase
-  /// (`CleonaService._claimedSendTimeMs`). The age of a call `INVITE` reads
+  /// It decides no notification either: the age rule of the start phase it
+  /// fed went with D-124 (S422; §22.8 L3 bundles the first collection
+  /// whatever the age). It is kept and carried on (group gate), not read for
+  /// a decision. The age of a call `INVITE` reads
   /// [harvestedAt] since S407-CALLNORM (§17.2: "The caller's claimed send
   /// time decides nothing").
   final DateTime? claimedSentAt;

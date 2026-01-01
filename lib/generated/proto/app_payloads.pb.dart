@@ -9170,6 +9170,7 @@ enum ReconcileFrame_Kind {
   deliver, 
   progress, 
   cancel, 
+  attachment, 
   notSet
 }
 
@@ -9182,6 +9183,7 @@ class ReconcileFrame extends $pb.GeneratedMessage {
     ReconcileDeliver? deliver,
     ReconcileProgress? progress,
     ReconcileCancel? cancel,
+    ReconcileAttachment? attachment,
   }) {
     final $result = create();
     if (reconcileId != null) {
@@ -9205,6 +9207,9 @@ class ReconcileFrame extends $pb.GeneratedMessage {
     if (cancel != null) {
       $result.cancel = cancel;
     }
+    if (attachment != null) {
+      $result.attachment = attachment;
+    }
     return $result;
   }
   ReconcileFrame._() : super();
@@ -9218,10 +9223,11 @@ class ReconcileFrame extends $pb.GeneratedMessage {
     5 : ReconcileFrame_Kind.deliver,
     6 : ReconcileFrame_Kind.progress,
     7 : ReconcileFrame_Kind.cancel,
+    8 : ReconcileFrame_Kind.attachment,
     0 : ReconcileFrame_Kind.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileFrame', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..oo(0, [2, 3, 4, 5, 6, 7])
+    ..oo(0, [2, 3, 4, 5, 6, 7, 8])
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'reconcileId', $pb.PbFieldType.OY)
     ..aOM<ReconcileHeader>(2, _omitFieldNames ? '' : 'header', subBuilder: ReconcileHeader.create)
     ..aOM<ReconcileManifest>(3, _omitFieldNames ? '' : 'manifest', subBuilder: ReconcileManifest.create)
@@ -9229,6 +9235,7 @@ class ReconcileFrame extends $pb.GeneratedMessage {
     ..aOM<ReconcileDeliver>(5, _omitFieldNames ? '' : 'deliver', subBuilder: ReconcileDeliver.create)
     ..aOM<ReconcileProgress>(6, _omitFieldNames ? '' : 'progress', subBuilder: ReconcileProgress.create)
     ..aOM<ReconcileCancel>(7, _omitFieldNames ? '' : 'cancel', subBuilder: ReconcileCancel.create)
+    ..aOM<ReconcileAttachment>(8, _omitFieldNames ? '' : 'attachment', subBuilder: ReconcileAttachment.create)
     ..hasRequiredFields = false
   ;
 
@@ -9330,6 +9337,21 @@ class ReconcileFrame extends $pb.GeneratedMessage {
   void clearCancel() => clearField(7);
   @$pb.TagNumber(7)
   ReconcileCancel ensureCancel() => $_ensure(6);
+
+  /// S422 (§14.6.3 "Attachments travel per conversation as one transfer,
+  /// directly …"): one piece of one attachment. ADDITIVE: Type 20 travels
+  /// only between own devices, which are all of one 4.2 version that knows
+  /// it (D-108).
+  @$pb.TagNumber(8)
+  ReconcileAttachment get attachment => $_getN(7);
+  @$pb.TagNumber(8)
+  set attachment(ReconcileAttachment v) { setField(8, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasAttachment() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearAttachment() => clearField(8);
+  @$pb.TagNumber(8)
+  ReconcileAttachment ensureAttachment() => $_ensure(7);
 }
 
 /// What the handover does not carry (§14.6.3): the conversation list with
@@ -9434,6 +9456,8 @@ class ReconcileChat extends $pb.GeneratedMessage {
     $fixnum.Int64? count,
     $fixnum.Int64? oldestMs,
     $fixnum.Int64? bytes,
+    $core.int? files,
+    $fixnum.Int64? fileBytes,
   }) {
     final $result = create();
     if (convId != null) {
@@ -9469,6 +9493,12 @@ class ReconcileChat extends $pb.GeneratedMessage {
     if (bytes != null) {
       $result.bytes = bytes;
     }
+    if (files != null) {
+      $result.files = files;
+    }
+    if (fileBytes != null) {
+      $result.fileBytes = fileBytes;
+    }
     return $result;
   }
   ReconcileChat._() : super();
@@ -9487,6 +9517,8 @@ class ReconcileChat extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(9, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..aInt64(10, _omitFieldNames ? '' : 'oldestMs')
     ..a<$fixnum.Int64>(11, _omitFieldNames ? '' : 'bytes', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.int>(12, _omitFieldNames ? '' : 'files', $pb.PbFieldType.OU3)
+    ..a<$fixnum.Int64>(13, _omitFieldNames ? '' : 'fileBytes', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..hasRequiredFields = false
   ;
 
@@ -9609,6 +9641,26 @@ class ReconcileChat extends $pb.GeneratedMessage {
   $core.bool hasBytes() => $_has(10);
   @$pb.TagNumber(11)
   void clearBytes() => clearField(11);
+
+  /// S422: the attachments of the conversation the source holds — offered as
+  /// one transfer with its size (§14.6.3, §24.4.5).
+  @$pb.TagNumber(12)
+  $core.int get files => $_getIZ(11);
+  @$pb.TagNumber(12)
+  set files($core.int v) { $_setUnsignedInt32(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasFiles() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearFiles() => clearField(12);
+
+  @$pb.TagNumber(13)
+  $fixnum.Int64 get fileBytes => $_getI64(12);
+  @$pb.TagNumber(13)
+  set fileBytes($fixnum.Int64 v) { $_setInt64(12, v); }
+  @$pb.TagNumber(13)
+  $core.bool hasFileBytes() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearFileBytes() => clearField(13);
 }
 
 /// §13.5.2 phase 2: one entry per message, without the body.
@@ -10461,6 +10513,189 @@ class ReconcileCancel extends $pb.GeneratedMessage {
   static ReconcileCancel? _defaultInstance;
 }
 
+/// S422 (§14.6.3): one piece of one attachment of an ATTACHMENTS fetch. The
+/// packets of a fetch are numbered (`seq`) like deliver packets; `complete`
+/// marks the last of the fetch, `part`/`parts` put one file together.
+class ReconcileAttachment extends $pb.GeneratedMessage {
+  factory ReconcileAttachment({
+    $core.List<$core.int>? fetchId,
+    $core.List<$core.int>? messageId,
+    $core.List<$core.int>? convId,
+    $core.int? part,
+    $core.int? parts,
+    $core.List<$core.int>? data,
+    $fixnum.Int64? size,
+    $core.int? seq,
+    $core.bool? complete,
+    $core.List<$core.int>? bulkAnnouncement,
+  }) {
+    final $result = create();
+    if (fetchId != null) {
+      $result.fetchId = fetchId;
+    }
+    if (messageId != null) {
+      $result.messageId = messageId;
+    }
+    if (convId != null) {
+      $result.convId = convId;
+    }
+    if (part != null) {
+      $result.part = part;
+    }
+    if (parts != null) {
+      $result.parts = parts;
+    }
+    if (data != null) {
+      $result.data = data;
+    }
+    if (size != null) {
+      $result.size = size;
+    }
+    if (seq != null) {
+      $result.seq = seq;
+    }
+    if (complete != null) {
+      $result.complete = complete;
+    }
+    if (bulkAnnouncement != null) {
+      $result.bulkAnnouncement = bulkAnnouncement;
+    }
+    return $result;
+  }
+  ReconcileAttachment._() : super();
+  factory ReconcileAttachment.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ReconcileAttachment.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ReconcileAttachment', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fetchId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'convId', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'part', $pb.PbFieldType.OU3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'parts', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'data', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'size', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.int>(8, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU3)
+    ..aOB(9, _omitFieldNames ? '' : 'complete')
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'bulkAnnouncement', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ReconcileAttachment clone() => ReconcileAttachment()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ReconcileAttachment copyWith(void Function(ReconcileAttachment) updates) => super.copyWith((message) => updates(message as ReconcileAttachment)) as ReconcileAttachment;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReconcileAttachment create() => ReconcileAttachment._();
+  ReconcileAttachment createEmptyInstance() => create();
+  static $pb.PbList<ReconcileAttachment> createRepeated() => $pb.PbList<ReconcileAttachment>();
+  @$core.pragma('dart2js:noInline')
+  static ReconcileAttachment getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ReconcileAttachment>(create);
+  static ReconcileAttachment? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fetchId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fetchId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFetchId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFetchId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get messageId => $_getN(1);
+  @$pb.TagNumber(2)
+  set messageId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMessageId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMessageId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get convId => $_getN(2);
+  @$pb.TagNumber(3)
+  set convId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasConvId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearConvId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get part => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set part($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasPart() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPart() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get parts => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set parts($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasParts() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearParts() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get data => $_getN(5);
+  @$pb.TagNumber(6)
+  set data($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasData() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearData() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get size => $_getI64(6);
+  @$pb.TagNumber(7)
+  set size($fixnum.Int64 v) { $_setInt64(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasSize() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSize() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get seq => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set seq($core.int v) { $_setUnsignedInt32(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSeq() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSeq() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.bool get complete => $_getBF(8);
+  @$pb.TagNumber(9)
+  set complete($core.bool v) { $_setBool(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasComplete() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearComplete() => clearField(9);
+
+  /// S422 (§14.6.3 "… or on lane 3 with its consent"): not on the LAN — the
+  /// attachments of the conversation were placed as ONE bulk object (§9.4);
+  /// this is its announcement (`bulk_announce.dart`), the recipient collects
+  /// it from the holders it names.
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get bulkAnnouncement => $_getN(9);
+  @$pb.TagNumber(10)
+  set bulkAnnouncement($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasBulkAnnouncement() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearBulkAnnouncement() => clearField(10);
+}
+
 class TwinSyncEnvelope extends $pb.GeneratedMessage {
   factory TwinSyncEnvelope({
     $core.List<$core.int>? syncId,
@@ -10832,6 +11067,7 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     $core.int? preRotationDeviceCount,
     KeyRotationMode? mode,
     $core.bool? emergency,
+    $core.Iterable<$core.List<$core.int>>? remainingDeviceNodeIds,
   }) {
     final $result = create();
     if (newEd25519Pk != null) {
@@ -10858,6 +11094,9 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     if (emergency != null) {
       $result.emergency = emergency;
     }
+    if (remainingDeviceNodeIds != null) {
+      $result.remainingDeviceNodeIds.addAll(remainingDeviceNodeIds);
+    }
     return $result;
   }
   KeyRotationBroadcast._() : super();
@@ -10873,6 +11112,7 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
     ..a<$core.int>(8, _omitFieldNames ? '' : 'preRotationDeviceCount', $pb.PbFieldType.OU3)
     ..e<KeyRotationMode>(9, _omitFieldNames ? '' : 'mode', $pb.PbFieldType.OE, defaultOrMaker: KeyRotationMode.KEY_ROTATION_MODE_UNSPECIFIED, valueOf: KeyRotationMode.valueOf, enumValues: KeyRotationMode.values)
     ..aOB(10, _omitFieldNames ? '' : 'emergency')
+    ..p<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'remainingDeviceNodeIds', $pb.PbFieldType.PY)
     ..hasRequiredFields = false
   ;
 
@@ -10968,6 +11208,16 @@ class KeyRotationBroadcast extends $pb.GeneratedMessage {
   $core.bool hasEmergency() => $_has(7);
   @$pb.TagNumber(10)
   void clearEmergency() => clearField(10);
+
+  /// S422 (§14.4 "Verification levels at sig rotation", §14.8): set only at a
+  /// rotation that locks a device out — the per-identity device identifiers
+  /// that REMAIN. The contact counts the quorum max(2, ceil(M/2)) (M = 1 → 1)
+  /// over the devices it already holds that are named here, never over the
+  /// previous count. ADDITIVE: an earlier 4.2 contact skips the field and
+  /// counts over its stored set as before — at a lock-out it then shows the
+  /// co-signature warning (visibility principle, §14.5), nothing breaks.
+  @$pb.TagNumber(11)
+  $core.List<$core.List<$core.int>> get remainingDeviceNodeIds => $_getList(8);
 }
 
 class CalendarReminderOffset extends $pb.GeneratedMessage {
@@ -14064,6 +14314,11 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     $core.List<$core.int>? newMlKemPk,
     ApprovalKind? approvalKind,
     $core.Iterable<$core.List<$core.int>>? newDeviceNodeIds,
+    $core.List<$core.int>? changeHash,
+    $core.int? changeSeq,
+    $core.List<$core.int>? roundId,
+    $core.List<$core.int>? lockedOutDeviceId,
+    $core.bool? withdrawn,
   }) {
     final $result = create();
     if (rotationHash != null) {
@@ -14087,6 +14342,21 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     if (newDeviceNodeIds != null) {
       $result.newDeviceNodeIds.addAll(newDeviceNodeIds);
     }
+    if (changeHash != null) {
+      $result.changeHash = changeHash;
+    }
+    if (changeSeq != null) {
+      $result.changeSeq = changeSeq;
+    }
+    if (roundId != null) {
+      $result.roundId = roundId;
+    }
+    if (lockedOutDeviceId != null) {
+      $result.lockedOutDeviceId = lockedOutDeviceId;
+    }
+    if (withdrawn != null) {
+      $result.withdrawn = withdrawn;
+    }
     return $result;
   }
   RotationApprovalRequestPayload._() : super();
@@ -14101,6 +14371,11 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
     ..e<ApprovalKind>(6, _omitFieldNames ? '' : 'approvalKind', $pb.PbFieldType.OE, defaultOrMaker: ApprovalKind.APPROVAL_KIND_KEY_ROTATION, valueOf: ApprovalKind.valueOf, enumValues: ApprovalKind.values)
     ..p<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'newDeviceNodeIds', $pb.PbFieldType.PY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'changeHash', $pb.PbFieldType.OY)
+    ..a<$core.int>(9, _omitFieldNames ? '' : 'changeSeq', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'roundId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'lockedOutDeviceId', $pb.PbFieldType.OY)
+    ..aOB(12, _omitFieldNames ? '' : 'withdrawn')
     ..hasRequiredFields = false
   ;
 
@@ -14183,6 +14458,69 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
   /// the change, so that the dialog can name what is being removed.
   @$pb.TagNumber(7)
   $core.List<$core.List<$core.int>> get newDeviceNodeIds => $_getList(6);
+
+  /// S422 (§14.4, §14.8): a lock-out is a device-set change AND a key change.
+  /// The approver signs both: [rotation_hash] for the contacts' rotation check
+  /// and [change_hash] = computeDeviceSetChangeHash(userId, new_device_node_ids,
+  /// change_seq) for the device-set announcement that carries the shrink proof
+  /// (§14.5 path 2). It recomputes both before it signs. Only with
+  /// APPROVAL_KIND_DEVICE_SET_CHANGE. ADDITIVE: an earlier 4.2 version never
+  /// receives a request (it cannot be an own device, D-108).
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get changeHash => $_getN(7);
+  @$pb.TagNumber(8)
+  set changeHash($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasChangeHash() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearChangeHash() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.int get changeSeq => $_getIZ(8);
+  @$pb.TagNumber(9)
+  set changeSeq($core.int v) { $_setUnsignedInt32(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasChangeSeq() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearChangeSeq() => clearField(9);
+
+  /// One per user action, the same in every identity of the requesting device
+  /// (§14.4 "one approval per device counts for all identities"): the
+  /// approving device answers every request of the round with one decision.
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get roundId => $_getN(9);
+  @$pb.TagNumber(10)
+  set roundId($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasRoundId() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearRoundId() => clearField(10);
+
+  /// The DeviceID of the device being locked out (display only; the hashes
+  /// cover what is signed).
+  @$pb.TagNumber(11)
+  $core.List<$core.int> get lockedOutDeviceId => $_getN(10);
+  @$pb.TagNumber(11)
+  set lockedOutDeviceId($core.List<$core.int> v) { $_setBytes(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasLockedOutDeviceId() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearLockedOutDeviceId() => clearField(11);
+
+  /// S422 (§14.8, D-124 point 5): the initiating device cancelled the round —
+  /// the same request, marked withdrawn. The receiver drops the parked
+  /// request (only when the device that asked withdraws it), no longer shows
+  /// it, and an approval of it counts nowhere. ADDITIVE: travels only between
+  /// own devices of the same version (D-108); an earlier 4.2 version is never
+  /// an own device of this one.
+  @$pb.TagNumber(12)
+  $core.bool get withdrawn => $_getBF(11);
+  @$pb.TagNumber(12)
+  set withdrawn($core.bool v) { $_setBool(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasWithdrawn() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearWithdrawn() => clearField(12);
 }
 
 /// TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).
@@ -14190,6 +14528,8 @@ class RotationApprovalResponsePayload extends $pb.GeneratedMessage {
   factory RotationApprovalResponsePayload({
     RotationApprovalToken? token,
     $core.bool? rejected,
+    RotationApprovalToken? changeToken,
+    $core.List<$core.int>? rotationHash,
   }) {
     final $result = create();
     if (token != null) {
@@ -14197,6 +14537,12 @@ class RotationApprovalResponsePayload extends $pb.GeneratedMessage {
     }
     if (rejected != null) {
       $result.rejected = rejected;
+    }
+    if (changeToken != null) {
+      $result.changeToken = changeToken;
+    }
+    if (rotationHash != null) {
+      $result.rotationHash = rotationHash;
     }
     return $result;
   }
@@ -14207,6 +14553,8 @@ class RotationApprovalResponsePayload extends $pb.GeneratedMessage {
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RotationApprovalResponsePayload', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..aOM<RotationApprovalToken>(1, _omitFieldNames ? '' : 'token', subBuilder: RotationApprovalToken.create)
     ..aOB(2, _omitFieldNames ? '' : 'rejected')
+    ..aOM<RotationApprovalToken>(3, _omitFieldNames ? '' : 'changeToken', subBuilder: RotationApprovalToken.create)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'rotationHash', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -14250,6 +14598,29 @@ class RotationApprovalResponsePayload extends $pb.GeneratedMessage {
   $core.bool hasRejected() => $_has(1);
   @$pb.TagNumber(2)
   void clearRejected() => clearField(2);
+
+  /// S422: the countersignature over the request's `change_hash` (lock-out).
+  @$pb.TagNumber(3)
+  RotationApprovalToken get changeToken => $_getN(2);
+  @$pb.TagNumber(3)
+  set changeToken(RotationApprovalToken v) { setField(3, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasChangeToken() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearChangeToken() => clearField(3);
+  @$pb.TagNumber(3)
+  RotationApprovalToken ensureChangeToken() => $_ensure(2);
+
+  /// S422: the hash the answer belongs to — also on a rejection, which carries
+  /// no token.
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get rotationHash => $_getN(3);
+  @$pb.TagNumber(4)
+  set rotationHash($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasRotationHash() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearRotationHash() => clearField(4);
 }
 
 /// Linked device → all contacts: "I am actively rejecting a rotation"

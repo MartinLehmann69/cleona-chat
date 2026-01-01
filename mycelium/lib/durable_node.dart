@@ -228,7 +228,8 @@ class DurableNode implements DurableTransport {
     final d = DurableDeposit(channel, object, holders(),
         isContact: stock.isContactNode,
         send: (p, to) => send(p, to),
-        onHolder: (h, answered) => answered ? capable(h) : failed(h));
+        onHolder: (h, answered) => answered ? capable(h) : failed(h),
+        report: report);
     _deposits
       ..removeWhere((x) => x.over)
       ..add(d);
@@ -241,7 +242,7 @@ class DurableNode implements DurableTransport {
       questions.fingerprint(channel, fingerprint);
 
   @override
-  void channelOpened(int channel) => questions.ask(channel, fetch: true);
+  void channelOpened(int channel) => questions.opened(channel);
 
   @override
   void edge() => questions.edge();

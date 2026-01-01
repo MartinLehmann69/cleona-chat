@@ -97,6 +97,30 @@ extension MailboxOwnSignal on Mailbox {
   /// line. A device whose whereabouts this one does not know yet is skipped
   /// and reported: without an address and a neighbour there is no step to
   /// take, and the post box would ring for nobody.
+  /// §14.6.3, §14.7 (S422): [content] to the own device [device] on step 1
+  /// ONLY — the initial reconciliation travels "directly on the LAN while
+  /// both devices are present". Step 1 waits for the recipient's end mark:
+  /// the transport holds the transmission whole and repeats as §11.3a says
+  /// (`Ladder.send` `answeredByEndMark`, `Shipment.stepOneFailed`). `true`:
+  /// it arrived. `false`: this node knows no segment address of [device] it
+  /// can speak to, or step 1 stayed without an answer — the caller then
+  /// places it in the post box.
+  Future<bool> ownDirect(Uint8List content, Uint8List device) async {
+    final line = ownLineOf(identity);
+    if (line == null || !line.active) return false;
+    if (!line.others.any((o) => _same(o, device))) return false;
+    final where = ownWhereOf(identity)[_hex(device)];
+    final lan = where?.segment.where((a) => node.ladder.speaks(a)).firstOrNull;
+    if (lan == null) return false;
+    final s = node.ladder.send(ownLinePacket(identity.postBox, content),
+        Target(lan: lan, postBoxApplicable: false),
+        answeredByEndMark: true);
+    final failed = await (s.stepOneFailed ?? Future<bool>.value(true));
+    report?.call('own direct: ${_short(device)} — '
+        '${failed ? "no answer on step 1" : "delivered on step 1"}');
+    return !failed;
+  }
+
   int ownSignal(Uint8List content, {List<Uint8List>? toDevices}) {
     final line = ownLineOf(identity);
     if (line == null || !line.active) {

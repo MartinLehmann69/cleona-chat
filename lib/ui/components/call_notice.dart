@@ -45,7 +45,30 @@ void showCallNotice(BuildContext? context, String? key) {
   if (context == null || key == null) return;
   final messenger = ScaffoldMessenger.maybeOf(context);
   if (messenger == null) return;
+  final locale = AppLocale.read(context);
+  final hint = callNoticeHintKey(key);
   messenger.showSnackBar(
-    SnackBar(content: Text(AppLocale.read(context).get(key))),
+    SnackBar(
+      content: hint == null
+          ? Text(locale.get(key))
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(locale.get(key),
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text(locale.get(hint)),
+              ],
+            ),
+    ),
   );
 }
+
+/// The explaining second line under a notice, or `null` when it needs none.
+///
+/// "Not reachable" names a platform boundary that the app must name, not
+/// paper over (§22.6 "Callability"): the callee may be an iPhone whose app
+/// is not open — the caller cannot know — and a message still reaches them
+/// (S418 V10, D-123 item 6).
+String? callNoticeHintKey(String key) =>
+    key == 'call_not_reachable' ? 'call_not_reachable_hint' : null;

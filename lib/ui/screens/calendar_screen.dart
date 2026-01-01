@@ -34,6 +34,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
   late DateTime _selectedDate;
   IpcClient? _ipcForDispose;
 
+  /// The app process that is its own node (Android, iOS): it runs the sync
+  /// cadence itself (`CalendarWiring`, §18.2).
+  CleonaAppState? _inProcessForDispose;
+
   @override
   void initState() {
     super.initState();
@@ -43,16 +47,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final svc = context.read<CleonaAppState?>()?.service;
+    final app = context.read<CleonaAppState?>();
+    final svc = app?.service;
     if (svc is IpcClient) {
       _ipcForDispose = svc;
       svc.setCalendarSyncForeground(true);
+    } else if (app != null && svc != null) {
+      _inProcessForDispose = app;
+      app.calendarSyncForeground(true);
     }
   }
 
   @override
   void dispose() {
     _ipcForDispose?.setCalendarSyncForeground(false);
+    _inProcessForDispose?.calendarSyncForeground(false);
     super.dispose();
   }
 

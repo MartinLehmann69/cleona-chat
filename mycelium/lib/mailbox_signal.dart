@@ -41,13 +41,18 @@ extension MailboxSignal on Mailbox {
   /// No search call of its own: the ladder sends one only when the
   /// recipient holds no address at all (§7.2), and a find would re-dispatch
   /// nothing — a signal has no history entry to re-dispatch from.
-  Outbound signal(String identifier, Uint8List content) {
+  ///
+  /// [callInvitation]: [content] is a call invitation (`INVITE`). Its step 3
+  /// is then sent again until the callee acknowledges it or the call stops
+  /// ringing ([signalEnd]), at most three times (§17.2, `ladder.dart`). The
+  /// content is opaque to this layer, so only the application can say it.
+  Outbound signal(String identifier, Uint8List content, {bool callInvitation = false}) {
     final who = contactOrNull(identifier);
     final address = who?.address ??
         groupPairOrNull(identifier)?.address ??
         (throw MailboxError('neither a contact nor a group pair: $identifier'));
     return node.send(content, address, who == null ? null : routeTo(who),
-        forField: identity, signal: true);
+        forField: identity, signal: true, callInvitation: callInvitation);
   }
 
   /// The call of [sent] has ended (§17.2: a signal "ends with its

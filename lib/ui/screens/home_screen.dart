@@ -28,6 +28,7 @@ import 'package:cleona/ui/components/chat_list_tile.dart';
 import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/components/create_group_dialog.dart';
 import 'package:cleona/ui/components/reduced_mode_banner.dart';
+import 'package:cleona/ui/components/reconcile_widgets.dart';
 import 'package:cleona/ui/components/enrolment_banner.dart';
 import 'package:cleona/ui/components/windows_firewall_banner.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
@@ -225,6 +226,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       _natWizardShown = false;
     }
 
+    // §22.8, D-125 (3): a tapped notification opens its conversation — here
+    // and nowhere else, so it never lands over a screen before the home
+    // screen (mandatory update, wipe notice, setup …).
+    if (appState.pendingNotificationOpen != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(appState.runPendingNotificationOpen());
+      });
+    }
+
     // Reset to "Aktuell" tab when go_back IPC is triggered
     if (appState.goBackCounter != _lastGoBackCounter) {
       _lastGoBackCounter = appState.goBackCounter;
@@ -378,6 +388,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           // until the next restart (which re-shows the splash).
           if (service.reducedMode) const ReducedModeBanner(),
           EnrolmentBanner(service: service), // B-4b, §13.0, D-40
+          // §14.6.3 (S422): "reconciling state".
+          if (service.reconcileView['running'] == true)
+            const ReconcileRunningBar(),
           // v4_2 §22.x Windows Desktop: inbound firewall rule of the daemon.
           if (Platform.isWindows && service is IpcClient)
             WindowsFirewallBanner(client: service),
@@ -2356,8 +2369,13 @@ class _InboxView extends StatelessWidget {
                       style: const TextStyle(
                           fontFamily: 'monospace', fontSize: 12)),
                   const SizedBox(height: 6),
-                  Text(locale.get('enrol_request_hint'),
-                      style: theme.textTheme.bodySmall),
+                  // D-108: a request of the earlier form cannot be accepted.
+                  r.olderVersion
+                      ? Text(locale.get('enrol_request_older_version'),
+                          key: Key('enrol_older_${r.requestIdHex}'),
+                          style: TextStyle(color: colorScheme.error))
+                      : Text(locale.get('enrol_request_hint'),
+                          style: theme.textTheme.bodySmall),
                   const SizedBox(height: 8),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
@@ -2368,13 +2386,15 @@ class _InboxView extends StatelessWidget {
                             service.enrolmentDecide(r.requestIdHex, false),
                         child: Text(locale.get('reject')),
                       ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        key: Key('enrol_accept_${r.requestIdHex}'),
-                        onPressed: () =>
-                            service.enrolmentDecide(r.requestIdHex, true),
-                        child: Text(locale.get('accept')),
-                      ),
+                      if (!r.olderVersion) ...[
+                        const SizedBox(width: 8),
+                        FilledButton(
+                          key: Key('enrol_accept_${r.requestIdHex}'),
+                          onPressed: () =>
+                              service.enrolmentDecide(r.requestIdHex, true),
+                          child: Text(locale.get('accept')),
+                        ),
+                      ],
                     ],
                   ),
                 ],

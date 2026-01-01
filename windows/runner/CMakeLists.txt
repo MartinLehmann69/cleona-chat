@@ -149,6 +149,30 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
             $<TARGET_FILE_DIR:${BINARY_NAME}>
     COMMENT "Copying cleona-play.exe into Windows bundle"
 )
+# === cleona-notify.exe (toast helper the daemon starts per notification) ===
+# Built from windows/cleona_notify/ (C++/WinRT from the Windows SDK, no
+# download), copied next to cleona.exe: windows_toast_notifier.dart starts
+# `<bundleDir>\cleona-notify.exe`, and the MSVC runtime DLLs it needs are
+# bundled in the same directory. Without it Windows shows no system
+# notification -- the verification below fails the build when it is missing
+# (-DEXPECTED_PROGRAMS).
+add_subdirectory("${CMAKE_SOURCE_DIR}/cleona_notify" "${CMAKE_BINARY_DIR}/cleona_notify_build")
+add_dependencies(${BINARY_NAME} cleona-notify)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona-notify>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona-notify.exe into Windows bundle"
+)
+# The helper must build its toast as text-only and silent (no toast shown,
+# nothing written) -- see windows/cleona_notify/check_notify.cmake.
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DHELPER=$<TARGET_FILE:cleona-notify>
+            -P "${CMAKE_SOURCE_DIR}/cleona_notify/check_notify.cmake"
+    COMMENT "Self check of cleona-notify.exe (toast XML, no toast)"
+    VERBATIM
+)
 # === cleona-firewall.cmd (inbound firewall rule of the daemon, S407) ===
 # The one definition of the rule: the setup runs it elevated after install,
 # the uninstaller to remove it, and the app's "Allow in firewall" button
@@ -264,6 +288,65 @@ if(MSVC)
   _cr_resolve_dll("liboqs" "liboqs.dll"  "provision-liboqs.ps1"  CLEONA_OQS_DLL)
   _cr_resolve_dll("zstd"   "libzstd.dll" "provision-libzstd.ps1" CLEONA_ZSTD_DLL)
   _cr_resolve_dll("opus"   "opus.dll"    "provision-opus.ps1"    CLEONA_OPUS_DLL)
+
+  # whisper.cpp (S422, R-11): five DLLs from ONE package,
+  # <libs>/whisper-<version>/pkg/bin/, built by provision-whisper.ps1 from the
+  # pinned source archive. Resolved as a directory rather than per DLL
+  # because the five belong together: whisper_wrapper.dll is linked against
+  # exactly this whisper.dll, and the ggml*.dll are its own dependencies.
+  # Provisioning runs when a file is missing OR when native/whisper_wrapper.c
+  # no longer matches the hash the package recorded for its wrapper — the
+  # wrapper source lives in this repository, so a changed wrapper must not be
+  # served from an old package. CMAKE_CONFIGURE_DEPENDS re-runs the configure
+  # when that file changes.
+  set(_cr_wrapper_c "${CMAKE_SOURCE_DIR}/../native/whisper_wrapper.c")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_cr_wrapper_c}")
+  file(SHA256 "${_cr_wrapper_c}" _cr_wrapper_sha)
+  macro(_cr_find_whisper_bin)
+    set(CLEONA_WHISPER_BIN "")
+    file(GLOB _cr_whits "${_cr_libs_dir}/whisper-*/pkg/bin/whisper.dll")
+    list(SORT _cr_whits)
+    foreach(_cr_h ${_cr_whits})
+      get_filename_component(CLEONA_WHISPER_BIN "${_cr_h}" DIRECTORY)
+    endforeach()
+    set(_cr_whisper_complete FALSE)
+    if(CLEONA_WHISPER_BIN)
+      set(_cr_whisper_complete TRUE)
+      foreach(_cr_w whisper.dll whisper_wrapper.dll ggml.dll ggml-base.dll ggml-cpu.dll)
+        if(NOT EXISTS "${CLEONA_WHISPER_BIN}/${_cr_w}")
+          set(_cr_whisper_complete FALSE)
+        endif()
+      endforeach()
+      set(_cr_stamp "${CLEONA_WHISPER_BIN}/../whisper_wrapper.c.sha256")
+      if(EXISTS "${_cr_stamp}")
+        file(READ "${_cr_stamp}" _cr_stamp_sha)
+        string(STRIP "${_cr_stamp_sha}" _cr_stamp_sha)
+        if(NOT _cr_stamp_sha STREQUAL _cr_wrapper_sha)
+          set(_cr_whisper_complete FALSE)
+        endif()
+      else()
+        set(_cr_whisper_complete FALSE)
+      endif()
+    endif()
+  endmacro()
+  _cr_find_whisper_bin()
+  if(NOT _cr_whisper_complete AND CLEONA_AUTO_PROVISION
+     AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../provision-whisper.ps1")
+    message(STATUS "runner: whisper package missing or stale — provisioning into ${_cr_libs_dir}")
+    execute_process(
+      COMMAND powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass
+              -File "${CMAKE_CURRENT_SOURCE_DIR}/../provision-whisper.ps1" -Root "${_cr_libs_dir}"
+      RESULT_VARIABLE _cr_rc
+      OUTPUT_VARIABLE _cr_out
+      ERROR_VARIABLE  _cr_err)
+    if(NOT _cr_rc EQUAL 0)
+      message(WARNING "runner: provision-whisper.ps1 failed (exit ${_cr_rc}):\n${_cr_out}\n${_cr_err}")
+    endif()
+    _cr_find_whisper_bin()
+  endif()
+  if(NOT _cr_whisper_complete)
+    set(CLEONA_WHISPER_BIN "")
+  endif()
 endif()
 
 if(CLEONA_OQS_DLL AND EXISTS "${CLEONA_OQS_DLL}")
@@ -318,6 +401,43 @@ foreach(DLL ${NATIVE_DLLS})
   )
 endforeach()
 
+# === whisper.cpp into lib\ (S422, R-11) ===
+# Voice transcription (architecture v4_2 §21.7, §27.3 "libwhisper (+ GGML)").
+# Until S422 no build path put these into the Windows bundle, so the
+# transcription page of every Windows build said "whisper.cpp library not
+# available".
+#
+# WHERE: <bundle>\lib\, not beside cleona.exe. Transcription runs in the
+# daemon (VoiceTranscriptionService lives in CleonaService), and the daemon
+# is bin\cleona-daemon.exe. whisper_ffi.dart searches the bare name — which
+# LoadLibraryW resolves from the directory of the EXECUTABLE, bin\ for the
+# daemon — and `${AppPaths.bundleLibDir}\whisper.dll`, i.e. <bundle>\lib\
+# for GUI and daemon alike (AppPaths.bundleDir maps bin\ to its parent). The
+# bundle root is in neither list for the daemon. The ggml*.dll that
+# whisper.dll imports are not searched in lib\ by Windows; whisper_ffi.dart
+# loads them first by full path, and the loader then reuses the loaded
+# modules (see _dirOf in whisper_ffi.dart).
+#
+# No hand-placed fallback: provisioning from the pinned archive is the only
+# origin. The list here and -DEXPECTED_LIB_DLLS below must name the same
+# five; a drift is caught at build time by the verification (missing file,
+# or a whisper*/ggml* DLL in lib\ that is not expected).
+foreach(_wdll whisper.dll whisper_wrapper.dll ggml.dll ggml-base.dll ggml-cpu.dll)
+  if(NOT CLEONA_WHISPER_BIN OR NOT EXISTS "${CLEONA_WHISPER_BIN}/${_wdll}")
+    message(FATAL_ERROR
+      "Required whisper.cpp DLL is missing: ${_wdll}\n"
+      "It is a build INPUT from the provisioned package\n"
+      "<libs>/whisper-<version>/pkg/bin/. Run windows/provision-whisper.ps1\n"
+      "(see its output for the reason), then configure again.")
+  endif()
+  add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${BINARY_NAME}>/lib"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CLEONA_WHISPER_BIN}/${_wdll}"
+            "$<TARGET_FILE_DIR:${BINARY_NAME}>/lib/${_wdll}"
+  )
+endforeach()
+message(STATUS "runner: whisper.cpp DLLs from provisioned package (${CLEONA_WHISPER_BIN})")
+
 # Post-build check over the finished bundle, in both directions (S338):
 # completeness AND no foreign cleona_*.dll. The four above are inputs and
 # already verified at configure time, but their POST_BUILD copy can still
@@ -333,11 +453,17 @@ endforeach()
 # derives WIN_BUNDLE_DLLS from this literal — keep the -DEXPECTED_DLLS=
 # format greppable. Comma-separated on purpose: a semicolon would be split
 # while CMake assembles the argument list.
+# EXPECTED_LIB_DLLS (S422) is the same for <bundle>\lib\ — the whisper.cpp
+# set above. A separate list rather than "lib/whisper.dll" entries in
+# EXPECTED_DLLS: every consumer of EXPECTED_DLLS reads it with the character
+# class [A-Za-z0-9_.,+-], which ends at a "/" and would silently cut the list
+# (release-build.sh, win-deploy.sh, preflight Check 14b, two self-tests).
 add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
+          -DEXPECTED_LIB_DLLS=whisper.dll,whisper_wrapper.dll,ggml.dll,ggml-base.dll,ggml-cpu.dll
           -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll
-          -DEXPECTED_PROGRAMS=cleona-play.exe,cleona-firewall.cmd
+          -DEXPECTED_PROGRAMS=cleona-play.exe,cleona-notify.exe,cleona-firewall.cmd
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

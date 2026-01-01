@@ -288,6 +288,62 @@ RotationCoAuthResult verifyRotationCoAuth({
       : RotationCoAuthResult.quorumNotMet;
 }
 
+/// The contact's check of a rotation that locks a device out (§14.4
+/// "Verification levels at sig rotation": "(ii) the lock-out quorum
+/// `max(2, ⌈M/2⌉)` (§14.8)").
+///
+/// `M` is the number of devices the contact ALREADY holds
+/// ([cachedDeviceSigKeys]) that the announcement names as remaining
+/// ([remainingDeviceNodeIds]) — never a device the announcement adds, so the
+/// sender cannot raise or invent signers. Only tokens of those devices count,
+/// each device once (§14.8 "distinct devices, not pieces of evidence"). `M = 1`
+/// asks one approval (§14.8 "M = 1 → 1"); before S422 the contact counted
+/// over the whole previous set and asked two.
+///
+/// The cached set may already be the remaining one (the device-set
+/// announcement of the same lock-out arrived first): then every cached device
+/// is named and `M` is its size — the same result.
+RotationCoAuthResult verifyLockoutCoAuth({
+  required List<RotationApprovalToken> tokens,
+  required List<DeviceSigInfo> cachedDeviceSigKeys,
+  required Uint8List rotationHash,
+  required List<Uint8List> remainingDeviceNodeIds,
+}) {
+  if (cachedDeviceSigKeys.isEmpty) return RotationCoAuthResult.legacy;
+  final named = {for (final id in remainingDeviceNodeIds) _bytesToHex(id)};
+  final remaining = [
+    for (final d in cachedDeviceSigKeys)
+      if (named.contains(_bytesToHex(d.deviceNodeId))) d
+  ];
+  final required = deviceSetChangeQuorum(remaining.length);
+  if (required == 0) return RotationCoAuthResult.quorumNotMet;
+  final approvers = <String>{};
+  for (final token in tokens) {
+    final deviceHex = _bytesToHex(token.deviceNodeId);
+    if (approvers.contains(deviceHex)) continue;
+    final info = remaining
+        .where((d) => _bytesToHex(d.deviceNodeId) == deviceHex)
+        .firstOrNull;
+    if (info == null) continue;
+    if (!_bytesEqual(token.rotationHash, rotationHash)) continue;
+    if (token.verify(info.deviceEd25519Pk, info.deviceMlDsaPk)) {
+      approvers.add(deviceHex);
+    }
+  }
+  return approvers.length >= required
+      ? RotationCoAuthResult.quorumMet
+      : RotationCoAuthResult.quorumNotMet;
+}
+
+/// The quorum a co-signing round needs on the device that starts it (§14.4,
+/// §14.8): a lock-out counts the REMAINING devices `M`
+/// ([deviceSetChangeQuorum]: M = 1 → 1, M ≥ 2 → max(2, ⌈M/2⌉)); an Emergency
+/// Key Rotation without a set change keeps every device, so `M = N`
+/// ([rotationQuorum]: N = 1 → 0, the rule does not apply). Counted in
+/// distinct devices, the starting device included.
+int coSignRequired({required bool lockOut, required int remaining}) =>
+    lockOut ? deviceSetChangeQuorum(remaining) : rotationQuorum(remaining);
+
 String _bytesToHex(Uint8List bytes) {
   final sb = StringBuffer();
   for (final b in bytes) {

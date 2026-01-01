@@ -1329,6 +1329,11 @@ message ReconcileFrame {
     ReconcileDeliver deliver = 5;
     ReconcileProgress progress = 6;
     ReconcileCancel cancel = 7;
+    // S422 (§14.6.3 "Attachments travel per conversation as one transfer,
+    // directly …"): one piece of one attachment. ADDITIVE: Type 20 travels
+    // only between own devices, which are all of one 4.2 version that knows
+    // it (D-108).
+    ReconcileAttachment attachment = 8;
   }
 }
 
@@ -1354,6 +1359,10 @@ message ReconcileChat {
   uint64 count = 9;       // messages the source holds before the cut
   int64 oldest_ms = 10;
   uint64 bytes = 11;      // size hint of that history (text + extra)
+  // S422: the attachments of the conversation the source holds — offered as
+  // one transfer with its size (§14.6.3, §24.4.5).
+  uint32 files = 12;
+  uint64 file_bytes = 13;
 }
 
 // §13.5.2 phase 2: one entry per message, without the body.
@@ -1387,6 +1396,9 @@ message ReconcileFetch {
     // wrote itself in the scope of the pair, written or changed since 14
     // days before since_ms.
     SINCE = 3;
+    // S422 (§14.6.3): the attachments of conv_ids, as one transfer — asked
+    // only on the user's consent (§24.4.5).
+    ATTACHMENTS = 4;
   }
   bytes fetch_id = 1;
   Kind kind = 2;
@@ -1447,6 +1459,26 @@ message ReconcileProgress {
 }
 
 message ReconcileCancel {}
+
+// S422 (§14.6.3): one piece of one attachment of an ATTACHMENTS fetch. The
+// packets of a fetch are numbered (`seq`) like deliver packets; `complete`
+// marks the last of the fetch, `part`/`parts` put one file together.
+message ReconcileAttachment {
+  bytes fetch_id = 1;
+  bytes message_id = 2;
+  bytes conv_id = 3;
+  uint32 part = 4;
+  uint32 parts = 5;
+  bytes data = 6;
+  uint64 size = 7;
+  uint32 seq = 8;
+  bool complete = 9;
+  // S422 (§14.6.3 "… or on lane 3 with its consent"): not on the LAN — the
+  // attachments of the conversation were placed as ONE bulk object (§9.4);
+  // this is its announcement (`bulk_announce.dart`), the recipient collects
+  // it from the holders it names.
+  bytes bulk_announcement = 10;
+}
 enum DevicePlatform {
   PLATFORM_UNKNOWN = 0;
   PLATFORM_ANDROID = 1;
@@ -1514,6 +1546,14 @@ message KeyRotationBroadcast {
   // `rotateIdentityKeys`; absent on the routine KEM notice, which the same
   // dispatcher parses under this message.
   bool emergency = 10;
+  // S422 (§14.4 "Verification levels at sig rotation", §14.8): set only at a
+  // rotation that locks a device out — the per-identity device identifiers
+  // that REMAIN. The contact counts the quorum max(2, ceil(M/2)) (M = 1 → 1)
+  // over the devices it already holds that are named here, never over the
+  // previous count. ADDITIVE: an earlier 4.2 contact skips the field and
+  // counts over its stored set as before — at a lock-out it then shows the
+  // co-signature warning (visibility principle, §14.5), nothing breaks.
+  repeated bytes remaining_device_node_ids = 11;
 }
 // ── Calendar (§23) ─────────────────────────────────────────────────────
 
@@ -1863,11 +1903,39 @@ message RotationApprovalRequestPayload {
   // Only set with APPROVAL_KIND_DEVICE_SET_CHANGE — the device list after
   // the change, so that the dialog can name what is being removed.
   repeated bytes new_device_node_ids = 7;
+  // S422 (§14.4, §14.8): a lock-out is a device-set change AND a key change.
+  // The approver signs both: [rotation_hash] for the contacts' rotation check
+  // and [change_hash] = computeDeviceSetChangeHash(userId, new_device_node_ids,
+  // change_seq) for the device-set announcement that carries the shrink proof
+  // (§14.5 path 2). It recomputes both before it signs. Only with
+  // APPROVAL_KIND_DEVICE_SET_CHANGE. ADDITIVE: an earlier 4.2 version never
+  // receives a request (it cannot be an own device, D-108).
+  bytes change_hash = 8;
+  uint32 change_seq = 9;
+  // One per user action, the same in every identity of the requesting device
+  // (§14.4 "one approval per device counts for all identities"): the
+  // approving device answers every request of the round with one decision.
+  bytes round_id = 10;
+  // The DeviceID of the device being locked out (display only; the hashes
+  // cover what is signed).
+  bytes locked_out_device_id = 11;
+  // S422 (§14.8, D-124 point 5): the initiating device cancelled the round —
+  // the same request, marked withdrawn. The receiver drops the parked
+  // request (only when the device that asked withdraws it), no longer shows
+  // it, and an approval of it counts nowhere. ADDITIVE: travels only between
+  // own devices of the same version (D-108); an earlier 4.2 version is never
+  // an own device of this one.
+  bool withdrawn = 12;
 }
 // TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).
 message RotationApprovalResponsePayload {
   RotationApprovalToken token = 1;
   bool rejected = 2;  // true = active rejection (not just timeout)
+  // S422: the countersignature over the request's `change_hash` (lock-out).
+  RotationApprovalToken change_token = 3;
+  // S422: the hash the answer belongs to — also on a rejection, which carries
+  // no token.
+  bytes rotation_hash = 4;
 }
 // Linked device → all contacts: "I am actively rejecting a rotation"
 message RotationRejectionAlertPayload {

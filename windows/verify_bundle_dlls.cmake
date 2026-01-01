@@ -22,17 +22,25 @@
 #     from a still-running cleona.exe. Exactly how cleona_pow.dll was absent
 #     from every Windows build until S281.
 #
-# Arguments (both required):
+# Arguments (all three required):
 #   -DBUNDLE_DIR=<dir>            directory to inspect
 #   -DEXPECTED_DLLS=a.dll,b.dll   comma-separated (NOT semicolon: a semicolon
 #                                 would be split by CMake while assembling the
 #                                 custom-command argument list)
+#   -DEXPECTED_LIB_DLLS=a.dll,... the same for <dir>/lib (S422: the
+#                                 whisper.cpp set, see "Library directory"
+#                                 below). Required, so that a caller that
+#                                 forgets it fails instead of skipping it.
+# Optional: -DEXPECTED_PROGRAMS=a.exe,b.exe (see the end of this file).
 
 if(NOT DEFINED BUNDLE_DIR)
   message(FATAL_ERROR "verify_bundle_dlls: -DBUNDLE_DIR=<dir> is required")
 endif()
 if(NOT DEFINED EXPECTED_DLLS)
   message(FATAL_ERROR "verify_bundle_dlls: -DEXPECTED_DLLS=a.dll,b.dll is required")
+endif()
+if(NOT DEFINED EXPECTED_LIB_DLLS)
+  message(FATAL_ERROR "verify_bundle_dlls: -DEXPECTED_LIB_DLLS=a.dll,b.dll is required")
 endif()
 
 if(NOT IS_DIRECTORY "${BUNDLE_DIR}")
@@ -144,13 +152,97 @@ if(_foreign)
     "directory 1:1, so a stale DLL here ships to end users.")
 endif()
 
+# ── Library directory (S422): -DEXPECTED_LIB_DLLS=a.dll,b.dll ───────────────
+#
+# The whisper.cpp set (whisper.dll, whisper_wrapper.dll, ggml*.dll) lies in
+# <bundle>/lib, where whisper_ffi.dart looks for it (AppPaths.bundleLibDir —
+# for the daemon in bin/ the only bundle path it searches). Until S422 no
+# build path put it there and no list asked for it, so every Windows build
+# shipped without transcription and every gate stayed green
+# (`mycelium/berichte/S422-RCA-E2E-LAUF-4.2.8.md`, R-11).
+#
+# Both directions, as above: every expected file present in lib/, and no
+# whisper*.dll / ggml*.dll that is not expected — neither in lib/ (a stale
+# DLL of an older whisper.cpp, e.g. a renamed ggml backend) nor in the
+# bundle root, where the GUI's bare-name lookup would pick it up before the
+# one in lib/. The namespace is whisper*/ggml* on purpose, the same reasoning
+# as cleona_*: only that set does EXPECTED_LIB_DLLS describe exhaustively;
+# lib/ also holds sqlite3.dll from the build hook of package:sqlite3.
+string(REPLACE "," ";" _lib_expected "${EXPECTED_LIB_DLLS}")
+set(_lib_nonempty "")
+foreach(_dll IN LISTS _lib_expected)
+  string(STRIP "${_dll}" _dll)
+  if(NOT _dll STREQUAL "")
+    list(APPEND _lib_nonempty "${_dll}")
+  endif()
+endforeach()
+if(NOT _lib_nonempty)
+  message(FATAL_ERROR
+    "verify_bundle_dlls: EXPECTED_LIB_DLLS parsed to an empty list (got: "
+    "'${EXPECTED_LIB_DLLS}').\n"
+    "Fix the -DEXPECTED_LIB_DLLS argument in windows/runner/CMakeLists.txt.")
+endif()
+set(_lib_expected "${_lib_nonempty}")
+
+set(_lib_missing "")
+foreach(_dll IN LISTS _lib_expected)
+  if(NOT EXISTS "${BUNDLE_DIR}/lib/${_dll}")
+    list(APPEND _lib_missing "lib/${_dll}")
+  endif()
+endforeach()
+if(_lib_missing)
+  string(REPLACE ";" "\n  " _lib_missing_text "${_lib_missing}")
+  message(FATAL_ERROR
+    "Windows bundle is incomplete — these DLLs are missing from lib/:\n"
+    "  ${_lib_missing_text}\n"
+    "\n"
+    "Bundle directory:\n  ${BUNDLE_DIR}\n"
+    "\n"
+    "They come from the package windows/provision-whisper.ps1 builds\n"
+    "(<libs>/whisper-<version>/pkg/bin) and are copied by a POST_BUILD step\n"
+    "in windows/runner/CMakeLists.txt. Without them the transcription page\n"
+    "says \"whisper.cpp library not available\" and nothing else reports it.")
+endif()
+
+file(GLOB _lib_bundle RELATIVE "${BUNDLE_DIR}/lib"
+     "${BUNDLE_DIR}/lib/whisper*.dll" "${BUNDLE_DIR}/lib/ggml*.dll")
+file(GLOB _root_whisper RELATIVE "${BUNDLE_DIR}"
+     "${BUNDLE_DIR}/whisper*.dll" "${BUNDLE_DIR}/ggml*.dll")
+set(_lib_foreign "")
+foreach(_dll IN LISTS _lib_bundle)
+  list(FIND _lib_expected "${_dll}" _idx)
+  if(_idx EQUAL -1)
+    list(APPEND _lib_foreign "lib/${_dll}")
+  endif()
+endforeach()
+foreach(_dll IN LISTS _root_whisper)
+  list(APPEND _lib_foreign "${_dll}")
+endforeach()
+if(_lib_foreign)
+  string(REPLACE ";" "\n  " _lib_foreign_text "${_lib_foreign}")
+  message(FATAL_ERROR
+    "Windows bundle contains whisper*/ggml* DLLs that do not belong there:\n"
+    "  ${_lib_foreign_text}\n"
+    "\n"
+    "Bundle directory:\n  ${BUNDLE_DIR}\n"
+    "\n"
+    "The whisper.cpp set belongs in lib/ and consists exactly of\n"
+    "-DEXPECTED_LIB_DLLS in windows/runner/CMakeLists.txt. A copy in the\n"
+    "bundle root would be loaded by the GUI before the one in lib/; an extra\n"
+    "one in lib/ is a leftover of another whisper.cpp build (the Release\n"
+    "directory is not cleared between builds). Delete the named file.")
+endif()
+list(LENGTH _lib_expected _lib_count)
+
 # ── Helper programs (S403): -DEXPECTED_PROGRAMS=a.exe,b.exe ─────────────────
 #
 # A helper program the daemon starts by name is the same failure class as a
 # DLL it loads by name: when it is absent nothing fails, a feature is just
 # gone. Without cleona-play.exe every sound is silent on Windows — which was
 # the state of every Windows build up to S403 and went unnoticed for months,
-# because the old player quietly did nothing. The argument is optional so
+# because the old player quietly did nothing. The same holds for
+# cleona-notify.exe (S420): without it Windows shows no system notification
+# and nothing else says so. The argument is optional so
 # that a caller with no helper program stays valid; a caller that passes it
 # must pass a non-empty list.
 set(_program_count 0)
@@ -181,16 +273,23 @@ if(DEFINED EXPECTED_PROGRAMS)
       "\n"
       "Bundle directory:\n  ${BUNDLE_DIR}\n"
       "\n"
-      "cleona-play.exe is built from windows/cleona_play/ and copied by a\n"
-      "POST_BUILD step in windows/runner/CMakeLists.txt. Check that the\n"
-      "target was built (its sources are fetched from github.com/xiph on the\n"
-      "first configure) and that the copy succeeded.\n"
+      "Each one is copied by a POST_BUILD step in\n"
+      "windows/runner/CMakeLists.txt; check that its target was built and\n"
+      "that the copy succeeded:\n"
+      "  cleona-play.exe      from windows/cleona_play/ (its sources are\n"
+      "                       fetched from github.com/xiph on the first\n"
+      "                       configure) -- without it no sound\n"
+      "  cleona-notify.exe    from windows/cleona_notify/ -- without it no\n"
+      "                       system notification\n"
+      "  cleona-firewall.cmd  from windows/ -- without it no firewall rule\n"
       "\n"
-      "This build is failed on purpose: without it the daemon plays no sound.")
+      "This build is failed on purpose: the daemon starts these by name, and\n"
+      "a missing one fails silently.")
   endif()
 endif()
 
 list(LENGTH _expected _count)
 message(STATUS
-  "Windows bundle verified: ${_count} native DLLs and ${_program_count} "
-  "helper program(s) present, no foreign cleona_*.dll in ${BUNDLE_DIR}")
+  "Windows bundle verified: ${_count} native DLLs, ${_lib_count} DLLs in lib/ "
+  "and ${_program_count} helper program(s) present, no foreign cleona_*.dll "
+  "or whisper*/ggml* DLL in ${BUNDLE_DIR}")

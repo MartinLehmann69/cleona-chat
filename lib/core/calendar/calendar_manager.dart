@@ -39,6 +39,11 @@ class CalendarManager {
   /// Free/Busy settings for this identity.
   FreeBusySettings freeBusySettings = FreeBusySettings();
 
+  /// Called after every write of events ([persistEvent], [save]) — every
+  /// change of the stock passes one of the two. The iOS reminder schedule
+  /// listens here (§18.1.6: withdrawn when its event changes or is cancelled).
+  void Function()? onChanged;
+
   bool _loaded = false;
 
   CalendarManager({
@@ -139,6 +144,7 @@ class CalendarManager {
   /// see a deletion. Whoever changes exactly ONE event calls
   /// [persistEvent].
   void save() {
+    onChanged?.call();
     final store = _store;
     if (store == null) return; // Proxy mode
     // DATA-LOSS LATCH (S366): it now asks the STORE, no longer
@@ -181,6 +187,7 @@ class CalendarManager {
   /// — 12 triggers, no cap, no deadline. The model is
   /// `PollManager.persistPoll`.
   void persistEvent(String eventId) {
+    onChanged?.call();
     final store = _store;
     if (store == null) return; // Proxy mode
     final event = events[eventId];

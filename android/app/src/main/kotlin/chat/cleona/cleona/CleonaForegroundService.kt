@@ -110,14 +110,37 @@ class CleonaForegroundService : Service() {
             }
         }
 
-        /// Play a one-shot tone (notification). No shared
-        /// state — the player cleans up after itself.
+        /// Play a one-shot tone. No shared state — the player cleans up
+        /// after itself.
+        ///
+        /// [notification]: the sound of a notification (S422 T-3, §22.8
+        /// "platform gates outside Cleona's control (system DND, …)"). It is
+        /// played with the notification usage — the notification volume, and
+        /// muted by the ringer modes silent and vibrate
+        /// (https://developer.android.com/reference/android/media/AudioAttributes#USAGE_NOTIFICATION)
+        /// — and not at all while the ringer is not normal or "Do not
+        /// disturb" filters anything
+        /// (https://developer.android.com/reference/android/app/NotificationManager#getCurrentInterruptionFilter()).
+        /// Every other sound (preview in the settings, call tones) stays on
+        /// the media stream and audible.
         @JvmStatic
-        fun playAssetSound(context: Context, asset: String) {
+        fun playAssetSound(context: Context, asset: String, notification: Boolean = false) {
+            if (notification && !notificationSoundAllowed(context)) {
+                Log.d(SOUND_TAG, "one-shot held back: ringer or Do not disturb")
+                return
+            }
             try {
                 val afd: AssetFileDescriptor =
                     context.applicationContext.assets.openFd("flutter_assets/$asset")
                 val mp = MediaPlayer()
+                if (notification) {
+                    mp.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                }
                 mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 afd.close()
                 mp.prepare()
@@ -125,6 +148,30 @@ class CleonaForegroundService : Service() {
                 mp.setOnCompletionListener { it.release() }
             } catch (e: Exception) {
                 Log.w(SOUND_TAG, "one-shot failed: $asset", e)
+            }
+        }
+
+        /// Whether the sound of a notification may play now: ringer in
+        /// normal mode and "Do not disturb" off (interruption filter
+        /// `ALL`, API 23+). An unknown state counts as not allowed — a
+        /// sound in a meeting is worse than a missing one (as the
+        /// screenshot click, S412).
+        private fun notificationSoundAllowed(context: Context): Boolean {
+            return try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    // `UNKNOWN`: the filter is unavailable — then the
+                    // ringer above decides alone.
+                    val filter = context.getSystemService(NotificationManager::class.java)
+                        .currentInterruptionFilter
+                    if (filter != NotificationManager.INTERRUPTION_FILTER_ALL &&
+                        filter != NotificationManager.INTERRUPTION_FILTER_UNKNOWN) return false
+                }
+                true
+            } catch (e: Exception) {
+                Log.w(SOUND_TAG, "ringer state unknown", e)
+                false
             }
         }
 

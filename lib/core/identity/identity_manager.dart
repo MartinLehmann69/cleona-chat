@@ -1091,6 +1091,88 @@ class IdentityManager {
     });
   }
 
+  /// This device was locked out (§14.4, S422): [ids] are the identities it
+  /// removes for that reason — noted BEFORE they are removed, so that
+  /// [deleteIdentity] does not note their indices as deleted (they live on, on
+  /// the other own devices).
+  void lockedOutSelfNote(
+      List<({int index, String name})> ids, DateTime at) {
+    _deviceStoreForWrite('the lock-out note').putEntry(
+        DeviceStore.areaDevice, DeviceStore.keyLockedOutSelf, {
+      'v': {
+        'at': at.millisecondsSinceEpoch,
+        'ids': [
+          for (final i in ids) {'i': i.index, 'name': i.name}
+        ],
+        'seen': false,
+      }
+    });
+  }
+
+  /// The note of [lockedOutSelfNote] — `null` when this device was never
+  /// locked out (or without a device database).
+  ({DateTime at, List<({int index, String name})> ids, bool seen})?
+      lockedOutSelf() {
+    final v = _deviceStoreIfPresent()
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyLockedOutSelf)?['v'];
+    if (v is! Map || v['at'] is! int) return null;
+    return (
+      at: DateTime.fromMillisecondsSinceEpoch(v['at'] as int),
+      ids: [
+        for (final e in (v['ids'] as List? ?? const []))
+          if (e is Map && e['i'] is int)
+            (index: e['i'] as int, name: e['name'] as String? ?? '')
+      ],
+      seen: v['seen'] == true,
+    );
+  }
+
+  /// The user dismissed the lock-out notice (§14.4 "the interface says
+  /// why"): the note stays (it keeps the indices from being noted as
+  /// deleted), marked as read. Local only.
+  void lockedOutSelfSeen() {
+    final n = lockedOutSelf();
+    if (n == null || n.seen) return;
+    _deviceStoreForWrite('the lock-out note').putEntry(
+        DeviceStore.areaDevice, DeviceStore.keyLockedOutSelf, {
+      'v': {
+        'at': n.at.millisecondsSinceEpoch,
+        'ids': [
+          for (final i in n.ids) {'i': i.index, 'name': i.name}
+        ],
+        'seen': true,
+      }
+    });
+  }
+
+  /// The note of [lockedOutSelfNote] goes: this device was enrolled again
+  /// (§14.6.1) — no longer the locked-out device.
+  void lockedOutSelfClear() {
+    final store = _deviceStoreIfPresent();
+    if (store == null || lockedOutSelf() == null) return;
+    _deviceStoreForWrite('the lock-out note')
+        .removeEntry(DeviceStore.areaDevice, DeviceStore.keyLockedOutSelf);
+  }
+
+  /// Devices locked out of this user's devices (§14.4, D-109, S422): the
+  /// names `deviceRecordKeys` forms (`u:<DeviceID>`, `n:<node id>`).
+  Set<String> lockedOutDevices() {
+    final v = _deviceStoreIfPresent()
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyLockedOutDevices)?['v'];
+    return {if (v is List) for (final x in v) if (x is String) x};
+  }
+
+  /// Notes the names [keys] of a locked-out device (idempotent).
+  void lockedOutDevicesNote(Set<String> keys) {
+    if (keys.isEmpty) return;
+    final store = _deviceStoreForWrite('the locked-out devices');
+    store.transaction(() {
+      final have = lockedOutDevices()..addAll(keys);
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyLockedOutDevices,
+          {'v': have.toList()..sort()});
+    });
+  }
+
   /// Closes the derivation run — the user's choice, never automatic (§13.7).
   void identityRunClose() {
     final store = _deviceStoreIfPresent();
@@ -1691,7 +1773,11 @@ class IdentityManager {
     // next derivation run. Its index is never given again either: the
     // high-water mark [DeviceStore.keyMaxHdIndex] stays.
     final hd = removed?.hdIndex;
-    if (hd != null && !retiredIdentities().any((r) => r.hdIndex == hd)) {
+    // S422 (§14.4): nor an identity removed because this device was locked
+    // out — it lives on, on the other own devices.
+    if (hd != null &&
+        !retiredIdentities().any((r) => r.hdIndex == hd) &&
+        !(lockedOutSelf()?.ids.any((r) => r.index == hd) ?? false)) {
       markHdIndexDeleted(hd);
     }
     // §4.4.2 (D-106): the device key set this device held for the identity

@@ -73,12 +73,13 @@ extension NodeStepFour on Node {
           Address to,
           Address from,
           Uint8List? message,
-          {required bool signal}) =>
+          {required bool signal, bool callInvitation = false}) =>
       Target.outDueTo(three,
           lan: destination,
           neighbours: c?.neighbours ?? const [],
           code: c?.code,
           identifier: to.identifier,
           signal: signal,
+          callInvitation: callInvitation, // §17.2: step 3 repeats (`ladder.dart`)
           sending: message == null ? null : sendingSeed(message, from, to));
 }

@@ -103,17 +103,27 @@ Uint8List deviceValue(PostBox me, Uint8List deviceId, int day) =>
 /// The questions of THIS device of [i]: its values of today and the six days
 /// before (§8.2 retention) — one question, or none while the line is
 /// inactive. Asked at the same edges as the day values (`node_post_box.dart`).
+///
+/// §14.4 "The transition" (S422, D-109 B-3): after a key change the identity
+/// keeps its previous day-key seed for 7 days ([PostBox.previousDaySeed]);
+/// while it does, the values of the PREVIOUS own line are asked too — a
+/// sibling that has not taken its key package yet still deposits there
+/// ("asks under both lines during the transition").
 List<List<Question>> ownLineAsk(Identity i, DateTime now) {
   final line = ownLineOf(i);
   if (line == null || !line.active) return const [];
-  final kOwn = ownKey(i.postBox);
   final today = utcDay(now);
+  List<Question> under(Uint8List kOwn) => [
+        for (var d = 0; d < kAtMostValues; d++)
+          if (devicePair(kOwn, line.device, today - d) case final p)
+            (value: dayValue(p.pk), pair: p),
+      ];
+  final previous = i.postBox.previousDaySeed;
   return [
-    [
-      for (var d = 0; d < kAtMostValues; d++)
-        if (devicePair(kOwn, line.device, today - d) case final p)
-          (value: dayValue(p.pk), pair: p),
-    ],
+    under(ownKey(i.postBox)),
+    if (previous != null)
+      under(_na.hkdfSha256(previous.seed,
+          info: Uint8List.fromList(utf8.encode('own-line')), length: 32)),
   ];
 }
 

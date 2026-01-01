@@ -204,12 +204,16 @@ class WhisperFFI {
         }
       }
       for (final dir in searchPaths.map(_dirOf).whereType<String>().toSet()) {
+        // The platform separator: `LoadLibraryW` wants backslashes ("be
+        // sure to use backslashes (\), not forward slashes (/)",
+        // https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryw).
+        final path = '$dir${Platform.pathSeparator}$ggmlName';
         try {
-          DynamicLibrary.open('$dir/$ggmlName');
-          _log.info('GGML pre-loaded: $dir/$ggmlName');
+          DynamicLibrary.open(path);
+          _log.info('GGML pre-loaded: $path');
           break;
         } catch (e) {
-          _log.debug('GGML pre-load failed for $dir/$ggmlName: $e');
+          _log.debug('GGML pre-load failed for $path: $e');
           continue;
         }
       }
@@ -520,8 +524,25 @@ class WhisperFFI {
   bool get isModelLoaded => _ctx != null && _ctx != nullptr && !_disposed;
 
   /// Extract directory from a library path, or null for bare names.
+  ///
+  /// Both separators count (S422, R-11). On Windows the bundle entry of
+  /// the search list is `<bundleDir>\lib\whisper.dll` — `AppPaths` builds
+  /// it with `Platform.pathSeparator` — and a search for `/` alone found
+  /// no directory in it, so the GGML pre-load below never tried the
+  /// bundle. That pre-load is what makes the bundle work on Windows:
+  /// `DynamicLibrary.open` is `LoadLibraryW` without
+  /// `LOAD_WITH_ALTERED_SEARCH_PATH` (Dart SDK 3.12.2,
+  /// runtime/lib/ffi_dynamic_library.cc:77-78 with
+  /// `search_dll_load_dir = false`, runtime/platform/utils.cc:342-347), so
+  /// the `ggml*.dll` that `whisper.dll` imports are NOT looked for in
+  /// `lib\` but in the directory of the executable — and for the daemon
+  /// that is `bin\`. A module of the same name that is already loaded is
+  /// used instead of a search ("If a DLL with the same module name is
+  /// already loaded in memory, the system uses the loaded DLL, no matter
+  /// which directory it is in",
+  /// https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
   static String? _dirOf(String path) {
-    final idx = path.lastIndexOf('/');
+    final idx = path.lastIndexOf(RegExp(r'[/\\]'));
     return idx > 0 ? path.substring(0, idx) : null;
   }
 

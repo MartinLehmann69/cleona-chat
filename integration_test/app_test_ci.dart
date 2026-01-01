@@ -4,20 +4,13 @@
 //   - FFI loading and keyring (initUiCrypto, the same start as main())
 //   - App launch, Setup flow, Home screen
 //
-// Phase 2: Network integration (runs when BOOTSTRAP_CONTACT_SEED is set)
-//   - Programmatic ContactSeed import via CleonaService API (no GUI taps)
-//   - Peer connection verification (peer count > 0)
-//
-// Phase 3: Cross-node CR + messaging (runs when ALICE/ALLYCAT_CONTACT_SEED set)
-//   - Send CR to Alice (Node 1 identity 1) → auto-accepted by IPC watcher
-//   - Send CR to AllyCat (Node 1 identity 2) → auto-accepted by IPC watcher
-//   - Send test messages to both, receive CI-ACK messages back
+// Phases 2 and 3 (network entry via a seed, cross-node contact) are removed
+// (S388/S389); see the comments in the body.
 //
 // All phases run in a single testWidgets — Flutter integration tests
 // don't share widget trees across testWidgets blocks.
 //
 // Run: flutter test integration_test/app_test_ci.dart -d macos
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -39,14 +32,6 @@ void main() {
       FlutterError.presentError(details);
     }
   };
-
-  final contactSeedUri = Platform.environment['BOOTSTRAP_CONTACT_SEED'];
-  final hasContactSeed = contactSeedUri != null && contactSeedUri.isNotEmpty;
-
-  final aliceSeedUri = Platform.environment['ALICE_CONTACT_SEED'];
-  final allyCatSeedUri = Platform.environment['ALLYCAT_CONTACT_SEED'];
-  final hasPhase3 = aliceSeedUri != null && aliceSeedUri.isNotEmpty &&
-      allyCatSeedUri != null && allyCatSeedUri.isNotEmpty;
 
   testWidgets('CI Integration Test', (tester) async {
     // ── Phase 1: Startup Smoke ──────────────────────────────────────
@@ -119,11 +104,9 @@ void main() {
     // card of the first contact (§15.2) and the neighbour sources 1-3 (§11.8).
     // That needs a card export of the remote side in CI — the same
     // open prerequisite as for phase 3, in the report S389-BAU-APP.md.
-    if (hasContactSeed) {
-      printOnFailure('Phase 2 dropped (V3 ContactSeed reader + fixed '
-          'entry via BOOTSTRAP_CONTACT_SEED, S389) — the variable is '
-          'no longer read');
-    }
+    // The environment variable itself is gone too (S422, owner 12.11.2026):
+    // as a repository variable of the public repository its value stood in
+    // clear text in every public log of this workflow.
 
     // ── Phase 3: Cross-Node CR + Messaging — REMOVED ──────────────
     //
@@ -133,9 +116,5 @@ void main() {
     // V4.2 no longer has (S388-BAU-KONTAKT): a request only arises when
     // redeeming an invitation card (§15.5). A replacement via the card
     // needs a card export of the remote side in CI — open, in the report.
-    if (hasPhase3) {
-      printOnFailure('Phase 3 dropped (V3 first contact, S388-BAU-KONTAKT) — '
-          'ALICE/ALLYCAT_CONTACT_SEED are no longer read');
-    }
   });
 }

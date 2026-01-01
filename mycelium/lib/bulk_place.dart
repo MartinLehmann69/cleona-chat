@@ -329,7 +329,8 @@ class BulkPlacer {
         _send(holdPiecePacket((tag: tag, stripe: s, no: no,
             sealed: pieceSeal(seal, tag, s, no, blocks[i]))), to);
         wire++;
-        job.progress?.call(++sent, total);
+        sent++; // not inside `progress?.call`: no callback, no count (S422)
+        job.progress?.call(sent, total);
         if (sent % step == 0 && sent < total) {
           report?.call('Bulk: placing ${tagHex(tag).substring(0, 8)}: $sent '
               'of $total pieces sent (holder $to)');

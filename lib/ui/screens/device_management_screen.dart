@@ -404,14 +404,19 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
             Builder(builder: (context) {
               final hashHex = entry['rotationHashHex'] as String;
               final requesterHex = entry['requestingDeviceIdHex'] as String;
-              final expiresAtMs = entry['expiresAtMs'] as int;
-              final remainingMs = expiresAtMs - nowMs;
+              // S422: no clock — a daemon of this version sends no
+              // `expiresAtMs`; the request waits for the decision.
+              final expiresAtMs = entry['expiresAtMs'] as int?;
+              final remainingMs =
+                  expiresAtMs == null ? 1 : expiresAtMs - nowMs;
               final expired = remainingMs <= 0;
               final totalSeconds = remainingMs > 0 ? remainingMs ~/ 1000 : 0;
               final timeLabel = '${totalSeconds ~/ 60}:'
                   '${(totalSeconds % 60).toString().padLeft(2, '0')}';
               final requesterName = _devices
-                  .where((d) => d.deviceNodeIdHex == requesterHex)
+                  .where((d) =>
+                      d.deviceId == requesterHex ||
+                      d.deviceNodeIdHex == requesterHex)
                   .map((d) => d.deviceName)
                   .firstOrNull;
 
@@ -431,6 +436,7 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
                         style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                       ),
                       const SizedBox(height: 4),
+                      if (expiresAtMs != null)
                       Text(
                         expired
                             ? locale.get('device_rotation_approval_expired')
@@ -506,11 +512,63 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     final locale = AppLocale.read(context);
     final theme = Theme.of(context);
     final lockouts = widget.service.deviceLockouts;
-    if (lockouts.isEmpty) return const SizedBox.shrink();
+    // §14.9.2 "Quorum" (S422): a lock-out waiting for the other devices.
+    final round = widget.service.coSignRoundView;
+    if (lockouts.isEmpty && round == null) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (round != null)
+          Card(
+            key: const Key('co_sign_round'),
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Icon(Icons.how_to_reg, size: 24, color: theme.colorScheme.error),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        (round['deviceName'] as String?) ?? '',
+                        style: theme.textTheme.titleMedium,
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 8),
+                  Text(
+                    locale.tr('device_lockout_quorum', {
+                      'need': '${round['need']}',
+                      'have': '${round['have']}',
+                    }),
+                    key: const Key('co_sign_quorum'),
+                  ),
+                  if (round['lockOut'] == true &&
+                      (round['missing'] as List?)?.isNotEmpty == true) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      locale.tr('device_lockout_no_quorum', {
+                        'device': (round['missing'] as List).join(', '),
+                      }),
+                      key: const Key('co_sign_missing'),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      key: const Key('co_sign_cancel'),
+                      onPressed: () => widget.service.cancelCoSign(),
+                      child: Text(locale.get('cancel')),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ...lockouts.map((l) {
           final name = (l['deviceName'] as String?) ?? '';
           final total = (l['total'] as int?) ?? 0;

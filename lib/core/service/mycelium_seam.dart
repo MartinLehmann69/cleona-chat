@@ -358,20 +358,42 @@ Future<Host> hostStart({
   void Function(String)? report,
   void Function(String)? traceReport,
 }) async {
-  final hostReport = report == null || traceReport == null
-      ? report
-      : (String line) => line.startsWith(kTraceLinePrefix)
-          ? traceReport(line)
-          : report(line);
+  // S420 measurement (IB-2): which host instance of this process takes an
+  // inbound link. The shell's callee line (`shell.dart` `_setUp`, §11.8.6)
+  // gets the instance number of this host; two hosts on one port in one
+  // process (the iOS wake-up beside the app until S420) were
+  // indistinguishable in the log. A number, no name, no address.
+  final instance = ++_hostInstancesStarted;
+  String tagged(String line) => line.contains(_calleeLine)
+      ? '$line (host instance $instance)'
+      : line;
+  final hostReport = report == null
+      ? null
+      : traceReport == null
+          ? (String line) => report(tagged(line))
+          : (String line) => line.startsWith(kTraceLinePrefix)
+              ? traceReport(tagged(line))
+              : report(line);
   if (services.isEmpty) {
     throw StateError('a host needs at least one service — without a '
         'mailbox the node would start up mute');
   }
   final attached = <CleonaService>{};
+  // The last state the node reported — for the edge into `ready`.
+  ReadinessState? lastReadiness;
   void readinessChanged(ReadinessState state, int responding) {
     report?.call('mycelium:readiness ${state.name} '
         '($responding responding neighbours)');
+    // §22.8 "Normative": a readiness transition `searching`/`connecting` →
+    // `ready` opens a first collection, bundled like the one after a start
+    // (D-124). The callback also fires on a mere change of the number, so
+    // only the edge into `ready` counts.
+    final intoReady = state == ReadinessState.ready &&
+        lastReadiness != null &&
+        lastReadiness != ReadinessState.ready;
+    lastReadiness = state;
     for (final d in List.of(attached)) {
+      if (intoReady) d.openFirstCollection();
       d.onStateChanged?.call();
     }
   }
@@ -437,6 +459,8 @@ Future<Host> hostStart({
         askRouter ? () => portMappingConfigured(baseDir, key) : null,
   );
   _servicesPerHost[host] = attached;
+  _hostInstance[host] = instance;
+  report?.call('mycelium:host instance $instance started, port ${host.port}');
   // §8.2 "After more than 7 days" (D-48): the node says when a collection of
   // an identity ended with an answer from at least one holder; the service
   // of THAT identity keeps the moment and checks its age (§9.5). The edge of
@@ -494,6 +518,19 @@ Future<Host> hostStart({
 }
 
 bool get _mobile => Platform.isAndroid || Platform.isIOS;
+
+/// Hosts started in this process so far — the instance number of the next
+/// one (S420 measurement, see [hostStart]).
+int _hostInstancesStarted = 0;
+final Expando<int> _hostInstance = Expando('host-instance');
+
+/// The part of the shell's line for an inbound link that [hostStart] tags
+/// (`mycelium/lib/shell.dart` `_setUp`: `set up as callee`).
+const String _calleeLine = ' set up as callee';
+
+/// The instance number [hostStart] gave [host] (1 for the first host of the
+/// process), or `null` for a host it did not start — for the log only.
+int? hostInstance(Host? host) => host == null ? null : _hostInstance[host];
 
 /// Stops [host] and, before it, the session clocks of lane 2 (§17.6) —
 /// `HostStream` lives beside the host (`host_stream.dart`), and `host.dart`

@@ -25,7 +25,7 @@
 /// (wire closed, probe on the same port, the restart); a second probe needed
 /// one wait of 1 ms in 260 and 322 of 2000, and after it every bind
 /// succeeded (measured S413, report
-/// `berichte/S413-FIX-RUFPORT.md`). Hence [_bindAgain]: a holder from this
+/// `berichte/S413-FIX-RUFPORT.md`). Hence [bindAgain]: a holder from this
 /// process is gone within milliseconds, a foreign one stays.
 ///
 /// The window between the probe's close and the wire's bind remains: a
@@ -53,7 +53,7 @@ Future<RawDatagramSocket> bindAlone(InternetAddress to4, int port) async {
         port: port);
   }
   final number = await _freeNumber(to4, port);
-  return _bindAgain(() => RawDatagramSocket.bind(to4, number));
+  return bindAgain(() => RawDatagramSocket.bind(to4, number));
 }
 
 /// A number nobody holds: [port] itself, or for 0 the pick of the operating
@@ -64,7 +64,7 @@ Future<int> _freeNumber(InternetAddress to4, int port) async {
   RawDatagramSocket? onCallPort;
   try {
     while (true) {
-      final probe = await _bindAgain(
+      final probe = await bindAgain(
           () => RawDatagramSocket.bind(to4, port, reuseAddress: false));
       if (probe.port != kCallPort) {
         probe.close();
@@ -95,8 +95,9 @@ const Set<int> _addressInUse = {98, 48, 10048, 10013};
 
 /// [bind], tried again while a socket of this process may still be closing —
 /// only on the codes of [_addressInUse]. Every other error is no lingering
-/// socket and is thrown at once.
-Future<RawDatagramSocket> _bindAgain(
+/// socket and is thrown at once. Also used by `Wire`'s reopen on the same
+/// port (§31.3 recovery, S422: field iPhone, EADDRINUSE on a reopen).
+Future<RawDatagramSocket> bindAgain(
     Future<RawDatagramSocket> Function() bind) async {
   for (var attempt = 1;; attempt++) {
     try {

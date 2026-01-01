@@ -284,10 +284,12 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
                     const SizedBox(height: 16),
                     _buildGoogleSection(locale, googleConfigured),
                   ],
-                  if (!_isOnAndroid) ...[
-                    const SizedBox(height: 16),
-                    _buildExchangeSection(locale, exchangeConfigured),
-                  ],
+                  // Exchange on the phone too (D-125 (4), S422 K-6): with
+                  // user name and password; its OAuth sign-in needs the
+                  // loopback flow the app process does not offer
+                  // (`_ExchangeDialog._oauthAvailable`).
+                  const SizedBox(height: 16),
+                  _buildExchangeSection(locale, exchangeConfigured),
                   const SizedBox(height: 16),
                   _buildLocalIcsSection(locale),
                   if (!_isOnAndroid) ...[
@@ -1420,6 +1422,11 @@ class _ExchangeDialogState extends State<_ExchangeDialog> {
   bool _busy = false;
   String? _error;
 
+  /// The OAuth sign-in runs over a loopback redirect the daemon serves; the
+  /// app process (Android, iOS) has none (`InProcessCalendarSyncBridge`
+  /// `startExchangeOauth`), so there only user name and password are offered.
+  bool get _oauthAvailable => widget.ipc is! InProcessCalendarSyncBridge;
+
   @override
   void initState() {
     super.initState();
@@ -1429,6 +1436,7 @@ class _ExchangeDialogState extends State<_ExchangeDialog> {
       _direction = widget.initial!['direction'] as String? ?? 'bidirectional';
       _useOAuth = widget.initial!['authMode'] == 'oauth2';
     }
+    if (!_oauthAvailable) _useOAuth = false;
   }
 
   @override
@@ -1550,6 +1558,7 @@ class _ExchangeDialogState extends State<_ExchangeDialog> {
                 ],
               ),
               const SizedBox(height: 12),
+              if (_oauthAvailable)
               DropdownButtonFormField<bool>(
                 value: _useOAuth,
                 decoration: InputDecoration(

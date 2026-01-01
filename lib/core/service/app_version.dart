@@ -32,7 +32,7 @@ library;
 /// minor and patch at most 99 (D-98). `scripts/preflight.sh` holds version,
 /// build number and `android/local.properties` against each other and blocks
 /// the commit on deviation (`scripts/check-app-version-single-source.sh`).
-const String kAppVersion = '4.2.7';
+const String kAppVersion = '4.2.8';
 
 /// The own version as `major * 1000 + minor`.
 ///

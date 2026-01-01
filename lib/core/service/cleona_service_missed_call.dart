@@ -230,15 +230,12 @@ extension CleonaServiceMissedCall on CleonaService {
         '${senderHex.substring(0, 8)}${group != null ? ' in a group' : ''}'
         '${isNew ? '' : ' (already shown)'}');
     if (!isNew ||
-        _shouldSuppressNotification(
-            conversationId, _claimedSendTimeMs(event))) {
+        _shouldSuppressNotification(conversationId)) {
       return;
     }
-    notificationSound.playMessageSound(
+    _signalNotification(
         soundName: conversations[conversationId]?.notificationSoundName);
-    notificationSound.vibrate(VibrationType.message);
-    final words = notificationWords ??
-        (String key) => trayTranslate(key, trayLocaleCode());
+    final words = notificationWord;
     final senderName =
         _contacts[senderHex]?.displayName ??
             group?.members[senderHex]?.displayName ??

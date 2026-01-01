@@ -85,15 +85,6 @@ _whisper_free_params
 _whisper_params_set_language
 _whisper_params_set_n_threads
 
-# iOS native UDP bypass (cleona_udp_ios.c)
-_cleona_ios_find_udp_fd
-_cleona_ios_find_udp6_fd
-_cleona_ios_sendto
-_cleona_ios_sendto6
-_cleona_ios_recv_peek
-_cleona_ios_recvfrom
-_cleona_ios_create_send_socket
-
 # libcleona_pow (native PoW)
 _cleona_pow_find_nonce
 

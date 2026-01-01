@@ -207,9 +207,15 @@ class _CallScreenState extends State<CallScreen> {
     final isRinging = currentCall?.state == CallState.ringing;
     final isIncoming = currentCall?.direction == CallDirection.incoming;
     final isVideo = currentCall?.isVideo ?? widget.callInfo.isVideo;
+    // §17.5 "desktop video calls remain audio-only": a device without a video
+    // path (the service named `notSupported`) shows no camera, no own-video
+    // toggle and no camera switch — the call runs as a voice call, and so is
+    // it shown (S422 N-W33).
+    final noVideoPath =
+        currentCall?.ownVideoOffReason == CallVideoOffReason.notSupported;
 
     // Video call layout
-    if (isVideo && !isRinging) {
+    if (isVideo && !isRinging && !noVideoPath) {
       return _buildVideoCallLayout(context, appState, currentCall, isRinging, isIncoming);
     }
 

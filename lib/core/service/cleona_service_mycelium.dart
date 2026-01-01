@@ -109,6 +109,9 @@ extension CleonaServiceMycelium on CleonaService {
     // §14.7 Type 23 (D-99): the own devices carrying this identity join its
     // set; a changed identity list goes to the other own devices.
     _identitySetAttach();
+    // §14.6.3, §13.5.2 "resumable" (S422): a reconciliation this device
+    // served or took before the restart goes on.
+    reconcileResume();
     // §15.3 "lives 60 s": the mailbox closed at its start what was due; a
     // face-to-face invitation shown shortly before a restart gets its rest.
     _faceToFaceArm();
@@ -519,7 +522,12 @@ extension CleonaServiceMycelium on CleonaService {
       bool groupPair = false}) {
     final mycelium.Outbound a;
     try {
-      a = mycelium.MailboxSignal(p).signal(identifier, frame);
+      // §17.2: the invitation alone is sent again on step 3 until the callee
+      // acknowledges it or the call stops ringing (`_myceliumCallEnded`);
+      // every other signal stays single. The type is known here and nowhere
+      // below — the delivery layer carries the frame as opaque bytes.
+      a = mycelium.MailboxSignal(p).signal(identifier, frame,
+          callInvitation: type == proto.MessageType.MT_CALL_INVITE);
     } on mycelium.MailboxError catch (e) {
       _log.warn('mycelium:${type.name} to $short — $e. Not sent.');
       return null;
@@ -1081,7 +1089,8 @@ extension CleonaServiceMycelium on CleonaService {
 
     _log.event('mycelium RECEIVE${frame.messageType.name} from '
         '${senderHex.substring(0, 8)} (${e.content.length} B, '
-        '${viaGroupPair ? 'group pair' : trust.name})');
+        '${viaGroupPair ? 'group pair' : trust.name}, '
+        'host instance ${hostInstance(p?.host)})'); // S420: which host took it
 
     final verdict = await handleApplicationFrame(
       event: HarvestEvent.fromApplicationFrame(

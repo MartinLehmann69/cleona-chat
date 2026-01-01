@@ -12,6 +12,7 @@
 /// acknowledgement waits until the object decodes (§9.4, Q1).
 library;
 
+import 'dart:io' show InternetAddress;
 import 'dart:typed_data';
 
 import 'package:mycelium/bulk_announce.dart';
@@ -19,6 +20,8 @@ import 'package:mycelium/bulk_collect.dart';
 import 'package:mycelium/bulk_place.dart';
 import 'package:mycelium/card.dart' show CardAddress;
 import 'package:mycelium/mailbox.dart';
+import 'package:mycelium/mailbox_own_signal.dart'
+    show MailboxOwnSignal, ownWhereOf;
 
 extension MailboxBulk on Mailbox {
   /// Holder candidates for a transfer to [contactIdentifier], in the order
@@ -52,6 +55,33 @@ extension MailboxBulk on Mailbox {
       }
     }
     return host.bulk.holderOrder(told);
+  }
+
+  /// Places [object] ONCE for the own device [device] (S422, §14.6.3 "… or on
+  /// lane 3"): its fixed neighbours as it last told them on the own line
+  /// (§14.7, [ownWhereOf]) first — §9.4 "the recipient's fixed neighbours as
+  /// the recipient last told them" —, then this device's own and the other
+  /// reachable holders ([BulkHost.holderOrder]).
+  Future<BulkPlaced> bulkPlaceForOwnDevice(Uint8List device, Uint8List object,
+      {Uint8List? transferKey}) {
+    final hex =
+        device.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    // Never THIS node (S422, finding P6-L3b): the sibling may name it as its
+    // fixed neighbour, but lane 3 is the way when the sibling does not reach
+    // this node — pieces kept here would help nobody.
+    final mine = ownWhereHere().segment;
+    bool self(CardAddress a) =>
+        a.port == node.port &&
+        (mine.any((m) => m.equal(a)) ||
+            InternetAddress.fromRawAddress(a.address).isLoopback);
+    final told = [
+      for (final a in ownWhereOf(identity)[hex]?.neighbours ??
+          const <CardAddress>[])
+        if (!self(a)) a
+    ];
+    return host.bulk.placer.place(
+        object, [for (final a in host.bulk.holderOrder(told)) if (!self(a)) a],
+        transferKey: transferKey);
   }
 
   /// Places [object] for [contactIdentifier] with the holders of

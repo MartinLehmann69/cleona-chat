@@ -27,6 +27,8 @@ import 'package:mycelium/durable_fetch.dart' show DurableSend, nodeKey;
 import 'package:mycelium/durable_packets.dart';
 import 'package:mycelium/durable_proof.dart';
 import 'package:mycelium/durable_stock.dart';
+import 'package:mycelium/durable_trace.dart';
+import 'package:mycelium/post_box_proof_of_work.dart' show kProofOfWorkLength;
 import 'package:mycelium/send_batch.dart';
 
 /// Blocks beyond what the object needs: a quarter of its source blocks and
@@ -61,26 +63,46 @@ class DurableServe {
 
   /// `0x90` — answered `0x91` (kept or already held) or `0x94` (not
   /// held here: no such channel, no valid proof of work, or refused by the
-  /// application).
+  /// application). An object above [kDurableObjectAtMost] is answered
+  /// `0x94` as well (§16.7 "a limit", D-123 (10)) — silence would make the
+  /// author's device count this holder as incapable (`durable_ask.dart`).
   void deposit(Uint8List p, CardAddress from) {
     final d = depositRead(p);
-    if (d == null) return;
+    if (d == null) return _oversize(p, from);
     final id = DurableId.of(d.channel, d.object);
     bool kept;
+    String why;
     if (!_holds(d.channel)) {
       kept = false;
+      why = 'channel not held';
     } else if (!durableProofCarries(d.channel, d.object, d.proof)) {
       kept = false; // §16.7: no valid proof of work, no deposit
+      why = 'no valid proof';
       report('Durable: deposit from ${nodeKey(from)} without a valid proof');
     } else if (stock.isHeldOrRejected(id)) {
       kept = stock.object(id) != null;
+      why = kept ? 'held before' : 'rejected before';
     } else {
       kept = stock.offer(d.channel, d.object, fromNode: nodeKey(from)) ==
           DurableVerdict.kept;
+      why = kept ? 'kept' : 'refused by the application';
       if (kept) depositsKept++;
     }
+    durableTraceDepositIn(report, id, from, d.object.length,
+        kept: kept, why: why);
     unawaited(send(
         kept ? depositedPacket(d.channel, id.hash) : notHeldPacket(id), from));
+  }
+
+  /// A `0x90` [depositRead] did not take: above the limit → `0x94`, one
+  /// line; anything else (malformed) stays unanswered as before.
+  void _oversize(Uint8List p, CardAddress from) {
+    final id = depositOversizeRead(p);
+    if (id == null) return;
+    report('Durable: deposit from ${nodeKey(from)} refused — object of '
+        '${p.length - 2 - kProofOfWorkLength} B above $kDurableObjectAtMost B, '
+        'answered 0x94');
+    unawaited(send(notHeldPacket(id), from));
   }
 
   /// `0x92` — fountain blocks of the object, or `0x94`.

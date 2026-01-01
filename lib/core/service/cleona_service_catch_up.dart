@@ -99,6 +99,9 @@ extension CleonaServiceCatchUp on CleonaService {
   /// between finds the absence again at its next collection.
   void collectionAnswered() {
     if (_disposed) return;
+    // §22.8 L3: an answered collection of this identity ends a running
+    // first collection — its one batch notification goes now (D-124).
+    endFirstCollection();
     final now = catchUpClock();
     final last = catchUpLastCollection;
     if (last != null && now.difference(last) > kCatchUpAfter) {
@@ -375,10 +378,9 @@ extension CleonaServiceCatchUp on CleonaService {
     catchUpTaken += taken;
     // One sound per conversation and packet, as for a message that arrives.
     for (final e in rang.entries) {
-      if (_shouldSuppressNotification(e.key, 0)) continue;
-      notificationSound.playMessageSound(
+      if (_shouldSuppressNotification(e.key)) continue;
+      _signalNotification(
           soundName: conversations[e.key]?.notificationSoundName);
-      notificationSound.vibrate(VibrationType.message);
       _postAndroidNotification(
           _contacts[partyHex]?.displayName ?? partyHex.substring(0, 8),
           e.value.text.length > 100

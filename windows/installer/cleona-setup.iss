@@ -19,11 +19,15 @@
   #define ProductAppId "{{8F4A9C2E-7B3D-4E1F-A5C8-2D9E6F0B1A4C}"
   #define AutostartValue "CleonaDaemon"
   #define IconAsset "app_icon.ico"
+  #define IconPng "app_icon.png"
+  #define ToastAppId "Cleona.Chat"
 #else
   #define ProductName "Cleona Beta"
   #define ProductAppId "{{C2D7E1A4-3F96-4B58-9E0D-71A6B4F2C853}"
   #define AutostartValue "CleonaBetaDaemon"
   #define IconAsset "app_icon_beta.ico"
+  #define IconPng "app_icon_beta.png"
+  #define ToastAppId "Cleona.Chat.Beta"
 #endif
 
 [Setup]
@@ -66,7 +70,19 @@ Name: "autostart"; Description: "{#ProductName} beim Windows-Start automatisch s
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\data\flutter_assets\assets\{#IconAsset}"
+; The start-menu shortcut carries the sender identity of the system
+; notifications (S420): "For a desktop app to display a toast, the app must
+; have a shortcut on the Start screen. The shortcut must have an
+; AppUserModelID." (https://learn.microsoft.com/en-us/uwp/api/windows.ui.notifications.toastnotificationmanager.createtoastnotifier).
+; AppUserModelID: "Specifies the Windows 7 (or later) Application User Model
+; ID for the shortcut" (https://jrsoftware.org/ishelp/topic_iconssection.htm).
+; In this non-administrative setup {group} is the folder {#ProductName} in the
+; current user's start menu (https://jrsoftware.org/ishelp/topic_consts.htm),
+; i.e. ...\Start Menu\Programs\{#ProductName}\{#ProductName}.lnk -- the very
+; file cleona-notify.exe keeps (target, app id) for in-network updates and
+; the ZIP, so there is one entry either way. Same app id as
+; WindowsToastNotifier.appIdFor, checked by smoke_windows_toast_notifier.dart.
+Name: "{group}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\data\flutter_assets\assets\{#IconAsset}"; AppUserModelID: "{#ToastAppId}"
 Name: "{group}\{#ProductName} deinstallieren"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\data\flutter_assets\assets\{#IconAsset}"; Tasks: desktopicon
 
@@ -78,6 +94,16 @@ Name: "{autodesktop}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename
 ; "laeuft, oeffnet nur keinen Socket". Die [Files]-Zeile oben nimmt das
 ; Unterverzeichnis ueber `recursesubdirs` ohnehin mit.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AutostartValue}"; ValueData: """{app}\bin\cleona-daemon.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+; Sender identity of the system notifications (v4_2 section 22.6 "toast
+; notifications", S420). cleona-notify.exe writes the same two values at
+; every run, because in-network updates and the ZIP never run this setup;
+; the entry here makes the uninstaller remove the key (uninsdeletekey removes
+; the whole key, https://jrsoftware.org/ishelp/topic_registrysection.htm).
+; The app id is the one of lib/core/platform/windows_toast_notifier.dart
+; (WindowsToastNotifier.appIdFor), checked by
+; test/smoke/smoke_windows_toast_notifier.dart.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\{#ToastAppId}"; ValueType: string; ValueName: "DisplayName"; ValueData: "{#ProductName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\{#ToastAppId}"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\data\flutter_assets\assets\{#IconPng}"
 
 [Run]
 Filename: "{app}\cleona.exe"; Description: "{#ProductName} starten"; Flags: nowait postinstall skipifsilent

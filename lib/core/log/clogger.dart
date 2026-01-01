@@ -149,20 +149,44 @@ class CLogger {
     return List.unmodifiable(_ring.sublist(_ring.length - count));
   }
 
-  /// Returns lines for bug reports: ALL events + filtered log lines
-  /// (no DEBUG from transport modules). Much more diagnostic value than
-  /// raw tail of the ring buffer.
+  /// Returns lines for bug reports: the ring without transport DEBUG noise,
+  /// and a line whose text (after its time stamp) equals one of the last
+  /// [_reportFold] lines taken is counted there instead of repeated —
+  /// `… [x87, last <time>]`. S422: 103 of the 200 report lines were one error
+  /// and its reopen within 3 s, and the network change before it was pushed
+  /// out (third time this class: 27.07.2026, S406, S422). Only the report
+  /// folds; the ring, [getRecentLines] and the log file keep every line.
   static List<String> getReportLines(int maxLines) {
-    final filtered = <String>[];
+    final out = <({String ts, String rest, int n, String last})>[];
     for (final line in _ring) {
       if (line.contains('[DEBUG]') && _isTransportNoise(line)) continue;
-      filtered.add(line);
+      final cut = line.indexOf(' ');
+      final ts = cut < 0 ? '' : line.substring(0, cut);
+      final rest = cut < 0 ? line : line.substring(cut);
+      final from = out.length - _reportFold < 0 ? 0 : out.length - _reportFold;
+      var i = out.length - 1;
+      while (i >= from && out[i].rest != rest) {
+        i--;
+      }
+      if (i >= from) {
+        final o = out[i];
+        out[i] = (ts: o.ts, rest: rest, n: o.n + 1, last: ts);
+        continue;
+      }
+      out.add((ts: ts, rest: rest, n: 1, last: ts));
     }
-    if (filtered.length > maxLines) {
-      return List.unmodifiable(filtered.sublist(filtered.length - maxLines));
+    final lines = [
+      for (final o in out)
+        o.n == 1 ? '${o.ts}${o.rest}' : '${o.ts}${o.rest} [x${o.n}, last ${o.last}]',
+    ];
+    if (lines.length > maxLines) {
+      return List.unmodifiable(lines.sublist(lines.length - maxLines));
     }
-    return List.unmodifiable(filtered);
+    return List.unmodifiable(lines);
   }
+
+  /// How far back [getReportLines] looks for an equal line to fold into.
+  static const int _reportFold = 4;
 
   static bool _isTransportNoise(String line) {
     for (final m in _transportModules) {

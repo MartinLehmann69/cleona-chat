@@ -14,6 +14,15 @@ typedef DesktopNotificationCall = Future<int> Function({
   required String body,
 });
 
+/// The one thing the daemon needs of a platform's system notifications
+/// (§22.6, §22.8): hand over a title and a text, optionally under a key (a
+/// conversation, a reminder) whose later notification replaces this one.
+/// Implementations never throw and never wait. Linux: [DesktopNotifier];
+/// Windows: `WindowsToastNotifier`.
+abstract interface class SystemNotifier {
+  void post({required String summary, required String body, String? key});
+}
+
 /// Posts a notification on the Linux desktop (§22.6 "notifications via
 /// `notify-send`/D-Bus").
 ///
@@ -37,7 +46,7 @@ typedef DesktopNotificationCall = Future<int> Function({
 /// [post] never throws and never waits: it is called from the receive path.
 /// A failure costs one log line, once per run — and that line names the
 /// kind of failure, never the title or the text.
-class DesktopNotifier {
+class DesktopNotifier implements SystemNotifier {
   DesktopNotifier({
     DesktopNotificationCall? call,
     this.warn,
@@ -69,6 +78,7 @@ class DesktopNotifier {
   final LinkedHashMap<String, int> _shown = LinkedHashMap<String, int>();
 
   /// Post a notification. Returns immediately; the outcome is only logged.
+  @override
   void post({required String summary, required String body, String? key}) {
     try {
       final replaces = key == null ? 0 : (_shown[key] ?? 0);

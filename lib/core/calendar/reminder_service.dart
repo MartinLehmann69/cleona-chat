@@ -58,6 +58,15 @@ class ReminderService {
         .info('Reminder service started (check every ${checkInterval.inSeconds}s)');
   }
 
+  /// Whether this service has already fired [reminder] (same key as the
+  /// duplicate guard). A reminder the running app has shown is not handed to
+  /// the system's schedule again (iOS, §18.1.6).
+  bool hasFired(ReminderInfo reminder) => _firedReminders.contains(
+      '${reminder.eventId}:${reminder.eventStart}:${reminder.minutesBefore}');
+
+  /// Whether the check clock runs (between [start] and [stop]/[dispose]).
+  bool get isRunning => _timer != null;
+
   /// Stop the reminder timer.
   void stop() {
     _timer?.cancel();

@@ -51,9 +51,10 @@ import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/link/data_port.dart';
 import 'package:cleona/core/calls/plane_d_call_transport.dart' show CallPlaneD;
 import 'package:cleona/core/service/gui_device_setting.dart';
+import 'package:cleona/core/service/notification_content.dart';
 import 'package:cleona/core/service/notification_silence.dart';
 import 'package:cleona/core/tray/tray_status.dart'
-    show trayLocaleCode, trayTranslate;
+    show isTrayLanguage, trayLocaleCode, trayTranslate;
 import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/service/sender_identity_snapshot.dart';
 import 'package:cleona/core/identity/identity_context.dart';
@@ -138,6 +139,7 @@ import 'package:cleona/core/service/mycelium_seam.dart' as seam
 import 'package:cleona/core/service/mycelium_seam.dart'
     show
         bulkCacheBytesForPlatform,
+        hostInstance,
         mailboxDetailsFor,
         networkChangeEdge,
         servicesOnHost,
@@ -176,7 +178,7 @@ import 'package:mycelium/invitation_face_to_face.dart' as mycelium
 import 'package:mycelium/mailbox_rotation.dart' as mycelium show MailboxRotation;
 import 'package:mycelium/mailbox_own_line.dart' as mycelium show MailboxOwnLine;
 import 'package:mycelium/mailbox_own_signal.dart' as mycelium
-    show MailboxOwnSignal, ownWhereRead, ownWhereWire;
+    show MailboxOwnSignal, ownWhereOf, ownWhereRead, ownWhereWire;
 import 'package:mycelium/mailbox_parked.dart' as mycelium show MailboxParked;
 // Without prefix, for the same reason as `node_invitation.dart` above.
 import 'package:mycelium/mailbox_format_reset.dart'
@@ -312,6 +314,9 @@ part 'cleona_service_own_ring.dart';
 part 'cleona_service_shared_settings.dart';
 part 'cleona_service_identity_set.dart';
 part 'cleona_service_key_package.dart';
+part 'cleona_service_co_sign.dart';
+part 'cleona_service_lock_out.dart';
+part 'cleona_service_reconcile.dart';
 
 // `AppFrameDispatchOutcome` STOOD HERE — REMOVED ON 2026-09-03.
 //
@@ -529,6 +534,47 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// lifecycle event arrives.
   bool _isAppResumed = true;
 
+  /// Test seam: stands in for the platform in [_signalNotification] and
+  /// [notificationSoundBySystem], so a suite on the desktop measures the
+  /// phone's rule. Never set in the product.
+  NotificationPlatform? platformProbe;
+
+  NotificationPlatform get _notificationPlatform =>
+      platformProbe ??
+      (Platform.isAndroid
+          ? NotificationPlatform.android
+          : Platform.isIOS
+              ? NotificationPlatform.ios
+              : NotificationPlatform.desktop);
+
+  NotificationSignal get _currentSignal => notificationSignal(
+      notificationSound.settings,
+      platform: _notificationPlatform,
+      resumed: _isAppResumed);
+
+  /// Whether a system notification posted now carries sound and vibration
+  /// (§22.8, D-125 (1), [notificationSignal]). Read by the Android and iOS
+  /// receivers of [_postSystemNotification] (`main.dart`,
+  /// `ios_background_fetch.dart`) at the moment they post.
+  bool get notificationSoundBySystem => _currentSignal.system;
+
+  /// The one place that rings and vibrates for a notification (§22.8,
+  /// D-125 (1)): the app plays [soundName] and vibrates only where the
+  /// system notification does not ([notificationSignal]) — always on the
+  /// desktop (D-116), on Android and iOS in the foreground, and on Android
+  /// in the background only what a mixed setting leaves on. [vibrate] false
+  /// for a place that never vibrated (the bulk file, S422). Quiet hours,
+  /// the master mute and L1–L4 are decided by the caller before.
+  void _signalNotification({String? soundName, bool vibrate = true}) {
+    final signal = _currentSignal;
+    if (signal.appSound) {
+      unawaited(notificationSound.playMessageSound(soundName: soundName));
+    }
+    if (vibrate && signal.appVibration) {
+      unawaited(notificationSound.vibrate(VibrationType.message));
+    }
+  }
+
   // `_suppressReceiptForCurrentFrame` (V3.2 §8.1, suppressing the receipt of a silently
   // discarded CONTACT_REQUEST) was dropped with
   // `_handleContactRequestV3`, its only setter.
@@ -552,15 +598,53 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Wall-clock of the most recent fired notification per conversation.
   /// Used for the per-conv 2s debounce that protects against group-chat bursts.
   final Map<String, DateTime> _lastNotifiedAt = {};
-  /// Maximum age (ms) of an incoming message that still triggers a notification
-  /// during the startup catch-up phase. After catch-up ends, no age-based
-  /// suppression applies — Doze-delayed and S&F messages notify normally.
-  static const int _notificationStaleThresholdMs = 60000;
   /// Minimum spacing (ms) between two notifications for the same conversation.
   static const int _notificationDebounceMs = 2000;
-  /// True during the first 30s after init — startup backlog is age-filtered.
-  /// After catch-up, stale suppression is disabled (Doze/S&F messages pass).
-  bool _inStartupCatchUp = true;
+
+  /// L3, the first collection after a start (§22.8 "Bundling rule", D-124):
+  /// while it runs, every message that passes the other gates is counted
+  /// instead of notified; when it ends ([endFirstCollection]) ONE batch
+  /// notification reports them. Every later message notifies on its own,
+  /// whatever its age. Until S422 L3 dropped every message older than 60 s
+  /// in the first 30 s instead — on iOS exactly the ones a background
+  /// wake-up collects (`S422-BAU-IOS-BENACHRICHTIGUNG.md` 5.1).
+  bool _inFirstCollection = true;
+
+  /// Messages counted in the first collection, and their conversations.
+  int _firstCollectionCount = 0;
+  final Set<String> _firstCollectionConversations = {};
+
+  /// Whether a first collection still runs (for the background wake-up,
+  /// which ends it at the end of its window).
+  bool get inFirstCollection => _inFirstCollection;
+
+  /// Which opening of a first collection the pending 30 s limit belongs to:
+  /// an older limit must not end a first collection opened later.
+  int _firstCollectionGeneration = 0;
+
+  /// Opens a first collection (§22.8 "Normative": after a start, and after
+  /// every readiness transition `searching`/`connecting` → `ready`; D-124
+  /// bundles it). Called by [startService] and by the seam
+  /// (`mycelium_seam.dart` `readinessChanged`). It ends with the first
+  /// collection of this identity a holder answered ([collectionAnswered]) or
+  /// the node's first completed run ([reportHarvestRun]), at the latest
+  /// after 30 s — the node reports no run without a neighbour, and nothing
+  /// may bundle for ever. The 30 s are the limit that stood at the start
+  /// before (S254), now armed once per opening: no periodic clock. Opening
+  /// while one runs keeps what it counted and moves the limit.
+  void openFirstCollection() {
+    if (_disposed) return;
+    final generation = ++_firstCollectionGeneration;
+    if (!_inFirstCollection) {
+      _inFirstCollection = true;
+      _firstCollectionCount = 0;
+      _firstCollectionConversations.clear();
+      _log.info('first collection opened');
+    }
+    Future.delayed(const Duration(seconds: 30), () {
+      if (generation == _firstCollectionGeneration) endFirstCollection();
+    });
+  }
 
   /// Extracted moderation sub-service (§9.3 jury, §9.4 reports, channel index gossip).
   late final ChannelModerationService _moderation;
@@ -807,12 +891,42 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void Function(String title, String body, String notificationId)?
       onPostDesktopNotification;
 
+  /// iOS: post a system notification (set by the Flutter app, `main.dart`;
+  /// at the cold start of the background fetch a collecting receiver,
+  /// `ios_background_fetch.dart`). Fired from [_postSystemNotification] with
+  /// the same three values and behind the same gates as
+  /// [onPostNotificationAndroid] (§22.8 "The same on every platform").
+  /// Until S422 iOS had no receiver here, and every notification of the
+  /// running app ended silently (`S422-RCA-IOS-BENACHRICHTIGUNG-LAUFENDE-APP`
+  /// N-1).
+  Future<void> Function(String title, String body, String notificationId)?
+      onPostNotificationIos;
+
+  /// iOS: remove the delivered notification of a conversation once read
+  /// (the counterpart of [onCancelNotificationAndroid]).
+  void Function(String conversationId)? onCancelNotificationIos;
+
   /// The words of a notification the service writes itself (an invitation,
-  /// [_announceInvitation]): the host sets the translation in the language
-  /// the user chose — the app process through `AppLocale`, the daemon
-  /// through `trayTranslate` in the language the GUI reported. Unset: the
-  /// language of the operating system (`trayLocaleCode`).
+  /// [_announceInvitation], the kind of a media message, a notification
+  /// without content): the host sets the translation in the language the
+  /// user chose — the app process through `AppLocale`, the daemon through
+  /// `trayTranslate` in the language the GUI reported. Unset (the cold start
+  /// of the iOS background fetch, §24.1): the language stored in the device
+  /// database (`gui_device_setting.dart`), else that of the operating system
+  /// (`trayLocaleCode`).
   String Function(String key)? notificationWords;
+
+  /// One word of a notification, through [notificationWords] or its
+  /// fallback.
+  String notificationWord(String key) {
+    final words = notificationWords;
+    if (words != null) return words(key);
+    final stored =
+        guiDeviceSettingsRead(identity.deviceStoreOrNull)[kGuiFieldLocale];
+    final code =
+        stored is String && isTrayLanguage(stored) ? stored : trayLocaleCode();
+    return trayTranslate(key, code);
+  }
 
   /// Android: cancel notification when conversation is read (set by Flutter app).
   void Function(String conversationId)? onCancelNotificationAndroid;
@@ -1365,11 +1479,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _log.debug('Starting CleonaService displayName="$displayName"');
     _log.info('Starting CleonaService...');
 
-    // §12.5 S254: startup catch-up phase — age-based notification suppression
-    // only applies during the first 30s. After that, Doze-delayed and S&F
-    // messages trigger notifications normally.
-    _inStartupCatchUp = true;
-    Future.delayed(const Duration(seconds: 30), () => _inStartupCatchUp = false);
+    // §22.8 L3 (D-124): the first collection after this start is bundled.
+    _firstCollectionCount = 0;
+    _firstCollectionConversations.clear();
+    _inFirstCollection = false;
+    openFirstCollection();
 
     // Ensure profile dir exists
     Directory(profileDir).createSync(recursive: true);
@@ -4834,6 +4948,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (conv.unreadCount > 0) {
       conv.unreadCount = 0;
       onCancelNotificationAndroid?.call(conversationId);
+      onCancelNotificationIos?.call(conversationId);
       _updateBadgeCount();
     }
 
@@ -4927,6 +5042,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   void setAppResumed(bool isResumed, {bool triggerNodeHarvest = true}) {
+    // One line per change, not per call (the life-cycle observer repeats
+    // `resumed`): it shows in the app log which state the L5 gate of
+    // [_postAndroidNotification] saw — the state only, no content (S422).
+    if (isResumed != _isAppResumed) {
+      _log.info('foreground state for notifications: '
+          '${isResumed ? 'resumed' : 'not resumed'}');
+    }
     _isAppResumed = isResumed;
     // Here stood `_identityPublisher?.setForeground(isResumed)` — the
     // adaptive liveness TTL of the 2D DHT (§2.2.4) — and, until S408-P23,
@@ -4942,20 +5064,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   ///
   ///   L1 — Foreground active conversation: chat is already on screen.
   ///   L2 — Per-conversation/type notification setting.
-  ///   L3 — Stale backlog (startup only): during the first 30s after init,
-  ///        messages older than 60s (sender clock) are suppressed. After
-  ///        catch-up, no age-based suppression — Doze-delayed and S&F
-  ///        messages notify normally.
+  ///   L3 — First collection after a start (§22.8, D-124): counted for ONE
+  ///        batch notification ([endFirstCollection]) instead of one each;
+  ///        afterwards every message notifies, whatever its age.
   ///   L4 — Per-conversation debounce: at most one notification every
   ///        [_notificationDebounceMs] ms per conversation.
   ///   Quiet — the device's master mute or this identity's quiet hours
   ///        (§22.8, `notification_silence.dart`).
   ///
   /// L5 (_isAppResumed gate) lives in [_postAndroidNotification] and only
-  /// affects the Android system notification, not in-app sound/vibrate.
+  /// affects the system notification. Which way rings — the app or the
+  /// system notification — is [_signalNotification]'s (D-125 (1)).
   ///
   /// Badge updates run in a different code path and are NOT gated by this.
-  bool _shouldSuppressNotification(String conversationId, int messageTimestampMs) {
+  bool _shouldSuppressNotification(String conversationId) {
     // Quiet hours of this identity, master mute of the device (§22.8).
     if (notificationSilenced(
         masterMute: masterMute,
@@ -4973,10 +5095,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
               isGroup: conv.isGroup, isChannel: conv.isChannel);
       if (!enabled) return true;
     }
-    // L3: stale backlog — only during startup catch-up phase
-    if (_inStartupCatchUp) {
-      final ageMs = DateTime.now().millisecondsSinceEpoch - messageTimestampMs;
-      if (ageMs > _notificationStaleThresholdMs) return true;
+    // L3: the first collection after a start is counted for its one batch
+    // notification, not notified one by one (§22.8, D-124).
+    if (_inFirstCollection) {
+      _firstCollectionCount++;
+      _firstCollectionConversations.add(conversationId);
+      return true;
     }
     // L4: per-conversation debounce
     final last = _lastNotifiedAt[conversationId];
@@ -4987,13 +5111,46 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return false;
   }
 
-  /// The send time [event]'s sender claims, for L3 of
-  /// [_shouldSuppressNotification] and nothing else. It is an assertion
-  /// without evidence (§22.5.3) and decides neither display nor sorting nor
-  /// expiry: all a sender gains by choosing it is whether its own message
-  /// rings during the start phase. A message without the claim counts as old.
-  int _claimedSendTimeMs(HarvestEvent event) =>
-      event.claimedSentAt?.millisecondsSinceEpoch ?? 0;
+  /// Ends the first collection after the start (§22.8 L3, "Bundling rule",
+  /// D-124) and reports what it counted in ONE notification: one sound, one
+  /// vibration, one system notification under the product name — through
+  /// [_postAndroidNotification], so L5 and the "notification without
+  /// content" setting apply. Quiet hours and the master mute are checked
+  /// again now, at the moment of notifying (§22.8). Called by the first
+  /// completed collection run ([reportHarvestRun]), at the latest 30 s after
+  /// the start, and by the iOS background wake-up at the end of its window.
+  /// Idempotent: from then on every message notifies on its own.
+  void endFirstCollection() {
+    if (!_inFirstCollection || _disposed) {
+      _inFirstCollection = false;
+      return;
+    }
+    _inFirstCollection = false;
+    final count = _firstCollectionCount;
+    final conversationsCounted = _firstCollectionConversations.length;
+    _firstCollectionCount = 0;
+    _firstCollectionConversations.clear();
+    // Counts only (§22.8: no title, no text in a log).
+    _log.info('first collection ended: $count message(s) in '
+        '$conversationsCounted conversation(s)');
+    if (count == 0) return;
+    if (notificationSilenced(
+        masterMute: masterMute,
+        settings: notificationSound.settings,
+        now: DateTime.now())) {
+      return;
+    }
+    _signalNotification();
+    _postAndroidNotification(
+        notificationProductName(),
+        firstCollectionBatchText(
+            count, conversationsCounted, notificationWord),
+        kFirstCollectionNotificationId);
+  }
+
+  // Here stood `_claimedSendTimeMs` — the sender's claimed send time for the
+  // age rule of L3. Since D-124 L3 counts every message of a first
+  // collection whatever its age, and the claim decides no notification.
 
   /// Toggle favorite status of a conversation.
   @override
@@ -7035,6 +7192,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  // ── Notification without content (§22.8, D-49) ──────────────────────
+
+  /// Read through from the device database, like [masterMute]: one value
+  /// for every identity of the device, off by default.
+  @override
+  bool get notificationWithoutContent =>
+      notificationWithoutContentRead(identity.deviceStoreOrNull);
+
+  @override
+  Future<bool> setNotificationWithoutContent(bool on) async {
+    try {
+      final ok =
+          notificationWithoutContentWrite(identity.deviceStoreForWrite(), on);
+      if (ok) onStateChanged?.call();
+      return ok;
+    } catch (e) {
+      _log.debug('Failed to save notification without content: $e');
+      return false;
+    }
+  }
+
   // ── NFC Contact Exchange ─────────────────────────────────────────────
 
   @override
@@ -7192,6 +7370,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// whole start sequence.
   @visibleForTesting
   void profileUpdateStateLoadForTesting() => _loadProfileUpdateState();
+
+  /// [_loadContacts] for probes that seed the store and run without
+  /// [startService] — so the contacts reach memory the way the start does
+  /// and the data-loss latch of `_saveContacts` sees a completed load
+  /// (S422 RCA REFUSED-EMPTY-CONTACTS).
+  @visibleForTesting
+  void contactsLoadForTesting() => _loadContacts();
 
   void _loadProfileUpdateState() {
     try {
@@ -8023,24 +8208,50 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// Post a system notification for an incoming message: on Android through
-  /// [onPostNotificationAndroid], on the desktop through
-  /// [onPostDesktopNotification] (whichever the platform has set).
+  /// [onPostNotificationAndroid], on iOS through [onPostNotificationIos], on
+  /// the desktop through [onPostDesktopNotification] (whichever the platform
+  /// has set).
   /// L5 gate: suppressed when the user interface is in the foreground.
-  void _postAndroidNotification(String senderName, String text, String conversationId) {
+  void _postAndroidNotification(
+      String senderName, String text, String conversationId,
+      {NotificationKind kind = NotificationKind.message}) {
     if (_isAppResumed) return;
-    _postSystemNotification(senderName, text, conversationId);
+    _postSystemNotification(senderName, text, conversationId, kind: kind);
   }
 
   /// The one place that hands a notification to the platform — and the one
   /// source of what it shows: every platform gets the same [title] and
-  /// [body] (§22.8). Never throws, and logs neither of the two.
+  /// [body] (§22.8). With the device's "notification without content" on,
+  /// both are replaced by the product name and the bare fact of [kind]
+  /// (`notification_content.dart`). Never throws, and logs neither of the
+  /// two.
   void _postSystemNotification(
-      String title, String body, String notificationId) {
+      String title, String body, String notificationId,
+      {required NotificationKind kind}) {
     try {
+      final shown = notificationShown(
+          kind: kind,
+          title: title,
+          body: body,
+          withoutContent: notificationWithoutContent,
+          words: notificationWord);
+      title = shown.title;
+      body = shown.body;
       final android = onPostNotificationAndroid;
       if (android != null) {
         unawaited(android(title, body, notificationId).catchError((Object e) {
           _log.warn('postAndroidNotification failed: $e');
+        }));
+        return;
+      }
+      final ios = onPostNotificationIos;
+      if (ios != null) {
+        // One line per notification handed over (S422 N-1): the kind only —
+        // title and text go to the notification service and nowhere else.
+        _log.info('system notification handed to iOS (${kind.name})');
+        unawaited(ios(title, body, notificationId).catchError((Object e) {
+          // The type only: the platform's error may quote the text.
+          _log.warn('postIosNotification failed: ${e.runtimeType}');
         }));
         return;
       }
@@ -8058,9 +8269,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// title, [body] how long until it starts (§22.8 "A reminder shows the
   /// event's title and how long until it starts").
   void notifyReminderDue(String title, String body, String notificationId) {
-    _postSystemNotification(title, body, notificationId);
-    unawaited(notificationSound.playMessageSound());
-    unawaited(notificationSound.vibrate(VibrationType.message));
+    _postSystemNotification(title, body, notificationId,
+        kind: NotificationKind.reminder);
+    _signalNotification();
   }
 
   /// §16.2.2 "Joining is an explicit act of the invitee" — which needs the
@@ -8090,8 +8301,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return;
     }
     if (conv?.notificationsEnabled == false) return;
-    final words = notificationWords ??
-        (String key) => trayTranslate(key, trayLocaleCode());
+    final words = notificationWord;
     final inviter = _contacts[inviterHex]?.displayName ??
         (inviterHex.length > 8 ? inviterHex.substring(0, 8) : inviterHex);
     final body = words(channel
@@ -8099,10 +8309,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             : 'notification_group_invite_body')
         .replaceAll('{name}', inviter)
         .replaceAll(channel ? '{channel}' : '{group}', name);
-    unawaited(notificationSound.playMessageSound(
-        soundName: conv?.notificationSoundName));
-    unawaited(notificationSound.vibrate(VibrationType.message));
-    _postAndroidNotification(words('invitation_label'), body, id);
+    _signalNotification(soundName: conv?.notificationSoundName);
+    _postAndroidNotification(words('invitation_label'), body, id,
+        kind: NotificationKind.invitation);
   }
 
   /// Feed `CalendarManager.syncBirthdaysFromContacts()` from the local
@@ -8882,6 +9091,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       // Prune expired entries (>7 days) on load
       _pruneSyncDedup();
+      // §14.5 (S422): requests of other own devices still waiting for the
+      // user's decision survive a restart.
+      _coSignWaitLoad();
       _devicesLoaded = true;
       _log.info('Loaded ${_devices.length} devices, ${_processedSyncIds.length} sync IDs');
     } catch (e) {
@@ -9046,13 +9258,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // removed, regardless of whether the proof for it can be built. That
     // matches the `catch` branch this method already had for exactly
     // this case ("A failure here must not strand the revocation").
-    if (_devices.length > 1) {
-      _log.error('§7.5: device removal WITHOUT co-signature proof — '
-          'neither the delegation list nor the device key has a holder in '
-          'V4.1 (gap G-9). Contacts will see the '
-          'shrinkage uncovered and show the §7.5 warning. '
-          '${_devices.length} device(s) in the set.');
-    }
+    // S422: the proof exists now — the co-signing round collected the
+    // remaining devices' countersignatures over the change hash before the
+    // removal took effect, and `_coSignFinish` announces the set with them.
     applyRetraction();
   }
 
@@ -9103,6 +9311,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   List<Map<String, dynamic>> get deviceLockouts => deviceLockoutStates();
 
+  /// §14.9.2 (S422) — class member for the interface; the body lives in
+  /// `cleona_service_co_sign.dart` (same reason as [deviceLockouts]).
+  @override
+  Map<String, dynamic>? get coSignRoundView => coSignRoundState;
+
+  @override
+  Future<int> cancelCoSign() async => coSignCancelAll();
+
+  /// §14.6.3 (S422) — class members for the interface; the bodies live in
+  /// `cleona_service_reconcile.dart`.
+  @override
+  Map<String, dynamic> get reconcileView =>
+      {'running': reconcileRunning, 'offers': reconcileOffers};
+
+  @override
+  Future<bool> reconcileFetchHistoryOf(String conversationId) async =>
+      reconcileFetchHistory(conversationId);
+
+  @override
+  Future<bool> reconcileFetchAttachmentsOf(String conversationId) async =>
+      reconcileFetchAttachments(conversationId);
+
   /// Rename a twin device and broadcast via TWIN_SYNC.
   @override
   void renameDevice(String deviceId, String newName) {
@@ -9151,20 +9381,92 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   List<DeviceSigInfo>? announceableDeviceSetForTesting() =>
       _announceableDeviceSet();
 
-  /// Revoke a twin device: remove from list, notify twins + contacts.
-  /// Returns true if the device was found and revoked.
+  /// Lock a device out (§14.4, §14.9.2 "Lock out device — out of every
+  /// identity"). S422 (phases 4 and 5): ONE user action starts a co-signing
+  /// round in every identity of this device whose set names the device, all
+  /// under one round identifier — the other own devices approve it once for
+  /// all identities. The lock-out takes effect per identity when its quorum
+  /// over the remaining devices `M` is reached (§14.8; with one remaining
+  /// device at once). Until then the device stays in every set and nothing
+  /// rotates; the device set does not grow (D-109). Returns true when a
+  /// round started (or the lock-out took effect) in at least one identity.
   @override
   Future<bool> revokeDevice(String deviceId) async {
     if (deviceId == _localDeviceId) return false; // Can't revoke self
     final device = _devices[deviceId];
     if (device == null) return false;
+    final roundId = SodiumFFI().randomBytes(16);
+    var started = 0;
+    for (final s in _identitySetServices) {
+      String? there;
+      for (final r in s._devices.values) {
+        final same = identical(s, this)
+            ? r.deviceId == deviceId
+            : deviceRecordsSame(r, device);
+        if (same) there = r.deviceId;
+      }
+      if (there == null) continue;
+      final open = s.coSignRound;
+      if (open != null) {
+        s._log.warn('§14.4 lock-out of ${there.substring(0, 8)}: a round is '
+            'still open in this identity (${open.roundId.substring(0, 8)}) — '
+            'not started here');
+        continue;
+      }
+      await s.coSignStart(
+          lockOutDeviceId: there,
+          reason: KeyPackageReason.lockout,
+          roundId: roundId);
+      started++;
+    }
+    _log.info('§14.4 lock-out of ${deviceId.substring(0, 8)} '
+        '(${device.deviceName}): round ${bytesToHex(roundId).substring(0, 8)} '
+        'in $started identit${started == 1 ? "y" : "ies"} of this device');
+    _notifyDevicesChanged();
+    return started > 0;
+  }
 
+  /// The lock-out of [device] takes effect in THIS identity — its quorum is
+  /// reached (`_coSignFinish`). Type 11 goes to every own device of the set,
+  /// the locked-out one included (it learns it is out, §14.4), the contacts
+  /// get the lock-out notice, and the device leaves the set; the key change
+  /// with the collected countersignatures follows in the caller.
+  Future<void> _lockOutTakeEffect(DeviceRecord device, CoSignRound round) async {
+    final deviceId = device.deviceId;
     _log.info('Revoking twin device: $deviceId (${device.deviceName})');
     enrolApprovalEnd(device); // D-99: its enrolment approval ends
 
-    // Notify twins: device has been revoked
-    final payload = Uint8List.fromList(utf8.encode(deviceId));
-    _sendTwinSync(proto.TwinSyncType.TWIN_DEVICE_REVOKED, payload);
+    // Notify twins: device has been revoked. S422: Type 11 carries the proof
+    // of the quorum (the remaining devices' countersignatures over the change
+    // hash), because the device it names deletes every identity on itself
+    // (§14.4) — and it does so only on that proof: one device alone, which
+    // holds the identity keys like every other, must not be able to make a
+    // sibling delete itself.
+    final payload = lockOutNoticeBody(
+        deviceIdHex: deviceId,
+        changeSeq: round.changeSeq ?? 0,
+        remainingNodeIdHexes: round.remainingNodeIds,
+        changeTokens: round.tokens('c'));
+    // AWAITED, like the key packages: the deposit must be sealed and signed
+    // with the keys the locked-out device still holds. Sent after the switch
+    // it would be signed with the new keys, and that device discards it
+    // (`_myceliumOwnInbound`: "the envelope is signed by other keys") —
+    // measured in `smoke_co_sign_lock_out` (S422).
+    final syncId = SodiumFFI().randomBytes(16);
+    _processedSyncIds[bytesToHex(syncId)] = DateTime.now().millisecondsSinceEpoch;
+    final placed = await _myceliumOwnSend(
+        messageType: proto.MessageType.MT_TWIN_SYNC,
+        payload: buildTwinSyncEnvelope(
+          syncId: syncId,
+          deviceId: hexToBytes(_localDeviceId),
+          timestampMs: DateTime.now().millisecondsSinceEpoch,
+          syncType: proto.TwinSyncType.TWIN_DEVICE_REVOKED,
+          payload: payload,
+          where: _ownWhereWires(),
+        ));
+    _log.info('§14.4 Type 11 (${payload.length} B, with the quorum proof) '
+        '${placed ? "placed" : "NOT placed"} for every own device of the set, '
+        'before the key change');
 
     // Broadcast DEVICE_REVOKED to contacts with DeviceRecord proto (§26.6.1),
     // naming the device only by what THIS identity's device set names it
@@ -9222,12 +9524,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     _devices.remove(deviceId);
     _saveDevices();
-    // §14.5 path 2: the shrunken device set goes pairwise to the
-    // contacts. AFTER `_devices.remove`, so that the announcement carries
-    // the state AFTER the change — §14.8 counts the quorum over the
-    // REMAINING devices ("On a device-set change, the quorum counts the
-    // *remaining* devices `M`, not the state before it").
-    _announceDeviceSetToContacts(occasion: 'device revocation');
+    // §14.5 path 2: the shrunken device set goes pairwise to the contacts —
+    // S422: from `_coSignFinish`, after the key change, with the reserved
+    // number and the remaining devices' countersignatures over it (§14.8
+    // counts the quorum over the REMAINING devices `M`).
     // §7.4 + §7.5: retract the device-bound authority (delegation cert +
     // Device-Sig keys) and rebuild the published device set. Both live in
     // [_applyDeviceSetRemoval] now, because the Auth re-publish they trigger
@@ -9236,39 +9536,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // unchanged: retraction before address-set rebuild, so the last mutation
     // carries fully consistent state through the publisher's coalescing gate.
     //
-    // Not awaited: collecting consent can take minutes (a human taps
-    // "approve" on another device) and the IPC caller must not block on it.
-    // The local removal above has already taken effect, and contacts were
-    // told via MT_DEVICE_REVOCATION before this point.
+    // The consent was collected before this point (S422); contacts were told
+    // via MT_DEVICE_REVOCATION above.
     unawaited(_applyDeviceSetRemoval(device, deviceId));
 
     // §14.10: a revoked device still holds every user key it saw before
-    // removal — it POSSESSES them, revocation alone only stops it from being
-    // ADDRESSED. "A mere inbox rotation would be a label, not a lock." This
-    // is the same Emergency Key Rotation the "Identitaet neu schluesseln"
-    // IPC path (`rotate_identity_keys`) already triggers by hand — replaces
-    // User-Sig (Ed25519+ML-DSA) AND User-KEM (X25519+ML-KEM) together, so
-    // the stolen/lost device can neither keep signing as this user nor keep
-    // reading what contacts encrypt to it from here on.
+    // removal — "a mere inbox rotation would be a label, not a lock". The key
+    // change follows in `_coSignFinish` with the keys the round formed and
+    // the countersignatures it collected (S422); the other own devices take
+    // it over from their key package (Type 16) and do not rotate themselves.
     //
-    // Safe to fire without waiting for `_applyDeviceSetRemoval` above to
-    // finish retracting the delegation: `rotateIdentityKeys()`'s twin-sync
-    // fan-out (LD-8 delegation rotation + legacy-twin entropy) resolves
-    // recipients from `_devices` (§7.2 self fan-out, see `sendToUser`), not
-    // from the publisher's delegation list — and `_devices.remove(deviceId)`
-    // above already ran. The revoked device is excluded from that fan-out
-    // regardless of how long the §7.5 device-set-change proof above still
-    // takes to collect.
-    //
-    // Not awaited for the same reason as `_applyDeviceSetRemoval`: the
-    // rotation's OWN §7.5 co-auth (a Linked Device countersigning the new
-    // keys) can wait up to 5 min (`_rotationApprovalWaitWindow`) before it
-    // proceeds anyway — see `rotateIdentityKeys()`. A revocation initiated
-    // on another device arrives via the mirrored call in
-    // `_handleTwinDeviceRevoked`.
-    unawaited(rotateIdentityKeys());
+    // §14.4 (D-109, phase 5): the device is noted device-wide, so that its
+    // identity list (Type 23) never brings it back into a set.
+    _lockOutNoteDevice(device);
     _notifyDevicesChanged();
-    return true;
   }
 
   /// Inject a fake twin device for E2E testing (test-only).
@@ -9956,6 +10237,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @visibleForTesting
   void deviceAnnounceForTesting() => _sendTwinAnnounce(withKeys: true);
 
+  /// Probe (S422): a twin-sync delivery of [type] with [payload] to every
+  /// other own device — as another own device would send it.
+  @visibleForTesting
+  void twinSyncForTesting(proto.TwinSyncType type, Uint8List payload) =>
+      _sendTwinSync(type, payload);
+
+  /// Probe (S422, §14.8): a restart of the approving side — the parked
+  /// requests held in memory are forgotten and loaded from the store as at
+  /// start ([_loadDevices]).
+  @visibleForTesting
+  void coSignWaitReloadForTesting() {
+    _pendingRotationApprovals.clear();
+    _coSignWaitLoad();
+  }
+
   /// The Emergency Key Rotation (§4.5.4) — [rotateIdentityKeys], the
   /// completion of a recovery (§13.6) and the recovery without a bundle
   /// (§13.2.2). Returns whether the keys were replaced; `false`: aborted
@@ -9995,82 +10291,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // That is why the work below is done in this order — first send
     // (with the OLD key, which must still be present for it), then apply.
     // Not the other way round.
-    // S414: the key package (Type 16) is built (`cleona_service_key_package
-    // .dart`) and the device set names the siblings' KEM keys (§14.9.1). What
-    // still keeps this closed is the quorum (§14.4, §14.8) — phase 3/4 of
-    // `S414-KOPPELN-BAUPLAN.md`. Points 1 and 2 of the block below describe
-    // the state before S414.
-    if (_devices.length > 1 && !rotationQuorumBypassForTesting) {
-      // ── SINCE S361 THE REASON IS A DIFFERENT ONE AGAIN ─────────────────
-      //
-      // The justification has moved twice, and both times because the
-      // stated reason had gone away. So that it does not stay standing a
-      // third time after it is no longer true, here is what has
-      // FALLEN and what CARRIES.
-      //
-      // FALLEN (S360): "without a self-send path the rotation material does
-      // not reach the own devices" — the shared twin line is built
-      // (`own_line.dart`).
-      //
-      // FALLEN (S361): "the device-bound line from §14.1 is not built" —
-      // it is built (`device_line.dart`) and is entered by `sendToUser`.
-      // Addressing a device specifically works.
-      //
-      // ── WHAT CARRIES, AND IT IS TWO THINGS ────────────────────────
-      //
-      // **1. There is no package that could be sent.** §14.4 describes
-      // kind 16 as "the package of wrapped new keys — one for each
-      // remaining device", wrapped "with that device's own device key":
-      // `wrap_d = Enc(device_key_d, shared_key(n))`. Exactly that cannot
-      // be formed in the build:
-      //
-      //   * `TwinSyncType.DEVICE_SET_CHANGED` (kind 16) occurs NOWHERE in
-      //     `lib/` — neither a producer nor a case in the receive `switch`
-      //     (`_handleTwinSync`). A package the receiver does not interpret
-      //     is not a delivery.
-      //   * The `shared_key` from §14.4 does not exist (measured in
-      //     `own_line.dart`; that is why `K_own` falls back to deriving from
-      //     the user KEM secrets).
-      //   * `device_key_d` of a SIBLING has no holder: `DeviceRecord`
-      //     keeps no keys, only `deviceNodeIdHex` (gap G-9, the same one at
-      //     which `_announceableDeviceSet` exits with `null` when
-      //     `_devices.length > 1`).
-      //
-      // **2. Without the wrap the lock-out would be ineffective.** §14.4
-      // names exactly that as the carrying property: "the exclusion is
-      // structural, not rule-based". The device line does NOT achieve it
-      // and cannot: its root falls out of `K_own`, and `K_own` still holds
-      // a just-locked-out device — it could compute every device line
-      // along and open every cell (§14.2). The separation this line
-      // achieves is an OPERATIONAL one (who harvests what), not a
-      // cryptographic one. Distributing it via the device line would look
-      // like a solution and would not be one.
-      //
-      // **3. The quorum is still missing** (§14.4/§14.8,
-      // `max(2, ceil(M/2))`): `approveRotation` cannot co-sign on a
-      // sibling device, and `_announceableDeviceSet` cannot prove the
-      // set — both gap G-9.
-      //
-      // The consequence of carrying on would still be the worst possible:
-      // the sibling devices would not get their new keys and would be
-      // locked out of the own identity after the rotation. Fail-closed
-      // remains the right answer.
-      _log.error('rotateIdentityKeys: ABORTED — ${_devices.length} '
-          'devices on this identity. The DEVICE-BOUND line from '
-          '§14.1 has been built and entered since S361; what is missing is the '
-          'CONTENT: kind 16 (DEVICE_SET_CHANGED) has in this codebase '
-          'neither producer nor receive case, the `shared_key` from §14.4 '
-          'does not exist, and the device key of a sibling has '
-          'no holder (gap G-9) — without it the lock-out is not '
-          'structural, but does not happen at all. Also missing is the quorum '
-          'max(2, ceil(M/2)) from §14.4/§14.8 (likewise G-9). '
-          'NOTHING was rotated; the existing keys are unchanged. '
-          '${_contacts.length} contact(s), ${_devices.length} device(s) '
-          'would have had to be notified.');
-      onStateChanged?.call();
-      return false;
+    // S422 (phase 3/4 of `S414-KOPPELN-BAUPLAN.md`, D-123): with other own
+    // devices in the set the rotation needs their countersignatures first
+    // (§14.4 "Who is allowed to do what", §14.8): a co-signing round starts
+    // (`cleona_service_co_sign.dart`) with the new keys formed now and kept in
+    // the store; the keys change only when the quorum is reached. Without the
+    // quorum NOTHING rotates, and the round stays visible until it is reached,
+    // rejected or cancelled by the user — no clock (E-a/E-b of S400 §9).
+    // Before S422 this place aborted unconditionally with more than one device.
+    if (_devices.values.any((d) => !d.isThisDevice) &&
+        !rotationQuorumBypassForTesting) {
+      if (identity.foundingEd25519SecretKeyDerived == null) {
+        _log.error('rotateIdentityKeys: ABORTED — the founding secret key of '
+            'this identity cannot be derived from the seed here (§4.5.4). '
+            'NOTHING was rotated; the existing keys are unchanged.');
+        onStateChanged?.call();
+        return false;
+      }
+      return coSignStart(
+          lockOutDeviceId: null,
+          reason: reason,
+          askPreviousDayValues: askPreviousDayValues);
     }
+    final keys = await _emergencyKeysNew();
+    if (keys == null) return false;
+    return _emergencyApply(keys,
+        askPreviousDayValues: askPreviousDayValues, reason: reason);
+  }
 
+  /// The new keys of an Emergency Key Rotation (§4.5.4) — formed once, before
+  /// any co-signing (the countersignature covers their public halves), or
+  /// `null` when this identity may not rotate here (named in the log).
+  Future<EmergencyKeys?> _emergencyKeysNew() async {
     // §4.5.4 (D-33, E-A8): "An identity whose founding secret key cannot
     // be derived from the seed on the rotating device does not rotate —
     // `K_AB` would change silently." After the rotation the delivery layer
@@ -10081,7 +10333,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           'this identity cannot be derived from the seed here (§4.5.4). '
           'NOTHING was rotated; the existing keys are unchanged.');
       onStateChanged?.call();
-      return false;
+      return null;
     }
 
     final sodium = SodiumFFI();
@@ -10103,7 +10355,49 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final newX25519Sk = sodium.ed25519SkToX25519(newEd25519.secretKey);
     final pqKeys =
         await generatePqKeysDeterministicIsolated(newMasterSeed, hdIndex);
+    return EmergencyKeys(
+      ed25519Pk: newEd25519.publicKey,
+      ed25519Sk: newEd25519.secretKey,
+      mlDsaPk: pqKeys.mlDsaPk,
+      mlDsaSk: pqKeys.mlDsaSk,
+      x25519Pk: newX25519Pk,
+      x25519Sk: newX25519Sk,
+      mlKemPk: pqKeys.mlKemPk,
+      mlKemSk: pqKeys.mlKemSk,
+    );
+  }
 
+  /// The rotation hash over [k]'s public keys (§14.5) — what every device
+  /// countersigns and every contact recomputes.
+  Uint8List _emergencyRotationHash(EmergencyKeys k) => computeRotationHash(
+        newEd25519Pk: k.ed25519Pk,
+        newMlDsaPk: k.mlDsaPk,
+        newX25519Pk: k.x25519Pk,
+        newMlKemPk: k.mlKemPk,
+        userId: identity.userId,
+      );
+
+  /// Applies the Emergency Key Rotation to [k] (§4.5.4, §14.4): key packages
+  /// to the remaining own devices, the keys locally, the announcement with
+  /// [tokens] (the countersignatures collected, S422) to every contact.
+  /// [remainingNodeIds]: set at a lock-out — the per-identity identifiers of
+  /// the devices that remain, so the contact counts its quorum over `M`
+  /// (§14.4 (ii), §14.8). [announceSet]: `false` when the caller announces the
+  /// device set itself (a lock-out carries its own shrink proof).
+  Future<bool> _emergencyApply(EmergencyKeys k,
+      {bool askPreviousDayValues = true,
+      KeyPackageReason reason = KeyPackageReason.emergency,
+      List<RotationApprovalToken>? tokens,
+      List<Uint8List> remainingNodeIds = const [],
+      List<String>? packagesOnlyTo,
+      bool announceSet = true}) async {
+    if (identity.foundingEd25519SecretKeyDerived == null) {
+      _log.error('rotateIdentityKeys: ABORTED — the founding secret key of '
+          'this identity cannot be derived from the seed here (§4.5.4). '
+          'NOTHING was rotated; the existing keys are unchanged.');
+      onStateChanged?.call();
+      return false;
+    }
     // 2. Build the announcement. It carries no signature of its own any
     //    more (S398, D-33): the envelope that carries it is signed hybrid by
     //    the NEW keys and carries the hybrid rotation chain inside its seal
@@ -10111,48 +10405,54 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     //    5/6 stood in for. TAGS_VALID is what the norm states: "`K_AB`
     //    survives every rotation" (§4.3, §4.5.4) — the codes stay.
     final broadcast = proto.KeyRotationBroadcast()
-      ..newEd25519Pk = newEd25519.publicKey
-      ..newMlDsaPk = pqKeys.mlDsaPk
-      ..newX25519Pk = newX25519Pk
-      ..newMlKemPk = pqKeys.mlKemPk
+      ..newEd25519Pk = k.ed25519Pk
+      ..newMlDsaPk = k.mlDsaPk
+      ..newX25519Pk = k.x25519Pk
+      ..newMlKemPk = k.mlKemPk
       ..mode = proto.KeyRotationMode.KEY_ROTATION_MODE_TAGS_VALID
       ..emergency = true;
 
-    // §7.5/§14.5: the co-signature of THIS device. With exactly one device
-    // it forms no quorum (§14.8: "the rule does not apply") — the
-    // receiver treats a device set of size 1 as `singleDevice`.
-    // It is attached anyway, so that ONE form stands on the wire and not
-    // two; as soon as a self-send path exists, further tokens join it
-    // without the format changing.
-    final rotHash = computeRotationHash(
-      newEd25519Pk: newEd25519.publicKey,
-      newMlDsaPk: pqKeys.mlDsaPk,
-      newX25519Pk: newX25519Pk,
-      newMlKemPk: pqKeys.mlKemPk,
-      userId: identity.userId,
-    );
-    final ownToken = _ownApprovalToken(rotHash);
-    if (ownToken != null) {
-      broadcast.approvalTokens.add(ownToken.toProto());
+    // §7.5/§14.5: the co-signatures — this device's own, and since S422 the
+    // ones the co-signing round collected from the other own devices
+    // (`cleona_service_co_sign.dart`). With exactly one device the own one
+    // forms no quorum (§14.8: "the rule does not apply") — the receiver
+    // treats a device set of size 1 as `singleDevice`.
+    final rotHash = _emergencyRotationHash(k);
+    final all = tokens ?? [?_ownApprovalToken(rotHash)];
+    final seenDevices = <String>{};
+    for (final t in all) {
+      if (seenDevices.add(bytesToHex(t.deviceNodeId))) {
+        broadcast.approvalTokens.add(t.toProto());
+      }
     }
     broadcast.preRotationDeviceCount = _devices.length;
+    broadcast.remainingDeviceNodeIds.addAll(remainingNodeIds);
     final payload = Uint8List.fromList(broadcast.writeToBuffer());
+    final ownToken = all.isEmpty ? null : all.first;
+    _log.info('§14.4: rotation announcement ${payload.length} B with '
+        '${broadcast.approvalTokens.length} co-signature(s)');
 
     // 3. §14.4 "Device side" (S414): the link old→new is formed ONCE, and
     //    every remaining own device gets it in its key package (Type 16),
     //    placed in the OLD line and awaited — BEFORE the keys change.
-    final link = identity.rotationLinkTo(newEd25519.publicKey, pqKeys.mlDsaPk);
+    final link = identity.rotationLinkTo(k.ed25519Pk, k.mlDsaPk);
     if (_devices.values.any((d) => !d.isThisDevice)) {
       final (placed, missing) = await _keyPackagesPlace(DeviceKeyPackage(
         reason: reason,
         chain: [...identity.rotationChain, link],
-        ed25519Sk: newEd25519.secretKey,
-        mlDsaSk: pqKeys.mlDsaSk,
-        x25519Pk: newX25519Pk,
-        x25519Sk: newX25519Sk,
-        mlKemPk: pqKeys.mlKemPk,
-        mlKemSk: pqKeys.mlKemSk,
-        remaining: [for (final d in _devices.values) d.deviceId],
+        ed25519Sk: k.ed25519Sk,
+        mlDsaSk: k.mlDsaSk,
+        x25519Pk: k.x25519Pk,
+        x25519Sk: k.x25519Sk,
+        mlKemPk: k.mlKemPk,
+        mlKemSk: k.mlKemSk,
+        // §14.4 (D-109): at a co-signed rotation only the devices that were
+        // in the set when the round began.
+        remaining: [
+          for (final d in _devices.values)
+            if (packagesOnlyTo == null || packagesOnlyTo.contains(d.deviceId))
+              d.deviceId
+        ],
         atMs: DateTime.now().millisecondsSinceEpoch,
       ));
       _log.info('§14.4: $placed key package(s) placed, $missing device(s) '
@@ -10161,17 +10461,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // 4. Apply locally. `rotateIdentityFull` appends the hybrid link
     //    old→new to the rotation chain (`identity_context.dart`) — proof
-    //    (i) of §14.4.
+    //    (i) of §14.4. D-109 B-3 (S422): the previous signing keys are noted
+    //    first — siblings still on them are heard for 7 days.
+    _ownPreviousNote();
     identity.rotateIdentityFull(
       link: link,
-      newEd25519Pk: newEd25519.publicKey,
-      newEd25519Sk: newEd25519.secretKey,
-      newMlDsaPk: pqKeys.mlDsaPk,
-      newMlDsaSk: pqKeys.mlDsaSk,
-      newX25519Pk: newX25519Pk,
-      newX25519Sk: newX25519Sk,
-      newMlKemPk: pqKeys.mlKemPk,
-      newMlKemSk: pqKeys.mlKemSk,
+      newEd25519Pk: k.ed25519Pk,
+      newEd25519Sk: k.ed25519Sk,
+      newMlDsaPk: k.mlDsaPk,
+      newMlDsaSk: k.mlDsaSk,
+      newX25519Pk: k.x25519Pk,
+      newX25519Sk: k.x25519Sk,
+      newMlKemPk: k.mlKemPk,
+      newMlKemSk: k.mlKemSk,
     );
 
     // 4a. THE RUNNING MAILBOX TAKES THE ROTATION OVER (S398, proposal A
@@ -10261,7 +10563,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // 7. §14.5 path 2: the device set goes along pairwise. Without it
     //    the receiver would have no device keys after this rotation
     //    against which it could check a quorum next time.
-    _announceDeviceSetToContacts(occasion: 'key rotation');
+    if (announceSet) _announceDeviceSetToContacts(occasion: 'key rotation');
 
     // THE TRANSITION after the rotation (§8.2): the post box asks under the
     // previous day values for 7 more days (`PostBox.signingAdopt`, the
@@ -10274,8 +10576,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     //    them.
     _log.info('§14.10: emergency rotation carried out — all four keys '
         'replaced, broadcast to ${recipient.length} contact(s) pairwise '
-        '(§14.4), co-signature '
-        '${ownToken != null ? "1 own device" : "none"} (§14.8)'
+        '(§14.4), co-signature(s) '
+        '${ownToken != null ? "${broadcast.approvalTokens.length} device(s)" : "none"}'
+        '${remainingNodeIds.isEmpty ? "" : ", lock-out with ${remainingNodeIds.length} remaining"} (§14.8)'
         '${askPreviousDayValues ? "" : ", previous day values NOT asked (§13.2.2)"}.');
     // 8. §13.3.4 "At a rotation": the bundle is placed at once, outside the
     //    3-day cadence — a bundle with the replaced keys restores nothing
@@ -10748,6 +11051,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // badge — otherwise the badge stays stuck on the primary, although
       // the user has read on the second device.
       onCancelNotificationAndroid?.call(conversationId);
+      onCancelNotificationIos?.call(conversationId);
       _updateBadgeCount();
       _saveConversations();
       onStateChanged?.call();
@@ -10794,34 +11098,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     } catch (e) {
       _log.warn('Twin SETTINGS_CHANGED failed: $e');
-    }
-  }
-
-  void _handleTwinDeviceRevoked(List<int> payload) {
-    try {
-      final deviceIdHex = utf8.decode(payload);
-      if (deviceIdHex == _localDeviceId) {
-        // This device has been revoked — wipe and return to welcome
-        _log.warn('THIS DEVICE has been revoked by another twin!');
-        // Wipe will be handled by the GUI layer via callback
-        _notifyDevicesChanged();
-        return;
-      }
-      final revoked = _devices.remove(deviceIdHex);
-      _saveDevices();
-      enrolApprovalEnd(revoked); // D-99: its enrolment approval ends
-      // §7.4/§7.5: same state transition as `revokeDevice`, only arriving over
-      // twin-sync instead of local IPC — including the co-auth attempt.
-      // Read the record from the `remove` return value: `deviceNodeIdHex` is
-      // gone from the map by now.
-      unawaited(_applyDeviceSetRemoval(revoked, deviceIdHex));
-      // §14.10: mirror of the call in `revokeDevice` for a revocation that
-      // another device initiated over twin-sync.
-      unawaited(rotateIdentityKeys());
-      _log.info('Twin device revoked: $deviceIdHex');
-      _notifyDevicesChanged();
-    } catch (e) {
-      _log.warn('Twin DEVICE_REVOKED failed: $e');
     }
   }
 
@@ -10898,21 +11174,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final tokens = broadcast.approvalTokens
           .map(RotationApprovalToken.fromProto)
           .toList();
-      coAuthResult = verifyRotationCoAuth(
-        tokens: tokens,
-        cachedDeviceSigKeys: cachedDeviceSigKeys,
-        rotationHash: rotHash,
-        // Key rotation keeps the full device set, so the quorum stays
-        // `rotationQuorum(cachedDeviceSigKeys.length)` — unchanged §7.5
-        // semantics. `broadcast.preRotationDeviceCount` was passed here
-        // before and never read; it is the sender's own claim and is left
-        // out rather than given a meaning it cannot carry.
-        occasion: CoAuthOccasion.keyRotation,
-      );
+      final remaining = broadcast.remainingDeviceNodeIds
+          .map((b) => Uint8List.fromList(b))
+          .toList();
+      if (remaining.isNotEmpty) {
+        // S422 (§14.4 (ii), §14.8): a rotation that locks a device out — the
+        // quorum counts the REMAINING devices `M` this contact holds, not the
+        // previous set (with two devices, one locked out: one approval).
+        coAuthResult = verifyLockoutCoAuth(
+          tokens: tokens,
+          cachedDeviceSigKeys: cachedDeviceSigKeys,
+          rotationHash: rotHash,
+          remainingDeviceNodeIds: remaining,
+        );
+      } else {
+        coAuthResult = verifyRotationCoAuth(
+          tokens: tokens,
+          cachedDeviceSigKeys: cachedDeviceSigKeys,
+          rotationHash: rotHash,
+          // Key rotation keeps the full device set, so the quorum stays
+          // `rotationQuorum(cachedDeviceSigKeys.length)` — unchanged §7.5
+          // semantics. `broadcast.preRotationDeviceCount` was passed here
+          // before and never read; it is the sender's own claim and is left
+          // out rather than given a meaning it cannot carry.
+          occasion: CoAuthOccasion.keyRotation,
+        );
+      }
       _log.info('§7.5 Co-Auth result for ${senderHex.substring(0, 8)}: '
           '$coAuthResult (${tokens.length} tokens, '
           '${cachedDeviceSigKeys.length} cached devices, '
-          'quorum=${rotationQuorum(cachedDeviceSigKeys.length)})');
+          '${remaining.isEmpty ? 'quorum=${rotationQuorum(cachedDeviceSigKeys.length)}' : 'lock-out, ${remaining.length} named remaining'})');
     }
 
     // §14.4 "Verification levels at sig rotation (normative)": the level
@@ -10962,7 +11253,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // multi-device identity (possible Primary theft).
     if (coAuthResult == RotationCoAuthResult.quorumNotMet) {
       final tokens = broadcast.approvalTokens.length;
-      final required = rotationQuorum(cachedDeviceSigKeys.length);
+      final named = {
+        for (final b in broadcast.remainingDeviceNodeIds)
+          bytesToHex(Uint8List.fromList(b))
+      };
+      final required = named.isEmpty
+          ? rotationQuorum(cachedDeviceSigKeys.length)
+          : deviceSetChangeQuorum(cachedDeviceSigKeys
+              .where((d) => named.contains(bytesToHex(d.deviceNodeId)))
+              .length);
       try {
         onRotationCoAuthWarning?.call(
             senderHex, contact.displayName, tokens, required);
@@ -12123,6 +12422,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// until the fallback period, and the reversal would be built and never
   /// entered.
   void reportHarvestRun() {
+    endFirstCollection(); // §22.8 L3: the first collection is complete
     if (_coldStartRotationsTor.harvestRun() == null) return;
     _log.info('First harvest run reported — deferred rotation runs '
         'now (§4.5.4/S363).');
@@ -13382,11 +13682,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final isGroup = _groups.containsKey(conversationId);
       final isNew = _addMessageToConversation(conversationId, msg,
           isGroup: isGroup, isChannel: isChannel);
-      if (isNew && !_shouldSuppressNotification(
-          conversationId, _claimedSendTimeMs(event))) {
-        notificationSound.playMessageSound(
+      if (isNew && !_shouldSuppressNotification(conversationId)) {
+        _signalNotification(
             soundName: conversations[conversationId]?.notificationSoundName);
-        notificationSound.vibrate(VibrationType.message);
         final senderName =
             _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         _postAndroidNotification(
@@ -13517,20 +13815,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final isGroup = _groups.containsKey(conversationId);
       final isNew = _addMessageToConversation(conversationId, msg, isGroup: isGroup);
-      if (isNew && !_shouldSuppressNotification(
-          conversationId, _claimedSendTimeMs(event))) {
-        notificationSound.playMessageSound(
+      if (isNew && !_shouldSuppressNotification(conversationId)) {
+        _signalNotification(
             soundName: conversations[conversationId]?.notificationSoundName);
-        notificationSound.vibrate(VibrationType.message);
         final senderName =
             _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        final label = metadata.mimeType.startsWith('image/')
-            ? '📷 Image'
-            : metadata.mimeType.startsWith('video/')
-                ? '🎬 Video'
-                : metadata.mimeType.startsWith('audio/')
-                    ? '🎵 Audio'
-                    : '📎 File';
+        // The kind in the words of the interface (§22.8, §24.1; D-123 item
+        // 9) — as stored above: `audio/` here is a voice message.
+        final label = mediaNotificationText(
+            _msgTypeFromMime(metadata.mimeType),
+            metadata.mimeType,
+            notificationWord);
         _postAndroidNotification(senderName, label, conversationId);
         _lastNotifiedAt[conversationId] = DateTime.now();
       }
@@ -14947,6 +15242,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // on raw payload bytes.
     try {
       final sync = proto.TwinSyncEnvelope.fromBuffer(event.payload);
+      // Every sender writes the 16-byte device identifier
+      // (`buildTwinSyncEnvelope`, `app_payloads.proto` field 2). A frame
+      // without one has no origin to record and is dropped here — before the
+      // dedup entry and before any log line cuts the identifier (S422 TW-2).
+      if (sync.deviceId.length != 16) {
+        _log.warn('TWIN_SYNC without a valid device identifier '
+            '(${sync.deviceId.length} bytes) — dropped');
+        return;
+      }
       final syncIdHex = sync.syncId.hex;
       final deviceIdHex = sync.deviceId.hex;
 
@@ -15178,6 +15482,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           // §14.7 Type 23 (S413, D-99) — `cleona_service_identity_set.dart`.
           unawaited(_handleTwinIdentitySet(sync.payload, event.senderDeviceId));
           break;
+        case proto.TwinSyncType.RECONCILE:
+          // §14.7 Type 20 (S422, D-42) — `cleona_service_reconcile.dart`.
+          _handleTwinReconcile(sync.payload, event.senderDeviceId);
+          break;
         default:
           _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
       }
@@ -15187,64 +15495,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  // §7.5: Co-Auth — collect approval tokens from linked devices during rotation.
-  Completer<void>? _rotationApprovalCompleter;
-  final List<RotationApprovalToken> _collectedApprovalTokens = [];
-  Uint8List? _pendingRotationHash;
-
-  /// §7.5: the device-set change currently being co-authorized, if any.
-  ///
-  /// Deliberately separate state from the key-rotation collection above,
-  /// although both travel the same wire channel: the two hashes cover
-  /// different things, and a shared bucket would let a token collected for one
-  /// occasion be counted towards the other. `_handleRotationApprovalResponse`
-  /// routes each token by the hash it actually signed.
-  ///
-  /// Memory-only and single-slot. A second removal started while one is in
-  /// flight replaces it — the older change is then published without a proof
-  /// rather than with a stale one.
-  _PendingDeviceSetChange? _pendingDeviceSetChange;
-
-  /// §7.5 co-authorization: rotation-approval requests on this Linked Device
-  /// that are waiting for an EXPLICIT user decision. Memory-only and
-  /// deliberately not persisted — a request that survives a daemon restart
-  /// would be a request nobody is watching any more.
+  /// §14.5 co-signing (S422): requests of other own devices waiting on THIS
+  /// device for an explicit user decision, by rotation hash. Kept in the
+  /// store ([_areaCoSignWait], `cleona_service_co_sign.dart`) — they survive
+  /// a restart and never expire: no clock decides for the user (S400 §9 E-a;
+  /// the 5-minute window and its 2-minute grace are gone). Silence still never
+  /// counts as consent: without the decision nothing is sent.
   final Map<String, _PendingRotationApproval> _pendingRotationApprovals = {};
 
-  /// §7.5: how long the *Primary* waits for approvals in
-  /// [rotateIdentityKeysEmergency] before it gives up on the quorum.
-  static const Duration _rotationApprovalWaitWindow = Duration(minutes: 5);
+  /// The open co-signing round this identity started (one entry `round`).
+  static const String _areaCoSign = 'co_sign';
 
-  /// §7.5: grace added on the Linked Device on top of the Primary's wait
-  /// window, covering the one-way trip of the response frame.
-  static const Duration _rotationApprovalTtlGrace = Duration(minutes: 2);
+  /// The parked requests of other own devices (key = rotation hash hex).
+  static const String _areaCoSignWait = 'co_sign_wait';
 
-  /// §7.5: how long a pending rotation-approval request stays answerable on
-  /// this Linked Device. After that it is dropped and NOTHING is sent — see
-  /// below.
-  ///
-  /// DERIVED, NOT CHOSEN — and that is the point. The TTL used to be a second
-  /// hardcoded `Duration(minutes: 5)`, numerically identical to the Primary's
-  /// wait window. That made the two windows close at the same instant: a user
-  /// who tapped "approve" at 4:50 produced a perfectly valid countersignature
-  /// that the Primary was no longer listening for, so the quorum failed even
-  /// though the human had consented. The LD window must therefore *outlive*
-  /// the Primary's, never merely match it.
-  ///
-  /// Keeping the TTL an expression of [_rotationApprovalWaitWindow] means the
-  /// next change to the Primary's timeout drags this one along instead of
-  /// silently re-opening the same gap. Do not replace this with a literal.
-  ///
-  /// Enlarging the LD side is the safe direction: a response that arrives
-  /// after the Primary stopped waiting is merely ignored (the completer is
-  /// null by then), whereas a response that is never produced is a lost
-  /// approval. The reverse — an LD window shorter than the Primary's — has no
-  /// upside at all.
-  /// (`static final`, not `static const`: `Duration.+` is not a const
-  /// operator, and a const literal here would be exactly the duplicated
-  /// number this comment exists to prevent.)
-  static final Duration _rotationApprovalTtl =
-      _rotationApprovalWaitWindow + _rotationApprovalTtlGrace;
+  /// Requests their initiating device withdrew (§14.8; key = rotation hash
+  /// hex, value names the withdrawing device) — so that a request arriving
+  /// after its withdrawal, or again after a restart, is not shown.
+  static const String _areaCoSignWithdrawn = 'co_sign_withdrawn';
 
   /// §7.5: Linked Device receives ROTATION_APPROVAL_REQUEST from the Primary.
   ///
@@ -15281,10 +15549,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// answer: the Primary simply never reaches the quorum, and the contact
   /// side surfaces that via `onRotationCoAuthWarning`.
   ///
-  /// NOTE (state of the wiring): the UI counterpart is not built yet, so
-  /// today no approval can come about at all. That is the intentionally safe
-  /// side (fail-closed rather than fail-open) — but until the UI is wired,
-  /// Emergency Key Rotation reaches no quorum any more.
+  /// S422: the request is kept in the store until the user decides — no
+  /// expiry. Before it is parked, both hashes are recomputed from what the
+  /// request names (the new public keys, and at a lock-out the remaining
+  /// device identifiers and the announcement number): a request whose hash
+  /// does not follow from its content asks for a signature over something
+  /// the dialog cannot show, and is discarded.
   void _handleRotationApprovalRequest(List<int> payload, Uint8List senderDeviceId) {
     try {
       final req = proto.RotationApprovalRequestPayload.fromBuffer(payload);
@@ -15294,11 +15564,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         return;
       }
       final hashHex = bytesToHex(rotationHash);
-      if (_pendingRotationApprovals.containsKey(hashHex)) {
-        // Re-broadcast of the same request (twin fan-out / retry): keep the
-        // original TTL, do not prompt the user twice for one rotation.
+      if (!req.withdrawn && _pendingRotationApprovals.containsKey(hashHex)) {
+        // Re-broadcast of the same request (twin fan-out / retry): do not
+        // prompt the user twice for one rotation.
         _log.debug('§7.5 ROTATION_APPROVAL_REQUEST ${hashHex.substring(0, 8)} '
             'already pending — not re-prompting');
+        return;
+      }
+      final expected = computeRotationHash(
+        newEd25519Pk: Uint8List.fromList(req.newEd25519Pk),
+        newMlDsaPk: Uint8List.fromList(req.newMlDsaPk),
+        newX25519Pk: Uint8List.fromList(req.newX25519Pk),
+        newMlKemPk: Uint8List.fromList(req.newMlKemPk),
+        userId: identity.userId,
+      );
+      if (bytesToHex(expected) != hashHex) {
+        _log.warn('§14.5 ROTATION_APPROVAL_REQUEST ${hashHex.substring(0, 8)}: '
+            'the hash does not follow from the keys it names — discarded');
         return;
       }
 
@@ -15313,25 +15595,54 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           .map((b) => Uint8List.fromList(b))
           .where((b) => b.isNotEmpty)
           .toList();
-
-      final expiryTimer = Timer(_rotationApprovalTtl, () {
-        if (_pendingRotationApprovals.remove(hashHex) != null) {
-          _log.warn('§7.5 rotation approval ${hashHex.substring(0, 8)} expired '
-              'after ${_rotationApprovalTtl.inMinutes} min without a user '
-              'decision — nothing sent (silence is not consent)');
+      Uint8List? changeHash;
+      if (kind == RotationApprovalKind.deviceSetChange) {
+        final change = computeDeviceSetChangeHash(
+            userId: identity.userId,
+            newDeviceNodeIds: newDeviceIds,
+            newSeq: req.changeSeq);
+        if (req.changeHash.isEmpty ||
+            bytesToHex(change) !=
+                bytesToHex(Uint8List.fromList(req.changeHash))) {
+          _log.warn('§14.5 ROTATION_APPROVAL_REQUEST ${hashHex.substring(0, 8)}'
+              ' (lock-out): the change hash does not follow from the '
+              'remaining devices it names — discarded');
+          return;
         }
-      });
-      _pendingRotationApprovals[hashHex] = _PendingRotationApproval(
+        changeHash = change;
+      }
+
+      // §14.8: the request checked as above, marked withdrawn — or a
+      // request its device withdrew before it arrived here.
+      if (req.withdrawn) {
+        _coSignWithdrawnIn(hashHex, senderDeviceId);
+        return;
+      }
+      if (_coSignWithdrawnBy(hashHex, senderDeviceId)) {
+        _log.info('§14.8 ROTATION_APPROVAL_REQUEST ${hashHex.substring(0, 8)}: '
+            'its device withdrew it already — not parked, not shown');
+        return;
+      }
+
+      final pending = _PendingRotationApproval(
         rotationHash: rotationHash,
         requestingDeviceId: Uint8List.fromList(senderDeviceId),
         receivedAtMs: DateTime.now().millisecondsSinceEpoch,
-        expiryTimer: expiryTimer,
         kind: kind,
         newDeviceNodeIds: newDeviceIds,
+        roundId: req.roundId.isEmpty
+            ? null
+            : bytesToHex(Uint8List.fromList(req.roundId)),
+        changeHash: changeHash,
+        lockedOutDeviceId: req.lockedOutDeviceId.isEmpty
+            ? null
+            : bytesToHex(Uint8List.fromList(req.lockedOutDeviceId)),
       );
+      _pendingRotationApprovals[hashHex] = pending;
+      _coSignWaitPut(hashHex, pending);
       _log.info('§7.5 ROTATION_APPROVAL_REQUEST ${hashHex.substring(0, 8)} '
-          'kind=${kind.wireName} parked for explicit user decision (TTL '
-          '${_rotationApprovalTtl.inMinutes} min) — NOT auto-signed');
+          'kind=${kind.wireName} parked for explicit user decision (kept '
+          'until decided, no clock) — NOT auto-signed');
 
       try {
         onRotationApprovalRequest?.call(hashHex, bytesToHex(senderDeviceId),
@@ -15344,52 +15655,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// §7.5: the user explicitly approved the rotation on this Linked Device.
-  /// Only here is the Device-Sig countersignature created.
-  /// Returns false when the hash is unknown or its TTL already elapsed.
+  /// §7.5: the user explicitly approved the rotation on this device. Only
+  /// here are the countersignatures created — with the device signing keys of
+  /// each identity (D-106) — and sent to the device that asked (Type 13).
+  /// S422: one decision answers the requests of the same round in every
+  /// identity of this device (§14.4 "one approval per device counts for all
+  /// identities"). Returns false when the hash is unknown.
   @override
   Future<bool> approveRotation(String rotationHashHex) async {
-    final pending = _pendingRotationApprovals.remove(rotationHashHex);
-    if (pending == null) {
+    if (!_pendingRotationApprovals.containsKey(rotationHashHex)) {
       _log.warn('§7.5 approveRotation: no pending request for '
-          '$rotationHashHex (unknown or expired)');
+          '$rotationHashHex (unknown or already decided)');
       return false;
     }
-    pending.expiryTimer.cancel();
-    // Countersigning is not available yet with more than one device (§14.5,
-    // open work of Appendix C). This device could sign — its device signing
-    // key exists ([_ownApprovalToken]) — but nothing could use the token:
-    // no device sends a request (Type 12), the devices do not hold each
-    // other's device signing public keys, and the rotated keys have no way
-    // to the other devices (Type 16). An approval with the identity key
-    // would not be one: whoever stole the seed could co-sign.
-    _log.error('§14.5 approveRotation: countersigning is not available yet '
-        'with more than one device (Types 12 and 16 are not built). '
-        'The request $rotationHashHex stays unanswered.');
-    return false;
+    final n = _coSignDecide(rotationHashHex, approve: true);
+    _log.info('§14.5 approveRotation: $n request(s) of the round answered');
+    return n > 0;
   }
 
-  /// §7.5 point 5: the user explicitly rejected the rotation on this Linked
-  /// Device. Answers `rejected=true` and raises the theft alarm with the
-  /// contacts directly.
-  /// Returns false when the hash is unknown or its TTL already elapsed.
+  /// §7.5 point 5: the user explicitly rejected the rotation on this device.
+  /// Answers `rejected=true` (Type 13) — for the requests of the same round in
+  /// every identity of this device, as the approval does.
+  /// Returns false when the hash is unknown.
   @override
   Future<bool> rejectRotation(String rotationHashHex) async {
-    final pending = _pendingRotationApprovals.remove(rotationHashHex);
+    final pending = _pendingRotationApprovals[rotationHashHex];
     if (pending == null) {
       _log.warn('§7.5 rejectRotation: no pending request for '
-          '$rotationHashHex (unknown or expired)');
+          '$rotationHashHex (unknown or already decided)');
       return false;
     }
-    pending.expiryTimer.cancel();
     try {
-      final response = proto.RotationApprovalResponsePayload()..rejected = true;
-      // Same reasoning as in `approveRotation`: only the requesting Primary
-      // can act on this. The contacts are informed separately below — that
-      // path deliberately does NOT go through the Primary.
-      _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_RESPONSE,
-          Uint8List.fromList(response.writeToBuffer()),
-          targetDeviceId: pending.requestingDeviceId);
+      _coSignDecide(rotationHashHex, approve: false);
 
       // §7.5: the alert goes DIRECTLY to the contacts, bypassing the Primary
       // — which is exactly the device under suspicion. `_pendingRotationHash`
@@ -15414,24 +15711,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   ///
   /// The event fires exactly once, when the request arrives. A GUI that
   /// starts (or reconnects) afterwards would otherwise never learn about a
-  /// parked request, and it would expire unanswered — the user is never asked
-  /// and the Primary's rotation silently fails the quorum. Reading the map is
-  /// the only way to close that window; the parked entries are memory-only by
-  /// design, so nothing else could reconstruct them.
-  ///
-  /// Expired-but-not-yet-collected entries are filtered out rather than
-  /// returned with a past `expiresAtMs`: the expiry timer and this call are
-  /// not ordered against each other, and handing the UI a request that
-  /// [approveRotation] is about to reject as unknown would be a prompt the
-  /// user cannot answer.
+  /// parked request. S422: the parked entries are kept in the store and do
+  /// not expire, so there is no `expiresAtMs` any more — the request waits
+  /// for the user's decision.
   @override
   Future<List<Map<String, dynamic>>> getPendingRotationApprovals() async {
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final ttlMs = _rotationApprovalTtl.inMilliseconds;
     final out = <Map<String, dynamic>>[];
     for (final entry in _pendingRotationApprovals.entries) {
-      final expiresAtMs = entry.value.receivedAtMs + ttlMs;
-      if (expiresAtMs <= nowMs) continue;
       out.add({
         'rotationHashHex': entry.key,
         'requestingDeviceIdHex': bytesToHex(entry.value.requestingDeviceId),
@@ -15442,7 +15728,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         'newDeviceNodeIdHexes':
             entry.value.newDeviceNodeIds.map(bytesToHex).toList(),
         'receivedAtMs': entry.value.receivedAtMs,
-        'expiresAtMs': expiresAtMs,
+        if (entry.value.roundId != null) 'roundId': entry.value.roundId,
+        if (entry.value.lockedOutDeviceId != null)
+          'lockedOutDeviceIdHex': entry.value.lockedOutDeviceId,
       });
     }
     out.sort((a, b) =>
@@ -15450,95 +15738,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return out;
   }
 
-  /// §7.5: Primary receives ROTATION_APPROVAL_RESPONSE from a Linked Device.
-  ///
-  /// Two collections can be outstanding on this channel — an Emergency Key
-  /// Rotation and a device-set change. An approval is routed by the hash it
-  /// actually signed, never by which collection happens to be open: a token
-  /// signed over a rotation hash must not be able to satisfy a device-set
-  /// quorum, or vice versa.
+  /// §7.5: the starting device receives ROTATION_APPROVAL_RESPONSE (Type 13)
+  /// from another own device. S422: counted in the stored round
+  /// (`cleona_service_co_sign.dart`, `_coSignResponseIn`) — by distinct
+  /// device, each token checked against the device signing keys this
+  /// identity's set names; a token over another hash counts nowhere.
   void _handleRotationApprovalResponse(List<int> payload, Uint8List senderDeviceId) {
     try {
-      final resp = proto.RotationApprovalResponsePayload.fromBuffer(payload);
-      final senderHex = bytesToHex(senderDeviceId);
-      final pendingChange = _pendingDeviceSetChange;
-
-      // Device-set change approvals: the token must cover exactly the change
-      // hash being collected for. `_PendingDeviceSetChange.add` de-duplicates
-      // by device, so answering twice does not count twice.
-      if (!resp.rejected &&
-          resp.hasToken() &&
-          pendingChange != null &&
-          resp.token.rotationHash.hex ==
-              pendingChange.changeHashHex) {
-        final isNew =
-            pendingChange.add(RotationApprovalToken.fromProto(resp.token));
-        _log.info('§7.5 device-set change approval from '
-            '${senderHex.substring(0, 8)} '
-            '(${isNew ? "new" : "duplicate, ignored"}) — '
-            '${pendingChange.approvers.length}/'
-            '${pendingChange.requiredApprovers}');
-        return;
-      }
-
-      if (_pendingRotationHash == null) {
-        if (resp.rejected && pendingChange != null) {
-          // A Linked Device refuses to co-sign the device-set change. Nothing
-          // is forged and nothing is aborted: the bucket simply stays below
-          // the quorum, so the manifest publishes without a proof and the
-          // contacts raise the §7.5 warning — a rejection must be at least as
-          // strong a signal as silence.
-          _log.warn('§7.5 device ${senderHex.substring(0, 8)} REJECTED the '
-              'device-set change — no proof will be attached');
-          return;
-        }
-        _log.warn('§7.5 ROTATION_APPROVAL_RESPONSE received but no rotation pending');
-        return;
-      }
-      if (resp.rejected) {
-        // NOTE — this relayed alert is expected to be DROPPED by every
-        // up-to-date receiver, and that is correct, not a regression.
-        //
-        // `_sendRotationRejectionAlert` signs with THIS device's key
-        // (`node.deviceKeyPair`) while stamping the *rejecting* device's id
-        // into `deviceNodeId`. The two do not match, so the receiver-side
-        // check in `_handleRotationRejectionAlert` verifies the Primary's
-        // signature against the Linked Device's published pubkey and fails.
-        // It cannot be fixed here: the Primary does not hold the Linked
-        // Device's Device-Sig secret — that is precisely the §7.5 property
-        // that makes co-authorization worth anything.
-        //
-        // Nothing is lost. The rejecting device already sent its own,
-        // correctly self-signed alert straight to the contacts from
-        // `rejectRotation`, deliberately bypassing this device. That is the
-        // authoritative path, because this device is the one under suspicion
-        // — a theft alarm relayed by the suspect was never a trustworthy
-        // signal to begin with. The send is kept as a no-op rather than
-        // removed so the log below still records what the Primary saw.
-        _log.warn('§7.5 Device ${senderHex.substring(0, 8)} REJECTED rotation — '
-            'sending ROTATION_REJECTION_ALERT to contacts');
-        _sendRotationRejectionAlert(senderDeviceId);
-        return;
-      }
-      if (!resp.hasToken()) {
-        _log.warn('§7.5 ROTATION_APPROVAL_RESPONSE without token from '
-            '${senderHex.substring(0, 8)} — skipped');
-        return;
-      }
-      _collectedApprovalTokens.add(RotationApprovalToken.fromProto(resp.token));
-      _log.info('§7.5 Collected approval ${_collectedApprovalTokens.length} '
-          'from ${senderHex.substring(0, 8)}');
-
-      // FORMERLY the device count came from `_identityPublisher.delegations`.
-      // Without a publisher `_devices` is the only set this device keeps
-      // about its twins — it is not the same (it also counts legacy twins
-      // without delegation), but it is the only measured number instead of
-      // a guessed one. Gap G-9.
-      final totalDevices = _devices.isEmpty ? 1 : _devices.length;
-      final required = rotationQuorum(totalDevices);
-      if (_collectedApprovalTokens.length + 1 >= required) {
-        _rotationApprovalCompleter?.complete();
-      }
+      _coSignResponseIn(payload, senderDeviceId);
     } catch (e) {
       _log.error('§7.5 ROTATION_APPROVAL_RESPONSE handling failed: $e');
     }
@@ -15906,10 +16113,10 @@ Future<SeedFileResult?> _selfSeedInIsolate({
   );
 }
 
-/// §7.5: a rotation-approval request parked on a Linked Device while it waits
-/// for an explicit user decision. Memory-only, dropped by [expiryTimer] after
-/// [CleonaService._rotationApprovalTtl] — expiry sends nothing at all,
-/// because silence must not count as consent.
+/// §7.5: a rotation-approval request parked on this device while it waits
+/// for an explicit user decision. S422: kept in the store
+/// ([CleonaService._areaCoSignWait]) until decided — no expiry; silence still
+/// sends nothing, because silence must not count as consent.
 class _PendingRotationApproval {
   /// The hash the Primary asked us to countersign.
   final Uint8List rotationHash;
@@ -15931,11 +16138,19 @@ class _PendingRotationApproval {
   ///    Primary is not (yet) in this device's `_devices` map.
   final Uint8List requestingDeviceId;
 
-  /// Arrival time, epoch-ms — lets the UI show the remaining TTL.
+  /// Arrival time, epoch-ms.
   final int receivedAtMs;
 
-  /// Fires once when the request expires; cancelled on approve/reject.
-  final Timer expiryTimer;
+  /// S422: the round of the starting device — one user decision answers
+  /// every request of it, in every identity of this device (§14.4).
+  final String? roundId;
+
+  /// S422: at a lock-out, the change hash this device signs as well (§14.5
+  /// path 2), recomputed from [newDeviceNodeIds] and the announcement number.
+  final Uint8List? changeHash;
+
+  /// S422: the DeviceID being locked out (display only).
+  final String? lockedOutDeviceId;
 
   /// §7.5: what the Primary is asking for. Carried all the way to the UI —
   /// the countersignature is identical for both occasions, so the ONLY thing
@@ -15957,64 +16172,40 @@ class _PendingRotationApproval {
     required this.rotationHash,
     required this.requestingDeviceId,
     required this.receivedAtMs,
-    required this.expiryTimer,
     required this.kind,
     required this.newDeviceNodeIds,
-  });
-}
-
-/// §7.5: countersignatures being collected for a device-set change that has
-/// not been published yet. Owned by `CleonaService._pendingDeviceSetChange`
-/// and read by the publisher's `deviceSetChangeProofProvider`.
-class _PendingDeviceSetChange {
-  /// The hash the remaining devices are asked to sign. Bound to both the
-  /// post-change device list and the sequence number of the manifest that
-  /// will carry the proof.
-  final Uint8List changeHash;
-
-  /// Hex of [changeHash] — the provider compares against this to check that a
-  /// publish actually describes the change these tokens cover.
-  final String changeHashHex;
-
-  /// Device count before the change; goes into the proof as
-  /// `previous_device_count`.
-  final int previousDeviceCount;
-
-  /// `deviceSetChangeQuorum(remaining)` — how many DISTINCT devices must
-  /// consent before a proof may be attached.
-  final int requiredApprovers;
-
-  final List<RotationApprovalToken> tokens = [];
-
-  /// Device-node-id hexes that have consented. Kept alongside [tokens]
-  /// because the quorum counts devices, not signatures: two tokens from one
-  /// device are one consent.
-  final Set<String> approvers = {};
-
-  /// Completes as soon as [requiredApprovers] distinct devices have consented;
-  /// null while nothing is being waited on.
-  Completer<void>? completer;
-
-  _PendingDeviceSetChange({
-    required this.changeHash,
-    required this.changeHashHex,
-    required this.previousDeviceCount,
-    required this.requiredApprovers,
+    this.roundId,
+    this.changeHash,
+    this.lockedOutDeviceId,
   });
 
-  /// Record one device's consent. Duplicate tokens from the same device are
-  /// dropped, so a device cannot fill a quorum on its own by answering twice.
-  /// Returns true when this was a new approver.
-  bool add(RotationApprovalToken token) {
-    final hex = bytesToHex(token.deviceNodeId);
-    if (!approvers.add(hex)) return false;
-    tokens.add(token);
-    if (approvers.length >= requiredApprovers &&
-        completer != null &&
-        !completer!.isCompleted) {
-      completer!.complete();
-    }
-    return true;
+  Map<String, dynamic> toJson() => {
+        'rh': bytesToHex(rotationHash),
+        'from': bytesToHex(requestingDeviceId),
+        'at': receivedAtMs,
+        'kind': kind.wireName,
+        'ids': newDeviceNodeIds.map(bytesToHex).toList(),
+        if (roundId != null) 'round': roundId,
+        if (changeHash != null) 'ch': bytesToHex(changeHash!),
+        if (lockedOutDeviceId != null) 'out': lockedOutDeviceId,
+      };
+
+  static _PendingRotationApproval? fromJson(Map<String, dynamic> j) {
+    final rh = j['rh'], from = j['from'];
+    if (rh is! String || from is! String) return null;
+    return _PendingRotationApproval(
+      rotationHash: hexToBytes(rh),
+      requestingDeviceId: hexToBytes(from),
+      receivedAtMs: j['at'] as int? ?? 0,
+      kind: RotationApprovalKind.fromWireName(j['kind'] as String?),
+      newDeviceNodeIds: [
+        for (final x in (j['ids'] as List? ?? const [])) hexToBytes('$x')
+      ],
+      roundId: j['round'] as String?,
+      changeHash: j['ch'] is String ? hexToBytes(j['ch'] as String) : null,
+      lockedOutDeviceId: j['out'] as String?,
+    );
   }
 }
+
 

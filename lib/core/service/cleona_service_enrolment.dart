@@ -31,17 +31,20 @@
 //   * The handover arrives → its files and key state are written, the
 //     mailbox is opened anew from them, and it is an ordinary own device.
 //
-// ── THE LOCK (E7) ───────────────────────────────────────────────────────
+// ── THE LOCK (D-123) ────────────────────────────────────────────────────
 //
-// The routine KEM rotation across own devices (E7, D-40 second sentence) is
-// not built in this tree. Until it is, two devices of one identity would
-// drift apart at the first rotation — so the product path stays behind
-// [EnrolmentGate]: the window cannot be opened, the interface says "not
-// available yet". A test opens it on purpose.
+// The product path stays behind [EnrolmentGate]: the window cannot be opened,
+// the interface says "not available yet". The owner's decision of 12.11.2026
+// (D-123): it opens only after the co-signing (Types 12/13), the lock-out
+// from all identities and the first reconciliation (Type 20) are built and
+// green, and a full E2E run with two enrolled devices per platform passed
+// (D-96). (Until S422 this comment named the routine KEM rotation across own
+// devices, E7 — built since, no longer the reason.) A test opens it on
+// purpose.
 
 part of 'cleona_service.dart';
 
-/// The lock of the product path to two devices until E7 is merged.
+/// The lock of the product path to two devices (D-123).
 class EnrolmentGate {
   /// Opened by a test, or by the environment of a lab daemon
   /// (`CLEONA_ENROLMENT_OPEN=1`); nothing else sets it.
@@ -292,8 +295,9 @@ extension CleonaServiceEnrolment on CleonaService {
   /// a mailbox. Every bundle is laid at once with the window's end.
   Future<bool> enrolOpenAll() async {
     if (!EnrolmentGate.open) {
-      _log.info('Enrolment: window NOT opened — not available until the '
-          'routine KEM rotation across own devices (E7) is built');
+      _log.info('Enrolment: window NOT opened — enrolment stays locked until '
+          'a full E2E run with two enrolled devices per platform has passed '
+          '(D-123, D-96)');
       return false;
     }
     final p = myceliumMailbox;
@@ -370,6 +374,16 @@ extension CleonaServiceEnrolment on CleonaService {
       _enrol.pending[id] = (q: q, at: DateTime.now());
       _enrolPendingSave(id);
       fresh++;
+      if (!q.namesSigningKeys) {
+        // D-108 (§14.6.1): the earlier form (4.2.3–4.2.6) names no device
+        // signing keys — such a device could not countersign (§14.5), does
+        // not know Type 16 and would be cut off at the first key change. It
+        // is refused; the Requests tab says to update it and pair again.
+        _log.event('Enrolment: request of "${q.deviceName}" is of the earlier '
+            'form (no device signing keys) — it cannot be accepted (D-108); '
+            'the Requests tab asks to update that device first');
+        continue;
+      }
       if (_enrolApproved.contains(q.deviceIdHex)) {
         // The user approved this device already — one approval for every
         // identity, kept until it is locked out (§14.6.1 step 3, D-99).
@@ -403,6 +417,7 @@ extension CleonaServiceEnrolment on CleonaService {
           platform: e.value.q.platform,
           deviceIdHex: e.value.q.deviceIdHex,
           receivedAt: e.value.at,
+          olderVersion: !e.value.q.namesSigningKeys,
         ));
       }
     }
@@ -461,7 +476,19 @@ extension CleonaServiceEnrolment on CleonaService {
     var refuse = !accept;
     final held = _enrolUserDeviceCount;
     final approvedBefore = _enrolApproved.contains(device);
-    if (accept && !approvedBefore && held >= kDeviceCapPerUser) {
+    if (accept && !q.namesSigningKeys) {
+      // D-108: a request of the earlier form is never accepted.
+      refuse = true;
+      _log.event('Enrolment: "${q.deviceName}" REFUSED — request of the '
+          'earlier form, the device must be updated first (D-108)');
+    } else if (accept && coSignLockOutPendingOnHost) {
+      // §14.4 (D-109, S422): while a lock-out waits for its quorum the set
+      // does not grow. The request stays in the tab for a later decision.
+      _log.event('Enrolment: "${q.deviceName}" NOT accepted now — a lock-out '
+          'waits for its quorum and the device set does not grow meanwhile '
+          '(§14.4, D-109); the request stays');
+      return false;
+    } else if (accept && !approvedBefore && held >= kDeviceCapPerUser) {
       refuse = true;
       _enrolCapRefused = q.deviceName;
       _log.event('Enrolment: "${q.deviceName}" REFUSED — the user has $held '
@@ -560,6 +587,9 @@ extension CleonaServiceEnrolment on CleonaService {
     // announcement proves only a set whose device signing keys this node
     // holds; it names itself in the log when it stays silent.
     _announceDeviceSetToContacts(occasion: 'Device enrolled');
+    // §14.6.1 step 6, §14.6.3 (S422): the initial reconciliation follows the
+    // handover — header now, the newest messages on the new device's fetch.
+    reconcileBegin(q.deviceIdHex);
     _enrolWindowShut();
     _log.event('Enrolment: "${q.deviceName}" ACCEPTED — ${body.length} B '
         'handed over ($placed), Type 9 to the other own devices');
@@ -841,6 +871,14 @@ extension CleonaServiceEnrolment on CleonaService {
             e.key as String: (e.value as Map).cast<String, dynamic>()
         };
     final keys = area(IdentityContext.areaKeys)[IdentityContext.keyKeys];
+    // S422 (§14.4): a device locked out before and enrolled again by the
+    // user's explicit approval is no longer the locked-out device — its note
+    // goes, so later deletions note their indices as usual again.
+    try {
+      _identityMgr.lockedOutSelfClear();
+    } on Object catch (e) {
+      _log.warn('Enrolment: lock-out note not cleared — $e');
+    }
     if (keys == null || !_enrolContinues(keys, area(IdentityContext.areaRotationChain))) {
       _log.error('Enrolment: the handed-over keys do not continue this '
           'identity (§4.5.4) — NOT taken over');

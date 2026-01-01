@@ -347,12 +347,14 @@ class ReconcileFetch_Kind extends $pb.ProtobufEnum {
   static const ReconcileFetch_Kind MESSAGES = ReconcileFetch_Kind._(1, _omitEnumNames ? '' : 'MESSAGES');
   static const ReconcileFetch_Kind NEWEST = ReconcileFetch_Kind._(2, _omitEnumNames ? '' : 'NEWEST');
   static const ReconcileFetch_Kind SINCE = ReconcileFetch_Kind._(3, _omitEnumNames ? '' : 'SINCE');
+  static const ReconcileFetch_Kind ATTACHMENTS = ReconcileFetch_Kind._(4, _omitEnumNames ? '' : 'ATTACHMENTS');
 
   static const $core.List<ReconcileFetch_Kind> values = <ReconcileFetch_Kind> [
     MANIFEST,
     MESSAGES,
     NEWEST,
     SINCE,
+    ATTACHMENTS,
   ];
 
   static final $core.Map<$core.int, ReconcileFetch_Kind> _byValue = $pb.ProtobufEnum.initByValue(values);

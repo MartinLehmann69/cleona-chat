@@ -169,6 +169,18 @@ class DeviceStore extends EncryptedStore {
   /// the next derivation run (§13.7).
   static const String keyRetiredIdentities = 'retired_identities';
 
+  /// [areaDevice]: this device was locked out by the user's other devices
+  /// (§14.4, D-107, S422) — `{'v': {'at': ms, 'ids': [{'i': index, 'name':
+  /// …}, …], 'seen': bool}}`, for the interface to say why every identity
+  /// went. Their indices are NOT noted as deleted: the identities live on, on
+  /// the other own devices.
+  static const String keyLockedOutSelf = 'locked_out_self';
+
+  /// [areaDevice]: devices locked out of this user's devices (§14.4, D-109,
+  /// S422) — `{'v': ['u:<DeviceID>', 'n:<node id of the device>', …]}`; an
+  /// identity list (Type 23) never enters such a device into a set again.
+  static const String keyLockedOutDevices = 'locked_out_devices';
+
   /// [areaDevice]: the DeviceID of this device (`{'v': <32 hex digits>}`,
   /// §14.1; §4.1 "a daemon hosting N identities has exactly one DeviceID")
   /// — ONE for every identity of the device. Set by the first identity that

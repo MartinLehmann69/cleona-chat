@@ -26,6 +26,12 @@
 ///   the answer itself gets the answer deadline, [kDurableAfterEndWait];
 /// * [SendEnd.unreachable] / [SendEnd.refused] — the shell's handshake
 ///   stayed unanswered or the hop refused: failed at once (§11.6).
+///
+/// The failure says whether the node was REACHED (S420, BL-2): only a node
+/// that took the request and stayed silent lacks the capability (§16.0
+/// "Older 4.2 versions … never asked twice"). A node the request never
+/// reached says nothing about its capability and is asked again at the next
+/// edge (§16.7 "deposited again at every edge").
 library;
 
 import 'dart:async';
@@ -40,7 +46,10 @@ const Duration kDurableAfterEndWait = Duration(milliseconds: 800);
 
 class DurableAsk {
   final Future<SendEnd> Function() _send;
-  final void Function(String why) _failed;
+  /// [reached]: the request reached the node (it ended as sent, delivered or
+  /// unconfirmed) and no answer came; false when the transmission itself
+  /// failed (unreachable, refused, send error).
+  final void Function(String why, bool reached) _failed;
   final Duration answerWait;
   final Duration afterEndWait;
   Timer? _wait;
@@ -56,17 +65,18 @@ class DurableAsk {
   void start() {
     if (_done || _started) return;
     _started = true;
-    _send().then(_ended, onError: (Object e) => _fail('send failed: $e'));
+    _send().then(_ended,
+        onError: (Object e) => _fail('send failed: $e', reached: false));
   }
 
   void _ended(SendEnd end) {
     if (_done) return;
     if (end == SendEnd.unreachable || end == SendEnd.refused) {
-      _fail('transmission ${end.name}');
+      _fail('transmission ${end.name}', reached: false);
       return;
     }
     _wait = Timer(end == SendEnd.sent ? answerWait : afterEndWait,
-        () => _fail('no answer'));
+        () => _fail('no answer', reached: true));
   }
 
   /// The answer arrived.
@@ -81,9 +91,9 @@ class DurableAsk {
     _wait = null;
   }
 
-  void _fail(String why) {
+  void _fail(String why, {required bool reached}) {
     if (_done) return;
     _end();
-    _failed(why);
+    _failed(why, reached);
   }
 }

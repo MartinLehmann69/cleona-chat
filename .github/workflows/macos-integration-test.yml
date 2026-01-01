@@ -4,8 +4,8 @@
 # Phase 1: Startup smoke (always)
 #   FFI dylib loading, app launch, setup flow, UI navigation
 #
-# Phase 2: Network integration (when BOOTSTRAP_CONTACT_SEED variable is set)
-#   ContactSeed import, peer connection to bootstrap via relay cascade
+# No repository variable or secret is read here: a variable of a public
+# repository stands in clear text in every public log that names it (S422).
 #
 # No signing needed — runs locally on the runner, not distributed.
 ###############################################################################
@@ -102,8 +102,6 @@ jobs:
       # screen comes up.
       - name: Run integration test (fresh keychain)
         timeout-minutes: 10
-        env:
-          BOOTSTRAP_CONTACT_SEED: ${{ vars.BOOTSTRAP_CONTACT_SEED }}
         run: |
           set -o pipefail
           flutter test integration_test/app_test_ci.dart -d macos --timeout 120s 2>&1 | tee test-output.log

@@ -1,6 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:mycelium/durable_packets.dart' show kDurableObjectAtMost;
+import 'package:mycelium/node_helpers.dart' show interfaces;
+import 'package:mycelium/own_address.dart' show linkKindFrom;
+
 import '../log/clogger.dart';
+import '../log/log_redaction.dart';
 import '../service/cleona_service.dart';
 import 'crash_report_builder.dart';
 import 'system_channels.dart';
@@ -32,9 +38,63 @@ class CrashReporter {
   // ── Manual log report ──────────────────────────────────────────────
 
   LogReport buildLogReport() {
-    final logLines = CLogger.getReportLines(SystemChannels.maxLogTailLines)
+    final head = _stateLines();
+    final tail = CLogger.getReportLines(SystemChannels.maxLogTailLines)
         .map(normalizeCrashPath)
         .toList();
+    var report = _logReport(head, tail);
+    // A system object above `kDurableObjectAtMost` is read by no holder
+    // (`durable_packets.dart`, S420 BL-5): the oldest tail lines go first,
+    // never the head; 1024 B stay free for pseudonym, signature and the
+    // object's own head (`system_object.dart`).
+    while (tail.isNotEmpty &&
+        utf8.encode(report.toPostText()).length > kDurableObjectAtMost - 1024) {
+      tail.removeRange(0, tail.length < 10 ? tail.length : 10);
+      report = _logReport(head, tail);
+    }
+    return report;
+  }
+
+  /// Fixed lines at the head of a log report (S422): the state a storm of
+  /// equal lines pushes out of the tail, read from the node instead of the
+  /// log. Every address goes through [LogRedaction.apply] — the same markers
+  /// as in the tail; an interface is named by its kind and index, never by
+  /// its name (on Windows the name is the user's own text).
+  List<String> _stateLines() {
+    final host = _service.myceliumMailbox?.host;
+    if (host == null) return const ['== node: not running'];
+    try {
+      final node = host.node;
+      final c = node.wireCounters;
+      final ifs = [
+        for (final s in interfaces)
+          '${linkKindFrom(s.name).name}#${s.index} '
+              '${s.addresses.map((a) => a.address).join(',')}',
+      ].join('; ');
+      final pub = node.publicAddress;
+      final edge = host.network.watch.lastEdge;
+      String cap(String s) => s.length > 1024 ? '${s.substring(0, 1024)}…' : s;
+      return [
+        '== wire: port ${node.port}, IPv6 socket '
+            '${node.speaks(InternetAddress.loopbackIPv6) ? 'yes' : 'no'}; '
+            'packets sent ${c.packetsSent}, received ${c.packetsReceived}; '
+            'send failures IPv4 ${c.sendFailures4}, IPv6 ${c.sendFailures6}',
+        cap('== interfaces at the last edge: ${LogRedaction.apply(ifs)}'),
+        '== own public address: ${pub == null ? 'none' : LogRedaction.apply(
+            '${InternetAddress.fromRawAddress(pub.address).address}:${pub.port}')}',
+        edge == null
+            ? '== last network change: none since start'
+            : cap('== last network change ${edge.at.toIso8601String()} '
+                '(${edge.reason}): ${LogRedaction.apply(
+                    host.network.watch.last.join(','))}'),
+      ];
+    } catch (e) {
+      return ['== node state not readable: ${e.runtimeType}'];
+    }
+  }
+
+  LogReport _logReport(List<String> head, List<String> tail) {
+    final logLines = [...head, ...tail];
 
     final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
 

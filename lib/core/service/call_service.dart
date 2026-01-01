@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/calls/audio_mixer.dart';
 import 'package:cleona/core/calls/collaboration/screen_share_manager.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
+import 'package:cleona/core/calls/keyframe_request_gate.dart';
 import 'package:cleona/core/calls/session_behaviour.dart';
 import 'package:cleona/core/calls/voice_codec.dart';
 import 'package:cleona/core/calls/voice_event_dispatch.dart';
@@ -301,7 +302,11 @@ class CallService {
       return;
     }
     _ownVideoAnnounced = (sending: sendingVideo, reason: r);
+    session.ownVideoOffReason = sendingVideo ? null : r;
     onOwnVideoStateChanged?.call(session, sendingVideo, r);
+    // The GUI learns it from [CallInfo.ownVideoOffReason] (§17.5: no camera
+    // on a device without a video path).
+    onStateChanged?.call();
   }
 
   /// A call did not come about BECAUSE plane D cannot carry anything (§17):
@@ -1841,9 +1846,14 @@ class CallService {
     return fresh;
   }
 
+  /// One keyframe request per call and gap (§17.2, S422 R-16a — see
+  /// [KeyframeRequestGate]).
+  final KeyframeRequestGate _keyframeRequests = KeyframeRequestGate();
+
   void sendKeyframeRequest() {
     final session = callManager.currentCall;
     if (session == null || session.state != CallState.inCall) return;
+    if (!_keyframeRequests.allow(session.callIdHex, DateTime.now())) return;
     // DETACHED, BUT OBSERVED: the same class as in
     // `CleonaService._detachedSend`. `sendToUser` is `async` and therefore
     // NEVER throws synchronously — every throw lands in this discarded

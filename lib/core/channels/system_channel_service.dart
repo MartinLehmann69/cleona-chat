@@ -153,7 +153,12 @@ class SystemChannelService implements SystemChannelApi {
     final fpHex = draft.fingerprintHex;
     final fp = fpHex != null && fpHex.length == 64 ? hexToBytes(fpHex) : null;
     final bytes = author.report(draft.channel, draft.text, fingerprint: fp);
-    final refusal = _refusal(hub.store.ownCheck(bytes), draft.channel);
+    final reason = hub.store.ownCheck(bytes);
+    final refusal = _refusal(reason, draft.channel);
+    // The measurement of D-123 (10): how large a signed object really gets
+    // on this device (a manual log report above all). Once per preview.
+    _log.info('syschan: prepared object of ${bytes.length} B for channel '
+        '${draft.channel}${reason == null ? '' : ' — refused: $reason'}');
     final holders = hub.holders();
     SystemObject? existing;
     if (fp != null && refusal == null) {

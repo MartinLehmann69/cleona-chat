@@ -28,6 +28,14 @@ export 'package:mycelium/ladder_target.dart';
 /// The proof of work is step 4's natural offset: whoever acknowledges before
 /// it is ready costs no deposit.
 ///
+/// **One exception, the call invitation while it rings** (§17.2, D-44
+/// addendum 11.11.2026): its step 3 is sent again until the callee
+/// acknowledges it, at most three times, on the answer wait of
+/// [kInvitationFirstWait] doubled after every sending ([Silence.ask]
+/// `doubling`). The repeat is the caller's because only the caller can notice
+/// that nothing comes back: a forwarder reports no lost hand-on (§8.1), and a
+/// signal has no step 4 (S418 34.T03, `berichte/S420-VORLAGEN-G1-NETZ.md`).
+///
 /// This file knows no network. It gets a function for every step and calls
 /// each applicable one exactly once, inside [Ladder.send].
 ///
@@ -169,6 +177,13 @@ class Shipment {
   }
 }
 
+/// The first answer wait of a call invitation on step 3 (§17.2): T1 = 500 ms,
+/// the round-trip estimate SIP starts its INVITE retransmission timer with
+/// (RFC 3261 §17.1.1.1 "T1 … 500 ms", §17.1.1.2 "Timer A … initially set to
+/// T1", doubled at every retransmission). With [kRepeatsAtMost] = 3 the
+/// repeats leave 0.5 s, 1.5 s and 3.5 s after the first sending.
+const Duration kInvitationFirstWait = Duration(milliseconds: 500);
+
 typedef StepsSend = FutureOr<Object?> Function(
     Uint8List packet, CardAddress destination);
 
@@ -217,7 +232,8 @@ class Ladder {
         silence = silence ?? Silence();
 
   /// Where step 1 of a sending that waits for its acknowledgement is
-  /// repeated and given up (§11.3a) — the node's.
+  /// repeated and given up (§11.3a), and step 3 of a call invitation
+  /// (§17.2) — the node's.
   final Silence silence;
 
   /// Sends [packet] off: every applicable step, now, once (§7.1).
@@ -231,7 +247,8 @@ class Ladder {
   /// [answered]: the sending waits for its acknowledgement (§9.2) — its step 1
   /// is a packet that expects an answer and is repeated as §11.3a says until
   /// the acknowledgement ends the sending. A receipt or an amendment expects
-  /// nothing and leaves once.
+  /// nothing and leaves once. With [Target.callInvitation] its step 3 is
+  /// repeated too ([_invitationOnStepThree], §17.2).
   ///
   /// [answeredByEndMark]: step 1 is a packet that expects an answer which
   /// may come long after it arrived — the request (2) of a QR/NFC join waits
@@ -282,7 +299,13 @@ class Ladder {
     }
     final neighbour = target.neighbour;
     if (neighbour != null && target.code != null) {
-      s._send(LadderStep.neighbour, () => viaNeighbour(packet, neighbour, target));
+      s._send(LadderStep.neighbour, () {
+        if (!(answered && target.signal && target.callInvitation)) {
+          viaNeighbour(packet, neighbour, target);
+          return;
+        }
+        _invitationOnStepThree(s, neighbour);
+      });
     }
     if (target.stepFour) {
       s._send(LadderStep.postBox,
@@ -294,5 +317,43 @@ class Ladder {
           : 'no route known — only the post box remains');
     }
     return s;
+  }
+
+  /// Step 3 of a call invitation (§17.2): "the caller sends the invitation
+  /// again on step 3, at most three times (0.5 s, 1.5 s and 3.5 s after the
+  /// first sending, as SIP, RFC 3261 §17.1.1.2), until the callee
+  /// acknowledges it or the call stops ringing; each repeat plans its first
+  /// hop anew." The answer awaited is the callee's acknowledgement (§9.2),
+  /// which ends the shipment ([Shipment.acknowledged]); the call stopping to
+  /// ring gives it up ([Shipment.giveUp], `MailboxSignal.signalEnd`) — both
+  /// complete `_done` and stop the repeats.
+  ///
+  /// Every sending calls [viaNeighbour] anew, so the node picks its first hop
+  /// from its neighbourhood as it stands then (`code_send.dart`). The silence
+  /// of a repeat is no evidence about any neighbour (`evidence: false`): the
+  /// answer comes from the callee behind two forwarders, and §11.3a judges
+  /// the neighbour asked, not the way behind it. The same envelope leaves
+  /// again — no new format; the callee drops the copy (`mailbox_inbound.dart`
+  /// "SECOND COPY") and acknowledges it anew.
+  void _invitationOnStepThree(Shipment s, CardAddress neighbour) {
+    var sendings = 0;
+    unawaited(silence.ask(s._done.future,
+        to: InternetAddress.fromRawAddress(Uint8List.fromList(neighbour.address)),
+        port: neighbour.port,
+        send: (_, __) {
+          if (sendings++ > 0) {
+            report?.call('Step neighbour: call invitation sent again '
+                '($sendings of ${1 + kRepeatsAtMost}) — no acknowledgement from the callee yet (§17.2)'
+                '${traceOn ? " — TRACE ladder ${packetId(s.packet)} repeat" : ""}');
+          }
+          viaNeighbour(s.packet, neighbour, s.target);
+          return null;
+        },
+        wait: kInvitationFirstWait,
+        doubling: true,
+        others: false,
+        evidence: false,
+        cancelled: () => s._finished,
+        what: 'call invitation on step 3'));
   }
 }

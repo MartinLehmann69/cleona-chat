@@ -2537,6 +2537,17 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: muted));
           break;
 
+        case 'set_notification_without_content':
+          final ncService = _resolveService(client, req);
+          if (ncService == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final stored = await ncService
+              .setNotificationWithoutContent(req.params['on'] == true);
+          _sendResponse(client, IpcResponse(id: req.id, success: stored));
+          break;
+
         case 'set_gui_device_setting':
           final gService = _resolveService(client, req);
           if (gService == null) {
@@ -3112,6 +3123,32 @@ class IpcServer {
           }
           final revoked = await service.revokeDevice(revokeDeviceId);
           _sendResponse(client, IpcResponse(id: req.id, success: revoked));
+          break;
+        case 'reconcile_fetch_history':
+        case 'reconcile_fetch_attachments':
+          // §14.6.3 (S422): the user's decision / consent per conversation.
+          final recService = _resolveService(client, req);
+          final recConv = req.params['conversationId'] as String?;
+          if (recService == null || recConv == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: recService == null ? 'No active service' : 'Missing param: conversationId'));
+            break;
+          }
+          final recOk = req.command == 'reconcile_fetch_history'
+              ? await recService.reconcileFetchHistoryOf(recConv)
+              : await recService.reconcileFetchAttachmentsOf(recConv);
+          _sendResponse(client, IpcResponse(id: req.id, success: recOk));
+          break;
+        case 'co_sign_cancel':
+          // §14.9.2 (S422): the user cancels the open co-signing round(s).
+          final cancelService = _resolveService(client, req);
+          if (cancelService == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final cancelled = await cancelService.cancelCoSign();
+          _sendResponse(client,
+              IpcResponse(id: req.id, success: true, data: {'cancelled': cancelled}));
           break;
 
         // B-4b (§14.6.1, D-39, D-40): the enrolment of a further device.

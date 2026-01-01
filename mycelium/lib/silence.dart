@@ -150,12 +150,19 @@ class Silence {
   /// [evidence] `false`: a request an older 4.2 node does not answer (D-87,
   /// `who_question.dart`) — its silence says nothing about the address: it
   /// fails nothing and marks nothing as silent.
+  ///
+  /// [doubling]: the answer wait doubles after every sending ([wait], 2 ×,
+  /// 4 ×, 8 ×) — the retransmission timer of an end-to-end request whose
+  /// answer comes over a path of unknown length (RFC 3261 §17.1.1.2, Timer A:
+  /// starts at T1, doubles at every retransmission). Only the call
+  /// invitation on step 3 asks for it (§17.2, `ladder.dart`).
   Future<Answered> ask(
     Future<Object?> answer, {
     required InternetAddress to,
     required int port,
     required SendOnce send,
     Duration wait = kAnswerWait,
+    bool doubling = false,
     bool others = true,
     bool Function()? cancelled,
     String what = 'request',
@@ -185,9 +192,10 @@ class Silence {
           if (n > 0 && (cancelled?.call() ?? false)) return null;
           if (n > 0) repeated++;
           Object? end;
+          final w = doubling ? wait * (1 << n) : wait; // [doubling]: Timer A
           // A handshake still running after one answer wait has had its
           // first flight unanswered: the address is silent now as well.
-          final t = Timer(wait, () {
+          final t = Timer(w, () {
             if (evidence && !inSilence) _quiet(k, 1);
             inSilence = evidence;
           });
@@ -206,7 +214,7 @@ class Silence {
             shellDeclared = true;
             break;
           }
-          if (end != SendEnd.unconfirmed && await _within(answer, wait)) {
+          if (end != SendEnd.unconfirmed && await _within(answer, w)) {
             return answeredAt(a, p);
           }
           // This sending stayed without an answer (an unconfirmed

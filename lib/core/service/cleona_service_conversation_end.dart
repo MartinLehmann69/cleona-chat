@@ -101,6 +101,7 @@ extension ConversationEndOps on CleonaService {
     if (shown != null && shown.unreadCount > 0) _updateBadgeCount();
     try {
       onCancelNotificationAndroid?.call(conversationId);
+      onCancelNotificationIos?.call(conversationId);
     } catch (e) {
       _log.debug('Conversation ${_short(conversationId)}: notification not '
           'cancelled — $e');

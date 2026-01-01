@@ -6,9 +6,10 @@
 /// is —, then devices of non-contacts before devices of contacts
 /// ([durableHolderOrder]). Within each, a node that has already shown the
 /// capability (named an identifier, answered `0x91`/`0x96`/`0x98`) goes
-/// first, and a node that failed a durable request this run is left out:
-/// an older 4.2 version discards `0x90` without an answer (D-21) and is
-/// asked once, not again (§16.0 "Older 4.2 versions").
+/// first, and a node that was reached and stayed silent this run is left
+/// out: an older 4.2 version discards `0x90` without an answer (D-21) and is
+/// asked once, not again (§16.0 "Older 4.2 versions"). A node the request
+/// never reached (handshake unanswered) is not left out (S420, BL-2).
 ///
 /// **Proof of work.** The deposit carries `D_box` (§16.7, §8.2), computed
 /// once per object before the first `0x90` (`durable_proof.dart`).
@@ -30,6 +31,7 @@ import 'package:mycelium/durable_fetch.dart' show DurableSend, nodeKey;
 import 'package:mycelium/durable_packets.dart';
 import 'package:mycelium/durable_proof.dart';
 import 'package:mycelium/durable_stock.dart';
+import 'package:mycelium/durable_trace.dart';
 
 /// Holders a deposit goes to (§16.7).
 const int kDepositHolders = 3;
@@ -60,9 +62,14 @@ class DurableDeposit {
   final bool Function(String node) _isContact;
   final DurableSend _send;
 
-  /// A holder answered (`true`) or failed (`false`) — the node's capability
-  /// memory (`durable_node.dart`).
+  /// A holder answered (`true`) or was reached and stayed silent (`false`) —
+  /// the node's capability memory (`durable_node.dart`). A holder the
+  /// deposit never reached is not reported (S420, BL-2): unreachable says
+  /// nothing about the capability, and the next edge asks it again.
   final void Function(CardAddress holder, bool answered) onHolder;
+
+  /// The node's report, for the success lines (`durable_trace.dart`).
+  final void Function(String)? report;
   final StreamController<DepositEvent> _events = StreamController();
   final Map<String, DurableAsk> _asks = {};
   final Set<String> _acked = {};
@@ -72,7 +79,8 @@ class DurableDeposit {
   DurableDeposit(this.channel, this.object, this._candidates,
       {required bool Function(String node) isContact,
       required DurableSend send,
-      required this.onHolder})
+      required this.onHolder,
+      this.report})
       : hash = DurableId.of(channel, object).hash,
         _isContact = isContact,
         _send = send;
@@ -102,7 +110,7 @@ class DurableDeposit {
     final k = nodeKey(holder);
     final ask = DurableAsk(
         () => _send(depositPacket(channel, _proof!, object), holder),
-        (why) => _failed(holder, why));
+        (why, reached) => _failed(holder, why, reached: reached));
     _asks[k] = ask;
     ask.start();
   }
@@ -119,6 +127,8 @@ class DurableDeposit {
       _asks.remove(k);
       onHolder(from, true);
       if (!_acked.add(k)) return;
+      durableTraceDepositAck(
+          report, hash, channel, from, _acked.length, kDepositPublished);
       _events.add(DepositEvent(_acked.length,
           holder: k, contactHolder: _isContact(k)));
       if (_acked.length >= kDepositPublished) _close();
@@ -127,13 +137,15 @@ class DurableDeposit {
     final no = notHeldRead(p);
     if (no == null || no.channel != channel || !_equal(no.hash, hash)) return;
     // It answered, but holds nothing: neither capable for questions about
-    // the stock nor failed.
+    // the stock nor failed — also when it refused the object for a limit
+    // (D-123 (10)): the holder stays askable for the next object.
     ask.answered();
+    durableTraceDepositRefused(report, hash, channel, from);
     _gone(k, 'not held there (0x94)');
   }
 
-  void _failed(CardAddress holder, String why) {
-    onHolder(holder, false);
+  void _failed(CardAddress holder, String why, {required bool reached}) {
+    if (reached) onHolder(holder, false);
     _gone(nodeKey(holder), why);
   }
 

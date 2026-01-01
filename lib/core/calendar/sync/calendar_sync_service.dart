@@ -289,6 +289,16 @@ class CalendarSyncService {
     _timer = null;
   }
 
+  /// Whether the cadence clock runs (between [start] and [stop]).
+  bool get isRunning => _timer != null;
+
+  /// Any provider configured for this identity — the four of §18.2 that
+  /// [syncAll] serves. The local ICS bridge counts as well: until S422 the
+  /// clock skipped an identity whose only provider was the ICS file
+  /// (the guard predates the bridge and was extended for EWS, not for it).
+  bool get _anyProvider =>
+      _caldav != null || _google != null || _ews != null || _localIcs != null;
+
   /// Switch between foreground (aggressive polling) and background
   /// (conservative polling) cadence. Called by the daemon when the UI
   /// reports app lifecycle changes.
@@ -304,8 +314,11 @@ class CalendarSyncService {
     _foreground = foreground;
     _log.info('Calendar sync interval → ${interval.inMinutes}min '
         '(${foreground ? "foreground" : "background"})');
+    // A stopped service stays stopped: only a running clock changes its
+    // cadence, and only a running one syncs at once (S422).
+    if (!isRunning) return;
     _restartTimer();
-    if (foreground && (_caldav != null || _google != null || _ews != null)) {
+    if (foreground && _anyProvider) {
       unawaited(syncAll());
     }
   }
@@ -313,7 +326,7 @@ class CalendarSyncService {
   void _restartTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(interval, (_) {
-      if (_caldav == null && _google == null && _ews == null) return;
+      if (!_anyProvider) return;
       unawaited(syncAll());
     });
   }

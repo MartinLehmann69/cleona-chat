@@ -14,6 +14,7 @@ import android.provider.OpenableColumns
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
@@ -68,7 +69,15 @@ class MainActivity : FlutterActivity() {
     // channel name is now defined in CleonaForegroundService.SESSION_BEHAVIOUR_CHANNEL
     // (single source of truth at the place that also makes
     // OUTGOING invokeMethod calls on this channel — see there).
-    private val MSG_CHANNEL_ID = "cleona_messages"
+    // §22.8, D-125 (1a): the message channel carries Cleona's standard
+    // message sound (`res/raw/cleona_message.ogg`, a copy of
+    // `assets/sounds/message.ogg`). Android never changes the sound of an
+    // existing channel ("you can't change the sound ... after you create the
+    // channel", https://developer.android.com/develop/ui/views/notifications/channels#UpdateChannel),
+    // so the channel with a sound has a new identifier and the one before it
+    // (`cleona_messages`, system sound) is deleted.
+    private val MSG_CHANNEL_ID = "cleona_messages_sound"
+    private val OLD_MSG_CHANNEL_ID = "cleona_messages"
     private val CALL_CHANNEL_ID = "cleona_calls"
     private val CALL_NOTIFICATION_ID = 42001
     private val NOTIFICATION_PERMISSION_CODE = 1001
@@ -108,6 +117,9 @@ class MainActivity : FlutterActivity() {
         private const val REQUEST_CONFIRM_CREDENTIAL = 1004
         private const val PREFS_PLATFORM = "cleona_platform"
         private const val KEY_BATTERY_EXEMPTION_ASKED = "battery_exemption_asked"
+        // Extras of a message notification's tap intent (§22.8).
+        private const val EXTRA_CONVERSATION_ID = "conversationId"
+        private const val EXTRA_IDENTITY = "identity"
     }
 
     // Samsung Auto-Blocker revokes REQUEST_INSTALL_PACKAGES after ~30 min.
@@ -127,6 +139,13 @@ class MainActivity : FlutterActivity() {
 
     // Deep link: cleona:// URI from ACTION_VIEW intent, drained by Dart.
     private var pendingDeepLink: String? = null
+
+    // §22.8 (D-125 (3)): the conversation and identity of a tapped message
+    // notification, drained by Dart via `consumeNotificationTap` on
+    // NOTIFICATION_MSG_CHANNEL. The channel is kept to signal the tap
+    // (`notificationTapped`) while the engine runs.
+    private var pendingNotificationTap: Map<String, String>? = null
+    private var notificationChannel: MethodChannel? = null
 
     override fun provideFlutterEngine(context: Context): FlutterEngine? {
         return FlutterEngineCache.getInstance().get(CleonaApplication.ENGINE_ID)
@@ -323,14 +342,25 @@ class MainActivity : FlutterActivity() {
         }
 
         // Notification channel: post message notifications + play sounds
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NOTIFICATION_MSG_CHANNEL).setMethodCallHandler { call, result ->
+        val notificationMsgChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NOTIFICATION_MSG_CHANNEL)
+        notificationChannel = notificationMsgChannel
+        notificationMsgChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "postNotification" -> {
                     val title = call.argument<String>("title") ?: "Cleona"
                     val body = call.argument<String>("body") ?: ""
                     val conversationId = call.argument<String>("conversationId") ?: ""
-                    postMessageNotification(title, body, conversationId)
+                    val identity = call.argument<String>("identity") ?: ""
+                    // §22.8, D-125 (1): silent while the app rings itself
+                    // (foreground) or the message sound is off.
+                    val silent = call.argument<Boolean>("silent") ?: false
+                    postMessageNotification(title, body, conversationId, identity, silent)
                     result.success(null)
+                }
+                "consumeNotificationTap" -> {
+                    val tap = pendingNotificationTap
+                    pendingNotificationTap = null
+                    result.success(tap)
                 }
                 "cancelNotification" -> {
                     val conversationId = call.argument<String>("conversationId") ?: ""
@@ -352,11 +382,14 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "asset required", null)
                         return@setMethodCallHandler
                     }
+                    // The sound of a notification (S422 T-3) follows the
+                    // ringer and "Do not disturb"; a preview does not.
+                    val notification = call.argument<Boolean>("notification") ?: false
                     Thread {
                         // A-1: ownership lies with the foreground service
                         // (process-wide), not with this Activity.
                         CleonaForegroundService.playAssetSound(
-                            applicationContext, asset)
+                            applicationContext, asset, notification)
                         runOnUiThread { result.success(null) }
                     }.start()
                 }
@@ -712,6 +745,16 @@ class MainActivity : FlutterActivity() {
         // handleShareIntent discarded it because of the wrong action.
         handleShareIntent(intent)
         handleDeepLinkIntent(intent)
+        // Cold start through a tapped notification. Not when the activity is
+        // recreated (savedInstanceState) or relaunched from recents: Android
+        // then hands over the ORIGINAL intent again and marks a relaunch from
+        // recents with FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY
+        // (https://developer.android.com/reference/android/content/Intent#FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)
+        // — the conversation would reopen on every return.
+        if (savedInstanceState == null &&
+            (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            handleNotificationTapIntent(intent)
+        }
     }
 
     // §16.2 lifecycle invariant: always re-issue startForegroundService so
@@ -747,6 +790,7 @@ class MainActivity : FlutterActivity() {
         setIntent(intent)
         handleShareIntent(intent)
         handleDeepLinkIntent(intent)
+        handleNotificationTapIntent(intent)
     }
 
     // Resolves the pending RECORD_AUDIO MethodChannel.Result (Bug #U10b)
@@ -786,6 +830,27 @@ class MainActivity : FlutterActivity() {
             pendingKeyguardResult?.success(resultCode == RESULT_OK)
             pendingKeyguardResult = null
         }
+    }
+
+    // §22.8 (D-125 (3)): stashes the conversation and identity of a tapped
+    // message notification and signals Dart, which drains it via
+    // `consumeNotificationTap` (also on resume and after the first frame, for
+    // the cold start). Dart decides what opens (not the batch notification,
+    // not a reminder). The extra is removed once read, so a later delivery
+    // of the same Intent object does not stash it again.
+    private fun handleNotificationTapIntent(intent: Intent?) {
+        val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
+        if (conversationId.isEmpty()) return
+        pendingNotificationTap = mapOf(
+            "conversationId" to conversationId,
+            "identity" to (intent.getStringExtra(EXTRA_IDENTITY) ?: ""),
+        )
+        intent.removeExtra(EXTRA_CONVERSATION_ID)
+        intent.removeExtra(EXTRA_IDENTITY)
+        // No id in the log line (§22.8: what a notification shows goes
+        // nowhere else).
+        Log.i("Cleona", "[Notification] tap stashed")
+        notificationChannel?.invokeMethod("notificationTapped", null)
     }
 
     // Stashes cleona:// deep link URIs for Dart-side consumption.
@@ -859,6 +924,16 @@ class MainActivity : FlutterActivity() {
                 description = NotificationTexts.get(this@MainActivity, "channelMessagesDesc")
                 setShowBadge(true)
                 enableVibration(true)
+                // Cleona's standard message sound for every conversation
+                // (D-125 (1a)); a sound chosen per conversation is the app's
+                // own in the foreground.
+                setSound(
+                    Uri.parse("android.resource://$packageName/${R.raw.cleona_message}"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
             }
             val callChannel = NotificationChannel(
                 CALL_CHANNEL_ID,
@@ -869,6 +944,7 @@ class MainActivity : FlutterActivity() {
                 setSound(null, null)
             }
             val manager = getSystemService(NotificationManager::class.java)
+            manager.deleteNotificationChannel(OLD_MSG_CHANNEL_ID)
             manager.createNotificationChannel(channel)
             manager.createNotificationChannel(callChannel)
         }
@@ -901,10 +977,15 @@ class MainActivity : FlutterActivity() {
         manager.notify(CALL_NOTIFICATION_ID, notification)
     }
 
-    private fun postMessageNotification(title: String, body: String, conversationId: String) {
+    private fun postMessageNotification(
+        title: String, body: String, conversationId: String, identity: String,
+        silent: Boolean
+    ) {
+        // The tap target (§22.8, D-125 (3)): read by handleNotificationTapIntent.
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("conversationId", conversationId)
+            putExtra(EXTRA_CONVERSATION_ID, conversationId)
+            putExtra(EXTRA_IDENTITY, identity)
         }
         val pendingIntent = PendingIntent.getActivity(
             this, conversationId.hashCode(), intent,
@@ -924,6 +1005,9 @@ class MainActivity : FlutterActivity() {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setGroup("cleona_messages")
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            // Without sound and vibration of the channel
+            // (https://developer.android.com/reference/androidx/core/app/NotificationCompat.Builder#setSilent(boolean)).
+            .setSilent(silent)
             .build()
 
         val manager = getSystemService(NotificationManager::class.java)

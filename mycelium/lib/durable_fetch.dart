@@ -34,6 +34,7 @@ import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/durable_ask.dart';
 import 'package:mycelium/durable_id.dart';
 import 'package:mycelium/durable_packets.dart';
+import 'package:mycelium/durable_trace.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/split.dart' show SendEnd;
 import 'package:mycelium/update_run.dart';
@@ -119,7 +120,8 @@ class DurableFetcher {
     final received = r.decoder?.blocksAccepted;
     r.ask = DurableAsk(
         () => send(fetchPacket(r.id, received: received), r.namer),
-        (why) => _fail(r, why))
+        // Fetching writes a namer off for the day either way (§16.0).
+        (why, _) => _fail(r, why))
       ..start();
   }
 
@@ -173,6 +175,7 @@ class DurableFetcher {
     }
     _end(r);
     fetched++;
+    durableTraceFetched(report, r.id, r.namer, object.length);
     onObject(r.id, object, r.namer);
     _next(r.namer);
   }

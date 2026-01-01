@@ -154,6 +154,7 @@ extension StateSnapshotOps on CleonaService {
       'linkPreviewSettings': _linkPreviewSettings.toJson(),
       'guiDeviceSettings': guiDeviceSettings,
       'masterMute': masterMute,
+      'notificationWithoutContent': notificationWithoutContent,
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),
       'localDeviceId': _localDeviceId,
@@ -170,6 +171,10 @@ extension StateSnapshotOps on CleonaService {
       // anyway (`_scheduleRefresh`), so the display is at most one second
       // old — for a 14-day process.
       'deviceLockouts': deviceLockoutStates(),
+      // §14.9.2 "Quorum" (S422): the co-signing round this identity waits on.
+      'coSignRound': coSignRoundState,
+      // §14.6.3 (S422): "reconciling state" and the offers.
+      'reconcile': reconcileView,
       'deviceNodeIdHex': deviceNodeIdHex,
       // Identity-derivation fingerprint of the DAEMON build. The GUI compares
       // it against its own and refuses to present a ContactSeed it cannot

@@ -128,9 +128,28 @@ extension CleonaServiceOwnLine on CleonaService {
   /// and only when it is in the own device set (§22.5.3 `senderDeviceId`).
   Future<void> _myceliumOwnInbound(
       mycelium.Inbound e, proto.ApplicationFrame frame) async {
-    final ownKeys = e.from.sameIdentity(e.to) &&
+    var ownKeys = e.from.sameIdentity(e.to) &&
         constantTimeEquals(e.from.ed25519Pk, identity.ed25519PublicKey) &&
         constantTimeEquals(e.from.mlDsaPk, identity.mlDsaPublicKey);
+    if (!ownKeys && e.from.sameIdentity(e.to)) {
+      // D-109 B-3 (§14.4 "The transition", S422): a sibling that has not
+      // taken its key package yet still signs with the previous keys —
+      // accepted for 7 days, and only from a device still in the set.
+      Uint8List? named;
+      try {
+        final env = proto.TwinSyncEnvelope.fromBuffer(frame.payload);
+        named = Uint8List.fromList(env.deviceId);
+      } catch (_) {
+        named = null;
+      }
+      if (frame.messageType == proto.MessageType.MT_TWIN_SYNC &&
+          _ownPreviousAccepts(e.from.ed25519Pk, e.from.mlDsaPk, named)) {
+        ownKeys = true;
+        _log.info('own line: deposit of device '
+            '${CleonaService._hexShort(named!)} under the previous signing '
+            'keys taken (transition, D-109 B-3)');
+      }
+    }
     if (!ownKeys) {
       _log.warn('mycelium drop: frame names the own UserID, the envelope is '
           'signed by other keys. Discarded.');

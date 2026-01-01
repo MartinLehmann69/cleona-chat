@@ -978,6 +978,13 @@ abstract class ICleonaService {
   bool get masterMute;
   Future<bool> setMasterMute(bool on);
 
+  /// The device's "notification without content" (§22.8, D-49): every
+  /// message, invitation and reminder notification shows only that one
+  /// arrived. Off by default, stored in the device database
+  /// (`notification_content.dart`).
+  bool get notificationWithoutContent;
+  Future<bool> setNotificationWithoutContent(bool on);
+
   /// The GUI's device-wide choices (appearance, language, donation banner),
   /// stored in the device database (`gui_device_setting.dart`, §4.5.3).
   Map<String, dynamic> get guiDeviceSettings;
@@ -1064,7 +1071,34 @@ abstract class ICleonaService {
   /// the transition is closed.
   List<Map<String, dynamic>> get deviceLockouts;
   void renameDevice(String deviceId, String newName);
+
+  /// Lock a device out of every identity (§14.4, §14.9.2). S422: starts the
+  /// co-signing round; the lock-out takes effect when the quorum of the
+  /// remaining devices is reached ([coSignRoundView]).
   Future<bool> revokeDevice(String deviceId);
+
+  /// §14.9.2 "Quorum" (S422): the co-signing round this identity waits on —
+  /// `lockOut`, `deviceIdHex`, `deviceName`, `have`, `need`, `missing`
+  /// (names), `rejected` (names), `unreachable`; `null` without one.
+  Map<String, dynamic>? get coSignRoundView;
+
+  /// The user cancels the open co-signing round of every identity of this
+  /// device: nothing rotates, nobody is locked out. Returns how many rounds
+  /// were open.
+  Future<int> cancelCoSign();
+
+  /// §14.6.3 (S422): the initial reconciliation as the interface shows it —
+  /// `running` ("reconciling state") and `offers` (per conversation: device,
+  /// count, bytes, held, way, tooLarge, files, fileBytes, filesHeld, filesWay,
+  /// filesNotCarried).
+  Map<String, dynamic> get reconcileView;
+
+  /// The user's decision: fetch the full history of [conversationId].
+  Future<bool> reconcileFetchHistoryOf(String conversationId);
+
+  /// The user's consent (§24.4.5): fetch the attachments of
+  /// [conversationId] as one transfer.
+  Future<bool> reconcileFetchAttachmentsOf(String conversationId);
   Future<void> rotateIdentityKeys();
   void injectTestDevice(String deviceId, String name, String platform);
   /// Test-only (E2E gui-52): snapshot of §26.6.2 package C retry-manager state.

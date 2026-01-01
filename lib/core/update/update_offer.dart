@@ -74,15 +74,54 @@ bool updateFetchLockedFor({
 /// file (working rule 5). Collecting therefore only happens at the [source]
 /// that FIRST reports with an in-network-distributed manifest; the
 /// states of other sources are not read.
+/// What the install step did (S420 G3 11b, D-123).
+///
+/// Until S422 the step returned a `bool` that served the surface ("the hint
+/// stays, a second click is possible") and the trace line read it as
+/// "carried out yes/no": on Android a successful handover to the system
+/// installer and a missing file both logged `NOT carried out`
+/// (`S412-ZELLE-UPDATE-TEST.md:36`). The result now names the case; [done]
+/// keeps the old meaning for the surface unchanged (§26.6.1 step 6, D-23).
+enum UpdateInstall {
+  /// Desktop: the update is applied and the process restarts.
+  carriedOut('carried out — the process restarts'),
+
+  /// Android: the APK is handed to the system installer; whether the user
+  /// confirms there is not visible here, so the hint stays.
+  handedToSystem('handed to the system installer'),
+
+  /// The assembled file is not on disk.
+  fileMissing('NOT carried out — the assembled file is missing'),
+
+  /// The user did not grant the permission to install packages.
+  noPermission('NOT carried out — no permission to install'),
+
+  /// No update manager / store, or no verified binary.
+  notReady('NOT carried out — no verified update at hand'),
+
+  /// Applying the verified update failed.
+  failed('NOT carried out — applying the update failed');
+
+  const UpdateInstall(this.traceText);
+
+  /// The reason text of the `install` trace line.
+  final String traceText;
+
+  /// What [UpdateOffer.consent] returns: only a carried-out installation
+  /// counts; everything else leaves the banner and a second click.
+  bool get done => this == carriedOut;
+}
+
 class UpdateOffer<Q extends Object> {
   /// Triggers the automatic collecting for [target]. Returns when
   /// the pass ends — successfully or not; the outcome comes via
   /// [onState].
   final Future<void> Function(Q source, UpdateManifest target) assemble;
 
-  /// Installs the checked, ready update. `true` means: the
-  /// installation has been carried out (desktop: the process ends anyway).
-  final Future<bool> Function(Q source) install;
+  /// Installs the checked, ready update and names what happened
+  /// ([UpdateInstall]); only [UpdateInstall.carriedOut] counts as done
+  /// (desktop: the process ends anyway).
+  final Future<UpdateInstall> Function(Q source) install;
 
   /// Version comparison — `UpdateChecker.isNewer`, passed in, so that
   /// this class needs no logger and no data directory.
@@ -328,6 +367,13 @@ class UpdateOffer<Q extends Object> {
     _state = state;
   }
 
+  /// Writes the `install` trace line for [result]. [consent] calls it after
+  /// [install] returns; an install that ends the process itself (desktop
+  /// in-process, `exit(0)`) calls it before it ends, or the line is never
+  /// written.
+  void noteInstall(UpdateInstall result) =>
+      _trace('install', _target, result.traceText);
+
   /// The click on "Installieren". Without a checked, ready update,
   /// or while an installation is already running, nothing happens.
   Future<bool> consent() async {
@@ -343,10 +389,9 @@ class UpdateOffer<Q extends Object> {
     }
     _installed = true;
     try {
-      final done = await install(q);
-      _trace('install', _target,
-          done ? 'handed to the system' : 'NOT carried out');
-      return done;
+      final result = await install(q);
+      noteInstall(result);
+      return result.done;
     } finally {
       _installed = false;
     }

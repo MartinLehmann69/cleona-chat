@@ -197,6 +197,13 @@ class CallSession {
   /// the user.
   bool captureUnavailable = false;
 
+  /// Why this device sends no video in this call, as last announced to the
+  /// peer (`CallService._ownVideoState`); null while it sends video or before
+  /// anything was announced. Carried in [CallInfo] so a GUI that is not the
+  /// service (the desktop daemon split) learns it too — §17.5 "desktop video
+  /// calls remain audio-only" must not show a camera there.
+  CallVideoOffReason? ownVideoOffReason;
+
   CallSession({
     required this.callId,
     required this.peerNodeIdHex,
@@ -222,6 +229,7 @@ class CallSession {
         endReason: endReason,
         captureUnavailable: captureUnavailable,
         reaching: reaching,
+        ownVideoOffReason: ownVideoOffReason,
       );
 }
 

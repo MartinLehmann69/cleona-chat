@@ -728,6 +728,13 @@ class CallInfo {
   /// A daemon that does not send the field reads as `false`.
   final bool reaching;
 
+  /// Why this device sends no video in this call (`CallSession
+  /// .ownVideoOffReason`); null while it sends video or before the call
+  /// reached it. [CallVideoOffReason.notSupported] means this device has no
+  /// video path (§17.5: the desktop daemon) — the call screen then shows the
+  /// voice-call layout. A daemon that does not send the field reads as null.
+  final CallVideoOffReason? ownVideoOffReason;
+
   CallInfo({
     required this.callId,
     required this.peerNodeIdHex,
@@ -742,6 +749,7 @@ class CallInfo {
     this.endReason = CallEndReason.unspecified,
     this.captureUnavailable = false,
     this.reaching = false,
+    this.ownVideoOffReason,
   }) : startedAt = startedAt ?? DateTime.now();
 
   Map<String, dynamic> toJson() => {
@@ -758,6 +766,8 @@ class CallInfo {
         'endReason': endReason.name,
         'captureUnavailable': captureUnavailable,
         'reaching': reaching,
+        if (ownVideoOffReason != null)
+          'ownVideoOffReason': ownVideoOffReason!.name,
       };
 
   static CallInfo fromJson(Map<String, dynamic> json) => CallInfo(
@@ -776,6 +786,10 @@ class CallInfo {
             CallEndReason.unspecified,
         captureUnavailable: json['captureUnavailable'] as bool? ?? false,
         reaching: json['reaching'] as bool? ?? false,
+        // An unknown name (a newer daemon) reads as null: the screen keeps
+        // the layout it would have chosen without the field.
+        ownVideoOffReason: CallVideoOffReason.values
+            .asNameMap()[json['ownVideoOffReason']],
       );
 }
 
@@ -3329,12 +3343,18 @@ class EnrolmentRequestView {
   final String deviceIdHex;
   final DateTime receivedAt;
 
+  /// D-108 (§14.6.1): the request is of the earlier form (a new device on
+  /// 4.2.3–4.2.6, no device signing keys) — it cannot be accepted; the tab
+  /// says "update it first, then pair again".
+  final bool olderVersion;
+
   const EnrolmentRequestView({
     required this.requestIdHex,
     required this.deviceName,
     required this.platform,
     required this.deviceIdHex,
     required this.receivedAt,
+    this.olderVersion = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -3343,6 +3363,7 @@ class EnrolmentRequestView {
         'platform': platform,
         'deviceId': deviceIdHex,
         'receivedAt': receivedAt.millisecondsSinceEpoch,
+        if (olderVersion) 'olderVersion': true,
       };
 
   static EnrolmentRequestView fromJson(Map<String, dynamic> j) =>
@@ -3353,6 +3374,7 @@ class EnrolmentRequestView {
         deviceIdHex: j['deviceId'] as String? ?? '',
         receivedAt:
             DateTime.fromMillisecondsSinceEpoch(j['receivedAt'] as int? ?? 0),
+        olderVersion: j['olderVersion'] == true,
       );
 }
 

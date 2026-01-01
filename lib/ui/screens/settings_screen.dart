@@ -225,7 +225,7 @@ class SettingsScreen extends StatelessWidget {
 
     showDialog(
       context: context,
-      builder: (ctx) => _SeedPhraseDialog(words: words),
+      builder: (ctx) => SeedPhraseDialog(words: words),
     );
   }
 
@@ -376,6 +376,19 @@ class SettingsScreen extends StatelessWidget {
                 // The client mirror calls onStateChanged on success; the
                 // screen watches CleonaAppState and rebuilds from it.
                 onChanged: (v) => unawaited(service.setMasterMute(v)),
+              ),
+              // §22.8 "A notification without content" (D-49): a device
+              // value beside the master mute, off by default.
+              SwitchListTile(
+                key: const Key('notification_without_content_switch'),
+                secondary: const Icon(Icons.visibility_off_outlined),
+                title:
+                    Text(locale.get('settings_notification_without_content')),
+                subtitle: Text(
+                    locale.get('settings_notification_without_content_hint')),
+                value: service.notificationWithoutContent,
+                onChanged: (v) =>
+                    unawaited(service.setNotificationWithoutContent(v)),
               ),
             ],
           ),
@@ -640,9 +653,15 @@ class _SocialRecoveryLimitTile extends StatelessWidget {
   }
 }
 
-class _SeedPhraseDialog extends StatelessWidget {
+/// THE dialog of the 24 recovery words — copy, print, close. The settings row
+/// "Recovery-Phrase anzeigen" and the IPC action `show_seed_phrase`
+/// (`main.dart`) both open this one. Until S422 the IPC action built a
+/// second dialog of its own, with fixed German texts and no "Drucken", so
+/// tests driving it checked a dialog no user sees
+/// (S422-RCA-E2E-LAUF-4.2.8 R-5, side finding).
+class SeedPhraseDialog extends StatelessWidget {
   final List<String> words;
-  const _SeedPhraseDialog({required this.words});
+  const SeedPhraseDialog({super.key, required this.words});
 
   @override
   Widget build(BuildContext context) {
