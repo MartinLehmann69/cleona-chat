@@ -6,7 +6,7 @@ If you discover a security vulnerability in Cleona Chat, please report it respon
 
 ### How to Report
 
-**Email:** security@cleona.chat
+**Email:** MartinLehmann69@users.noreply.github.com
 
 **Encryption:** If possible, encrypt your report using the maintainer's public key available in `assets/cleona_maintainer_public.pem`.
 
