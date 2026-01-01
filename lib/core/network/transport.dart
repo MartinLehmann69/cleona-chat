@@ -251,16 +251,29 @@ class Transport {
       try {
         final portHex =
             port.toRadixString(16).toUpperCase().padLeft(4, '0');
-        final n = File('/proc/net/udp').readAsLinesSync().where((l) {
+        final n4 = File('/proc/net/udp').readAsLinesSync().where((l) {
           final p = l.trim().split(RegExp(r'\s+'));
           return p.length > 1 && p[1].endsWith(':$portHex');
         }).length;
-        if (n > 1) {
-          _log.error('§4.5.2 INVARIANT VIOLATED: $n IPv4 UDP sockets bound to '
+        if (n4 > 1) {
+          _log.error('§4.5.2 INVARIANT VIOLATED: $n4 IPv4 UDP sockets bound to '
               'data port $port (expected 1) — a second socket captures inbound '
               'and breaks receive. Check for an extra socket on the main port.');
         } else {
-          _log.debug('§4.5.2 invariant OK: $n IPv4 UDP socket on data port $port');
+          _log.debug('§4.5.2 invariant OK: $n4 IPv4 UDP socket on data port $port');
+        }
+        if (_udpSocket6 != null) {
+          final n6 = File('/proc/net/udp6').readAsLinesSync().where((l) {
+            final p = l.trim().split(RegExp(r'\s+'));
+            return p.length > 1 && p[1].endsWith(':$portHex');
+          }).length;
+          if (n6 > 1) {
+            _log.error('§4.5.2 INVARIANT VIOLATED: $n6 IPv6 UDP sockets bound to '
+                'data port $port (expected 1) — a second socket captures inbound '
+                'IPv6 and breaks receive. Check for an extra socket on the main port.');
+          } else {
+            _log.debug('§4.5.2 invariant OK: $n6 IPv6 UDP socket on data port $port');
+          }
         }
       } catch (e) {
         _log.debug('data-port socket self-check skipped: $e');
@@ -674,7 +687,8 @@ class Transport {
         return true;
       }
       _consecutiveZeroSends++;
-      _log.info('sendUdp: socket.send returned $sent for ${address.address}:$remotePort (${data.length}B)');
+      final v6Hint = address.type == InternetAddressType.IPv6 ? ' [IPv6]' : '';
+      _log.info('sendUdp: socket.send returned $sent for ${address.address}:$remotePort (${data.length}B)$v6Hint');
       if (_consecutiveZeroSends >= 10 && !_reconnecting) {
         _log.warn('UDP socket appears dead ($_consecutiveZeroSends consecutive 0-sends)');
         onUdpSocketDead?.call();

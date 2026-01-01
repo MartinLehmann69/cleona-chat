@@ -663,10 +663,16 @@ class MulticastDiscovery {
       return;
     }
     try {
-      // SO_REUSEPORT is POSIX-only — see LocalDiscovery.start() for context.
+      // Bind to discoveryPort (41338), NOT nodePort. All nodes share the same
+      // fixed discovery port so multicast packets reach every peer regardless
+      // of their data port. Binding to nodePort caused a §4.5.2-class bug:
+      // on Linux with SO_REUSEPORT the kernel distributed inbound IPv6 unicast
+      // packets between Transport._udpSocket6 and this socket — packets that
+      // landed here were silently dropped (not 38-byte CLEO frames). Same
+      // pattern as LocalDiscovery using discoveryPort for IPv4.
       _socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv6,
-        nodePort,
+        LocalDiscovery.discoveryPort,
         reuseAddress: true,
         reusePort: !Platform.isWindows,
       );
@@ -680,7 +686,7 @@ class MulticastDiscovery {
 
       _socket!.listen(_onEvent); // Listener stays PERMANENTLY active
       _sendBurst(burstCount);
-      _log.info('IPv6 multicast discovery started on port $nodePort');
+      _log.info('IPv6 multicast discovery started on port ${LocalDiscovery.discoveryPort}');
     } catch (e) {
       _log.warn('IPv6 multicast discovery unavailable: $e');
       _socket?.close();
@@ -736,7 +742,7 @@ class MulticastDiscovery {
     if (_socket == null) return false;
     final packet = Transport.buildDiscoveryPacket(nodeId, nodePort);
     try {
-      _socket!.send(packet, InternetAddress(multicastGroupV6), nodePort);
+      _socket!.send(packet, InternetAddress(multicastGroupV6), LocalDiscovery.discoveryPort);
       return true;
     } catch (e) {
       _log.debug('IPv6 multicast send failed: $e');

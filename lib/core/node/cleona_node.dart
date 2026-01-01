@@ -3493,9 +3493,7 @@ class CleonaNode {
       list.add(proto.PeerAddressProto()
         ..ip = ip
         ..port = port
-        ..addressType = ip.contains(':')
-            ? proto.AddressType.IPV6_GLOBAL
-            : proto.AddressType.IPV4_PRIVATE);
+        ..addressType = PeerAddress.typeToProto(PeerAddress.classifyIp(ip)));
     }
     final pubV4 = _advertisedPublicIp;
     final pubPort = _advertisedPublicPort ?? port;

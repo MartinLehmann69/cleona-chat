@@ -22,6 +22,7 @@
 
 /* Find the file descriptor of a UDP socket bound to the given local port.
  * Returns the fd on success, -1 if not found. Scans fds 3..1023. */
+__attribute__((visibility("default"), used))
 int cleona_ios_find_udp_fd(int local_port) {
     for (int fd = 3; fd < 1024; fd++) {
         struct sockaddr_in addr;
@@ -41,6 +42,7 @@ int cleona_ios_find_udp_fd(int local_port) {
 
 /* Send a UDP datagram via sendto() on the given fd.
  * Returns bytes sent (>0) on success, or -errno on failure. */
+__attribute__((visibility("default"), used))
 int cleona_ios_sendto(int fd, const char* dest_ip, int dest_port,
                       const void* data, int len) {
     struct sockaddr_in dest;

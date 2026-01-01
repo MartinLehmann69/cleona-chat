@@ -96,7 +96,7 @@ class PeerAddress {
     return proto.PeerAddressProto()
       ..ip = ip
       ..port = port
-      ..addressType = _typeToProto(type);
+      ..addressType = typeToProto(type);
   }
 
   static PeerAddress? fromProto(proto.PeerAddressProto p) {
@@ -124,7 +124,7 @@ class PeerAddress {
     );
   }
 
-  static proto.AddressType _typeToProto(PeerAddressType t) {
+  static proto.AddressType typeToProto(PeerAddressType t) {
     switch (t) {
       case PeerAddressType.ipv4Public:
         return proto.AddressType.IPV4_PUBLIC;
