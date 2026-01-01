@@ -390,7 +390,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // typed characters or Enter-to-send to be lost. The post-frame callback
     // below restores focus if it was stolen by the rebuild.
     _inputHadFocusBeforeBuild = _inputFocusNode.hasFocus;
-    if (_inputHadFocusBeforeBuild) {
+    if (_inputHadFocusBeforeBuild && !Platform.isIOS && !Platform.isAndroid) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (_inputHadFocusBeforeBuild && !_inputFocusNode.hasFocus) {
@@ -436,7 +436,10 @@ class _ChatScreenState extends State<ChatScreen> {
               if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
                 _buildConfigProposalBanner(context, conv!, service),
               Expanded(
-                child: Stack(
+                child: GestureDetector(
+                  onTap: () => _inputFocusNode.unfocus(),
+                  behavior: HitTestBehavior.translucent,
+                  child: Stack(
                   children: [
                     _ChatBackground(
                       child: messages.isEmpty
@@ -448,9 +451,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         )
                       : ListView.builder(
                           controller: _scrollController,
-                          // iOS-Feldtest S121: die Tastatur war sonst nicht
-                          // einklappbar (kein System-Back wie auf Android) —
-                          // Wisch in der Liste schliesst sie jetzt.
                           keyboardDismissBehavior:
                               ScrollViewKeyboardDismissBehavior.onDrag,
                           padding: const EdgeInsets.all(8),
@@ -542,6 +542,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
                   ],
+                ),
                 ),
               ),
               _buildInputArea(context, service),
@@ -1201,7 +1202,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   IconButton(
                     icon: Icon(_showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions_outlined),
                     tooltip: 'Emoji',
-                    onPressed: () => setState(() { _showEmojiPicker = !_showEmojiPicker; }),
+                    onPressed: () {
+                      final willShow = !_showEmojiPicker;
+                      setState(() { _showEmojiPicker = willShow; });
+                      if (willShow) {
+                        _inputFocusNode.unfocus();
+                      }
+                    },
                   ),
                   IconButton(
                     icon: const Icon(Icons.attach_file),
@@ -1259,16 +1266,16 @@ class _ChatScreenState extends State<ChatScreen> {
         onEmojiSelected: (category, emoji) {
           final cursor = _textController.selection.baseOffset;
           final text = _textController.text;
-          if (cursor >= 0) {
-            _textController.text = text.substring(0, cursor) + emoji.emoji + text.substring(cursor);
-            _textController.selection = TextSelection.collapsed(offset: cursor + emoji.emoji.length);
-          } else {
-            _textController.text = text + emoji.emoji;
-            _textController.selection = TextSelection.collapsed(offset: _textController.text.length);
-          }
-          if (!Platform.isAndroid) {
-            _inputFocusNode.requestFocus();
-          }
+          final newText = cursor >= 0
+              ? text.substring(0, cursor) + emoji.emoji + text.substring(cursor)
+              : text + emoji.emoji;
+          final newCursor = cursor >= 0
+              ? cursor + emoji.emoji.length
+              : newText.length;
+          _textController.value = TextEditingValue(
+            text: newText,
+            selection: TextSelection.collapsed(offset: newCursor),
+          );
         },
         config: _emojiConfig(colorScheme, 260),
       ),
@@ -3121,12 +3128,28 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
 
 // ── Image Fullscreen Viewer ──────────────────────────────────────
 class _ImageViewer extends StatelessWidget {
-  final String filePath;
+  final String? filePath;
+  final Uint8List? imageBytes;
   final String? filename;
-  const _ImageViewer({required this.filePath, this.filename});
+  const _ImageViewer({this.filePath, this.imageBytes, this.filename});
 
   @override
   Widget build(BuildContext context) {
+    Widget imageChild;
+    if (filePath != null && File(filePath!).existsSync()) {
+      imageChild = Image.file(
+        File(filePath!),
+        errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96, color: Colors.white54),
+      );
+    } else if (imageBytes != null) {
+      imageChild = Image.memory(
+        imageBytes!,
+        errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96, color: Colors.white54),
+      );
+    } else {
+      imageChild = const Icon(Icons.broken_image, size: 96, color: Colors.white54);
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -3138,10 +3161,7 @@ class _ImageViewer extends StatelessWidget {
         child: InteractiveViewer(
           minScale: 0.5,
           maxScale: 5.0,
-          child: Image.file(
-            File(filePath),
-            errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96),
-          ),
+          child: imageChild,
         ),
       ),
     );
@@ -4068,13 +4088,22 @@ class _MessageBubbleState extends State<_MessageBubble> {
       }
 
       // Wrap image with GestureDetector for fullscreen viewer
-      if (imageWidget != null && message.filePath != null && File(message.filePath!).existsSync()) {
-        imageWidget = GestureDetector(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => _ImageViewer(filePath: message.filePath!, filename: message.filename)),
-          ),
-          child: imageWidget,
-        );
+      if (imageWidget != null) {
+        final hasFile = message.filePath != null && File(message.filePath!).existsSync();
+        final thumbBytes = _safeBase64Decode(message.thumbnailBase64);
+        if (hasFile || thumbBytes != null) {
+          imageWidget = GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => _ImageViewer(
+                filePath: hasFile ? message.filePath : null,
+                imageBytes: !hasFile ? thumbBytes : null,
+                filename: message.filename,
+              )),
+            ),
+            child: imageWidget,
+          );
+        }
       }
 
       return Column(

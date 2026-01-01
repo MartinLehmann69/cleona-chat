@@ -22,8 +22,6 @@ class BinarySeeder {
     'android': (n: 30, k: 21),
     'linux': (n: 50, k: 35),
     'windows': (n: 50, k: 35),
-    'macos': (n: 50, k: 35),
-    'ios': (n: 40, k: 28),
   };
 
   /// Get the RS parameters for a platform. Falls back to default (N=10, K=7)

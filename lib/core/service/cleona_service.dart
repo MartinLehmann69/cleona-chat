@@ -450,6 +450,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   late ChannelIndex _channelIndex;
 
   // System channels (§9.5)
+  DateTime serviceStartedAt = DateTime.now();
   CrashReporter? _crashReporter;
   ContactIssueReporter? _contactIssueReporter;
   Timer? _systemChannelEvictionTimer;
@@ -476,7 +477,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.148';
+  static const String kCurrentAppVersion = '3.1.149';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -551,6 +552,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Start service-level components (contacts, conversations, mailbox).
   /// The node must already be started externally.
   Future<void> startService() async {
+    serviceStartedAt = DateTime.now();
     _log.info('Starting CleonaService "$displayName"...');
 
     // Ensure profile dir exists
@@ -1606,10 +1608,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     final peer = node.routingTable.getPeer(ownerNodeId);
     if (peer == null) {
-      // Owner not currently in routing table; skip this attempt.
-      // Architecture §3.5: no re-push on reachability — the budget is
-      // consumed in one contiguous window. If the owner reappears later,
-      // recovery is via their FRAGMENT_RETRIEVE startup poll (§3.3.6).
+      _log.debug('Proactive push deferred: owner '
+          '${bytesToHex(ownerNodeId).substring(0, 8)} not in routing table '
+          'frag=${frag.fragmentIndex} (will re-arm on discovery)');
       return;
     }
 
@@ -1704,10 +1705,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _rearmExpiredPushes();
   }
 
-  /// Re-arm proactive push for fragments with exhausted budgets whose
-  /// owners are now reachable.
+  /// Re-arm proactive push for stalled fragments (never started,
+  /// stranded mid-chain, or budget exhausted) whose owners are now reachable.
   void _rearmExpiredPushes() {
-    final exhausted = mailboxStore.exhaustedPushEntries();
+    final exhausted = mailboxStore.rearmablePushEntries();
     if (exhausted.isEmpty) return;
     var rearmed = 0;
     for (final entry in exhausted) {
@@ -2466,24 +2467,41 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    // Request fragments from confirmed peers only (§4.4).
-    final peers = node.routingTable.allPeers
+    final mailboxIds = [primaryMailboxId, fallbackMailboxId];
+    if (_previousMailboxPrimary != null) mailboxIds.add(_previousMailboxPrimary!);
+
+    // Phase 1: confirmed peers → FRAGMENT_RETRIEVE + PEER_RETRIEVE
+    final confirmedPeers = node.routingTable.allPeers
         .where((p) => node.isPeerConfirmed(p.nodeIdHex))
         .toList();
-    for (final peer in peers) {
-      _requestFragments(peer, primaryMailboxId);
-      _requestFragments(peer, fallbackMailboxId);
-      // §5.6: poll old primary mailbox during key-rotation transition
-      if (_previousMailboxPrimary != null) {
-        _requestFragments(peer, _previousMailboxPrimary!);
+    for (final peer in confirmedPeers) {
+      for (final id in mailboxIds) {
+        _requestFragments(peer, id);
       }
-      // §5.5: also retrieve S&F whole messages (V3.1.138 fix — previously
-      // only fragments were polled here, S&F messages were missed in
-      // restore/aggressive mode).
       _requestStoredMessages(peer);
     }
 
-    _log.info('Mailbox poll sent to ${peers.length} peers'
+    // Phase 2: DHT-closest peers per mailbox-ID → FRAGMENT_RETRIEVE only
+    // (§5.4: receiver lookup is mailbox-ID-keyed, matching sender placement).
+    final polled = <String>{};
+    for (final hex in confirmedPeers.map((p) => p.nodeIdHex)) {
+      polled.add(hex);
+    }
+    var dhtCount = 0;
+    for (final mboxId in mailboxIds) {
+      final closest = node.routingTable.findClosestPeers(mboxId,
+          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+      for (final peer in closest) {
+        if (polled.add(peer.nodeIdHex)) {
+          for (final id in mailboxIds) {
+            _requestFragments(peer, id);
+          }
+          dhtCount++;
+        }
+      }
+    }
+
+    _log.info('Mailbox poll: ${confirmedPeers.length} confirmed + $dhtCount DHT-closest'
         '${_previousMailboxPrimary != null ? ' (+ transition primary)' : ''}');
   }
 
@@ -2630,7 +2648,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// Send FRAGMENT_RETRIEVE + PEER_RETRIEVE to all confirmed peers not
-  /// yet polled (dedup via [_postDiscoveryPolledPeers]).
+  /// yet polled, PLUS FRAGMENT_RETRIEVE to DHT-closest peers for each
+  /// mailbox-ID (§5.4: receiver lookup is mailbox-ID-keyed).
+  /// Dedup via [_postDiscoveryPolledPeers].
   int _pollConfirmedPeersOnce() {
     final sodium = SodiumFFI();
     final primaryMailboxId = sodium.sha256(Uint8List.fromList(
@@ -2639,19 +2659,43 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final fallbackMailboxId = sodium.sha256(Uint8List.fromList(
       [...utf8.encode('mailbox-nid'), ...identity.nodeId],
     ));
+    final mailboxIds = [primaryMailboxId, fallbackMailboxId];
+
+    // Phase 1: confirmed peers → FRAGMENT_RETRIEVE + PEER_RETRIEVE
     final newPeers = node.routingTable.allPeers
         .where((p) => node.isPeerConfirmed(p.nodeIdHex) &&
             _postDiscoveryPolledPeers.add(p.nodeIdHex))
         .toList();
-    if (newPeers.isEmpty) return 0;
     for (final peer in newPeers) {
       _requestFragments(peer, primaryMailboxId);
       _requestFragments(peer, fallbackMailboxId);
       _requestStoredMessages(peer);
     }
-    _log.info('#U1 polled ${newPeers.length} new peers '
-        '(total ${_postDiscoveryPolledPeers.length})');
-    return newPeers.length;
+
+    // Phase 2: DHT-closest peers per mailbox-ID → FRAGMENT_RETRIEVE only.
+    // Sender places fragments via findClosestPeers (count:30 deeper pool);
+    // receiver must query the same DHT locus to reach those holders.
+    // PEER_RETRIEVE stays confirmed-only (S&F uses mutual-contact model).
+    var dhtCount = 0;
+    for (final mboxId in mailboxIds) {
+      final closest = node.routingTable.findClosestPeers(mboxId,
+          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+      for (final peer in closest) {
+        if (_postDiscoveryPolledPeers.add(peer.nodeIdHex)) {
+          for (final id in mailboxIds) {
+            _requestFragments(peer, id);
+          }
+          dhtCount++;
+        }
+      }
+    }
+
+    final total = newPeers.length + dhtCount;
+    if (total > 0) {
+      _log.info('#U1 polled ${newPeers.length} confirmed + $dhtCount DHT-closest '
+          '(total ${_postDiscoveryPolledPeers.length})');
+    }
+    return total;
   }
 
   // ── Sending ────────────────────────────────────────────────────────
@@ -3692,7 +3736,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Excludes the recipient itself.
   List<Uint8List> _findContactPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
     final recipientHex = bytesToHex(recipientUserId);
-    final selfDeviceHex = bytesToHex(identity.nodeId);
+    final selfDeviceHex = identity.deviceNodeIdHex;
+    final recipientContact = _contacts[recipientHex];
+    final recipientDeviceHexes = recipientContact?.deviceNodeIds ?? <String>{};
     final seen = <String>{};
 
     // Phase 1: accepted contacts (high confidence mutual). S121 F2: rank
@@ -3739,7 +3785,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final phase2 = <(Uint8List, int)>[];
     for (final peer in node.routingTable.allPeers) {
       final peerHex = peer.nodeIdHex;
-      if (peerHex == recipientHex || peerHex == selfDeviceHex) continue;
+      if (peerHex == selfDeviceHex) continue;
+      if (peerHex == recipientHex || recipientDeviceHexes.contains(peerHex)) continue;
+      final peerUserId = peer.userId;
+      if (peerUserId != null && bytesToHex(peerUserId) == recipientHex) continue;
       if (seen.contains(peerHex)) continue;
       if (!node.isPeerConfirmed(peerHex)) continue;
       final routes = node.dvRouting.routesTo(peerHex);
@@ -11578,9 +11627,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           '(${localComplete.lengthSync()}B) — skipping download');
     } else {
       // 1. Resolve binary sources via BinaryRendezvousManager (§19.6.5).
-      final resolved = await node.binaryRendezvousManager?.resolve(platform);
-      if (resolved == null || resolved.isEmpty) {
+      final resolvedAll = await node.binaryRendezvousManager?.resolve(platform);
+      if (resolvedAll == null || resolvedAll.isEmpty) {
         _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
+        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
+        return;
+      }
+      // Filter: only sources advertising the target version (V3.1.149 hardening).
+      // Prevents downloading stale binaries from nodes that haven't seeded yet.
+      final resolved = resolvedAll
+          .where((ep) => ep.version == manifest.version)
+          .toList();
+      if (resolved.isEmpty) {
+        _log.warn('startInNetworkUpdate: ${resolvedAll.length} source(s) found but '
+            'none advertise v${manifest.version} (versions seen: '
+            '${resolvedAll.map((e) => e.version).toSet().join(', ')})');
         onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
         return;
       }
@@ -11658,7 +11719,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         k: params.k,
         expectedHash: expectedHash,
         sources: fragmentSources,
-        fetchFragment: fetchClient.fetch,
+        fetchFragment: (addr, plat, idx) => fetchClient.fetch(addr, plat, idx),
+        fetchWithSize: fetchClient.fetch,
         expectedSize: originalSize,
       );
       if (updater.state == BinaryUpdateState.failed) {

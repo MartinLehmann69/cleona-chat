@@ -12,7 +12,6 @@ import 'system_channels.dart';
 /// returns the result so the UI layer can show the appropriate popup.
 class CrashReporter {
   final CleonaService _service;
-  final DateTime _startTime = DateTime.now();
   final CLogger _log = CLogger.get('CrashReporter');
 
   /// Tracks reports-per-hour and reports-per-day for rate limiting.
@@ -59,7 +58,7 @@ class CrashReporter {
     final logLines =
         CLogger.getReportLines(SystemChannels.maxLogTailLines).join('\n');
 
-    final uptime = DateTime.now().difference(_startTime).inSeconds;
+    final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
 
     int peerCount = 0;
     try {
@@ -180,7 +179,7 @@ class CrashReporter {
         .map(_normalizePath)
         .toList();
 
-    final uptime = DateTime.now().difference(_startTime).inSeconds;
+    final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
 
     int peerCount = 0;
     int routeCount = 0;

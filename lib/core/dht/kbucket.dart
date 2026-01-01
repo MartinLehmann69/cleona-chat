@@ -274,8 +274,10 @@ class KBucket {
       return const KBucketAddResult(true, null);
     }
 
-    // Bucket full — evict oldest if it's stale (> 4 hours)
-    final staleCutoff = DateTime.now().subtract(const Duration(hours: 4));
+    // Bucket full — mark oldest as eviction candidate if stale (> 72h).
+    // Actual eviction requires a 3-probe gate at the caller level (CleonaNode).
+    // The KBucket returns the candidate; the caller probes before confirming.
+    final staleCutoff = DateTime.now().subtract(const Duration(hours: 72));
     if (peers.first.lastSeen.isBefore(staleCutoff)) {
       final evicted = peers.removeAt(0);
       peers.add(peer);
@@ -326,6 +328,11 @@ class RoutingTable {
   /// is added to the table. Refresh of an existing entry does NOT fire.
   /// Used by §2.2.4 IdentityPublisher to wake parked cold-start retries.
   final List<void Function(PeerInfo)> _onPeerAddedListeners = [];
+
+  /// Callback invoked when a peer is evicted from a full bucket due to
+  /// staleness. The caller (CleonaNode) uses this to 3-probe the evicted
+  /// peer and re-add it if still alive.
+  void Function(PeerInfo evicted)? onPeerEvicted;
 
   RoutingTable(this.ownNodeId) {
     _localNodeIds.add(_bytesToHex(ownNodeId));
@@ -404,10 +411,12 @@ class RoutingTable {
     }
     // A stale eviction may have displaced a DIFFERENT peer with its own
     // userIdHex — unindex that one too so we don't leak dangling refs.
+    // Notify the caller so it can 3-probe the evicted peer and re-add if alive.
     final evicted = result.evicted;
     if (evicted != null) {
       final evictedHex = evicted.userIdHex;
       if (evictedHex != null) _unindexFromUser(evictedHex, evicted.nodeId);
+      onPeerEvicted?.call(evicted);
     }
     _indexPeer(peer);
     // Notify listeners only when a previously unknown deviceNodeId joined —

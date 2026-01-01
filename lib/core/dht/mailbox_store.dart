@@ -452,12 +452,13 @@ class MailboxStore {
     state.lastPushAt = null;
   }
 
-  /// Fragments whose push budget is exhausted but not ACKed — candidates
-  /// for re-arm when the owner reappears (§5.4 V3.1.138).
-  List<MapEntry<String, FragmentPushState>> exhaustedPushEntries() {
+  /// Fragments whose push is stalled (never started, stranded mid-chain,
+  /// or budget exhausted) and not ACKed — candidates for re-arm when the
+  /// owner (re)appears. Excludes live chains (active retry timer).
+  List<MapEntry<String, FragmentPushState>> rearmablePushEntries() {
     return _pushState.entries
         .where((e) => !e.value.pushAcked &&
-            e.value.attempts >= maxPushAttempts &&
+            !(e.value.retryTimer?.isActive ?? false) &&
             _fragments.containsKey(e.key))
         .toList();
   }

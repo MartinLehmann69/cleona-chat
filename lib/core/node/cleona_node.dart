@@ -530,7 +530,7 @@ class CleonaNode {
   /// do NOT satisfy [hasSessionConfirmedPeers] — that flag requires a fresh
   /// direct packet in the current session.
   final Map<String, DateTime> _confirmedPeers = {};
-  static const Duration _confirmedPeerTtl = Duration(hours: 1);
+  static const Duration _confirmedPeerTtl = Duration(hours: 72);
 
   /// F2 (S123 UDP-dead RCA, 2026-07-03 Pixel field test): tracks the last
   /// INBOUND packet that proves our OWN sends are getting through — i.e. a
@@ -785,6 +785,15 @@ class CleonaNode {
     // Init routing table BEFORE transport (transport callbacks need it)
     // Phase 2: ownNodeId = deviceNodeId (per-device XOR distance)
     routingTable = RoutingTable(primaryIdentity.deviceNodeId);
+    routingTable.onPeerEvicted = (evicted) {
+      unawaited(_probeBeforeEvict(evicted).then((alive) {
+        if (alive && _running) {
+          routingTable.addPeer(evicted);
+          _log.info('KBucket re-add: ${evicted.nodeIdHex.substring(0, 8)} '
+              'responded to probe — restored');
+        }
+      }));
+    };
     // Register all identities as local (both userId for message delivery
     // and deviceNodeId for routing exclusion)
     for (final ctx in _identities.values) {
@@ -1342,9 +1351,13 @@ class CleonaNode {
   Future<void> _startDiscoveryCascade() async {
     _discoveryComplete = false;
 
-    // Tier 1 — Stored peers: probe persisted routing table. Anchor/Stable
-    // peers first (most likely to still have the same address after extended
-    // offline), then by lastSeen recency. 1 PING per peer, 2 s timeout, max 5.
+    // Tier 1 — Stored peers, two phases (§4.5, S231):
+    //   Phase A — Contact-First: probe ALL known contact device addresses
+    //             (no cap). These are the peers the user communicates with and
+    //             the most valuable mesh entry-points.
+    //   Phase B — Diverse Mesh: up to 5 additional non-contact stored peers,
+    //             sorted by stability tier then lastSeen, for mesh diversity.
+    final contactDeviceHexes = _getContactDeviceHexes();
     final stored = routingTable.allPeers
         .where((p) => !_isLocalIdentity(p.nodeIdHex))
         .toList()
@@ -1354,10 +1367,20 @@ class CleonaNode {
         return b.lastSeen.compareTo(a.lastSeen);
       });
 
-    if (stored.isNotEmpty) {
-      final probeCount = stored.length < 5 ? stored.length : 5;
-      _log.info('§4.5 Cascade Tier 1: probing $probeCount stored peers (all reachable addresses)');
-      for (final peer in stored.take(5)) {
+    final contactPeers = stored.where(
+        (p) => contactDeviceHexes.contains(p.nodeIdHex)).toList();
+    final nonContactPeers = stored.where(
+        (p) => !contactDeviceHexes.contains(p.nodeIdHex)).toList();
+    final tier1Peers = [
+      ...contactPeers,
+      ...nonContactPeers.take(5),
+    ];
+
+    if (tier1Peers.isNotEmpty) {
+      _log.info('§4.5 Cascade Tier 1: probing ${tier1Peers.length} peers '
+          '(${contactPeers.length} contact devices + '
+          '${tier1Peers.length - contactPeers.length} diverse)');
+      for (final peer in tier1Peers) {
         if (_discoveryComplete) return;
         for (final target in peer.allConnectionTargets()) {
           if (target.ip.isNotEmpty && target.port > 0 &&
@@ -1373,7 +1396,7 @@ class CleonaNode {
         wantData.wantedNodeIds.add(peer.nodeId);
       }
       final wantBytes = wantData.writeToBuffer();
-      for (final peer in stored.take(3)) {
+      for (final peer in tier1Peers.take(3)) {
         for (final addr in _filterNatContext(
             peer.allConnectionTargets(), peer)) {
           sendInfraDirect(
@@ -1427,44 +1450,36 @@ class CleonaNode {
         }
       }
     }
-    if (tier3Addrs.isNotEmpty) {
-      _log.info('§4.5 Cascade Tier 3: bootstrap probe '
-          '(${tier3Addrs.length} address(es)${_isolatedNodeBootstrapAddrs.isEmpty ? ", derived from stored peers" : ""})');
-      for (final addr in tier3Addrs) {
-        _addBootstrapPeer(addr);
-      }
-      for (var i = 0; i < 10 && !_discoveryComplete; i++) {
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-      if (_discoveryComplete) return;
-      _log.info('§4.5 Cascade Tier 3 exhausted — bootstrap unreachable');
-    }
+    // Tier 3 (Bootstrap) + Tier 3b (Rendezvous) fire in parallel (S231).
+    // Bootstrap probes are UDP, Rendezvous is WebSocket — completely
+    // independent, no reason to wait for one before starting the other.
+    {
+      final tier3bFutures = <Future>[];
 
-    // Tier 3b — External Rendezvous (§4.11 + §4.11.9): two parallel paths.
-    // (A) Contact-Rendezvous: resolve contact devices via device-scoped tags.
-    // (B) Infra-Rendezvous: resolve network entry-points via network-wide tag.
-    // Run regardless of _discoveryComplete: rendezvous is not just a cold-start
-    // fallback; it also refreshes entry-points and contact endpoints even after
-    // bootstrap peers have been found.
-    if (rendezvousManager != null ||
-        infraRendezvousManager != null ||
-        binaryRendezvousManager != null) {
-      _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve');
-      try {
-        final futures = <Future>[];
+      // Tier 3 — Bootstrap: unicast probe to cached bootstrap addresses.
+      if (tier3Addrs.isNotEmpty) {
+        _log.info('§4.5 Cascade Tier 3: bootstrap probe '
+            '(${tier3Addrs.length} address(es)${_isolatedNodeBootstrapAddrs.isEmpty ? ", derived from stored peers" : ""})');
+        for (final addr in tier3Addrs) {
+          _addBootstrapPeer(addr);
+        }
+      }
 
-        // Path A: Contact-Rendezvous (§4.11.4) — shared helper, stamps the
-        // §4.11.11 per-contact cooldown so a reactive resolve right after
-        // the cascade does not double-query the providers.
+      // Tier 3b — External Rendezvous (§4.11 + §4.11.9): three parallel paths.
+      if (rendezvousManager != null ||
+          infraRendezvousManager != null ||
+          binaryRendezvousManager != null) {
+        _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve '
+            '(parallel with Tier 3)');
+        // Path A: Contact-Rendezvous (§4.11.4)
         if (rendezvousManager != null) {
-          futures.add(_resolveContactRendezvousFor(
+          tier3bFutures.add(_resolveContactRendezvousFor(
               rendezvousManager!.contactsSnapshot,
               reason: 'tier3b'));
         }
-
         // Path B: Infrastructure-Rendezvous (§4.11.9)
         if (infraRendezvousManager != null) {
-          futures.add(() async {
+          tier3bFutures.add(() async {
             final infraEps =
                 await infraRendezvousManager!.resolve();
             for (final ep in infraEps) {
@@ -1478,14 +1493,9 @@ class CleonaNode {
             }
           }());
         }
-
-        // Path C: Binary-Distribution-Rendezvous (§19.6.5) — resolve nodes
-        // serving this platform's binary/fragments, so in-network update
-        // assembly has candidate sources without waiting for a full network
-        // scan. Read-only (resolve), independent of whether this device
-        // itself has anything to publish.
+        // Path C: Binary-Distribution-Rendezvous (§19.6.5)
         if (binaryRendezvousManager != null) {
-          futures.add(() async {
+          tier3bFutures.add(() async {
             final binEps =
                 await binaryRendezvousManager!.resolve(Platform.operatingSystem);
             for (final ep in binEps) {
@@ -1499,18 +1509,28 @@ class CleonaNode {
             }
           }());
         }
-
-        await Future.wait(futures);
-
-        if (!_discoveryComplete) {
-          for (var i = 0; i < 10 && !_discoveryComplete; i++) {
-            await Future.delayed(const Duration(milliseconds: 500));
-          }
-        }
-      } catch (e) {
-        _log.debug('§4.11 Rendezvous resolve failed: $e');
       }
-      if (_discoveryComplete) return;
+
+      // Shared wait: both Tier 3 PINGs and Tier 3b WebSocket results
+      // can trigger _onDiscoveryComplete. Wait up to 5s for either.
+      if (tier3Addrs.isNotEmpty || tier3bFutures.isNotEmpty) {
+        if (tier3bFutures.isNotEmpty) {
+          unawaited(Future.wait(tier3bFutures).then(
+              (_) {}, onError: (Object e) {
+            _log.debug('§4.11 Rendezvous resolve failed: $e');
+          }));
+        }
+        for (var i = 0; i < 10 && !_discoveryComplete; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        if (_discoveryComplete) return;
+        if (tier3Addrs.isNotEmpty) {
+          _log.info('§4.5 Cascade Tier 3+3b exhausted — '
+              'bootstrap unreachable, no rendezvous hit');
+        } else {
+          _log.info('§4.5 Cascade Tier 3b exhausted — no rendezvous hit');
+        }
+      }
     }
 
     // Tier 4 — Subnet Scan (last resort).
@@ -3911,22 +3931,6 @@ class CleonaNode {
           '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
       final ok = await _sendV3ViaHop(packet, hopId);
       if (ok) {
-        // §4.6.2 Stale-direct guard: a direct route's kernel-accept is NOT
-        // proof of delivery — the peer may have switched networks (WiFi→
-        // Mobilfunk). Only trust it if we received inbound traffic from the
-        // destination within 30s. Otherwise mark as best-effort and continue
-        // trying relay routes (which go through nodes with fresh addresses).
-        if (route.isDirect) {
-          final destPeer = routingTable.getPeer(deviceId);
-          final inbound = destPeer?.freshestInboundAt;
-          if (inbound == null ||
-              DateTime.now().difference(inbound) > const Duration(seconds: 30)) {
-            _log.info('sendToDevice ${destHex.substring(0, 8)}: direct route '
-                'sent but no recent inbound (${inbound != null ? "${DateTime.now().difference(inbound).inSeconds}s ago" : "never"}) '
-                '— continuing cascade');
-            continue;
-          }
-        }
         return true;
       }
     }
@@ -4177,15 +4181,13 @@ class CleonaNode {
       }
     }
 
-    // §4.6.2 (V3.1.102): Confirmed peer + UDP sent = success.
-    // DELIVERY_RECEIPT (RUDP-Light) is the architectural delivery proof,
-    // not lastReceivedAt. A confirmed peer whose bidirectional proof
-    // expired (>2 min idle) must NOT be penalised with recordFailure() —
-    // that creates a death spiral (cf++ → backoff → no targets → peer
-    // unreachable) contradicting the 1h direct-confirmed TTL (§4.6) and
-    // the "no timer-based expiry" principle (§5.3). The sendToDevice
-    // cascade still tries relay routes via the stale-direct guard (§4.6.2)
-    // when freshestInboundAt > 30s.
+    // Confirmed peer + UDP sent = success. DELIVERY_RECEIPT (RUDP-Light)
+    // is the architectural delivery proof, not lastReceivedAt. A confirmed
+    // peer whose bidirectional proof expired (>2 min idle) must NOT be
+    // penalised with recordFailure() — that creates a death spiral
+    // (cf++ → backoff → no targets → peer unreachable) contradicting the
+    // 72h direct-confirmed TTL (§4.6) and the "no timer-based expiry"
+    // principle (§5.3).
     if (udpSentAny && isConfirmed) {
       return true;
     }
@@ -5011,28 +5013,115 @@ class CleonaNode {
     return false;
   }
 
+  // ── 3-Probe Gate (Pflicht vor jeder Peer/Route-Löschung) ───────────
+  //
+  // Kein Routing-Table- oder DHT-Eintrag darf zeitbasiert gelöscht werden
+  // ohne vorherigen 3-maligen Cleona-PING auf alle bekannten Adressen.
+  // Ablauf: PING→2s Timeout, 10ms Pause→PING→2s Timeout, 500ms Pause→
+  // PING→2s Timeout. Sobald ein PONG kommt: Zähler reset, Löschung
+  // abgebrochen. Nur bei 3× Nicht-Antwort: Löschung erlaubt.
+
+  final Map<String, DateTime> _probeInFlight = {};
+
+  Set<String> _getContactDeviceHexes() {
+    final rm = rendezvousManager;
+    if (rm == null) return {};
+    final hexes = <String>{};
+    for (final c in rm.contactsSnapshot) {
+      for (final devHex in c.deviceNodeIds) {
+        hexes.add(devHex);
+      }
+      final peers = routingTable.getAllPeersForUserId(hexToBytes(c.userIdHex));
+      for (final p in peers) {
+        hexes.add(p.nodeIdHex);
+      }
+    }
+    return hexes;
+  }
+
+  Future<bool> _probeBeforeEvict(PeerInfo peer) async {
+    final peerHex = peer.nodeIdHex;
+    if (_probeInFlight.containsKey(peerHex)) return true;
+    _probeInFlight[peerHex] = DateTime.now();
+    try {
+      final targets = peer.allConnectionTargets();
+      if (targets.isEmpty) return false;
+
+      const delays = [Duration.zero, Duration(milliseconds: 10), Duration(milliseconds: 500)];
+      for (var i = 0; i < 3; i++) {
+        if (i > 0) await Future.delayed(delays[i]);
+        for (final addr in targets) {
+          if (addr.ip.isNotEmpty && addr.port > 0) {
+            _sendPing(addr.ip, addr.port);
+          }
+        }
+        await Future.delayed(const Duration(seconds: 2));
+        if (isPeerConfirmed(peerHex) ||
+            (peer.freshestInboundAt != null &&
+             DateTime.now().difference(peer.freshestInboundAt!) <
+                 const Duration(seconds: 5))) {
+          _log.info('Probe-gate: ${peerHex.substring(0, 8)} responded at attempt ${i + 1}');
+          return true;
+        }
+      }
+      _log.info('Probe-gate: ${peerHex.substring(0, 8)} did not respond after 3 probes');
+      return false;
+    } finally {
+      _probeInFlight.remove(peerHex);
+    }
+  }
+
+  void _probeBeforePrune(List<PeerInfo> candidates) {
+    for (final peer in candidates) {
+      unawaited(_probeBeforeEvict(peer).then((alive) {
+        if (!alive && _running) {
+          _log.info('Maintenance: removing ${peer.nodeIdHex.substring(0, 8)} '
+              'after 3-probe failure (>7d stale)');
+          routingTable.removePeer(peer.nodeId);
+          dvRouting.removeNeighbor(peer.nodeId);
+          udpKeepalive.unregister(peer.nodeIdHex);
+        }
+      }));
+    }
+  }
+
+  void _probeThenPruneStaleRoutes() {
+    final staleDestinations = dvRouting.getStaleDestinations();
+    if (staleDestinations.isEmpty) return;
+    _log.info('Soft-reset probe: ${staleDestinations.length} stale destinations to probe');
+    for (final destHex in staleDestinations) {
+      final peer = routingTable.getPeer(hexToBytes(destHex));
+      if (peer == null) {
+        dvRouting.pruneRoutesFor(destHex);
+        continue;
+      }
+      unawaited(_probeBeforeEvict(peer).then((alive) {
+        if (!alive && _running) {
+          dvRouting.pruneRoutesFor(destHex);
+          if (peer.pruneRelayIfStale(const Duration(seconds: 120))) {
+            _log.info('Soft-reset probe: relay route to ${destHex.substring(0, 8)} removed');
+          }
+        }
+      }));
+    }
+  }
+
   // ── Maintenance ────────────────────────────────────────────────────
 
   void _maintenance() {
-    // V3.1.111: 4h→24h so overnight-offline peers survive until morning.
-    // evictStalePeers() catches zombies with high failure rates sooner.
-    final peersBefore = routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
+    // Contact-device-IDs are protected from time-based pruning (only removed
+    // on explicit contact deletion). Non-contact peers prune after 7 days.
+    final contactDeviceHexes = _getContactDeviceHexes();
+    final candidatesForProbe = <PeerInfo>[];
     for (final peer in routingTable.allPeers) {
       final age = DateTime.now().difference(peer.lastSeen);
-      if (age.inHours >= 24) {
-        _log.info('Maintenance: peer ${peer.nodeIdHex.substring(0, 8)} age=${age.inSeconds}s will be pruned');
+      if (contactDeviceHexes.contains(peer.nodeIdHex)) continue;
+      if (age > const Duration(days: 7)) {
+        candidatesForProbe.add(peer);
       }
     }
-    final pruned = routingTable.prune(const Duration(hours: 24));
-    if (pruned > 0) {
-      _log.info('Maintenance: pruned $pruned stale peers');
-      final peersAfter = routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
-      final removed = peersBefore.difference(peersAfter);
-      for (final hex in removed) {
-        _log.info('Maintenance: removed ${hex.substring(0, 8)} from routing table');
-        dvRouting.removeNeighbor(hexToBytes(hex));
-        udpKeepalive.unregister(hex);
-      }
+    if (candidatesForProbe.isNotEmpty) {
+      _probeBeforePrune(candidatesForProbe);
     }
     // H-3: Evict DV neighbors that are no longer in the routing table.
     // When routingTable.prune() evicts a peer, the DV _neighbors map may
@@ -5337,12 +5426,12 @@ class CleonaNode {
       }
     }
 
-    // 3c. DV-Routing: mark all routes as stale (cost +5, 30 s deadline)
+    // 3c. DV-Routing: mark all routes as stale (cost +5, 120 s deadline)
     // instead of clearing. Topology knowledge survives transient events;
     // routes that re-confirm via PONG / DV-update lose the penalty,
-    // routes that miss the deadline are pruned.
+    // routes that miss the deadline are probed (3x Cleona-PING) before removal.
     final staleCount = dvRouting.markAllRoutesStale();
-    _log.debug('Soft-reset: marked $staleCount DV-routes as stale (30s deadline)');
+    _log.debug('Soft-reset: marked $staleCount DV-routes as stale (120s deadline)');
     _lastRouteUpdateSentTo.clear();
     _lastRouteEpochSentTo.clear();
     // F5: suppress catch-up for 15s after network change — delta propagation
@@ -5350,23 +5439,11 @@ class CleonaNode {
     _networkChangeGraceUntil = DateTime.now().add(const Duration(seconds: 15));
 
     // Schedule the prune sweep for the soft-reset deadline. Routes /
-    // relay-routes that did not revalidate via PONG / DV-update / Relay-
-    // delivery within 30 s are dropped — replicating the prior "hard reset"
-    // outcome exactly when revalidation actually fails, but only then.
-    Future.delayed(const Duration(seconds: 30), () {
+    // relay-routes that did not revalidate via PONG / DV-update within 120s
+    // are probed with 3x Cleona-PING before removal.
+    Future.delayed(const Duration(seconds: 120), () {
       if (!_running) return;
-      final dropped = dvRouting.pruneStaleRoutes(const Duration(seconds: 30));
-      var relayDropped = 0;
-      for (final peer in routingTable.allPeers) {
-        if (peer.pruneRelayIfStale(const Duration(seconds: 30))) {
-          relayDropped++;
-        }
-      }
-      if (dropped > 0 || relayDropped > 0) {
-        _log.info(
-            'Soft-reset prune: dropped $dropped DV-routes + $relayDropped relay-routes '
-            'that did not revalidate within 30 s');
-      }
+      _probeThenPruneStaleRoutes();
     });
 
     // 4. Ping all known peers with network-aware address selection.
@@ -6371,7 +6448,7 @@ class CleonaNode {
     // `_sendPing` → `sendInfraDirect`). A returning direct (hopCount==0)
     // PONG re-confirms the peer (§4.6). This is the SOLE periodic refresh of
     // direct-confirmed for non-NAT peers; without it, idle LAN/IPv6 contacts
-    // would silently decay past the 1h TTL and the first new message to them
+    // would silently decay past the 72h TTL and the first new message to them
     // would have to fall back to relay. Jittered (150 ms/peer) to avoid a
     // burst; unconfirmed neighbors are pinged too (that is how they become
     // confirmed in the first place).

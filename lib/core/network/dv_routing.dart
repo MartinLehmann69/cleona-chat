@@ -1077,6 +1077,28 @@ class DvRoutingTable {
     return removed;
   }
 
+  List<String> getStaleDestinations() {
+    final result = <String>[];
+    _routes.forEach((destHex, routes) {
+      if (routes.any((r) => r.isStale)) {
+        result.add(destHex);
+      }
+    });
+    return result;
+  }
+
+  void pruneRoutesFor(String destHex) {
+    final routes = _routes[destHex];
+    if (routes == null) return;
+    routes.removeWhere((r) => r.isStale);
+    if (routes.isEmpty) {
+      _routes.remove(destHex);
+      onRouteChanged?.call(destHex, Route.infinity);
+    }
+    routeEpoch++;
+    updateDefaultGateway();
+  }
+
   // ── Internal Helper Methods ─────────────────────────────────────────────
 
   void _addOrUpdateRoute(String destHex, Route route) {

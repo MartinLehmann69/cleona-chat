@@ -473,6 +473,21 @@ class Transport {
       _udpSocket6 = null;
     }
 
+    // iOS: rescan fd6 now that the IPv6 socket exists. The initial
+    // IosUdpSender.open() above ran before _udpSocket6 was bound, so
+    // cleona_ios_find_udp6_fd() returned -1 (hasIpv6=false). Without this
+    // rescan, all IPv6 sends fall through to Dart's broken socket.send()
+    // which always returns 0 on iOS — causing total IPv6 send failure at
+    // startup until the first reconnectUdpSockets() cycle.
+    if (Platform.isIOS && _iosUdpSender != null && !_iosUdpSender!.hasIpv6 &&
+        _udpSocket6 != null) {
+      _iosUdpSender = IosUdpSender.open(port);
+      if (_iosUdpSender != null && _iosUdpSender!.hasIpv6) {
+        _log.info('iOS native sendto6() activated after IPv6 bind '
+            '(fd6=${_iosUdpSender!.fd6})');
+      }
+    }
+
     // §4.5.2 invariant (V3.1.72): exactly ONE process socket must own the
     // IPv4 data port. A second bound socket (e.g. a NativeUdpSender opened on
     // the main port) silently captures inbound datagrams it never reads — the
@@ -1909,13 +1924,43 @@ class Transport {
       _udpSocket6 = null;
       stopMobileFallback();
 
-      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
+      // IPv4 bind with retry: transient failures (port-release race on iOS,
+      // interface transition) resolve within ~1s. 3 attempts × 500ms covers
+      // the common case without blocking onNetworkChanged excessively.
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, port);
+          break;
+        } catch (e) {
+          _log.warn('UDP IPv4 bind attempt ${attempt + 1}/3 failed: $e');
+          if (attempt < 2) {
+            await Future.delayed(const Duration(milliseconds: 500));
+          }
+        }
+      }
+
+      if (_udpSocket == null) {
+        _log.warn('UDP reconnect: IPv4 bind failed after 3 attempts — '
+            'scheduling deferred recovery');
+        Future.delayed(const Duration(seconds: 5), () {
+          if (_udpSocket == null && !_reconnecting) {
+            onUdpSocketDead?.call();
+          }
+        });
+        return;
+      }
+
       _udpSocket!.broadcastEnabled = true;
       _udpSocket!.readEventsEnabled = true;
       _setRecvBuffer(_udpSocket!);
       _udpSocket!.listen(
         _onUdpEvent,
-        onError: (e) => _log.warn('UDP socket error: $e'),
+        onError: (e) {
+          _log.warn('UDP socket error: $e');
+          if ('$e'.contains('errno = 9') && !_reconnecting) {
+            onUdpSocketDead?.call();
+          }
+        },
       );
 
       try {
@@ -1985,6 +2030,15 @@ class Transport {
       _log.info('UDP sockets reconnected on port $port');
     } catch (e) {
       _log.warn('UDP socket reconnect failed: $e');
+      // Deferred recovery: if an unexpected error left sockets null, ensure
+      // the system doesn't stay permanently dead.
+      if (_udpSocket == null) {
+        Future.delayed(const Duration(seconds: 5), () {
+          if (_udpSocket == null && !_reconnecting) {
+            onUdpSocketDead?.call();
+          }
+        });
+      }
     } finally {
       _reconnecting = false;
     }

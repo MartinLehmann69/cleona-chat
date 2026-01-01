@@ -156,6 +156,10 @@ class BinaryUpdateManager {
     required Future<Uint8List?> Function(
             EndpointAddress address, String platform, int index)
         fetchFragment,
+    Future<Uint8List?> Function(
+            EndpointAddress address, String platform, int index,
+            {int? expectedSize})?
+        fetchWithSize,
     int? expectedSize,
   }) async {
     _cancelled = false;
@@ -170,7 +174,10 @@ class BinaryUpdateManager {
       final fullSources = sources.where((s) => s.hasFullBinary).toList();
       for (final src in fullSources) {
         _log.info('Fetching full binary from ${src.address.ip}:${src.address.port}');
-        final data = await fetchFragment(src.address, platform, -1);
+        final data = fetchWithSize != null
+            ? await fetchWithSize(src.address, platform, -1,
+                expectedSize: expectedSize)
+            : await fetchFragment(src.address, platform, -1);
         if (_cancelled) return;
         if (data != null) {
           if (expectedSize != null && data.length != expectedSize) {
@@ -381,7 +388,7 @@ class BinaryUpdateManager {
 
   /// Whether to use in-network updates or redirect to Play Store.
   bool shouldUseInNetworkUpdate() {
-    if (Platform.isIOS) return false;
+    if (Platform.isIOS || Platform.isMacOS) return false;
     final source = InstallSourceDetector.cached;
     if (source == InstallSource.playStore) return false;
     return true;

@@ -23,7 +23,7 @@
 #
 # New flags (§19.6.2 — Cleona_Chat_Architecture_v3_0.md §19.6):
 #   --bin-dir DIR     Directory containing platform binaries named
-#                      cleona-linux, cleona-android, cleona-windows, cleona-macos, cleona-ios.
+#                      cleona-linux, cleona-android, cleona-windows.
 #                      For every binary found: computes its SHA-256 hash, its byte size, and
 #                      an Ed25519 signature (maintainer key) over the raw 32-byte hash — the
 #                      same trust anchor verified by BinaryUpdateManager.verify() /
@@ -53,7 +53,8 @@ PRIVATE_KEY="${CLEONA_MAINTAINER_KEY:-$HOME/Schreibtisch/cleona_maintainer_priva
 # used everywhere below (JSON map key order). Must stay stable — the signed
 # payload embeds these maps as compact JSON and the receiver's verification
 # re-serializes the decoded map in the same order it appeared in the manifest.
-PLATFORMS=(linux android windows macos ios)
+# macOS/iOS excluded: macOS uses DMG (GitHub Release), iOS uses TestFlight.
+PLATFORMS=(linux android windows)
 
 usage() {
     echo "Usage: $0 <version> <download-url> <archive-hash> <changelog> [<min-required-version> <min-required-reason>] [--bin-dir DIR] [--dht-tag TAG|PLATFORM=TAG] [--mono-seq N]" >&2

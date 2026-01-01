@@ -1880,4 +1880,5 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
   );
 
   stdout.writeln(seed.toUri());
+  exit(0);
 }

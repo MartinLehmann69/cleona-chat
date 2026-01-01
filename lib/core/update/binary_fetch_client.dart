@@ -67,6 +67,12 @@ class BinaryFetchClient {
         await response.drain<void>();
         return null;
       }
+      if (expectedSize != null && contentLength > 0 && contentLength != expectedSize) {
+        _log.warn('fetch $url: Content-Length ${contentLength}B != '
+            'expected ${expectedSize}B — rejecting early');
+        await response.drain<void>();
+        return null;
+      }
 
       final streamTimeout = index == -1 ? kFullBinaryTimeout : kFetchTimeout;
       final builder = BytesBuilder(copy: false);
