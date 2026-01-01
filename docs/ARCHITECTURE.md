@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:90691976c037, 2026-07-07). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c8a7b26a4772, 2026-07-07). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -834,7 +834,7 @@ service.sendToUser(recipientUserId, MessageType.TEXT, payload=encoded("Hallo"))
 node.sendToDevice(packet, deviceId)
                  │
                  ├─ [c] Routing-Decision: routingTable.routesFor(deviceId), sorted by cost
-                 │      ├─ try cheapest route, max 3 retries (ACK timeout 8s direct, 16s relay)
+                 │      ├─ try cheapest route, max 3 retries (ACK timeout 0.5-2s direct RTT-based, 8s relay)
                  │      ├─ if no ACK: try next-cheaper route
                  │      ├─ if all enumerated routes exhausted: try defaultGateway
                  │      └─ if defaultGateway also fails: report failure (nothing more to do)
@@ -1319,6 +1319,7 @@ Cleona nodes communicate over **a single UDP port per daemon** that additionally
 1. **UDP single-shot** (default): payload ≤ 1200 bytes → one UDP packet
 2. **UDP fragmented + NACK retry**: payload > 1200 bytes → app-level fragmentation (max 255 fragments, Fragment-NACK CFNK §5.8)
 3. **TLS on the same port** (fallback): after 15 consecutive UDP failures or on anti-censorship indicators → TLS frame instead of UDP datagram
+4. **HTTP on the same TCP port** (binary distribution only): First-Byte-Sniffing multiplexes `GET` → embedded HTTP server (§19.6.6) vs. `0x16 0x03` → TLS handshake on the same listener
 
 TLS serves exclusively as a **transport fallback** for reachability — the end-to-end encryption (KEM layer) is unaffected. TLS provides no additional security, only additional reachability against operator DPI filters. **Socket lifecycle:** inbound TLS connections that send an invalid or unparseable frame are immediately destroyed (`client.destroy()`) to prevent socket leaks from malformed or probing connections. **TLS capability cache:** per-peer tristate (capable / incapable / unknown) with 24h TTL eviction and 1000-entry hard cap. Eviction causes a re-probe on next bulk send (graceful: unknown defaults to "try TLS"); no mid-transfer impact since entries are written after the send completes.
 
@@ -1600,7 +1601,7 @@ sendToDevice(packet, deviceId):
   for route in routes:
     success = _attemptDelivery(packet, route, maxRetries=3)
     if success: return true
-    // ACK timeout 8s direct, ~16s relay (RTT-based), surgical mark route DOWN
+    // ACK timeout 0.5-2s direct (RTT-based), 8s relay, surgical mark route DOWN
   // Direct-target attempt: target is in routing table (e.g. from
   // addPeersFromContactSeed) with addresses but is NOT yet a DV neighbor
   // — the PING→PONG round-trip hasn't completed. Fire-and-forget UDP
@@ -2200,7 +2201,7 @@ signed_endpoint_record = {
 
 #### 4.11.6 Nostr Provider (NIP-01, NIP-33)
 
-The first external substrate. Chosen for minimal integration effort, negligible traffic overhead, and no participation obligation (unlike Mainline DHT).
+The first external substrate. Chosen for minimal integration effort, negligible traffic overhead, and no participation obligation (unlike Mainline DHT). Used for two publish categories: **(1) Contact-Rendezvous** (per-contact endpoint records, this section) and **(2) Binary Discovery** (network-wide software distribution records, §19.6.5).
 
 **Identity**: a deterministic secp256k1 keypair derived per contact×device combination:
 
@@ -2688,7 +2689,7 @@ Cleona's "Reliable UDP Light" — minimal overhead for ACK tracking, without TCP
 - Every application message (except ephemeral types such as TYPING_INDICATOR, READ_RECEIPT) expects a `DELIVERY_RECEIPT`
 - DELIVERY_RECEIPT is a dedicated inner-frame type, sent from the receiver back to the sender
 - The sender's `AckTracker` keeps a timer per `messageId`
-- Timeout = max(2 × RTT × hopCount, 8s) — Direct: 8s, Relay: ~16s
+- Timeout = max(2 × RTT + 50ms, floor) — Direct: floor 500ms (LAN, RTT<50ms) / 2s (WAN), Relay (hopCount>1): floor 8s
 - On timeout: per-route failure counter +1
 - After 3 consecutive timeouts on the same route: route DOWN (surgical)
 
@@ -3656,7 +3657,7 @@ This is the only place in V3 where the §2.3.5 InfrastructureFrame selector list
    her user-identity normally).
 ```
 
-After step 9, all subsequent traffic between Alice and Bob runs the regular ApplicationFrame path (§2.4 main pipeline). The InfrastructureFrame-wrap of CR is purely a bootstrap mechanism — never used after the first round-trip. CR-Retry (when the CR was sent but no response arrived) re-uses the same bootstrap path, since Alice still does not have Bob's User-KEM-PK. The retry timer checks peer reachability in this order: (a) recipientUserId in routing table, (b) userId secondary index via getPeerByUserId, (c) seedDeviceIdHex from the persisted ContactSeed bundle. Fallback (c) is necessary because the DV routing table only carries deviceNodeIds — the userId secondary index is often empty for first-CR contacts whose CR-Response has not yet arrived.
+After step 9, all subsequent traffic between Alice and Bob runs the regular ApplicationFrame path (§2.4 main pipeline). The InfrastructureFrame-wrap of CR is purely a bootstrap mechanism — never used after the first round-trip. CR-Retry (when the CR was sent but no response arrived) re-uses the same bootstrap path, since Alice still does not have Bob's User-KEM-PK. The retry timer checks peer reachability in this order: (a) recipientUserId in routing table, (b) userId secondary index via getPeerByUserId, (c) seedDeviceIdHex from the persisted ContactSeed bundle. Fallback (c) is necessary because the DV routing table only carries deviceNodeIds — the userId secondary index is often empty for first-CR contacts whose CR-Response has not yet arrived. CR-Retry is triggered both edge-triggered (onPeerAdded, post-discovery, 15s second-sweep) and by a 30s periodic fallback timer that runs while pending outgoing CRs or recently accepted contacts (< 5 min) exist — the timer self-cancels when no work remains. Per-contact exponential backoff (10s, 20s, … capped at 600s) inside the retry method prevents flooding regardless of trigger source.
 
 **Post-CR peer discovery:** After a successful CR exchange (step 9), the scanner has a confirmed contact and at least one active relay peer (from the QR's seed peers). Through this relay peer, the normal mesh-refresh cycle runs automatically: `PEER_LIST_SUMMARY → PEER_LIST_WANT → PEER_LIST_PUSH` (§5.10.5). The scanner thereby learns the **private IP addresses** of all peers in the mesh — including the relay peer itself. From this point on, the relay peer's private address is preferred (§4.6 address priority: same-subnet LAN priority 1 < global IPv6 priority 2 < other-subnet/public IPv4 priority 3), which switches the communication path from mobile data to the local network. This transition happens automatically through the address-scoring logic (PONG from private address → `lastReceivedAt` set → ranked higher) and requires no explicit network switch.
 
@@ -5889,7 +5890,7 @@ PoW Parameters:
 
 Only **chat content messages** (TEXT, IMAGE, FILE, VOICE), **call signaling** (CALL_INVITE, CALL_ANSWER, CALL_REJECT, CALL_HANGUP, CALL_REJOIN) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW. **Live-media frames (76–79) never carry PoW** — neither on LAN nor WAN paths.
 
-**Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. Pre-hashing (§13.1.2) ensures iteration time is constant regardless of payload size — no risk of Android background-killing the isolate during long PoW grinds. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
+**Async Crypto Pipeline:** The full inner send pipeline (User-Sign → zstd → KEM-Encrypt → PoW) runs in a single background isolate via `V3FrameCodec.buildAndEncryptInnerWithPowAsync()`. The isolate loads libsodium and liboqs independently. Two performance optimizations reduce per-message overhead: (1) **Native PoW loop (`libcleona_pow`):** the SHA-256 hashcash iteration runs in C (`cleona_pow_find_nonce`), eliminating ~1M Dart↔C FFI transitions per message. On platforms where `libcleona_pow` is not deployed, the Dart-side iteration loop serves as transparent fallback. (2) **OQS context caching:** the `OQS_SIG` and `OQS_KEM` context handles for ML-DSA-65 and ML-KEM-768 are allocated once per isolate and reused across calls, eliminating per-operation `OQS_*_new`/`OQS_*_free` overhead. Pre-hashing (§13.1.2) ensures PoW iteration time is constant regardless of payload size. The UI shows the message immediately with "sending" status (hourglass).
 
 **Admission PoW (identity-bound, D3 — Phase 1 observe-only):** distinct from the per-message PoW above, the admission proof prices **ID minting** (insider-Sybil cost anchor, §13.1.8):
 
@@ -6985,7 +6986,7 @@ Development uses a three-directory model to separate working code from secrets a
 
 **Reproducible builds:** Users can verify that official binaries match the published source by building from source and comparing the unsigned output. The Ed25519 release signature is a separate verification step (authenticity, not integrity). The maintainer's private key is never needed by verifiers.
 
-**Distribution channels:** GitHub Releases (signed binaries), Google Play (maintainer-signed APK), project website. F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy.
+**Distribution channels (external, for initial installation):** GitHub Releases (signed binaries), Google Play (maintainer-signed APK), project website. F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
 
 **Linux packaging:** Three formats built from the Flutter Linux bundle via `scripts/build-linux-packages.sh`: AppImage (universal, no installation), .deb (Debian/Ubuntu/Mint), .rpm (Fedora/openSUSE/RHEL). All install to `/opt/cleona/` with a wrapper script in `/usr/bin/cleona-chat` and a `.desktop` entry for application menu integration.
 
@@ -7078,7 +7079,7 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 3. If true, `UpdateRequiredScreen` is rendered as the initial route, before the normal `MaterialApp` shell. The screen shows:
    - Title: `t('update_required_title')`
    - Body: `t(manifest.minRequiredReason)` (i18n in 33 locales)
-   - Primary button: opens `manifest.downloadUrl` externally (browser / Play Store)
+   - Primary button: attempts In-Network Update first (§19.6.2), falls back to `manifest.downloadUrl` externally (browser / Play Store)
    - Secondary link: "Open anyway (limited)" → enters Reduced-Mode
 
 **Reduced-Mode semantics (`CleonaService._reducedMode = true`):**
@@ -7095,6 +7096,317 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 **Multi-Identity scope:** The hard-block applies at the daemon process level — all identities of the installation are gated together. Multi-Identity does not provide a per-identity bypass.
 
 **Rollback story:** If a release with `minRequiredVersion = X` introduces a critical bug, the rollback release re-publishes a manifest with `minRequiredVersion = null`. Cached manifests refresh within the 6h DHT-poll window, so the worst-case net-split lasts ~6h. Pre-release verification on the Beta cluster is the primary defense; rollback is a fallback with cost. Stability validation happens organically through real Beta usage (Multi-Identity traffic across the maintainer's own cluster) — issues surface as concrete user reports rather than synthetic soak loops.
+
+### 19.6 Censorship-Resistant Software Distribution
+
+Cleona's distribution currently depends entirely on external gatekeepers: GitHub Releases, Google Play, Apple App Store, and the project website. Each can be individually censored. This section introduces in-network updates, Nostr-based binary discovery, an embedded HTTP server for initial installation, and invite-driven onboarding — so that an installed Cleona network can update itself and onboard new users through existing users without centralized infrastructure.
+
+#### 19.6.1 Design Principles
+
+1. **No single gatekeeper.** Every distribution stage has at least two independent channels.
+2. **Person-to-person trust.** The inviter is the trust anchor — not a store, not a label, not a certificate.
+3. **Tiered model.** Convenient channels (stores, GitHub) remain as the primary path. Decentralized channels are fallback. Not either-or.
+4. **Bootstrapping honesty.** The very first installation always requires an external touchpoint. It can only be made as decentralized and redundant as possible — but not eliminated.
+5. **Bootstrap = launch helper, not permanent infrastructure.** The bootstrap node takes on disproportionate load during the network's early phase (complete binaries for all platforms, primary download source). Once enough nodes hold sufficient fragments, the bootstrap can relinquish this role and reduce to its core function (network entry point) — or be shut down entirely. The architecture must never assume the bootstrap as a permanent dependency.
+6. **Explicit release.** In-network updates are never triggered automatically from the development process. Only a manually signed manifest triggers an update. Development and test versions stay in the local/beta network.
+
+#### 19.6.2 In-Network Binary Updates
+
+For users who already have Cleona installed. The network delivers updates itself — no external dependency required.
+
+**Flow:**
+
+1. Maintainer signs the new binary (all platforms) with the Ed25519 maintainer key.
+2. Maintainer node erasure-codes the binary per platform and distributes fragments to DHT peers.
+3. The Update Manifest (§19.5.5) gains new fields alongside the existing `downloadUrl` (external fallback):
+   - `dhtBinaryTag: Map<String, String>?` — per platform (linux, windows, android, macos, ios) the DHT lookup tag for erasure fragments.
+   - `deltaBinaryTag: Map<String, Map<String, String>>?` — per platform a map from source version to DHT tag for delta patches.
+   - `minMonotoneSeq: int` — monotonically increasing sequence number. Nodes reject any manifest with a `minMonotoneSeq` lower than or equal to the highest previously seen value. Prevents downgrade attacks via replayed old (but validly signed) manifests.
+4. Receiver node reads the manifest (existing 6h poller), detects new version.
+5. Receiver fetches K fragments from N over DHT, assembles the binary, verifies SHA-256 hash + Ed25519 signature.
+6. User is prompted for installation (no auto-install — user consent required).
+
+**Release protection — no dev builds in the network:**
+
+The update manifest must be signed with the **Ed25519 maintainer private key**. Without a valid signature, every node ignores the manifest. This prevents development or test builds from accidentally being published as updates.
+
+| Protection | What it prevents |
+|---|---|
+| Manifest signature (maintainer key) | No node accepts an unsigned or incorrectly signed manifest — dev builds without signature trigger no update |
+| Explicit release script (`scripts/publish-in-network-update.sh`) | Manual act, no automatic pipeline trigger — analogous to the existing 4-script push pipeline |
+| Beta/Live network separation (§19.5.6) | Different network secrets = different DHT tags — beta updates never reach the live network |
+| Monotone sequence number (`minMonotoneSeq`) | Prevents downgrade attacks via replayed old manifests. Each new release increments the sequence; nodes reject manifests with equal or lower sequence than the highest seen |
+
+**Erasure coding parameters — adapted to storage budgets:**
+
+Fragment sizes must fit within the tightest storage budget (mobile: 5 MB). The N/K ratio is chosen so that individual fragments stay below the mobile limit while maintaining the same 1.43x redundancy ratio as message erasure coding (§5.7).
+
+| Platform | Binary size | N | K | Overhead | Fragment size | Fits mobile (5 MB) |
+|---|---|---|---|---|---|---|
+| Android | ~50 MB | 30 | 21 | ~72 MB | ~2.4 MB | Yes |
+| Linux | ~100 MB | 50 | 35 | ~143 MB | ~2.9 MB | Yes |
+| Windows | ~90 MB | 50 | 35 | ~129 MB | ~2.6 MB | Yes |
+| macOS | ~110 MB | 50 | 35 | ~157 MB | ~3.1 MB | Yes |
+| iOS | ~80 MB | 40 | 28 | ~114 MB | ~2.9 MB | Yes |
+
+Higher N means more fragments must be distributed, but each fragment is small enough for any node to hold. K/N = 0.7 (same ratio as message erasure coding: 70% of fragments required for reconstruction).
+
+**Storage budget per node:**
+
+| Node type | Budget | What it holds |
+|---|---|---|
+| **Bootstrap** (early phase only) | All platforms, complete | Primary download source during network bootstrap. This role is relinquished once sufficient fragment coverage exists across regular nodes. |
+| **Desktop node** | Max. 20 MB | ~6-8 fragments of own platform + optionally other platforms |
+| **Mobile node** | Max. 5 MB | 1-2 fragments of own platform |
+
+**Fragment garbage collection:** Fragments of older versions are discarded once >90% of reachable peers report the new version (via manifest version in PING). Minimum retention: 30 days. The >90% threshold is measured conservatively: only peers seen in the last 7 days count toward the denominator. Offline nodes are excluded from the calculation — they may still need old fragments when they come back online.
+
+**Maintainer key considerations (roadmap):** The Ed25519 maintainer key is a single point of coercion — a compromised or compelled key signs malicious updates for the entire network. Threshold signing (e.g., 2-of-3 maintainer keys required to sign a manifest) is a future hardening step, tracked in the post-V3.0 roadmap. For now, the single-key model is accepted with the mitigation that reproducible builds (§19.2) allow any user to verify that official binaries match the published source.
+
+#### 19.6.3 Delta Updates
+
+Full binary updates are expensive on mobile data. Delta updates reduce the volume to the actual changes between versions.
+
+**Mechanism:** bsdiff/bspatch. The maintainer generates deltas from V-1 to V and V-2 to V (two generations). Deltas are erasure-coded and distributed analogously to §19.6.2.
+
+**Expected savings:** Typical minor version: 2-5 MB instead of 50-100 MB (>90% reduction).
+
+**Fallback:** If no matching delta is available (version too old, node was >2 releases offline), the updater falls back to full binary (§19.6.2).
+
+#### 19.6.4 Invite Link for Initial Installation
+
+An existing user (Alice) generates a link containing everything a new user (Bob) needs: network access, download source, verification.
+
+**Link format (HTTP, works in any browser):**
+
+```
+http://<node-ip>:<port>/cleona#s=<ContactSeed>&h=<BinaryHashMap>&m=<MaintainerSig>&v=<Version>
+```
+
+| Parameter | Content | Purpose |
+|---|---|---|
+| `s` | ContactSeed (Base64) | Alice becomes Bob's first peer (existing §8.1.1 mechanism) |
+| `h` | SHA-256 hashes per platform (compressed, Base64) | Bob can verify the downloaded binary |
+| `m` | Ed25519 maintainer signature over the hash map | Proves that the hashes come from the maintainer |
+| `v` | Version number | Platform detection + version assignment |
+| `f` | Fallback URL (optional) | GitHub Release etc. as external fallback |
+
+**Why HTTP, not HTTPS:** Nodes have no domain — no TLS certificate possible. Self-signed certificates trigger browser warnings. Plain HTTP avoids this. Integrity is secured through the SHA-256 hash in the link, authenticity through the Ed25519 maintainer signature. TLS authenticity would be redundant — verification runs through stronger mechanisms.
+
+**Why `http://`, not `cleona://`:** A custom URI scheme only works if Cleona is already installed — chicken-and-egg. An HTTP link opens in the browser on any device. The hash fragment (`#...`) is not sent to the server (browser privacy).
+
+**Inviter privacy consideration:** The invite link contains Alice's IP address. When shared over insecure channels (email, other messengers), this exposes Alice's home IP. Mitigation: (a) dynamic IPs change within 24h, limiting the exposure window; (b) Alice can generate an invite that points to a different public node instead of herself (the ContactSeed `s=` parameter is independent of the download source); (c) for high-threat environments, the physical transfer path (§19.6.8 Stufe 4) avoids IP exposure entirely.
+
+**Cross-platform:** Alice runs on iOS, Bob needs Linux — no problem. The binary source is the network (§19.6.5), not Alice's own binary. Alice provides only the trust anchor (signature, hashes). Bob's browser receives the bootstrap web app from the node and the web app finds nodes with the right platform binary via Nostr lookup.
+
+**Android signing caveat — installSource-based update routing:**
+
+A sideloaded APK (from invite link or physical transfer) and a Play Store APK have different signing keys (Play App Signing vs. maintainer key). Android enforces signature consistency across updates — there is no update path between the two without uninstalling and reinstalling (which loses local data). The app therefore detects its installation source at first launch and permanently routes all future updates through the matching channel:
+
+| `installSource` | Detection | Update channel |
+|---|---|---|
+| `PLAY_STORE` | `PackageManager.getInstallSourceInfo().installingPackageName == "com.android.vending"` | Google Play (existing store update mechanism, no in-network update) |
+| `SIDELOAD` | Any other `installingPackageName` (null, file manager, browser) | In-network update (§19.6.2) — same maintainer signing key, Android accepts the update |
+
+The `installSource` is persisted in the encrypted database at first launch (immutable after that). The update manifest (§19.5.5) includes `downloadUrl` (Play Store link) alongside `dhtBinaryTag` (in-network). The app shows only the update path that matches its `installSource`.
+
+**Consequence for users:** A Play Store user who wants to switch to in-network updates must uninstall and reinstall via sideload (losing local data unless they have a seed-phrase backup). This is Android platform behavior, not a Cleona design choice.
+
+#### 19.6.5 Nostr as Binary Discovery Directory
+
+Extension of the existing Nostr usage (§4.11.6) with a third publish category alongside contact rendezvous (§4.11.6) and infrastructure rendezvous (§4.11.9).
+
+**Problem:** Cleona nodes have dynamic IPs (new every 24h). An invite link cannot contain fixed IPs. Nostr solves this: nodes publish their current IP, Bob looks them up on Nostr.
+
+**Who publishes:** Only nodes that are **directly reachable** publish binary availability records. The address filter from §4.11.7 applies analogously:
+
+- Public IP (bootstrap, port-forwarded): **yes**
+- Global IPv6 (not link-local, not ULA): **yes**
+- Same LAN as requester (via LAN discovery): **yes** (but not via Nostr — LAN nodes are found through existing LAN discovery §4.5)
+- Behind NAT, only reachable via relay: **no** — relay download makes no sense because the relay node itself can offer the packages as a download source
+
+**Binary availability record:**
+
+Every directly reachable node willing to serve binaries (opt-in, default: on) publishes:
+
+```
+binary_tag = HKDF-SHA-256(
+    ikm    = network_secret,
+    salt   = "cleona-rv-binary-v1",
+    info   = epoch_string + "/" + platform,
+    length = 32
+)
+
+binary_key = HKDF-SHA-256(
+    ikm    = network_secret,
+    salt   = "cleona-rv-binary-key-v1",
+    info   = epoch_string,
+    length = 32
+)
+
+nostr_sk = HKDF-SHA-256(
+    ikm    = network_secret,
+    salt   = "cleona-nostr-binary-v1",
+    info   = hex(own_device_id),
+    length = 32
+)
+```
+
+**Record content (encrypted with `binary_key`):**
+
+```json
+{
+  "device_id":        "<hex>",
+  "platform":         "android|linux|windows|macos|ios",
+  "version":          "3.1.125",
+  "addresses":        ["1.2.3.4:41338", "[2001:db8::1]:41338"],
+  "binary_hash":      "<SHA-256 of the complete binary>",
+  "has_full_binary":  true,
+  "fragment_indices": [0, 3, 7],
+  "seq":              42
+}
+```
+
+**NIP-33 multi-publisher:** As with infrastructure rendezvous (§4.11.9) — different nodes publish under the same d-tag with different Nostr pubkeys. The resolver query returns all available nodes for a platform.
+
+**Invite-scoped records:**
+
+Bob has no `network_secret` yet. The invite link therefore contains a derived key (not the secret itself):
+
+```
+invite_binary_key = HKDF-SHA-256(
+    ikm    = network_secret,
+    salt   = "cleona-invite-binary-v1",
+    info   = invite_nonce,
+    length = 32
+)
+```
+
+The inviting node publishes an invite-scoped record in parallel under a separate tag (derived from `invite_nonce`), encrypted with `invite_binary_key`. TTL: 72h (analogous to first-contact rendezvous §4.11.10). Bob can decrypt it with the key from the link.
+
+**Security note:** A captured invite link yields the `invite_binary_key`, which allows Nostr queries that reveal IP addresses of publishing nodes. The 72h TTL limits the exposure window. This is an accepted trade-off — the same risk profile exists for first-contact rendezvous (§4.11.10), where captured ContactSeed URIs similarly reveal endpoint addresses.
+
+#### 19.6.6 Embedded HTTP Server + Bootstrap Assembler
+
+Every Cleona node includes a minimal HTTP server that delivers the bootstrap web app and binary fragments. No external hosting needed — every directly reachable node is a complete download source.
+
+**Protocol multiplexing on the existing port:**
+
+Cleona already uses TCP on the same port as UDP (TLS fallback, §4.5). HTTP is also TCP. The node identifies the protocol at the start of each incoming TCP connection:
+
+| First bytes | Protocol | Handler |
+|---|---|---|
+| `GET ` / `HEAD` | HTTP | Static HTTP handler (§19.6.6) |
+| `0x16 0x03` (ClientHello) | TLS | Existing TLS fallback (§4.5) |
+
+No additional port required. UDP (SOCK_DGRAM) and TCP (SOCK_STREAM) share the port number kernel-side without conflict — this is already architectural baseline.
+
+**What the HTTP server delivers:**
+
+| Path | Content | Size |
+|---|---|---|
+| `/cleona` | Bootstrap web app (static HTML + JS) | ~200-400 KB |
+| `/cleona/binary/<platform>` | Complete binary (bootstrap nodes in early phase) | 50-110 MB |
+| `/cleona/fragment/<platform>/<index>` | Single erasure fragment | 2-3 MB |
+
+**What the HTTP server does NOT do:** No dynamic processing, no CGI, no API, no upload, no directory listing. Only GET on fixed paths. Minimal attack surface. Returns 404 for any unknown path — no server identification headers, no version disclosure.
+
+**DPI fingerprint mitigation:** The HTTP endpoint only responds to specific `/cleona` paths. All other requests receive a generic 404 with no identifying information. The endpoint does not respond to HTTP probes on `/`, `/index.html`, or other common paths. This is not stealth (any sufficiently motivated censor can fingerprint the protocol), but it avoids casual detection by automated scanners.
+
+**Bootstrap assembler flow:**
+
+Bob clicks the invite link. His browser connects via HTTP to the Cleona node:
+
+1. Node delivers the bootstrap web app (static HTML + JS, part of the Cleona binary).
+2. Web app reads parameters from the hash fragment (never sent to the server).
+3. Web app detects Bob's platform (User-Agent).
+4. Web app contacts Nostr relays via WebSocket — finds additional nodes with binary fragments for Bob's platform.
+5. Web app downloads the binary (or erasure fragments from multiple nodes) via HTTP.
+6. Assembles the complete binary in the browser (WebAssembly for Reed-Solomon).
+7. Verifies SHA-256 hash against the hash in the invite link.
+8. Verifies Ed25519 maintainer signature (libsodium.js).
+9. Offers the verified binary for download.
+
+**Download fallback cascade:**
+
+1. Complete binary from the initial node (if bootstrap with `has_full_binary: true`).
+2. Erasure fragments from multiple nodes (Nostr lookup, bandwidth distributed).
+3. External fallback (GitHub Release URL in the invite link as `f=` parameter, optional).
+
+**Trust model and MITM analysis:**
+
+The bootstrap assembler is a **best-effort convenience channel**, not a high-security path. The security analysis splits into two distinct layers:
+
+*Layer 1 — Binary integrity (strong):* The binary itself is protected by Ed25519 maintainer signature + SHA-256 hash. The hash and signature travel through the **invite link** — a separate channel (email, SMS, verbal). Even a compromised assembler cannot forge the maintainer signature to make a malicious binary pass verification. Additionally, erasure fragments are fetched from **multiple independent nodes** (via Nostr lookup) — a MITM would need to simultaneously intercept all connections to substitute coherent fake fragments.
+
+*Layer 2 — Assembler integrity (weak):* The bootstrap assembler (HTML+JS) is served over unauthenticated HTTP. A network-level attacker (MITM) could replace the assembler entirely — removing the signature check and delivering arbitrary malware instead. This is the genuine attack surface, and it is **not specific to Cleona**: any software download over HTTP has this property. Mitigations:
+- The assembler is deliberately kept small (~50 KB source) — small enough for a technical user to inspect in the browser's developer tools before running.
+- The binary hash in the invite link enables **out-of-band verification**: even if the assembler is compromised, Bob can manually compare `sha256sum <downloaded-file>` against the hash from the invite link.
+- Fragment downloads from multiple independent nodes make single-point interception insufficient for a coherent binary substitution.
+- The closed network model (§4.10) provides **post-installation verification**: a fake binary without the `network_secret` cannot communicate with any legitimate node — the deception is discovered immediately on first launch.
+
+*Why alternative protocols (SFTP, FTPS) do not help:* The assembler runs in a browser, which speaks only HTTP(S). SFTP requires SSH host-key trust (TOFU — no better than self-signed HTTPS). FTPS requires X.509 certificates (same problem as HTTPS — no domain, no CA validation possible). Any protocol that provides transport authentication ultimately requires a pre-shared trust anchor, which is the exact chicken-and-egg problem the invite link solves for the binary (but not for the assembler itself).
+
+*HTTPS is not viable:* Nodes have no domain — Let's Encrypt and all public CAs require domain-based validation (ACME HTTP-01/DNS-01), not IP-based. Self-signed certificates trigger browser warnings that are worse UX than plain HTTP. IP-based certificates from public CAs do not exist. Even if they did, a certificate could be revoked under legal pressure — the integrity guarantee must not depend on a CA's cooperation.
+
+Users in high-threat environments should use the physical transfer path (§19.6.8 Stufe 4) or receive the binary directly from a known contact.
+
+**Browser HTTP download restrictions:** Modern browsers (Chrome, Edge) may block or warn about executable downloads over plain HTTP ("insecure download"). This affects the UX of Stufe 3. Mitigation: the web app can instruct the user to explicitly confirm the download, or the user can copy the direct download URL and use a command-line tool (`wget`, `curl`). The binary hash verification is independent of the transport — the file is verified after download regardless of how it was obtained. This limitation is documented in the UX flow, not hidden.
+
+**iOS special case:** The web app can download an IPA, but iOS does not install it (no sideloading, except EU-DMA markets from iOS 17.4). The web app detects iOS and shows: "On iOS, Cleona is available through the App Store" + Store link.
+
+**Platform-specific installation (roadmap):** The actual installation mechanism (replacing a running binary, OS-level permissions, SmartScreen/Gatekeeper/Notarization) is platform-specific and outside the scope of this section. §19.6.2 delivers the verified binary; the installation UX is a per-platform implementation detail tracked separately: Linux (replace AppImage + restart daemon), Android (intent to package installer), Windows (UAC-elevated replacement), macOS (DMG mount + drag-to-Applications pattern). Each platform path will be specified when implemented.
+
+#### 19.6.7 Physical Binary Transfer
+
+For environments where network-based distribution is compromised or unavailable. The ultimate fallback — not censorable except by physical confiscation.
+
+**Supported transfer methods:**
+
+| Method | Platforms | Mechanism |
+|---|---|---|
+| USB file transfer | Android, Linux, Windows, macOS | Copy APK/binary to device, sideload/execute |
+| NFC (Android Beam / HCE) | Android | Tap-to-transfer APK between devices |
+| Bluetooth file transfer | Android, Linux, Windows | OBEX file push |
+| Local Wi-Fi (HTTP) | All | Sender's Cleona node serves binary via §19.6.6 HTTP server on LAN IP |
+
+**Not supported:** AirDrop (Apple proprietary, and iOS does not allow sideloading anyway).
+
+**Verification after physical transfer:** The transferred binary is verified by SHA-256 hash comparison against a hash the sender communicates verbally or via a separate channel. After installation, the closed network model (§4.10) provides the ultimate verification — a fake binary cannot join the network.
+
+#### 19.6.8 Multi-Fallback Strategy (Overview)
+
+| Tier | Channel | Censorable by | Target |
+|---|---|---|---|
+| 1 | Google Play / App Store | Apple / Google alone | Initial install (convenient) |
+| 2 | GitHub Releases | Microsoft / DMCA | Initial install (sideload) |
+| 3 | Invite link + Nostr discovery + node HTTP download | Nostr + all directly reachable nodes blocked | Initial install (decentralized) |
+| 4 | Physical (USB / NFC / Bluetooth / LAN Wi-Fi) | Not censorable (except confiscation) | Initial install (ultimate fallback) |
+| 5 | In-network update via DHT | Not censorable (as long as 1 peer is reachable) | Updates for existing users |
+| 6 | In-network delta update via DHT | Not censorable | Updates (bandwidth-efficient) |
+
+**Once installed = never dependent on externals again.** Tiers 5+6 operate entirely within the Cleona network. External channels (1-4) are only needed for initial installation, and no single one is critical.
+
+#### 19.6.9 Implementation Map
+
+| Concept | Class / File | Key API |
+|---|---|---|
+| Binary Fragment Store | `BinaryFragmentStore` (`lib/core/update/binary_fragment_store.dart`) | `storeFragment()`, `storeComplete()`, `getFragment()`, `getComplete()`, sync variants, `garbageCollect()`, `enforceBudget()` |
+| Reed-Solomon Seeder | `BinarySeeder` (`lib/core/update/binary_seeder.dart`) | `seed()`, `paramsFor()`, `isSeeding()` |
+| Update Manager (§19.6.2) | `BinaryUpdateManager` (`lib/core/update/binary_update_manager.dart`) | `checkForUpdate()`, `startDownload()`, `assemble()`, `verify()`, `gc()` |
+| Delta Updates (§19.6.3) | `DeltaUpdateManager` (`lib/core/update/delta_update_manager.dart`) | `findDeltaPath()`, `tryDeltaUpdate()` — bsdiff/bspatch glue, falls back to full binary when no path exists |
+| HTTP Fragment Server (§19.6.6) | `BinaryHttpServer` (`lib/core/update/binary_http_server.dart`) | `handleConnection()` behind the existing First-Byte-Sniffing multiplexer; serves `/cleona`, `/cleona/binary/<platform>`, `/cleona/fragment/<platform>/<index>` |
+| HTTP Fragment Client | `BinaryFetchClient` (`lib/core/update/binary_fetch_client.dart`) | `fetch()` |
+| Bootstrap Web App (§19.6.6) | `BootstrapWebApp` (`lib/core/update/bootstrap_web_app.dart`) | `html()` — self-contained HTML+JS assembler (Reed-Solomon + Ed25519 verification client-side) |
+| Install Source (§19.6.4) | `InstallSourceDetector` (`lib/core/update/install_source.dart`) | `detect()`, `cached` — Play Store vs. sideload update routing |
+| Invite Links (§19.6.4) | `InviteLink`/`InviteLinkGenerator` (`lib/core/update/invite_link.dart`), `InviteLinkService` (`lib/core/update/invite_link_service.dart`) | `InviteLinkGenerator.create()`, `InviteLink.fromUrl()`/`verifySignature()`, `createInviteLink()`, `publishInviteScopedRecord()` |
+| Physical Transfer (§19.6.7) | `PhysicalTransferHelper` (`lib/core/update/physical_transfer_helper.dart`) | `exportBinary()`, `exportFragment()`, `importAndVerifyBinary()`, `lanTransferUrl()` |
+| Binary Rendezvous (§19.6.5) | `BinaryRendezvousManager`/`BinaryAvailabilityRecord` (`lib/core/network/rendezvous/binary_rendezvous_manager.dart`) | `publish()`, `resolve()`, `resolveAll()` |
+| HKDF Derivations (§19.6.5) | `rendezvous_secret.dart` (`lib/core/network/rendezvous/`) | `computeBinaryTag()`, `deriveBinaryKey()`, `deriveBinaryNostrSecretKey()`, `deriveInviteBinaryKey()` |
+| Manifest Extensions (§19.6.2) | `UpdateManifest` (`lib/core/update/update_manifest.dart`) | Fields `dhtBinaryTag`, `deltaBinaryTag`, `minMonotoneSeq`, `binaryHashes`, `binarySignatures`, `binarySizes` |
+| Orchestration | `CleonaService` (`lib/core/service/cleona_service.dart`) | `startInNetworkUpdate()`, `_selfSeedCurrentBinary()`, `_buildBinaryAvailabilityRecord()` |
+
+**Erasure parameters as implemented** (`BinarySeeder.platformParams`, matches §19.6.2 table): Android N=30/K=21, Linux/Windows/macOS N=50/K=35, iOS N=40/K=28. **Storage budgets as implemented** (`BinaryFragmentStore.kMobileBudgetBytes`/`kDesktopBudgetBytes`, enforced via `enforceBudget()`): mobile 5 MB, desktop 20 MB — matches the §19.6.2 storage budget table.
 
 ---
 
@@ -7130,6 +7442,7 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 | **miniaudio** | via `libcleona_audio` C shim | Cross-platform audio capture + playback (PulseAudio/ALSA on Linux, AAudio/OpenSL on Android, WASAPI on Windows, Core Audio on macOS/iOS) | Single-header library, version 0.11.21, vendored at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. See §10.4. |
 | **speexdsp** | via `libcleona_audio` C shim | Acoustic Echo Cancellation + Noise Suppression for the audio capture path | Version 1.2.1, **vendored as full source** under `native/cleona_audio/vendor/speexdsp/` (SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`), statically linked. AEC tail = 250 ms @ 16 kHz. |
 | **cleona_net** | `native_udp_sender.dart` via `libcleona_net` C shim | Direct-syscall UDP send-path. Wraps POSIX `sendto` on Linux and Win32 `WSASendTo` on Windows synchronously. Required on both desktop platforms (no runtime fallback). See §4.5.2 for the architectural rationale and §20.3a below for the build details. |
+| **cleona_pow** | `proof_of_work.dart` (inline FFI) | PoW SHA-256 iteration loop in C — calls `crypto_hash_sha256` in a tight loop without per-iteration Dart↔C transitions | Links against libsodium. Build: `cmake -B build -S native/cleona_pow && cmake --build build`. Graceful fallback: platforms without the library use the Dart-side iteration loop transparently. |
 
 The **cleona_net** entry in the table above deserves a longer explanation because, unlike the other native libraries in this list, it does not unlock a feature that would otherwise be unavailable — Dart already ships a perfectly working `RawDatagramSocket`. We introduced the shim because Dart's implementation on Windows silently drops roughly 89 percent of sustained UDP send calls during the LAN-Discovery subnet-scan phase, while the very same workload (200-15000 packets at up to 500 pps to many different destinations) goes through with zero drops when issued by PowerShell's `.NET UdpClient`. The forensic chain that established this is documented at §4.5.2 — pktmon-counters on the Windows TCPIP layer confirm the dropped sends never reach the kernel, and raising the kernel `SO_SNDBUF` to 4 MB did not change the drop rate. The defect therefore lives inside Dart's Windows I/O implementation (likely the IOCP-based UDP send path), below where any Dart-level workaround can reach. Linux is unaffected — Dart's POSIX path uses blocking `sendto` and behaves identically to the C shim. We build and link the shim on Linux as well for the **discovery send path** (`LocalDiscovery`, port 41338). The **main data-port** transport (`Transport.sendUdp`), however, uses the native sender **only on Windows** (V3.1.72). Rationale: `cleona_udp_open` binds a real `SO_REUSEADDR` UDP socket on the given port; when opened on the *data* port in addition to Dart's receive socket, the Linux kernel delivered inbound datagrams to the send-only native socket — which is never read — starving the Dart `RawDatagramSocket` and breaking **all** inbound processing (no PONG → no peer ever confirmed → dead mesh). This was a regression introduced by commit `2fbc879` (it extended the Windows send-fix to the main port without updating this section). Because Dart's POSIX send path is unaffected (stated above), the Linux main port now uses `RawDatagramSocket` for both send and receive — exactly **one** socket per data port. `Transport.start()` enforces this with a `/proc/net/udp` self-check that logs an error if a second IPv4 socket ever binds the data port again. A behavioural regression guard lives in `test/smoke/smoke_udp_receive_path.dart`.
 

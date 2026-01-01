@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/device_keys_store.dart';
@@ -366,6 +367,19 @@ class IdentityContext {
 
     _log.info('Identity "$displayName" User-ID: ${userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${deviceNodeIdHex.substring(0, 16)}...');
+
+    // Export device KEM public keys to plaintext JSON for E2E test
+    // infrastructure (Android has no IPC — tests read this via ADB run-as).
+    // Contains only PUBLIC keys, no secrets.
+    try {
+      File('$_baseDir/device_kem_public.json').writeAsStringSync(jsonEncode({
+        'deviceNodeIdHex': deviceNodeIdHex,
+        'deviceX25519PkB64': base64Encode(deviceBundle.kem.x25519PublicKey),
+        'deviceMlKemPkB64': base64Encode(deviceBundle.kem.mlKemPublicKey),
+      }));
+    } catch (_) {
+      // Non-fatal: file is only consumed by E2E tests.
+    }
 
     // 2D-DHT Identity Resolution: persistierte seq-Counter wiederherstellen
     // (Datei fehlt beim ersten Start -> Defaults bleiben 0).

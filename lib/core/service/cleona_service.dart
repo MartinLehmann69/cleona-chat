@@ -7,10 +7,10 @@ import 'package:image/image.dart' as img;
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/per_message_kem.dart';
-import 'package:cleona/core/crypto/proof_of_work.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/dht/channel_index.dart';
 import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
@@ -57,6 +57,17 @@ import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_manager.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/core/update/binary_fetch_client.dart';
+import 'package:cleona/core/update/binary_fragment_store.dart';
+import 'package:cleona/core/update/binary_http_server.dart';
+import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/update/bootstrap_web_app.dart';
+import 'package:cleona/core/update/delta_update_manager.dart';
+import 'package:cleona/core/update/invite_link_service.dart';
+import 'package:cleona/core/update/physical_transfer_helper.dart';
+import 'package:cleona/core/update/install_source.dart';
+import 'package:cleona/core/update/binary_seeder.dart';
+import 'package:cleona/core/network/rendezvous/binary_rendezvous_manager.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/sync/calendar_sync_service.dart';
@@ -286,6 +297,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // §4.11.10 First-Contact Rendezvous (URI-scoped, nonce from ContactSeed `r`)
   FirstContactRendezvousManager? _fcRendezvous;
+
+  // §19.6 Censorship-Resistant Distribution: in-network binary updates.
+  // Node-wide singletons — only the first identity's service on a daemon
+  // wires these onto the shared node (same first-wins pattern as
+  // node.rendezvousManager above).
+  BinaryFragmentStore? _binaryFragmentStore;
+  BinaryUpdateManager? _binaryUpdateManager;
+  BinaryHttpServer? _binaryHttpServer;
+  BinaryRendezvousManager? _binaryRendezvousManager;
+  DeltaUpdateManager? _deltaUpdateManager;
+  InviteLinkService? _inviteLinkService;
+  PhysicalTransferHelper? _physicalTransferHelper;
+  BinarySeeder? _binarySeeder;
+  // §19.6.2 — periodic housekeeping on the fragment store (prunes
+  // superseded versions + enforces the platform storage budget).
+  Timer? _binaryGcTimer;
+  // Fetches fragments/binaries from other nodes' embedded HTTP servers
+  // (§19.6.6) — the `fetchFragment` callback for BinaryUpdateManager /
+  // DeltaUpdateManager downloads.
+  BinaryFetchClient? _binaryFetchClient;
+  InviteLinkService? get inviteLinkService => _inviteLinkService;
+  PhysicalTransferHelper? get physicalTransferHelper => _physicalTransferHelper;
   @override
   PollManager get pollManager => _polls.pollManager;
   @override
@@ -423,11 +456,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Timer? _updateCheckTimer;
   UpdateManifest? _latestManifest;
   /// Callback when a new version is available. UI should show banner/prompt.
-  void Function(UpdateManifest manifest, bool isCurrent)? onUpdateAvailable;
+  /// [inNetworkAvailable] is true when the update can additionally be
+  /// fetched via §19.6 in-network binary distribution (not just the
+  /// external `manifest.downloadUrl`).
+  void Function(UpdateManifest manifest, bool inNetworkAvailable)? onUpdateAvailable;
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.124';
+  static const String kCurrentAppVersion = '3.1.125';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -442,6 +478,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   Timer? _postDiscoverySecondSweep;
   Timer? _delegationRenewalTimer;
+  Timer? _crRetryTimer;
   final Set<String> _postDiscoveryPolledPeers = {};
 
   // §8.1 per-sender CR rate limit: max 5 CRs per hour per sender.
@@ -717,6 +754,104 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           .toList(),
     );
     _fcRendezvous!.onEndpointResolved = _onFcEndpointResolved;
+
+    // §19.6 Censorship-Resistant Distribution: in-network binary updates.
+    // Node-wide subsystem (fragment store on disk, one embedded HTTP server
+    // on the shared transport, one Nostr rendezvous manager) — only the
+    // first identity's service on this daemon wires it up, mirroring the
+    // node.rendezvousManager ??= _rendezvousManager first-wins pattern above.
+    if (node.binaryRendezvousManager == null) {
+      // §19.6.5: "opt-in, default: on" user preference — load once here
+      // (daemon-wide, see _loadServeBinaryUpdates) before any of the
+      // binaryHasContentToShare = true assignments below run.
+      node.serveBinaryUpdates = _loadServeBinaryUpdates();
+
+      await InstallSourceDetector.detect();
+
+      _binaryFragmentStore = BinaryFragmentStore(profileDir);
+      await _binaryFragmentStore!.init();
+
+      _binaryUpdateManager = BinaryUpdateManager(
+        store: _binaryFragmentStore!,
+        checker: UpdateChecker(log: _log),
+        profileDir: profileDir,
+      );
+      _deltaUpdateManager = DeltaUpdateManager(
+        store: _binaryFragmentStore!,
+        log: _log,
+      );
+      _inviteLinkService = InviteLinkService(profileDir: profileDir);
+      _physicalTransferHelper = PhysicalTransferHelper(
+        store: _binaryFragmentStore!,
+        profileDir: profileDir,
+      );
+      _binarySeeder = BinarySeeder(store: _binaryFragmentStore!, profileDir: profileDir);
+      _binaryFetchClient = BinaryFetchClient(profileDir: profileDir);
+      // Once a download is verified and ready, this device becomes a
+      // legitimate distribution source — (re)publish availability so
+      // other cold-starting nodes can find it.
+      _binaryUpdateManager!.onUpdateReady = (version, path) {
+        if (!node.serveBinaryUpdates) return;
+        node.binaryHasContentToShare = true;
+        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+        _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
+      };
+
+      _binaryHttpServer = BinaryHttpServer(profileDir: profileDir);
+      _binaryHttpServer!.bootstrapWebApp = Uint8List.fromList(
+          utf8.encode(BootstrapWebApp.html(
+              maintainerPublicKeyHex: UpdateChecker.maintainerPublicKeyHex)));
+      _binaryHttpServer!.binaryProvider = (platform) {
+        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
+        if (versions.isEmpty) return null;
+        return _binaryFragmentStore!.getCompleteSync(platform, versions.last);
+      };
+      _binaryHttpServer!.fragmentProvider = (platform, index) {
+        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
+        if (versions.isEmpty) return null;
+        return _binaryFragmentStore!.getFragmentSync(platform, versions.last, index);
+      };
+      node.transport.httpServer = _binaryHttpServer;
+
+      _binaryRendezvousManager = BinaryRendezvousManager(profileDir: profileDir);
+      _binaryRendezvousManager!.init(
+        networkSecret: NetworkSecret.secret,
+        deviceId: identity.deviceNodeId,
+        addressProvider: () => node.currentSelfAddresses()
+            .map((a) => RendezvousAddress(a.ip, a.port))
+            .toList(),
+        platformProvider: () => Platform.operatingSystem,
+      );
+      node.binaryRendezvousManager = _binaryRendezvousManager;
+      node.binaryRecordProvider = _buildBinaryAvailabilityRecord;
+
+      // Arbeitsregel #5 (kein unnötiger Netzwerkverkehr): only start the
+      // periodic Nostr republish if this device already holds binary/
+      // fragment data worth advertising. Devices with an empty store stay
+      // silent until BinaryUpdateManager.onUpdateReady flips the flag above.
+      // §19.6.5: also gated by the user's serve-binary-updates preference.
+      node.binaryHasContentToShare = node.serveBinaryUpdates &&
+          _binaryFragmentStore!
+              .storedVersionsSync(Platform.operatingSystem)
+              .isNotEmpty;
+      if (node.binaryHasContentToShare) {
+        _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+      }
+
+      // Self-seed: encode the running binary into RS fragments so this node
+      // can serve updates immediately (§19.6.2).
+      if (InstallSourceDetector.cached == InstallSource.sideload) {
+        _selfSeedCurrentBinary();
+      }
+
+      // §19.6 fragment GC — prune old/excess fragment data once per hour,
+      // and once immediately at startup to clean up stale data from
+      // previous runs.
+      _runBinaryFragmentGc();
+      _binaryGcTimer = Timer.periodic(const Duration(hours: 1), (_) {
+        _runBinaryFragmentGc();
+      });
+    }
 
     // Load conversations
     _loadConversations();
@@ -2086,6 +2221,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _postDiscoveryPolledPeers.clear();
     _pollConfirmedPeersOnce();
     _retryPendingContactRequests();
+    _startCrRetryTimer();
 
     // §4.11: initial rendezvous publish + start periodic refresh (4h).
     _rendezvousManager?.publishForAllContacts();
@@ -2185,37 +2321,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Device-Sign + per-device fan-out. Reply-fields and the sender-side
     // link-preview are wire-tagged on TextMessageV3 itself.
 
-    // Sender-side link preview. We fetch up-front (HTTPS-only, SSRF-guarded
-    // by LinkPreviewFetcher) and embed the result in TextMessageV3 so the
-    // receiver can render the card WITHOUT making any network request —
-    // this is the privacy-safe receiver-MUST-NOT-fetch invariant from the
-    // architecture (Messaging feature-list in CLAUDE.md).
-    proto.LinkPreview? wirePreview;
-    if (_linkPreviewSettings.enabled && extractFirstUrl(text) != null) {
-      try {
-        final preview = await _linkPreviewFetcher.fetchPreview(text);
-        if (preview != null) {
-          msg.linkPreviewUrl = preview.url;
-          msg.linkPreviewTitle = preview.title;
-          msg.linkPreviewDescription = preview.description;
-          msg.linkPreviewSiteName = preview.siteName;
-          if (preview.thumbnail != null) {
-            msg.linkPreviewThumbnailBase64 = base64Encode(preview.thumbnail!);
-          }
-          wirePreview = preview.toProto();
-          onStateChanged?.call();
-        }
-      } catch (e) {
-        _log.debug('Link preview fetch failed: $e');
-      }
-    }
+    // Sender-side link preview: fetched AFTER the message is sent, then
+    // delivered as an edit/update so the send path is never blocked by DNS
+    // or HTTP timeouts. The receiver-MUST-NOT-fetch invariant (CLAUDE.md)
+    // is preserved — the preview still comes from the sender, just async.
+    final hasUrl = _linkPreviewSettings.enabled && extractFirstUrl(text) != null;
 
     final tm = proto.TextMessageV3()
       ..text = text
       ..formatHint = 'plain';
-    if (wirePreview != null) {
-      tm.linkPreview = wirePreview;
-    }
     if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
       try {
         tm.replyToMessageId = hexToBytes(replyToMessageId);
@@ -2262,7 +2376,41 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       'timestamp': msg.timestamp.millisecondsSinceEpoch,
     }))));
 
+    // Async link-preview fetch: runs AFTER the message is sent so the
+    // send path is never blocked by DNS/HTTP timeouts. On success, the
+    // local UiMessage is updated and an EDIT envelope patches the preview
+    // onto the already-delivered message at the receiver.
+    if (hasUrl) {
+      unawaited(_fetchAndDeliverLinkPreview(
+        recipientUserIdHex, contact, msg, messageIdBytes, text,
+      ));
+    }
+
     return msg;
+  }
+
+  Future<void> _fetchAndDeliverLinkPreview(
+    String recipientUserIdHex,
+    ContactInfo contact,
+    UiMessage msg,
+    Uint8List messageIdBytes,
+    String text,
+  ) async {
+    try {
+      final preview = await _linkPreviewFetcher.fetchPreview(text);
+      if (preview == null) return;
+      msg.linkPreviewUrl = preview.url;
+      msg.linkPreviewTitle = preview.title;
+      msg.linkPreviewDescription = preview.description;
+      msg.linkPreviewSiteName = preview.siteName;
+      if (preview.thumbnail != null) {
+        msg.linkPreviewThumbnailBase64 = base64Encode(preview.thumbnail!);
+      }
+      onStateChanged?.call();
+      _saveConversations();
+    } catch (e) {
+      _log.debug('Async link preview fetch failed: $e');
+    }
   }
 
   /// §5.8: Check if any queuedOffline messages in [conversationId] have
@@ -2908,6 +3056,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (devices.isEmpty) {
       _log.debug('L1 retry: no devices resolved for ${recipientHex.substring(0, 8)}');
       return;
+    }
+
+    for (final dev in devices) {
+      if (dev.addresses.isNotEmpty) {
+        var peer = node.routingTable.getPeer(dev.deviceNodeId);
+        if (peer == null) {
+          peer = PeerInfo(nodeId: dev.deviceNodeId, userId: recipientUserId);
+          for (final addr in dev.addresses) {
+            peer.addresses.add(addr);
+          }
+          node.routingTable.addPeer(peer);
+        } else {
+          for (final addr in dev.addresses) {
+            final key = '${addr.ip}:${addr.port}';
+            if (!peer.addresses.any((a) => '${a.ip}:${a.port}' == key)) {
+              peer.addresses.add(addr);
+            }
+          }
+          node.routingTable.addPeer(peer);
+        }
+      }
     }
 
     final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
@@ -4361,6 +4530,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _lastCrRetryPerContact[entry.key] = now;
       _log.debug('CR-Response retry to ${entry.key.substring(0, 8)}');
+    }
+  }
+
+  void _startCrRetryTimer() {
+    _crRetryTimer?.cancel();
+    if (_contacts.values.any((c) => c.status == 'pending_outgoing') ||
+        _contacts.values.any((c) =>
+            c.status == 'accepted' &&
+            c.acceptedAt != null &&
+            DateTime.now().difference(c.acceptedAt!).inMinutes < 5)) {
+      _crRetryTimer = Timer(const Duration(seconds: 30), () {
+        _crRetryTimer = null;
+        _retryPendingContactRequests();
+        _startCrRetryTimer();
+      });
     }
   }
 
@@ -5879,6 +6063,75 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  // ── §19.6.5 Binary Distribution: Serve-Updates Preference ────────────
+  //
+  // Node-wide (not per-identity): only the first identity's CleonaService
+  // wires up the binary-distribution subsystem onto the shared [node] (see
+  // the `node.binaryRendezvousManager == null` guard in startService()), but
+  // any identity's Settings screen may flip the toggle. The preference —
+  // and its effect, [CleonaNode.binaryHasContentToShare] /
+  // [CleonaNode.binaryRendezvousManager] — therefore lives on the shared
+  // [node], and is persisted daemon-wide under [AppPaths.dataDir] (same
+  // scope as identities.json), not inside a single identity's profileDir.
+
+  static const String _serveBinaryUpdatesFile = 'binary_settings.json';
+
+  @override
+  bool get serveBinaryUpdates => node.serveBinaryUpdates;
+
+  @override
+  void setServeBinaryUpdates(bool enabled) {
+    node.serveBinaryUpdates = enabled;
+    _saveServeBinaryUpdates(enabled);
+    final rendezvous = node.binaryRendezvousManager;
+    if (!enabled) {
+      // Arbeitsregel #5: stop advertising immediately, don't wait for the
+      // next network-change/periodic tick.
+      node.binaryHasContentToShare = false;
+      rendezvous?.stopPeriodicRefresh();
+      _log.info('[update] Binary seeding disabled by user (§19.6.5 opt-out)');
+    } else {
+      final recordProvider = node.binaryRecordProvider;
+      final record = recordProvider?.call();
+      final hasContent =
+          record != null && (record.hasFullBinary || record.fragmentIndices.isNotEmpty);
+      node.binaryHasContentToShare = hasContent;
+      if (hasContent && rendezvous != null && recordProvider != null) {
+        rendezvous.startPeriodicRefresh(recordProvider);
+        rendezvous.publish(record);
+      }
+      _log.info('[update] Binary seeding re-enabled by user (§19.6.5 opt-in)'
+          '${hasContent ? '' : ' — nothing to share yet'}');
+    }
+    onStateChanged?.call();
+  }
+
+  /// Loads the persisted preference (default: true — §19.6.5 "opt-in,
+  /// default: on"). Only called once, from the `node.binaryRendezvousManager
+  /// == null` first-identity block in startService().
+  bool _loadServeBinaryUpdates() {
+    try {
+      final file = File('${AppPaths.dataDir}${Platform.pathSeparator}$_serveBinaryUpdatesFile');
+      if (file.existsSync()) {
+        final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+        return json['serveBinaryUpdates'] as bool? ?? true;
+      }
+    } catch (e) {
+      _log.debug('Failed to load binary-seeding preference: $e');
+    }
+    return true;
+  }
+
+  void _saveServeBinaryUpdates(bool enabled) {
+    try {
+      final file = File('${AppPaths.dataDir}${Platform.pathSeparator}$_serveBinaryUpdatesFile');
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(jsonEncode({'serveBinaryUpdates': enabled}), flush: true);
+    } catch (e) {
+      _log.debug('Failed to save binary-seeding preference: $e');
+    }
+  }
+
   // ── NFC Contact Exchange ─────────────────────────────────────────────
 
   @override
@@ -6850,7 +7103,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  Timer? _saveConversationsTimer;
+  bool _saveConversationsPending = false;
+
   void _saveConversations() {
+    _saveConversationsPending = true;
+    _saveConversationsTimer ??= Timer(const Duration(seconds: 2), () {
+      _saveConversationsTimer = null;
+      if (_saveConversationsPending) {
+        _saveConversationsPending = false;
+        _saveConversationsNow();
+      }
+    });
+  }
+
+  void _saveConversationsNow() {
     // Safety net: never overwrite an existing conversations file before the
     // load has completed. Before _conversationsLoaded, `conversations` can only
     // ever be a partial/seeded set (e.g. the §9.5 system channels), so
@@ -6878,7 +7145,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           if (entry.value.isFavorite) 'isFavorite': true,
           if (entry.value.profilePictureBase64 != null) 'profilePicture': entry.value.profilePictureBase64,
           if (entry.value.unreadCount > 0) 'unreadCount': entry.value.unreadCount,
-          // Use UiMessage.toJson for complete serialization (media, transcripts, reactions, etc.)
           'messages': entry.value.messages.map((m) => m.toJson()).toList(),
         };
       }
@@ -8031,6 +8297,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           .map((e) => e.key)
           .toList(),
       'mediaSettings': _mediaSettings.toJson(),
+      'serveBinaryUpdates': node.serveBinaryUpdates,
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),
       'localDeviceId': _localDeviceId,
@@ -10125,9 +10392,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   Future<void> stop() async {
+    _saveConversationsTimer?.cancel();
+    _saveConversationsTimer = null;
+    if (_saveConversationsPending) {
+      _saveConversationsPending = false;
+      _saveConversationsNow();
+    }
     _calls.dispose();
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = null;
+    _crRetryTimer?.cancel();
+    _crRetryTimer = null;
     _keyRotationTimer?.cancel();
     _keyRotationTimer = null;
     _keyRotationRetryTimer?.cancel();
@@ -10157,6 +10432,34 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _rendezvousManager = null;
     _fcRendezvous?.dispose();
     _fcRendezvous = null;
+    // §19.6: tear down the binary-distribution subsystem — only the
+    // identity that originally wired it onto the shared node clears it.
+    if (node.transport.httpServer == _binaryHttpServer) {
+      node.transport.httpServer = null;
+    }
+    _binaryHttpServer?.dispose();
+    _binaryHttpServer = null;
+    _binaryGcTimer?.cancel();
+    _binaryGcTimer = null;
+    _binaryUpdateManager?.dispose();
+    _binaryUpdateManager = null;
+    if (node.binaryRendezvousManager == _binaryRendezvousManager) {
+      node.binaryRendezvousManager = null;
+      node.binaryRecordProvider = null;
+      node.binaryHasContentToShare = false;
+    }
+    _binaryRendezvousManager?.dispose();
+    _binaryRendezvousManager = null;
+    _deltaUpdateManager?.dispose();
+    _deltaUpdateManager = null;
+    _inviteLinkService?.dispose();
+    _inviteLinkService = null;
+    _physicalTransferHelper?.dispose();
+    _physicalTransferHelper = null;
+    _binarySeeder = null;
+    _binaryFetchClient?.dispose();
+    _binaryFetchClient = null;
+    _binaryFragmentStore = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
     if (_publisherPeerAddedListener != null) {
       node.routingTable.removeOnPeerAddedListener(_publisherPeerAddedListener!);
@@ -10193,7 +10496,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     // Check collected fragments after a delay
-    Timer(const Duration(seconds: 8), () {
+    Timer(const Duration(seconds: 8), () async {
       final fragments = mailboxStore.retrieveFragments(dhtKey);
       if (fragments.isEmpty) return;
 
@@ -10220,7 +10523,26 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
         if (isNewer) {
           _log.info('Update available: v${manifest.version} (current: v$currentAppVersion)');
-          onUpdateAvailable?.call(manifest, false);
+
+          // §19.6: if the manifest carries a DHT binary tag, also check
+          // whether this platform's update is reachable via in-network
+          // binary distribution (peer-fetched fragments/binary) rather than
+          // only the external manifest.downloadUrl.
+          var inNetworkAvailable = false;
+          if (manifest.dhtBinaryTag != null && _binaryUpdateManager != null) {
+            try {
+              inNetworkAvailable = await _binaryUpdateManager!
+                  .checkForUpdate(manifest, currentAppVersion, Platform.operatingSystem);
+              if (inNetworkAvailable) {
+                _log.info('In-network update available for '
+                    '${Platform.operatingSystem}: v${manifest.version}');
+              }
+            } catch (e) {
+              _log.debug('In-network update check failed: $e');
+            }
+          }
+
+          onUpdateAvailable?.call(manifest, inNetworkAvailable);
         } else {
           _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
         }
@@ -10232,6 +10554,251 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Get the latest known update manifest (null if never checked or no update).
   UpdateManifest? get latestUpdateManifest => _latestManifest;
+
+  /// Builds the current [BinaryAvailabilityRecord] for this device (§19.6.5)
+  /// — a snapshot of what this node currently holds in its
+  /// [BinaryFragmentStore] for the running platform/version. `addresses` and
+  /// `seq` are placeholders overwritten by [BinaryRendezvousManager.publish].
+  /// Synchronous because [RendezvousManager]-style record providers are
+  /// invoked from debounce/periodic timers, not awaited call sites.
+  BinaryAvailabilityRecord _buildBinaryAvailabilityRecord() {
+    final platform = Platform.operatingSystem;
+    final version = currentAppVersion;
+    final store = _binaryFragmentStore;
+    return BinaryAvailabilityRecord(
+      deviceId: identity.deviceNodeId,
+      platform: platform,
+      version: version,
+      addresses: const [],
+      binaryHash: '',
+      hasFullBinary: store?.hasCompleteSync(platform, version) ?? false,
+      fragmentIndices: store?.availableFragmentsSync(platform, version) ?? const [],
+      seq: 0,
+    );
+  }
+
+  /// §19.6.2 fragment-store housekeeping: drops fragments/complete binaries
+  /// for versions superseded by [kCurrentAppVersion] and enforces a
+  /// platform-dependent storage budget on what's left. Invoked once at
+  /// startup and then hourly via [_binaryGcTimer].
+  void _runBinaryFragmentGc() {
+    final updater = _binaryUpdateManager;
+    final store = _binaryFragmentStore;
+    if (updater == null || store == null) return;
+
+    final budgetBytes = (Platform.isAndroid || Platform.isIOS)
+        ? BinaryFragmentStore.kMobileBudgetBytes
+        : BinaryFragmentStore.kDesktopBudgetBytes;
+
+    try {
+      updater.gc(kCurrentAppVersion, budgetBytes);
+    } catch (e) {
+      _log.debug('[update] Fragment GC failed: $e');
+    }
+  }
+
+  /// The §19.6 binary seeder for this device, if wired (null on the
+  /// non-first identity of a multi-identity daemon, or before startup).
+  BinarySeeder? get binarySeeder => _binarySeeder;
+
+  /// Self-seed: encode the currently-running binary into Reed-Solomon
+  /// fragments so this node becomes a distribution source for its own
+  /// platform/version immediately at startup, without waiting for an
+  /// update download (§19.6.2). Only meaningful for sideloaded installs —
+  /// Play Store builds never self-update, so seeding their own binary
+  /// serves no purpose.
+  void _selfSeedCurrentBinary() {
+    final platform = Platform.operatingSystem;
+    final version = kCurrentAppVersion;
+    // Check if already seeded (idempotent).
+    final existing = _binaryFragmentStore!.storedVersionsSync(platform);
+    if (existing.contains(version)) {
+      _log.debug('[update] Already seeded $platform/$version');
+      return;
+    }
+    final binaryPath = _resolveCurrentBinaryPath();
+    if (binaryPath == null) return;
+    final file = File(binaryPath);
+    if (!file.existsSync()) {
+      _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
+      return;
+    }
+    // Read + seed async (don't block startup).
+    file.readAsBytes().then((data) async {
+      final count = await _binarySeeder!.seed(
+        binary: data,
+        platform: platform,
+        version: version,
+        maxFragments: Platform.isAndroid ? 2 : 8,
+      );
+      if (count > 0) {
+        _log.info('[update] Self-seeded $count fragments for $platform/$version');
+        // §19.6.5: fragments stay on disk either way (so an opt-in later is
+        // instant), but only announce availability if the user allows it.
+        if (node.serveBinaryUpdates) {
+          node.binaryHasContentToShare = true;
+          _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+          _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
+        }
+      }
+    }).catchError((e) {
+      _log.warn('[update] Self-seed failed: $e');
+    });
+  }
+
+  /// Resolves the on-disk path of the currently-running binary, for
+  /// [_selfSeedCurrentBinary]. Platform-dependent — desktop builds run the
+  /// executable directly, so [Platform.resolvedExecutable] is correct.
+  /// Android's running code is the APK itself, not a standalone
+  /// executable, and locating it requires the PackageManager (not yet
+  /// wired) — self-seeding is skipped there until that lands.
+  String? _resolveCurrentBinaryPath() {
+    if (Platform.isAndroid) {
+      // Android APK path — resolved via app info, placeholder for now.
+      return null; // TODO: resolve via PackageManager
+    }
+    return Platform.resolvedExecutable;
+  }
+
+  /// §19.6.2 — trigger an in-network binary update download. Public entry
+  /// point for the UI layer: once [onUpdateAvailable] has fired with
+  /// `inNetworkAvailable == true` and the user has consented to installing
+  /// (no auto-install — §19.6.1 principle 6 / architecture §19.6.2 step 6),
+  /// the UI calls this to actually fetch, verify and seed the binary via
+  /// peers instead of falling back to `manifest.downloadUrl`.
+  Future<void> startInNetworkUpdate(UpdateManifest manifest) =>
+      _startInNetworkUpdate(manifest);
+
+  /// Orchestrates the full in-network update flow (§19.6.2): resolve
+  /// binary sources via [BinaryRendezvousManager], download erasure-coded
+  /// fragments (or the full binary in one shot when a peer has it) from
+  /// those sources, assemble + verify the result against the
+  /// maintainer-signed hash carried in [manifest], and seed the verified
+  /// binary back into this node's fragment store so it becomes a
+  /// distribution source for other nodes too.
+  Future<void> _startInNetworkUpdate(UpdateManifest manifest) async {
+    final platform = Platform.operatingSystem;
+    final store = _binaryFragmentStore;
+    final updater = _binaryUpdateManager;
+    final fetchClient = _binaryFetchClient;
+    final seeder = _binarySeeder;
+    if (store == null || updater == null || fetchClient == null || seeder == null) {
+      _log.warn('startInNetworkUpdate: binary-update subsystem not initialized');
+      return;
+    }
+
+    // The manifest's per-platform hash/signature/size is the trust anchor —
+    // without it there is nothing to verify the downloaded binary against,
+    // so refuse rather than install an unverified download.
+    final expectedHash = manifest.binaryHashes?[platform];
+    final signatureB64 = manifest.binarySignatures?[platform];
+    final originalSize = manifest.binarySizes?[platform];
+    if (expectedHash == null || signatureB64 == null || originalSize == null) {
+      _log.warn('startInNetworkUpdate: manifest v${manifest.version} has no '
+          'binaryHash/signature/size for platform=$platform — cannot verify, aborting');
+      return;
+    }
+    final Uint8List signatureBytes;
+    try {
+      signatureBytes = base64Decode(signatureB64);
+    } catch (e) {
+      _log.warn('startInNetworkUpdate: malformed binarySignature for platform=$platform: $e');
+      return;
+    }
+
+    // 1. Resolve binary sources via BinaryRendezvousManager (§19.6.5).
+    final resolved = await node.binaryRendezvousManager?.resolve(platform);
+    if (resolved == null || resolved.isEmpty) {
+      _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
+      return;
+    }
+
+    // 2. Convert ResolvedBinaryEndpoint -> FragmentSource.
+    final fragmentSources = resolved
+        .where((ep) => ep.addresses.isNotEmpty)
+        .map((ep) => FragmentSource(
+              address: ep.addresses.first,
+              fragmentIndices: ep.fragmentIndices,
+              hasFullBinary: ep.hasFullBinary,
+            ))
+        .toList();
+    if (fragmentSources.isEmpty) {
+      _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
+      return;
+    }
+
+    // 3. Reed-Solomon parameters for this platform (§19.6.2).
+    final params = BinarySeeder.paramsFor(platform);
+
+    // 4./5. Delta path (§19.6.3): findDeltaPath() is a free, side-effect-free
+    // check — only logged here. Actually applying a delta requires
+    // libcleona_bsdiff, which DeltaUpdateManager.applyDelta() documents as
+    // not yet implemented (always returns null), and the manifest carries no
+    // delta-hash trust anchor yet either. So this stays a guarded no-op
+    // until both land — full-binary download below is the functioning path.
+    final deltaFromVersion = _deltaUpdateManager?.findDeltaPath(
+      manifest: manifest,
+      currentVersion: currentAppVersion,
+      platform: platform,
+    );
+    if (deltaFromVersion != null) {
+      _log.debug('startInNetworkUpdate: delta path $deltaFromVersion -> '
+          '${manifest.version} advertised, but bsdiff is not yet wired — '
+          'falling back to full binary');
+    }
+
+    // 6. Download (full binary in one shot if a source has it, else
+    // K-of-N fragments assembled below).
+    await updater.startDownload(
+      platform: platform,
+      version: manifest.version,
+      n: params.n,
+      k: params.k,
+      expectedHash: expectedHash,
+      sources: fragmentSources,
+      fetchFragment: fetchClient.fetch,
+    );
+    if (updater.state == BinaryUpdateState.failed) {
+      _log.warn('startInNetworkUpdate: download failed: ${updater.errorMessage}');
+      return;
+    }
+
+    // 7. Assemble the binary from downloaded fragments (or reuse the
+    // complete binary if a full-binary fetch already stored it).
+    final binary = await updater.assemble(
+        platform, manifest.version, params.n, params.k, originalSize);
+    if (binary == null) {
+      _log.warn('startInNetworkUpdate: assemble failed: ${updater.errorMessage}');
+      return;
+    }
+
+    // 8. Verify SHA-256 hash + Ed25519 maintainer signature over that hash.
+    // On success this also fires BinaryUpdateManager.onUpdateReady, which
+    // republishes this node's binary-availability record.
+    final verified = updater.verify(binary, expectedHash, signatureBytes);
+    if (!verified) {
+      _log.error('startInNetworkUpdate: verification FAILED for v${manifest.version} '
+          '($platform) — refusing to seed or offer for install');
+      return;
+    }
+
+    // 9. Seed — encode into RS fragments so this node also becomes a
+    // fragment-serving distribution source, not just a full-binary source.
+    final maxFragments = Platform.isAndroid || Platform.isIOS ? 2 : 8;
+    final seededCount = await seeder.seed(
+      binary: binary,
+      platform: platform,
+      version: manifest.version,
+      maxFragments: maxFragments,
+    );
+    // §19.6.5: fragments are kept locally either way; only announce
+    // availability to other nodes if the user opted in to serving them.
+    if (node.serveBinaryUpdates) {
+      node.binaryHasContentToShare = true;
+    }
+    _log.info('startInNetworkUpdate: v${manifest.version} verified and ready '
+        '(${binary.length}B), seeded $seededCount fragment(s)');
+  }
 
   // ── DHT Identity Registry Recovery (Architecture Section 6.4.3) ────
 
@@ -10487,15 +11054,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (groupMembershipHash != null) {
         inner.groupMembershipHash = groupMembershipHash;
       }
-      final kemBytes = V3FrameCodec.buildAndEncryptInner(
-        inner: inner,
+      final l3PowStart = DateTime.now();
+      final (kemBytes, l3Pow) =
+          await V3FrameCodec.buildAndEncryptInnerWithPowAsync(
+        innerFrameBytes: inner.writeToBuffer(),
         senderUserEd25519Sk: identity.signingEd25519Sk,
         senderUserMlDsaSk: identity.signingMlDsaSk,
         recipientUserX25519Pk: contact.x25519Pk!,
         recipientUserMlKemPk: contact.mlKemPk!,
       );
-      final l3PowStart = DateTime.now();
-      final l3Pow = await ProofOfWork.computeAsync(kemBytes);
       final l3PowMs = DateTime.now().difference(l3PowStart).inMilliseconds;
       _log.info('offlineDelivery: PoW done kemSize=${kemBytes.length} powMs=$l3PowMs');
       final outer = V3FrameCodec.buildOuter(
@@ -10587,17 +11154,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           inner.groupMembershipHash = groupMembershipHash;
         }
 
-        final kemBytes = V3FrameCodec.buildAndEncryptInner(
-          inner: inner,
+        // Inner crypto + PoW in one background isolate (main isolate free).
+        final powStart = DateTime.now();
+        final (kemBytes, pow) =
+            await V3FrameCodec.buildAndEncryptInnerWithPowAsync(
+          innerFrameBytes: inner.writeToBuffer(),
           senderUserEd25519Sk: identity.signingEd25519Sk,
           senderUserMlDsaSk: identity.signingMlDsaSk,
           recipientUserX25519Pk: contact.x25519Pk!,
           recipientUserMlKemPk: contact.mlKemPk!,
         );
-
-        // §13.1 PoW: compute async in isolate for ApplicationFrames.
-        final powStart = DateTime.now();
-        final pow = await ProofOfWork.computeAsync(kemBytes);
         final powMs = DateTime.now().difference(powStart).inMilliseconds;
         _log.info('sendToUser: PoW done for ${_hexShort(deviceId)} '
             'kemSize=${kemBytes.length} powMs=$powMs nonce=${pow.nonce}');

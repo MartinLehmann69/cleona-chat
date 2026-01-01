@@ -312,6 +312,28 @@ build_whisper() {
     cd "$PROJECT_DIR"
 }
 
+build_cleona_pow() {
+    local platform="$1"
+    echo "── libcleona_pow ($platform) ─────────────────────────────────"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/cleona_pow"
+    local build="$BUILD_DIR/cleona_pow"
+    rm -rf "$build" && mkdir -p "$build" && cd "$build"
+
+    cmake -GNinja \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$INSTALL_DIR/sodium" \
+        "$src"
+    ninja -j"$NPROC"
+    mkdir -p "$INSTALL_DIR/cleona_pow/lib"
+    cp libcleona_pow.a "$INSTALL_DIR/cleona_pow/lib/"
+    cd "$PROJECT_DIR"
+}
+
 build_cleona_audio() {
     local platform="$1"
     echo "── libcleona_audio ($platform) ────────────────────────────────"
@@ -434,7 +456,7 @@ PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio vpx cleona_vpx)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio cleona_pow vpx cleona_vpx)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -454,6 +476,7 @@ for platform in "${PLATFORMS[@]}"; do
             opus)          build_libopus "$platform" ;;
             whisper)       build_whisper "$platform" ;;
             cleona_audio)  build_cleona_audio "$platform" ;;
+            cleona_pow)    build_cleona_pow "$platform" ;;
             vpx)           build_libvpx "$platform" ;;
             cleona_vpx)    build_cleona_vpx "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
@@ -505,6 +528,7 @@ for t in "${WANTED[@]}"; do
             done
             ;;
         cleona_audio)  make_xcfw libcleona_audio cleona_audio libcleona_audio.a include ;;
+        cleona_pow)    make_xcfw libcleona_pow cleona_pow libcleona_pow.a ;;
         vpx)           make_xcfw libvpx vpx libvpx.a include ;;
         cleona_vpx)    make_xcfw libcleona_vpx cleona_vpx libcleona_vpx.a ;;
     esac
@@ -536,7 +560,7 @@ for platform_tag in device simulator; do
     # that already contains their object files. Including all three causes
     # duplicate symbols when DEAD_CODE_STRIPPING is disabled.
     ALL_ARCHIVES=()
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib vpx/lib cleona_vpx/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib cleona_pow/lib vpx/lib cleona_vpx/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             case "$(basename "$a")" in

@@ -445,7 +445,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     style: const TextStyle(fontWeight: FontWeight.w500)),
                 const SizedBox(height: 8),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 200),
+                  constraints: const BoxConstraints(maxHeight: 300),
                   child: ListView.builder(
                     shrinkWrap: true,
                     itemCount: contacts.length,
@@ -474,12 +474,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: Text(locale.get('cancel')),
             ),
             FilledButton(
-              onPressed: () async {
-                final name = nameController.text.trim();
-                if (name.isEmpty || selected.isEmpty) return;
-                Navigator.pop(ctx);
-                await service.createGroup(name, selected.toList());
-              },
+              onPressed: selected.isEmpty
+                  ? null
+                  : () async {
+                      final name = nameController.text.trim();
+                      if (name.isEmpty) return;
+                      Navigator.pop(ctx);
+                      await service.createGroup(name, selected.toList());
+                    },
               child: Text(locale.get('create')),
             ),
           ],
@@ -567,7 +569,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         style: const TextStyle(fontWeight: FontWeight.w500)),
                     const SizedBox(height: 8),
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 150),
+                      constraints: const BoxConstraints(maxHeight: 300),
                       child: ListView.builder(
                         shrinkWrap: true,
                         itemCount: contacts.length,
@@ -599,20 +601,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: Text(locale.get('cancel')),
             ),
             FilledButton(
-              onPressed: () async {
-                final name = nameController.text.trim();
-                if (name.isEmpty) return;
-                // Private channels need subscribers; public don't
-                if (!isPublic && selected.isEmpty) return;
-                Navigator.pop(ctx);
-                final desc = descController.text.trim();
-                await service.createChannel(name, selected.toList(),
-                  isPublic: isPublic,
-                  isAdult: isAdult,
-                  language: language,
-                  description: desc.isNotEmpty ? desc : null,
-                );
-              },
+              onPressed: (!isPublic && selected.isEmpty)
+                  ? null
+                  : () async {
+                      final name = nameController.text.trim();
+                      if (name.isEmpty) return;
+                      Navigator.pop(ctx);
+                      final desc = descController.text.trim();
+                      await service.createChannel(name, selected.toList(),
+                        isPublic: isPublic,
+                        isAdult: isAdult,
+                        language: language,
+                        description: desc.isNotEmpty ? desc : null,
+                      );
+                    },
               child: Text(locale.get('create')),
             ),
           ],

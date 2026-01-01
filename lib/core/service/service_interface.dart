@@ -316,6 +316,11 @@ abstract class ICleonaService {
   LinkPreviewSettings get linkPreviewSettings;
   void updateLinkPreviewSettings(LinkPreviewSettings settings);
 
+  // §19.6.5 Binary Distribution: user preference for seeding update
+  // fragments to other nodes. Opt-in, default: on.
+  bool get serveBinaryUpdates;
+  void setServeBinaryUpdates(bool enabled);
+
   // NFC Contact Exchange: crypto keys + sign/verify
   Uint8List? get ed25519PublicKey;
   Uint8List? get mlDsaPublicKey;

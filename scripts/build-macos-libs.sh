@@ -285,6 +285,21 @@ build_vpx_shim() {
     rewrite_install_name "$out"
 }
 
+build_cleona_pow() {
+    echo "── libcleona_pow (PoW SHA-256 loop) ─────────────────────────"
+    local src="$PROJECT_DIR/native/cleona_pow"
+    local build="$BUILD_DIR/cleona_pow"
+    rm -rf "$build" && mkdir -p "$build"
+    cmake -GNinja -S "$src" -B "$build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_PREFIX_PATH="$BUILD_DIR/install-sodium"
+    ninja -C "$build"
+    cp "$build/libcleona_pow.dylib" "$OUT_DIR/libcleona_pow.dylib"
+    rewrite_install_name "$OUT_DIR/libcleona_pow.dylib"
+}
+
 build_cleona_audio() {
     echo "── libcleona_audio (miniaudio + vendored speexdsp) ──────────"
     # CMakeLists handles Apple natively: miniaudio_impl.c compiles as OBJC,
@@ -364,7 +379,7 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
-    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_audio)
+    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_pow cleona_audio)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")
     fi
@@ -381,6 +396,7 @@ run_builds() {
             opus) build_libopus ;;
             whisper) build_whisper ;;
             vpx) build_vpx_shim ;;
+            cleona_pow) build_cleona_pow ;;
             cleona_audio) build_cleona_audio ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac

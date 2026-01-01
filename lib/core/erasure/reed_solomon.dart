@@ -17,34 +17,52 @@ class ReedSolomon {
   static ReedSolomon? _instance;
   final CLogger _log = CLogger.get('erasure');
 
+  final int n;
+  final int k;
+  final int m;
+  final List<int> _cauchyX;
+  final List<int> _cauchyY;
+
   factory ReedSolomon() {
     _instance ??= ReedSolomon._();
     return _instance!;
   }
 
-  ReedSolomon._() {
-    _log.info('Reed-Solomon initialized (K=$defaultK, M=$defaultM, N=$defaultN)');
+  ReedSolomon._() : this._withParams(defaultN, defaultK);
+
+  factory ReedSolomon.withParams(int n, int k) {
+    if (k < 1) throw ArgumentError('k must be >= 1, got $k');
+    if (n <= k) throw ArgumentError('n must be > k, got n=$n k=$k');
+    if (n > 255) throw ArgumentError('n must be <= 255 (GF(256) limit), got $n');
+    return ReedSolomon._withParams(n, k);
+  }
+
+  ReedSolomon._withParams(this.n, this.k)
+      : m = n - k,
+        _cauchyX = List.generate(n - k, (i) => i + 1),
+        _cauchyY = List.generate(k, (i) => (n - k) + i + 1) {
+    _log.info('Reed-Solomon initialized (K=$k, M=$m, N=$n)');
   }
 
   /// Encode data into N fragments (K data + M parity).
   List<Uint8List> encode(Uint8List data) {
     // Pad data to be divisible by K
-    final paddedLen = ((data.length + defaultK - 1) ~/ defaultK) * defaultK;
+    final paddedLen = ((data.length + k - 1) ~/ k) * k;
     final padded = Uint8List(paddedLen);
     padded.setRange(0, data.length, data);
 
-    final fragSize = paddedLen ~/ defaultK;
+    final fragSize = paddedLen ~/ k;
     final fragments = <Uint8List>[];
 
     // K data fragments
-    for (var i = 0; i < defaultK; i++) {
+    for (var i = 0; i < k; i++) {
       fragments.add(Uint8List.fromList(padded.sublist(i * fragSize, (i + 1) * fragSize)));
     }
 
     // M parity fragments using Cauchy-matrix coefficients in GF(256)
-    for (var p = 0; p < defaultM; p++) {
+    for (var p = 0; p < m; p++) {
       final parity = Uint8List(fragSize);
-      for (var i = 0; i < defaultK; i++) {
+      for (var i = 0; i < k; i++) {
         final coeff = _cauchyCoeff(p, i);
         for (var j = 0; j < fragSize; j++) {
           parity[j] ^= _gfMul(fragments[i][j], coeff);
@@ -59,22 +77,22 @@ class ReedSolomon {
   /// Reconstruct original data from K or more fragments.
   /// fragments: map of fragmentIndex -> fragmentData (at least K entries needed).
   Uint8List decode(Map<int, Uint8List> fragments, int originalSize) {
-    if (fragments.length < defaultK) {
-      throw StateError('Need at least $defaultK fragments, got ${fragments.length}');
+    if (fragments.length < k) {
+      throw StateError('Need at least $k fragments, got ${fragments.length}');
     }
 
     // Check if all K data fragments are present — fast path
     final dataFragments = <int, Uint8List>{};
-    for (var i = 0; i < defaultK; i++) {
+    for (var i = 0; i < k; i++) {
       if (fragments.containsKey(i)) {
         dataFragments[i] = fragments[i]!;
       }
     }
 
-    if (dataFragments.length == defaultK) {
+    if (dataFragments.length == k) {
       final fragSize = dataFragments.values.first.length;
-      final result = Uint8List(fragSize * defaultK);
-      for (var i = 0; i < defaultK; i++) {
+      final result = Uint8List(fragSize * k);
+      for (var i = 0; i < k; i++) {
         result.setRange(i * fragSize, (i + 1) * fragSize, dataFragments[i]!);
       }
       return Uint8List.fromList(result.sublist(0, originalSize));
@@ -87,49 +105,49 @@ class ReedSolomon {
 
     // Pick exactly K available fragment indices (prefer data fragments first)
     final available = <int>[];
-    for (var i = 0; i < defaultK; i++) {
+    for (var i = 0; i < k; i++) {
       if (fragments.containsKey(i)) available.add(i);
     }
-    for (var p = 0; p < defaultM && available.length < defaultK; p++) {
-      if (fragments.containsKey(defaultK + p)) available.add(defaultK + p);
+    for (var p = 0; p < m && available.length < k; p++) {
+      if (fragments.containsKey(k + p)) available.add(k + p);
     }
 
-    if (available.length < defaultK) {
+    if (available.length < k) {
       throw StateError(
-          'Need at least $defaultK fragments, got ${available.length}');
+          'Need at least $k fragments, got ${available.length}');
     }
 
     // Build KxK encoding sub-matrix for the available rows.
     // Full encoding matrix (NxK): rows 0..K-1 = identity, rows K..N-1 = parity coefficients.
     final matrix =
-        List.generate(defaultK, (_) => List.filled(defaultK, 0));
-    for (var r = 0; r < defaultK; r++) {
+        List.generate(k, (_) => List.filled(k, 0));
+    for (var r = 0; r < k; r++) {
       final rowIdx = available[r];
-      if (rowIdx < defaultK) {
+      if (rowIdx < k) {
         matrix[r][rowIdx] = 1;
       } else {
-        final p = rowIdx - defaultK;
-        for (var c = 0; c < defaultK; c++) {
+        final p = rowIdx - k;
+        for (var c = 0; c < k; c++) {
           matrix[r][c] = _cauchyCoeff(p, c);
         }
       }
     }
 
     // Gaussian elimination on augmented matrix [matrix | I] → [I | inverse]
-    final w = 2 * defaultK;
+    final w = 2 * k;
     final aug = List.generate(
-        defaultK, (r) => List.filled(w, 0));
-    for (var r = 0; r < defaultK; r++) {
-      for (var c = 0; c < defaultK; c++) {
+        k, (r) => List.filled(w, 0));
+    for (var r = 0; r < k; r++) {
+      for (var c = 0; c < k; c++) {
         aug[r][c] = matrix[r][c];
       }
-      aug[r][defaultK + r] = 1;
+      aug[r][k + r] = 1;
     }
 
-    for (var col = 0; col < defaultK; col++) {
+    for (var col = 0; col < k; col++) {
       // Find pivot row
       var pivotRow = -1;
-      for (var r = col; r < defaultK; r++) {
+      for (var r = col; r < k; r++) {
         if (aug[r][col] != 0) {
           pivotRow = r;
           break;
@@ -151,7 +169,7 @@ class ReedSolomon {
       }
 
       // Eliminate this column in all other rows
-      for (var r = 0; r < defaultK; r++) {
+      for (var r = 0; r < k; r++) {
         if (r == col) continue;
         final factor = aug[r][col];
         if (factor == 0) continue;
@@ -163,20 +181,29 @@ class ReedSolomon {
 
     // Extract inverse matrix (right half of augmented)
     final inv = List.generate(
-        defaultK, (r) => List.generate(defaultK, (c) => aug[r][defaultK + c]));
+        k, (r) => List.generate(k, (c) => aug[r][k + c]));
 
     // Multiply inverse by available fragment data → original K data fragments
-    final result = Uint8List(fragSize * defaultK);
+    final result = Uint8List(fragSize * k);
     for (var j = 0; j < fragSize; j++) {
-      for (var d = 0; d < defaultK; d++) {
+      for (var d = 0; d < k; d++) {
         var val = 0;
-        for (var k = 0; k < defaultK; k++) {
-          val ^= _gfMul(inv[d][k], fragments[available[k]]![j]);
+        for (var kk = 0; kk < k; kk++) {
+          val ^= _gfMul(inv[d][kk], fragments[available[kk]]![j]);
         }
         result[d * fragSize + j] = val;
       }
     }
     return Uint8List.fromList(result.sublist(0, originalSize));
+  }
+
+  static List<Uint8List> encodeWithParams(Uint8List data, int n, int k) {
+    return ReedSolomon.withParams(n, k).encode(data);
+  }
+
+  static Uint8List decodeWithParams(
+      Map<int, Uint8List> fragments, int originalSize, int n, int k) {
+    return ReedSolomon.withParams(n, k).decode(fragments, originalSize);
   }
 
   /// GF(256) multiplication using AES polynomial (x^8 + x^4 + x^3 + x + 1).
@@ -206,10 +233,7 @@ class ReedSolomon {
   /// Cauchy matrix coefficient: C[p][i] = 1 / (x_p XOR y_i) in GF(256).
   /// x and y are disjoint sets of distinct elements, guaranteeing every
   /// square sub-matrix is non-singular (MDS property).
-  static const _cauchyX = [1, 2, 3]; // M=3 parity rows
-  static const _cauchyY = [4, 5, 6, 7, 8, 9, 10]; // K=7 data columns
-
-  static int _cauchyCoeff(int p, int i) {
+  int _cauchyCoeff(int p, int i) {
     return _gfInv(_cauchyX[p] ^ _cauchyY[i]);
   }
 

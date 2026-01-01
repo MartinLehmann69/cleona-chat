@@ -272,9 +272,18 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         return Process.runSync('kill', ['-0', '$pid']).exitCode == 0;
       }
       if (Platform.isWindows) {
-        final res = Process.runSync(
-            'tasklist', ['/FI', 'PID eq $pid', '/NH']);
-        return res.stdout.toString().contains('$pid');
+        // Avoid Process.runSync('tasklist') — it costs 0.5-2s and blocks
+        // the Flutter UI isolate on every reconnect attempt (5s timer).
+        // Instead check if the lock file is still exclusively held by the
+        // daemon. If opening for write throws (ERROR_SHARING_VIOLATION),
+        // the daemon is alive.
+        try {
+          final f = File(lockPath).openSync(mode: FileMode.writeOnlyAppend);
+          f.closeSync();
+          return false; // lock not held → daemon dead
+        } on FileSystemException {
+          return true; // lock held → daemon alive
+        }
       }
     } catch (_) {
       return true;
@@ -635,6 +644,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _isGuardianSetUp = state['isGuardianSetUp'] as bool? ?? false;
     final ms = state['mediaSettings'] as Map<String, dynamic>?;
     if (ms != null) _mediaSettings = MediaSettings.fromJson(ms);
+    _serveBinaryUpdates = state['serveBinaryUpdates'] as bool? ?? _serveBinaryUpdates;
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
@@ -1589,6 +1599,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   void updateMediaSettings(MediaSettings settings) {
     _mediaSettings = settings;
     _sendRequest('update_media_settings', params: settings.toJson());
+    onStateChanged?.call();
+  }
+
+  // ── §19.6.5 Binary Distribution: Serve-Updates Preference ──────────
+
+  bool _serveBinaryUpdates = true;
+
+  @override
+  bool get serveBinaryUpdates => _serveBinaryUpdates;
+
+  @override
+  void setServeBinaryUpdates(bool enabled) {
+    _serveBinaryUpdates = enabled;
+    _sendRequest('set_serve_binary_updates', params: {'enabled': enabled});
     onStateChanged?.call();
   }
 

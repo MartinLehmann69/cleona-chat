@@ -105,3 +105,4 @@ _cleona_ios_sendto6
 _cleona_ios_recv_peek
 _cleona_ios_recvfrom
 _cleona_ios_create_send_socket
+_cleona_pow_find_nonce

@@ -41,6 +41,7 @@ import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
+import 'package:cleona/core/network/rendezvous/binary_rendezvous_manager.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -242,6 +243,32 @@ class CleonaNode {
 
   /// §4.11.9 Infrastructure Rendezvous: network entry-point resolution.
   InfraRendezvousManager? infraRendezvousManager;
+
+  /// §19.6.5 Binary Distribution Rendezvous: publish/resolve which nodes
+  /// hold complete or partial application binaries, for in-network
+  /// censorship-resistant updates. Wired by CleonaService after identity
+  /// init (same pattern as [infraRendezvousManager]).
+  BinaryRendezvousManager? binaryRendezvousManager;
+
+  /// Supplies the current [BinaryAvailabilityRecord] for this device when
+  /// [binaryRendezvousManager] needs to (re-)publish on network change. Set
+  /// by CleonaService once its BinaryFragmentStore/BinaryUpdateManager are
+  /// ready.
+  BinaryAvailabilityRecord Function()? binaryRecordProvider;
+
+  /// True once this device holds at least one binary/fragment worth
+  /// advertising via [binaryRendezvousManager] (§19.6.5). Gates the
+  /// network-change republish so idle devices (nothing to serve) don't emit
+  /// unnecessary Nostr traffic (Arbeitsregel #5 — kein unnötiger
+  /// Netzwerkverkehr). Set by CleonaService.
+  bool binaryHasContentToShare = false;
+
+  /// §19.6.5 user preference — whether this device is willing to serve
+  /// binary/fragment updates to other Cleona nodes at all. Opt-in,
+  /// default: on. Shared across all identities on this daemon (mirrors
+  /// [binaryHasContentToShare]/[binaryRendezvousManager] node-wide scope).
+  /// Persisted + loaded by CleonaService; toggled from the Settings screen.
+  bool serveBinaryUpdates = true;
 
   // §4.11.11 Reactive Resolve Triggers (V3.1.117) — gating state.
   // Edge-triggered only (retry-exhausted, network-change+8s,
@@ -1390,7 +1417,9 @@ class CleonaNode {
     // Run regardless of _discoveryComplete: rendezvous is not just a cold-start
     // fallback; it also refreshes entry-points and contact endpoints even after
     // bootstrap peers have been found.
-    if (rendezvousManager != null || infraRendezvousManager != null) {
+    if (rendezvousManager != null ||
+        infraRendezvousManager != null ||
+        binaryRendezvousManager != null) {
       _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve');
       try {
         final futures = <Future>[];
@@ -1417,6 +1446,27 @@ class CleonaNode {
             if (infraEps.isNotEmpty) {
               _log.info('§4.11.9 Infra-RV: resolved '
                   '${infraEps.length} entry-point(s)');
+            }
+          }());
+        }
+
+        // Path C: Binary-Distribution-Rendezvous (§19.6.5) — resolve nodes
+        // serving this platform's binary/fragments, so in-network update
+        // assembly has candidate sources without waiting for a full network
+        // scan. Read-only (resolve), independent of whether this device
+        // itself has anything to publish.
+        if (binaryRendezvousManager != null) {
+          futures.add(() async {
+            final binEps =
+                await binaryRendezvousManager!.resolve(Platform.operatingSystem);
+            for (final ep in binEps) {
+              for (final addr in ep.addresses) {
+                _sendPing(addr.ip, addr.port);
+              }
+            }
+            if (binEps.isNotEmpty) {
+              _log.info('§19.6.5 Binary-RV: resolved ${binEps.length} '
+                  'node(s) serving ${Platform.operatingSystem} binary');
             }
           }());
         }
@@ -5144,6 +5194,15 @@ class CleonaNode {
     // resolve our new address via Nostr after the IP changed.
     rendezvousManager?.onNetworkChanged();
     infraRendezvousManager?.onNetworkChanged();
+    // §19.6.5: only republish if this device actually has something to
+    // serve — an idle device with an empty BinaryFragmentStore stays
+    // silent instead of emitting empty availability records on every
+    // network change (Arbeitsregel #5).
+    if (binaryHasContentToShare &&
+        binaryRendezvousManager != null &&
+        binaryRecordProvider != null) {
+      binaryRendezvousManager!.onNetworkChanged(binaryRecordProvider!);
+    }
 
     // 6b. §4.5 Discovery Cascade restart: if step 4's PINGs did not
     // re-establish connectivity (no PONG → discoveryComplete stays false),

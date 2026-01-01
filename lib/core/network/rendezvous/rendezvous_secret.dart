@@ -27,6 +27,10 @@ const String _infraNostrSalt = 'cleona-nostr-infra-v1';
 const String _fcTagSalt = 'cleona-rv-fc-tag-v1';
 const String _fcKeySalt = 'cleona-rv-fc-key-v1';
 const String _fcNostrSalt = 'cleona-nostr-fc-v1';
+const String _binaryTagSalt = 'cleona-rv-binary-v1';
+const String _binaryKeySalt = 'cleona-rv-binary-key-v1';
+const String _binaryNostrSalt = 'cleona-nostr-binary-v1';
+const String _inviteBinarySalt = 'cleona-invite-binary-v1';
 
 /// First-Contact Rendezvous role of the URI creator (§4.11.10).
 const String kFcRoleOwner = 'owner';
@@ -237,4 +241,61 @@ String previousEpochString() {
   final now = DateTime.now().toUtc();
   final prevEpoch = now.subtract(const Duration(hours: kRendezvousEpochHours));
   return epochStringFor(prevEpoch);
+}
+
+// ---------------------------------------------------------------------------
+// Binary Distribution Rendezvous (§19.6.5)
+// ---------------------------------------------------------------------------
+
+/// Computes the network-wide binary-distribution lookup tag for an epoch
+/// and platform (e.g. "linux-x64", "android-arm64").
+Uint8List computeBinaryTag(
+  Uint8List networkSecret,
+  String epochString,
+  String platform,
+) {
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_binaryTagSalt)),
+    info: Uint8List.fromList(utf8.encode('$epochString/$platform')),
+    length: 32,
+  );
+}
+
+/// Derives the encryption key for binary-distribution manifest records.
+Uint8List deriveBinaryKey(Uint8List networkSecret, String epochString) {
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_binaryKeySalt)),
+    info: Uint8List.fromList(utf8.encode(epochString)),
+    length: 32,
+  );
+}
+
+/// Derives a deterministic secp256k1 secret key for Nostr binary-distribution
+/// publishing per device (same pattern as Infrastructure Rendezvous §4.11.9).
+Uint8List deriveBinaryNostrSecretKey(
+    Uint8List networkSecret, Uint8List deviceId) {
+  final deviceHex =
+      deviceId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_binaryNostrSalt)),
+    info: Uint8List.fromList(utf8.encode(deviceHex)),
+    length: 32,
+  );
+}
+
+/// Derives the encryption key for binary-distribution records scoped to a
+/// single-use invite nonce (out-of-band physical transfer / QR flow).
+Uint8List deriveInviteBinaryKey(
+    Uint8List networkSecret, Uint8List inviteNonce) {
+  final nonceHex =
+      inviteNonce.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_inviteBinarySalt)),
+    info: Uint8List.fromList(utf8.encode(nonceHex)),
+    length: 32,
+  );
 }

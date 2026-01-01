@@ -382,10 +382,21 @@ class _CleonaAppState extends State<CleonaApp> {
           if (_showHardBlock && widget.blockManifest != null) {
             // Sec H-5 / T13 splash. Skipping flips the flag locally and
             // marks reducedMode on every per-identity service via appState.
+            // §19.6: the sync startup cache-read that produced blockManifest
+            // cannot know in-network availability (needs a running service's
+            // DHT check) — fold in the live result once CleonaService.
+            // onUpdateAvailable has fired for the same manifest version.
+            final liveManifest = appState.availableUpdateManifest;
+            final inNetworkAvailable = appState.availableUpdateInNetwork &&
+                liveManifest != null &&
+                liveManifest.version == widget.blockManifest!.version;
             home = UpdateRequiredScreen(
               downloadUrl: widget.blockManifest!.downloadUrl,
               reasonI18nKey: widget.blockManifest!.minRequiredReason
                   ?? 'update_required_kem_v2',
+              inNetworkAvailable: inNetworkAvailable,
+              onStartInNetworkUpdate:
+                  inNetworkAvailable ? appState.startInNetworkUpdate : null,
               onSkipLimited: () {
                 appState.setReducedModeSession(true);
                 setState(() {
@@ -821,6 +832,29 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool get isInitialized => _isInitialized;
   bool get hasProfile => _hasProfile;
   ThemeMode get themeMode => _themeMode;
+
+  /// §19.6: latest verified update manifest reported by any in-process
+  /// [CleonaService.onUpdateAvailable] fire (newest wins). Consumed by the
+  /// hard-block [UpdateRequiredScreen] to offer the in-network update path
+  /// in addition to the external `downloadUrl` — the synchronous startup
+  /// cache-read in [main] cannot know [_availableUpdateInNetwork] because
+  /// the DHT binary-availability check requires a running service.
+  UpdateManifest? _availableUpdateManifest;
+  bool _availableUpdateInNetwork = false;
+  CleonaService? _availableUpdateSourceService;
+
+  UpdateManifest? get availableUpdateManifest => _availableUpdateManifest;
+  bool get availableUpdateInNetwork => _availableUpdateInNetwork;
+
+  /// Starts the in-network binary update using the service that most
+  /// recently reported [_availableUpdateManifest]. No-op if no update (or
+  /// its owning service) is currently known.
+  Future<void> startInNetworkUpdate() async {
+    final manifest = _availableUpdateManifest;
+    final source = _availableUpdateSourceService;
+    if (manifest == null || source == null) return;
+    await source.startInNetworkUpdate(manifest);
+  }
 
   /// The active skin based on the current identity's skinId.
   Skin get activeSkin {
@@ -1785,6 +1819,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
     service.onGroupCallStarted = (_) => notifyListeners();
     service.onGroupCallEnded = (_) => notifyListeners();
+
+    // §19.6: a newer signed manifest was verified (any newer version, not
+    // only hard-blocking ones) and — if it carries a DHT binary tag — the
+    // in-network binary-distribution availability has already been checked.
+    // Store both so the UI can offer the in-network path alongside the
+    // external downloadUrl. See [_availableUpdateManifest].
+    service.onUpdateAvailable = (manifest, inNetworkAvailable) {
+      _availableUpdateManifest = manifest;
+      _availableUpdateInNetwork = inNetworkAvailable;
+      _availableUpdateSourceService = service;
+      notifyListeners();
+    };
 
     // § F-B: 1:1 + group video engine factory. Only wired here — for
     // in-process services (Android/iOS/macOS-no-daemon) — because it needs

@@ -205,6 +205,15 @@ class SettingsScreen extends StatelessWidget {
                 title: Text(locale.get('stored_fragments')),
                 subtitle: Text('${service.fragmentCount}'),
               ),
+              // §19.6.5: opt-in, default: on. Lets the user stop this device
+              // from serving binary/fragment updates to other Cleona nodes.
+              SwitchListTile(
+                secondary: const Icon(Icons.cloud_upload),
+                title: Text(locale.get('settingsServeBinaryUpdates')),
+                subtitle: Text(locale.get('settingsServeBinaryUpdatesDesc')),
+                value: service.serveBinaryUpdates,
+                onChanged: (v) => service.setServeBinaryUpdates(v),
+              ),
             ],
           ),
 

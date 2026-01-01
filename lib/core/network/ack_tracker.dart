@@ -118,12 +118,18 @@ class AckTracker {
         _log = CLogger.get('ack-tracker', profileDir: profileDir);
 
   /// Compute ACK timeout appropriate for the route type (§5.2 + §5.3).
-  /// Direct: max(2*RTT + 50ms, 8000ms) — 8s floor per spec.
+  /// Direct: max(2*RTT + 50ms, floor) — floor is 500ms for LAN peers
+  /// (RTT < 50ms), 2000ms for remote direct peers. The 8s floor is a
+  /// relay-only requirement (CLAUDE.md: "min 8s für Relay-Pfade") and does
+  /// not apply to direct routes, which resolve much faster on LAN.
   /// Relay: max(baseRtt * 2 * hopCount, 8000ms), capped at 30s.
   static Duration computeTimeout(Duration baseRtt, {int hopCount = 1}) {
     if (hopCount <= 1) {
       final directMs = baseRtt.inMilliseconds * 2 + 50;
-      return Duration(milliseconds: directMs.clamp(8000, 30000));
+      // LAN peers (RTT < 50ms): 500ms floor. Remote direct peers: 2s floor.
+      // 8s floor only for relay paths per architecture spec.
+      final floor = baseRtt.inMilliseconds < 50 ? 500 : 2000;
+      return Duration(milliseconds: directMs.clamp(floor, 30000));
     }
     final relayMs = baseRtt.inMilliseconds * 2 * hopCount;
     return Duration(milliseconds: relayMs.clamp(8000, 30000));

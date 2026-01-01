@@ -7,6 +7,7 @@ import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/native_udp_sender.dart';
 import 'package:cleona/core/network/ios_udp_sender.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
+import 'package:cleona/core/update/binary_http_server.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Magic bytes for LAN discovery packets: "CLEO" (0x43 0x4C 0x45 0x4F)
@@ -143,14 +144,36 @@ class Transport {
   bool _selfProbeAcked = false;
   int externalPacketsReceived = 0;
   bool firewallWarningEmitted = false;
-  SecureServerSocket? _tlsServer;
-  SecureServerSocket? _tlsServer6; // IPv6 TLS (§27)
+  /// Plain TCP listeners (§19.6.6 First-Byte-Sniffing). No longer a
+  /// [SecureServerSocket] — the TLS handshake happened automatically at
+  /// accept time, which left no way to route a plain HTTP request (used by
+  /// the censorship-resistant binary distribution web app) to the same
+  /// port. Every accepted [Socket] is sniffed in [_onRawTcpConnection] and
+  /// either upgraded to TLS in-process ([_upgradeToTls], preserving the
+  /// existing [_onTlsConnection] pipeline unchanged) or handed to
+  /// [httpServer].
+  ServerSocket? _tlsServer;
+  ServerSocket? _tlsServer6; // IPv6 TLS+HTTP (§27, §19.6.6)
   Timer? _tlsRebindTimer;
   int _tlsRebindAttempt = 0;
   /// Set when TLS context cannot be obtained (missing openssl, no profile
-  /// dir, etc.). Permanent failure — disables rebind retry to avoid log spam
-  /// on platforms without openssl (Android).
+  /// dir, etc.). Permanent failure — no further [_getOrCreateTlsContext]
+  /// calls to avoid log spam / repeated openssl spawns on platforms without
+  /// openssl (Android). Does NOT stop the plain TCP listener from binding
+  /// or rebinding — §19.6.6 HTTP binary distribution has no TLS dependency,
+  /// so it must keep working even where the TLS upgrade branch cannot.
   bool _tlsContextUnavailable = false;
+  /// Cached TLS [SecurityContext], resolved once by [_tryBindTlsListeners]
+  /// and reused for every in-process TLS upgrade in [_upgradeToTls] — a
+  /// fresh [_getOrCreateTlsContext] call re-reads the cert/key PEM files
+  /// from disk, which would be wasteful per incoming connection.
+  SecurityContext? _tlsSecurityContext;
+  /// §19.6.6 — embedded HTTP server for censorship-resistant binary
+  /// distribution, served on the same port via First-Byte-Sniffing. Not
+  /// constructed here — the owning service layer sets this (and its
+  /// providers) after [Transport] is created; connections are dropped if
+  /// unset (see [_routeSniffedConnection]).
+  BinaryHttpServer? httpServer;
   final FragmentReassembler _reassembler = FragmentReassembler();
 
   // ── Sender-side fragment pacing (Architecture §2.9.10) ───────────
@@ -459,6 +482,9 @@ class Transport {
 
     // TLS on same port as UDP (anti-censorship fallback, activates after 15 consecutive UDP failures).
     // UDP (SOCK_DGRAM) and TCP (SOCK_STREAM) live in separate kernel namespaces, so sharing the port number is safe.
+    // The TCP listener itself is a plain ServerSocket, not a SecureServerSocket: §19.6.6 First-Byte-Sniffing
+    // (_onRawTcpConnection) inspects the first bytes of each accepted connection and either upgrades it to TLS
+    // in-process (_upgradeToTls) or hands it to the embedded HTTP server (censorship-resistant binary distribution).
     //
     // Bind TLS in the BACKGROUND: it is NOT on the critical path. The UDP sockets
     // (primary transport) are already bound+listening above, and TLS is only the
@@ -480,34 +506,44 @@ class Transport {
     );
   }
 
-  /// Try to bind TLS IPv4 and IPv6 listeners. Returns whether IPv4 is bound.
-  /// Safe to call repeatedly — skips already-bound sockets.
+  /// Try to bind plain TCP IPv4 and IPv6 listeners on [port]. Returns
+  /// whether IPv4 is bound. Safe to call repeatedly — skips already-bound
+  /// sockets. Binding no longer depends on the TLS [SecurityContext]: the
+  /// §19.6.6 HTTP branch must keep working on platforms where TLS is
+  /// unavailable (no bundled openssl — see [_findOpenssl] on Android).
   Future<bool> _tryBindTlsListeners() async {
-    final ctx = await _getOrCreateTlsContext();
-    if (ctx == null) {
-      _tlsContextUnavailable = true;
-      return false;
+    // Best-effort, resolved at most once (permanent failure is cached in
+    // _tlsContextUnavailable — see field doc). A missing context only
+    // disables the TLS-upgrade branch in _upgradeToTls; the listener still
+    // binds below so plain HTTP keeps working.
+    if (_tlsSecurityContext == null && !_tlsContextUnavailable) {
+      final ctx = await _getOrCreateTlsContext();
+      if (ctx == null) {
+        _tlsContextUnavailable = true;
+      } else {
+        _tlsSecurityContext = ctx;
+      }
     }
     if (_tlsServer == null) {
       try {
-        _tlsServer = await SecureServerSocket.bind(InternetAddress.anyIPv4, port, ctx);
-        _tlsServer!.listen(_onTlsConnection, onError: (e) {
-          _log.debug('TLS accept error (non-fatal): $e');
+        _tlsServer = await ServerSocket.bind(InternetAddress.anyIPv4, port);
+        _tlsServer!.listen(_onRawTcpConnection, onError: (e) {
+          _log.debug('TCP accept error (non-fatal): $e');
         });
-        _log.info('TLS listening on port $port');
+        _log.info('TCP (TLS+HTTP First-Byte-Sniffing) listening on port $port');
       } catch (e) {
-        _log.info('TLS listener not available (port $port): $e');
+        _log.info('TCP listener not available (port $port): $e');
       }
     }
     if (_tlsServer6 == null) {
       try {
-        _tlsServer6 = await SecureServerSocket.bind(InternetAddress.anyIPv6, port, ctx, v6Only: true);
-        _tlsServer6!.listen(_onTlsConnection, onError: (e) {
-          _log.debug('TLS6 accept error (non-fatal): $e');
+        _tlsServer6 = await ServerSocket.bind(InternetAddress.anyIPv6, port, v6Only: true);
+        _tlsServer6!.listen(_onRawTcpConnection, onError: (e) {
+          _log.debug('TCP6 accept error (non-fatal): $e');
         });
-        _log.info('TLS6 listening on port $port');
+        _log.info('TCP6 (TLS+HTTP First-Byte-Sniffing) listening on port $port');
       } catch (e) {
-        _log.info('TLS6 listener not available (port $port): $e');
+        _log.info('TCP6 listener not available (port $port): $e');
       }
     }
     return _tlsServer != null;
@@ -515,10 +551,12 @@ class Transport {
 
   /// Schedule a rebind attempt with backoff (5s → 10s → 30s → 60s cap).
   /// Recovers from transient bind failures (port in TIME_WAIT after restart).
+  /// Not gated on TLS-context availability (unlike the old SecureServerSocket
+  /// design) — the plain TCP bind itself has no TLS dependency, so a missing
+  /// openssl must not stop retrying it.
   void _scheduleTlsRebind() {
     if (_tlsRebindTimer != null) return;
     if (_tlsServer != null && _tlsServer6 != null) return;
-    if (_tlsContextUnavailable) return; // permanent — openssl missing, no profile dir
     const backoffSec = [5, 10, 30, 60];
     final delay = backoffSec[_tlsRebindAttempt.clamp(0, backoffSec.length - 1)];
     _log.info('TLS rebind scheduled in ${delay}s (attempt ${_tlsRebindAttempt + 1})');
@@ -1037,6 +1075,132 @@ class Transport {
       _log.debug('Port probe send error: $e');
     }
     return false;
+  }
+
+  // ── §19.6.6 First-Byte-Sniffing: plain TCP → TLS or HTTP ────────────
+
+  /// Entry point for every connection accepted on the plain TCP listener
+  /// ([_tlsServer] / [_tlsServer6]). Sniffs the very first byte to tell a
+  /// TLS ClientHello (record type `0x16`) apart from an HTTP request line
+  /// (uppercase-ASCII method token), then dispatches via
+  /// [_routeSniffedConnection]. Anything else (unrecognized protocol, or
+  /// the client stalls without sending any bytes within 5s) is dropped —
+  /// this port only ever speaks TLS (anti-censorship fallback) or plain
+  /// HTTP (§19.6.6 binary distribution), never arbitrary TCP.
+  ///
+  /// IMPORTANT: the sniff subscription is *paused*, never cancelled, once a
+  /// decision is made — cancelling would flip the underlying `_Socket`'s
+  /// `_controller.hasListener` to false, which makes the VM's `Socket`
+  /// implementation shut down the raw socket's receive direction
+  /// (`_onSubscriptionStateChange` → `raw.shutdown(SocketDirection.receive)`,
+  /// see `dart-sdk/lib/_internal/vm/bin/socket_patch.dart`). That shutdown
+  /// silently breaks both the in-process TLS handshake (no more ClientHello
+  /// bytes can arrive) and any further HTTP body read — verified live: an
+  /// earlier cancel()-based version of this method made every sniffed TLS
+  /// connection fail with `HandshakeException: Connection terminated during
+  /// handshake`. Pausing only disables read events; no bytes are lost and
+  /// the subscription is safely resumable/detachable by the callee.
+  void _onRawTcpConnection(Socket client) {
+    final key = '${client.remoteAddress.address}:${client.remotePort}';
+    final sniff = BytesBuilder();
+    Timer? timeout;
+    StreamSubscription<Uint8List>? sub;
+
+    timeout = Timer(const Duration(seconds: 5), () {
+      _log.debug('TCP sniff timeout from $key — destroying connection');
+      timeout = null;
+      sub?.cancel();
+      client.destroy();
+    });
+
+    sub = client.listen(
+      (data) {
+        sniff.add(data);
+        final bytes = sniff.toBytes();
+        if (bytes.isEmpty) return;
+        timeout?.cancel();
+        timeout = null;
+        sub!.pause();
+        _routeSniffedConnection(client, bytes, sub);
+      },
+      onDone: () {
+        timeout?.cancel();
+        client.destroy();
+      },
+      onError: (e) {
+        _log.debug('TCP sniff error from $key: $e');
+        timeout?.cancel();
+        sub?.cancel();
+        client.destroy();
+      },
+    );
+  }
+
+  /// Route a sniffed connection based on its first byte (§19.6.6). [sub] is
+  /// the (paused) sniff subscription — see [_onRawTcpConnection] doc for
+  /// why it must never be cancelled while the raw socket is still needed.
+  void _routeSniffedConnection(
+      Socket client, Uint8List firstBytes, StreamSubscription<Uint8List> sub) {
+    final key = '${client.remoteAddress.address}:${client.remotePort}';
+    if (firstBytes[0] == 0x16) {
+      // TLS ClientHello: record content type = handshake. No legitimate
+      // HTTP method starts with a control byte, so this single byte is a
+      // reliable signal on its own.
+      unawaited(_upgradeToTls(client, firstBytes, sub));
+      return;
+    }
+    if (firstBytes[0] >= 0x41 && firstBytes[0] <= 0x5A) {
+      // Looks like an HTTP request line (method token starts with an
+      // uppercase ASCII letter, e.g. 'G'/'H' for GET/HEAD). The exact
+      // method is validated again inside BinaryHttpServer, which reuses
+      // this subscription instead of listening again — a Socket's stream
+      // can only ever be listened to once.
+      final srv = httpServer;
+      if (srv == null) {
+        _log.debug('TCP sniff: HTTP request from $key but no httpServer configured — destroying');
+        sub.cancel();
+        client.destroy();
+        return;
+      }
+      srv.handleConnection(client, bufferedData: firstBytes, subscription: sub);
+      return;
+    }
+    _log.debug('TCP sniff: unrecognized protocol from $key '
+        '(first byte 0x${firstBytes[0].toRadixString(16).padLeft(2, '0')}) — destroying');
+    sub.cancel();
+    client.destroy();
+  }
+
+  /// Upgrade a sniffed plain-TCP connection to TLS in-process, preserving
+  /// the existing [_onTlsConnection] pipeline unchanged. Uses the cached
+  /// [_tlsSecurityContext] — see its field doc for why it's not re-resolved
+  /// per connection. [bufferedData] (the bytes already consumed while
+  /// sniffing) is fed back into the TLS engine via `SecureSocket.secureServer`'s
+  /// `bufferedData` parameter, which exists precisely for this
+  /// protocol-detection pattern; `secureServer` detaches the raw socket
+  /// from [client] itself, so [sub] (still paused, never cancelled up to
+  /// this point) is only cancelled here for cleanup — by then `client`'s
+  /// raw socket reference is already null, so the cancel is a no-op rather
+  /// than the receive-shutdown described in [_onRawTcpConnection].
+  Future<void> _upgradeToTls(
+      Socket client, Uint8List bufferedData, StreamSubscription<Uint8List> sub) async {
+    final key = '${client.remoteAddress.address}:${client.remotePort}';
+    final ctx = _tlsSecurityContext;
+    if (ctx == null) {
+      _log.debug('TLS upgrade for $key failed: no security context available');
+      await sub.cancel();
+      client.destroy();
+      return;
+    }
+    try {
+      final secure = await SecureSocket.secureServer(client, ctx, bufferedData: bufferedData);
+      await sub.cancel();
+      _onTlsConnection(secure);
+    } catch (e) {
+      _log.debug('TLS handshake failed for $key: $e');
+      await sub.cancel();
+      client.destroy();
+    }
   }
 
   /// Handle incoming TLS connection (anti-censorship fallback).
@@ -1605,6 +1769,8 @@ class Transport {
     _consecutiveDeadFromBirth = 0;
     final silenceMs = now - _lastUdpReceiveMs;
     if (silenceMs > 30000) {
+      final sinceLast = now - _lastReconnectMs;
+      if (sinceLast < 60000) return;
       _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
       _lastUdpReceiveMs = now;
       _lastReconnectMs = now;

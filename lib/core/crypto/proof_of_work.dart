@@ -1,8 +1,76 @@
+import 'dart:ffi' as ffi;
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+// ---------------------------------------------------------------------------
+// Native PoW FFI (libcleona_pow) — optional, graceful fallback to Dart loop
+// ---------------------------------------------------------------------------
+
+typedef _PowFindNonceNative = ffi.Uint64 Function(
+  ffi.Pointer<ffi.Uint8> digest,
+  ffi.Int32 difficulty,
+  ffi.Pointer<ffi.Uint8> resultHash,
+);
+typedef _PowFindNonceDart = int Function(
+  ffi.Pointer<ffi.Uint8> digest,
+  int difficulty,
+  ffi.Pointer<ffi.Uint8> resultHash,
+);
+
+_PowFindNonceDart? _nativePowFindNonce;
+bool _nativePowTried = false;
+
+_PowFindNonceDart? _loadNativePow() {
+  if (_nativePowTried) return _nativePowFindNonce;
+  _nativePowTried = true;
+
+  final candidates = <String>[];
+  if (Platform.isLinux) {
+    candidates.add('libcleona_pow.so');
+    try {
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      candidates.add('$exeDir/lib/libcleona_pow.so');
+    } catch (_) {}
+    final home = Platform.environment['HOME'] ?? '';
+    if (home.isNotEmpty) {
+      candidates.add('$home/cleona-app/lib/libcleona_pow.so');
+    }
+    candidates.add('${Directory.current.path}/native/cleona_pow/build/libcleona_pow.so');
+  } else if (Platform.isWindows) {
+    candidates.add('cleona_pow.dll');
+    try {
+      final exeDir = File(Platform.resolvedExecutable).parent.path;
+      candidates.add('$exeDir\\cleona_pow.dll');
+    } catch (_) {}
+  } else if (Platform.isMacOS) {
+    for (final p in [
+      'libcleona_pow.dylib',
+      '@executable_path/../Frameworks/libcleona_pow.dylib',
+    ]) {
+      candidates.add(p);
+    }
+  }
+  // iOS/Android: static-link or separate .so — not yet deployed
+
+  for (final c in candidates) {
+    try {
+      final lib = ffi.DynamicLibrary.open(c);
+      _nativePowFindNonce = lib.lookupFunction<_PowFindNonceNative,
+          _PowFindNonceDart>('cleona_pow_find_nonce');
+      return _nativePowFindNonce;
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// ProofOfWork
+// ---------------------------------------------------------------------------
 
 /// Proof of Work: SHA-256 hashcash-style with leading zero bits.
 ///
@@ -17,12 +85,50 @@ class ProofOfWork {
   static const int minAcceptedDifficulty = 16;
 
   /// Compute PoW for [data]. Returns proto with nonce, difficulty, hash.
-  /// Pre-hashes data to a 32-byte digest before iterating — PoW time is
-  /// independent of payload size (~20ms for difficulty 20 regardless of input).
+  /// Uses native C loop (libcleona_pow) when available, otherwise falls back
+  /// to Dart loop with per-iteration SHA-256 FFI calls.
   static proto.ProofOfWork compute(Uint8List data, {int difficulty = defaultDifficulty}) {
     final sodium = SodiumFFI();
-    // Pre-hash: reduce arbitrarily-sized payload to fixed 32-byte digest.
     final dataDigest = sodium.sha256(data);
+
+    final native = _loadNativePow();
+    if (native != null) {
+      return _computeNative(native, dataDigest, difficulty);
+    }
+    return _computeDart(sodium, dataDigest, difficulty);
+  }
+
+  static proto.ProofOfWork _computeNative(
+    _PowFindNonceDart native,
+    Uint8List dataDigest,
+    int difficulty,
+  ) {
+    final digestPtr = calloc<ffi.Uint8>(32);
+    final hashPtr = calloc<ffi.Uint8>(32);
+    try {
+      for (int i = 0; i < 32; i++) {
+        digestPtr[i] = dataDigest[i];
+      }
+      final nonce = native(digestPtr, difficulty, hashPtr);
+      final hash = Uint8List(32);
+      for (int i = 0; i < 32; i++) {
+        hash[i] = hashPtr[i];
+      }
+      return proto.ProofOfWork()
+        ..nonce = Int64(nonce)
+        ..difficulty = difficulty
+        ..hash = hash;
+    } finally {
+      calloc.free(digestPtr);
+      calloc.free(hashPtr);
+    }
+  }
+
+  static proto.ProofOfWork _computeDart(
+    SodiumFFI sodium,
+    Uint8List dataDigest,
+    int difficulty,
+  ) {
     final buffer = Uint8List(32 + 8);
     buffer.setRange(0, 32, dataDigest);
     final nonceView = ByteData.sublistView(buffer, 32);
@@ -46,7 +152,6 @@ class ProofOfWork {
       final result = await Isolate.run(() {
         SodiumFFI(); // Init FFI in isolate
         final pow = ProofOfWork.compute(data, difficulty: difficulty);
-        // Return serializable data (proto objects may not cross isolate boundaries)
         return (pow.nonce.toInt(), pow.difficulty, Uint8List.fromList(pow.hash));
       });
       return proto.ProofOfWork()
@@ -54,7 +159,6 @@ class ProofOfWork {
         ..difficulty = result.$2
         ..hash = result.$3;
     } catch (_) {
-      // Fallback: compute synchronously (blocks UI but at least works)
       return compute(data, difficulty: difficulty);
     }
   }

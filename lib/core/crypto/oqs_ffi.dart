@@ -240,6 +240,35 @@ class OqsFFI {
 
   bool _initialized = false;
 
+  // Cached OQS context handles — allocated once, reused across calls.
+  // Thread-safe: Dart is single-threaded per isolate.
+  Pointer<Void> _cachedKem = nullptr;
+  Pointer<Void> _cachedSig = nullptr;
+
+  Pointer<Void> get _kem {
+    if (_cachedKem == nullptr) {
+      final name = _kemAlgorithm.toNativeUtf8();
+      _cachedKem = _kemNew(name);
+      calloc.free(name);
+      if (_cachedKem == nullptr) {
+        throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
+      }
+    }
+    return _cachedKem;
+  }
+
+  Pointer<Void> get _sig {
+    if (_cachedSig == nullptr) {
+      final name = _sigAlgorithm.toNativeUtf8();
+      _cachedSig = _sigNew(name);
+      calloc.free(name);
+      if (_cachedSig == nullptr) {
+        throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
+      }
+    }
+    return _cachedSig;
+  }
+
   void _bindFunctions() {
     _oqsInit = _lib.lookupFunction<_OqsInitNative, _OqsInitDart>('OQS_init');
 
@@ -285,6 +314,19 @@ class OqsFFI {
     }
   }
 
+  /// Release cached OQS context handles. Safe to call multiple times;
+  /// subsequent crypto calls lazily re-allocate the contexts.
+  void dispose() {
+    if (_cachedKem != nullptr) {
+      _kemFree(_cachedKem);
+      _cachedKem = nullptr;
+    }
+    if (_cachedSig != nullptr) {
+      _sigFree(_cachedSig);
+      _cachedSig = nullptr;
+    }
+  }
+
   // --------------------------------------------------------------------------
   // ML-KEM-768  (Key Encapsulation Mechanism)
   // --------------------------------------------------------------------------
@@ -295,19 +337,11 @@ class OqsFFI {
   ({Uint8List publicKey, Uint8List secretKey}) mlKemKeypair() {
     _ensureInitialized();
 
-    final methodName = _kemAlgorithm.toNativeUtf8();
-    final kem = _kemNew(methodName);
-    calloc.free(methodName);
-
-    if (kem == nullptr) {
-      throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
-    }
-
     final pk = calloc<Uint8>(mlKemPublicKeyLength);
     final sk = calloc<Uint8>(mlKemSecretKeyLength);
 
     try {
-      final status = _kemKeypair(kem, pk, sk);
+      final status = _kemKeypair(_kem, pk, sk);
       if (status != OqsStatus.success) {
         throw StateError('OQS_KEM_keypair failed with status $status');
       }
@@ -319,7 +353,6 @@ class OqsFFI {
     } finally {
       calloc.free(pk);
       calloc.free(sk);
-      _kemFree(kem);
     }
   }
 
@@ -341,20 +374,11 @@ class OqsFFI {
         .isolateLocal(_derandCallback);
     _randCustom(_derandCallable!.nativeFunction);
 
-    final methodName = _kemAlgorithm.toNativeUtf8();
-    final kem = _kemNew(methodName);
-    calloc.free(methodName);
-
-    if (kem == nullptr) {
-      _restoreSystemDrbg();
-      throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
-    }
-
     final pk = calloc<Uint8>(mlKemPublicKeyLength);
     final sk = calloc<Uint8>(mlKemSecretKeyLength);
 
     try {
-      final status = _kemKeypair(kem, pk, sk);
+      final status = _kemKeypair(_kem, pk, sk);
       if (status != OqsStatus.success) {
         throw StateError('OQS_KEM_keypair (derand) failed with status $status');
       }
@@ -365,7 +389,6 @@ class OqsFFI {
     } finally {
       calloc.free(pk);
       calloc.free(sk);
-      _kemFree(kem);
       _restoreSystemDrbg();
     }
   }
@@ -385,20 +408,12 @@ class OqsFFI {
       );
     }
 
-    final methodName = _kemAlgorithm.toNativeUtf8();
-    final kem = _kemNew(methodName);
-    calloc.free(methodName);
-
-    if (kem == nullptr) {
-      throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
-    }
-
     final ct = calloc<Uint8>(mlKemCiphertextLength);
     final ss = calloc<Uint8>(mlKemSharedSecretLength);
     final pkNative = _allocFromUint8List(publicKey);
 
     try {
-      final status = _kemEncaps(kem, ct, ss, pkNative);
+      final status = _kemEncaps(_kem, ct, ss, pkNative);
       if (status != OqsStatus.success) {
         throw StateError('OQS_KEM_encaps failed with status $status');
       }
@@ -411,7 +426,6 @@ class OqsFFI {
       calloc.free(ct);
       calloc.free(ss);
       calloc.free(pkNative);
-      _kemFree(kem);
     }
   }
 
@@ -434,20 +448,12 @@ class OqsFFI {
       );
     }
 
-    final methodName = _kemAlgorithm.toNativeUtf8();
-    final kem = _kemNew(methodName);
-    calloc.free(methodName);
-
-    if (kem == nullptr) {
-      throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
-    }
-
     final ss = calloc<Uint8>(mlKemSharedSecretLength);
     final ctNative = _allocFromUint8List(ciphertext);
     final skNative = _allocFromUint8List(secretKey);
 
     try {
-      final status = _kemDecaps(kem, ss, ctNative, skNative);
+      final status = _kemDecaps(_kem, ss, ctNative, skNative);
       if (status != OqsStatus.success) {
         throw StateError('OQS_KEM_decaps failed with status $status');
       }
@@ -457,7 +463,6 @@ class OqsFFI {
       calloc.free(ss);
       calloc.free(ctNative);
       calloc.free(skNative);
-      _kemFree(kem);
     }
   }
 
@@ -471,19 +476,11 @@ class OqsFFI {
   ({Uint8List publicKey, Uint8List secretKey}) mlDsaKeypair() {
     _ensureInitialized();
 
-    final methodName = _sigAlgorithm.toNativeUtf8();
-    final sig = _sigNew(methodName);
-    calloc.free(methodName);
-
-    if (sig == nullptr) {
-      throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
-    }
-
     final pk = calloc<Uint8>(mlDsaPublicKeyLength);
     final sk = calloc<Uint8>(mlDsaSecretKeyLength);
 
     try {
-      final status = _sigKeypair(sig, pk, sk);
+      final status = _sigKeypair(_sig, pk, sk);
       if (status != OqsStatus.success) {
         throw StateError('OQS_SIG_keypair failed with status $status');
       }
@@ -495,7 +492,6 @@ class OqsFFI {
     } finally {
       calloc.free(pk);
       calloc.free(sk);
-      _sigFree(sig);
     }
   }
 
@@ -551,20 +547,11 @@ class OqsFFI {
         .isolateLocal(_derandCallback);
     _randCustom(_derandCallable!.nativeFunction);
 
-    final methodName = _sigAlgorithm.toNativeUtf8();
-    final sig = _sigNew(methodName);
-    calloc.free(methodName);
-
-    if (sig == nullptr) {
-      _restoreSystemDrbg();
-      throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
-    }
-
     final pk = calloc<Uint8>(mlDsaPublicKeyLength);
     final sk = calloc<Uint8>(mlDsaSecretKeyLength);
 
     try {
-      final status = _sigKeypair(sig, pk, sk);
+      final status = _sigKeypair(_sig, pk, sk);
       if (status != OqsStatus.success) {
         throw StateError('OQS_SIG_keypair (derand) failed with status $status');
       }
@@ -575,7 +562,6 @@ class OqsFFI {
     } finally {
       calloc.free(pk);
       calloc.free(sk);
-      _sigFree(sig);
       _restoreSystemDrbg();
     }
   }
@@ -601,14 +587,6 @@ class OqsFFI {
       );
     }
 
-    final methodName = _sigAlgorithm.toNativeUtf8();
-    final sig = _sigNew(methodName);
-    calloc.free(methodName);
-
-    if (sig == nullptr) {
-      throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
-    }
-
     final sigBuf = calloc<Uint8>(mlDsaSignatureLength);
     final sigLen = calloc<Size>(1);
     final msgNative = _allocFromUint8List(message);
@@ -616,7 +594,7 @@ class OqsFFI {
 
     try {
       final status = _sigSign(
-        sig,
+        _sig,
         sigBuf,
         sigLen,
         msgNative,
@@ -634,7 +612,6 @@ class OqsFFI {
       calloc.free(sigLen);
       calloc.free(msgNative);
       calloc.free(skNative);
-      _sigFree(sig);
     }
   }
 
@@ -661,21 +638,13 @@ class OqsFFI {
       );
     }
 
-    final methodName = _sigAlgorithm.toNativeUtf8();
-    final sig = _sigNew(methodName);
-    calloc.free(methodName);
-
-    if (sig == nullptr) {
-      throw StateError('OQS_SIG_new("$_sigAlgorithm") returned null');
-    }
-
     final msgNative = _allocFromUint8List(message);
     final sigNative = _allocFromUint8List(signature);
     final pkNative = _allocFromUint8List(publicKey);
 
     try {
       final status = _sigVerify(
-        sig,
+        _sig,
         msgNative,
         message.length,
         sigNative,
@@ -687,7 +656,6 @@ class OqsFFI {
       calloc.free(msgNative);
       calloc.free(sigNative);
       calloc.free(pkNative);
-      _sigFree(sig);
     }
   }
 

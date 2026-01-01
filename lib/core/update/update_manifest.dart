@@ -35,6 +35,39 @@ class UpdateManifest {
   /// Null on legacy manifests.
   final String? minRequiredReason;
 
+  /// NEW (§19.6): per-platform DHT lookup tag for erasure-coded binary fragments.
+  /// Keys: linux, windows, android, macos, ios. Null on legacy manifests.
+  final Map<String, String>? dhtBinaryTag;
+
+  /// NEW (§19.6): per-platform map from source-version to DHT tag for delta patches.
+  /// Null on legacy manifests.
+  final Map<String, Map<String, String>>? deltaBinaryTag;
+
+  /// NEW (§19.6): monotonically increasing sequence number for downgrade protection.
+  /// Null on legacy manifests.
+  final int? minMonotoneSeq;
+
+  /// NEW (§19.6.2): per-platform SHA-256 hash (hex) of the release binary.
+  /// This is the trust anchor an in-network downloader verifies the
+  /// assembled/reconstructed binary against — see
+  /// [BinaryUpdateManager.verify]. Null on legacy manifests or manifests
+  /// without in-network distribution.
+  final Map<String, String>? binaryHashes;
+
+  /// NEW (§19.6.2): per-platform Ed25519 signature (base64) by the
+  /// maintainer key over the raw 32-byte SHA-256 hash of that platform's
+  /// binary (same scheme as `PhysicalTransferHelper.importAndVerifyBinary`
+  /// / `InviteLink`). Independent of [signature] (which covers the manifest
+  /// payload as a whole) so the binary itself carries its own portable proof
+  /// of authenticity. Null on legacy manifests.
+  final Map<String, String>? binarySignatures;
+
+  /// NEW (§19.6.2): per-platform exact byte size of the unpadded release
+  /// binary, required to truncate the Reed-Solomon reconstruction back to
+  /// the original binary (erasure-coded fragments are padded to a multiple
+  /// of K). Null on legacy manifests.
+  final Map<String, int>? binarySizes;
+
   UpdateManifest({
     required this.version,
     required this.downloadUrl,
@@ -44,17 +77,35 @@ class UpdateManifest {
     required this.signature,
     this.minRequiredVersion,
     this.minRequiredReason,
+    this.dhtBinaryTag,
+    this.deltaBinaryTag,
+    this.minMonotoneSeq,
+    this.binaryHashes,
+    this.binarySignatures,
+    this.binarySizes,
   });
 
-  /// Payload to sign. Legacy format (no new fields) preserved when both new
+  /// Payload to sign. Legacy format (no new fields) preserved when all new
   /// fields are null — keeps old manifests verifiable. When new fields are
   /// set, they are appended to the payload.
   String get signedPayload {
     final base = '$version\n$downloadUrl\n$archiveHash\n$changelog\n$timestamp';
-    if (minRequiredVersion == null && minRequiredReason == null) {
+    if (minRequiredVersion == null && minRequiredReason == null &&
+        dhtBinaryTag == null && deltaBinaryTag == null && minMonotoneSeq == null &&
+        binaryHashes == null && binarySignatures == null && binarySizes == null) {
       return base;
     }
-    return '$base\n${minRequiredVersion ?? ''}\n${minRequiredReason ?? ''}';
+    var payload = '$base\n${minRequiredVersion ?? ''}\n${minRequiredReason ?? ''}';
+    if (dhtBinaryTag != null || deltaBinaryTag != null || minMonotoneSeq != null ||
+        binaryHashes != null || binarySignatures != null || binarySizes != null) {
+      payload += '\n${dhtBinaryTag != null ? jsonEncode(dhtBinaryTag) : ''}'
+          '\n${deltaBinaryTag != null ? jsonEncode(deltaBinaryTag) : ''}'
+          '\n${minMonotoneSeq ?? ''}'
+          '\n${binaryHashes != null ? jsonEncode(binaryHashes) : ''}'
+          '\n${binarySignatures != null ? jsonEncode(binarySignatures) : ''}'
+          '\n${binarySizes != null ? jsonEncode(binarySizes) : ''}';
+    }
+    return payload;
   }
 
   /// Verify the manifest signature against the maintainer public key.
@@ -79,6 +130,12 @@ class UpdateManifest {
     };
     if (minRequiredVersion != null) json['minReq'] = minRequiredVersion;
     if (minRequiredReason != null) json['minReqReason'] = minRequiredReason;
+    if (dhtBinaryTag != null) json['dhtBin'] = dhtBinaryTag;
+    if (deltaBinaryTag != null) json['deltaBin'] = deltaBinaryTag;
+    if (minMonotoneSeq != null) json['monotoneSeq'] = minMonotoneSeq;
+    if (binaryHashes != null) json['binHash'] = binaryHashes;
+    if (binarySignatures != null) json['binSig'] = binarySignatures;
+    if (binarySizes != null) json['binSize'] = binarySizes;
     return json;
   }
 
@@ -94,6 +151,25 @@ class UpdateManifest {
         signature: base64Decode(json['sig'] as String),
         minRequiredVersion: json['minReq'] as String?,
         minRequiredReason: json['minReqReason'] as String?,
+        dhtBinaryTag: (json['dhtBin'] as Map?)?.map(
+          (k, v) => MapEntry(k as String, v as String),
+        ),
+        deltaBinaryTag: (json['deltaBin'] as Map?)?.map(
+          (k, v) => MapEntry(
+            k as String,
+            (v as Map).map((k2, v2) => MapEntry(k2 as String, v2 as String)),
+          ),
+        ),
+        minMonotoneSeq: json['monotoneSeq'] as int?,
+        binaryHashes: (json['binHash'] as Map?)?.map(
+          (k, v) => MapEntry(k as String, v as String),
+        ),
+        binarySignatures: (json['binSig'] as Map?)?.map(
+          (k, v) => MapEntry(k as String, v as String),
+        ),
+        binarySizes: (json['binSize'] as Map?)?.map(
+          (k, v) => MapEntry(k as String, v as int),
+        ),
       );
     } catch (e) {
       return null;
@@ -108,7 +184,9 @@ class UpdateManifest {
   }
 
   @override
-  String toString() => 'UpdateManifest(v$version, $downloadUrl, ts=$timestamp, minReq=$minRequiredVersion)';
+  String toString() => 'UpdateManifest(v$version, $downloadUrl, ts=$timestamp, minReq=$minRequiredVersion, '
+      'dhtBin=$dhtBinaryTag, deltaBin=$deltaBinaryTag, monotoneSeq=$minMonotoneSeq, '
+      'binHash=$binaryHashes, binSize=$binarySizes)';
 }
 
 /// Checks for updates via DHT.
@@ -170,6 +248,12 @@ class UpdateChecker {
       if (cv[i] > mv[i]) return false;
     }
     return false;  // equal → not blocked
+  }
+
+  /// Downgrade protection (§19.6): true if the manifest's minMonotoneSeq is
+  /// not newer than the highest sequence number this node has already seen.
+  bool isDowngradeAttempt(UpdateManifest manifest, int highestSeenSeq) {
+    return manifest.minMonotoneSeq != null && manifest.minMonotoneSeq! <= highestSeenSeq;
   }
 
   List<int>? _parseVersion(String version) {

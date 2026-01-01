@@ -11,6 +11,7 @@
 // own the keypairs and pass them in; the codec does not touch identity or
 // device-key persistence.
 
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:fixnum/fixnum.dart';
@@ -136,6 +137,65 @@ class V3FrameCodec {
       ..aeadNonce = kemHeader.aesNonce
       ..version = kemHeader.version;
     return kemV3.writeToBuffer();
+  }
+
+  /// Async variant: runs sign + compress + KEM-encrypt + PoW in a single
+  /// background isolate, keeping the main isolate free for UI/events.
+  /// Falls back to synchronous on isolate failure (e.g. Android FFI loading).
+  static Future<(Uint8List kemBytes, proto.ProofOfWork pow)>
+      buildAndEncryptInnerWithPowAsync({
+    required Uint8List innerFrameBytes,
+    required Uint8List senderUserEd25519Sk,
+    required Uint8List senderUserMlDsaSk,
+    required Uint8List recipientUserX25519Pk,
+    required Uint8List recipientUserMlKemPk,
+    int powDifficulty = ProofOfWork.defaultDifficulty,
+    bool skipPow = false,
+  }) async {
+    try {
+      final result = await Isolate.run(() {
+        SodiumFFI();
+        OqsFFI().init();
+        final inner = proto.ApplicationFrameV3.fromBuffer(innerFrameBytes);
+        final kemBytes = buildAndEncryptInner(
+          inner: inner,
+          senderUserEd25519Sk: senderUserEd25519Sk,
+          senderUserMlDsaSk: senderUserMlDsaSk,
+          recipientUserX25519Pk: recipientUserX25519Pk,
+          recipientUserMlKemPk: recipientUserMlKemPk,
+        );
+        if (skipPow) {
+          return (Uint8List.fromList(kemBytes), 0, 0, Uint8List(0));
+        }
+        final pow = ProofOfWork.compute(kemBytes, difficulty: powDifficulty);
+        return (
+          Uint8List.fromList(kemBytes),
+          pow.nonce.toInt(),
+          pow.difficulty,
+          Uint8List.fromList(pow.hash),
+        );
+      });
+      final pow = result.$3 == 0 && skipPow
+          ? null
+          : (proto.ProofOfWork()
+            ..nonce = Int64(result.$2)
+            ..difficulty = result.$3
+            ..hash = result.$4);
+      return (result.$1, pow ?? proto.ProofOfWork());
+    } catch (_) {
+      final inner = proto.ApplicationFrameV3.fromBuffer(innerFrameBytes);
+      final kemBytes = buildAndEncryptInner(
+        inner: inner,
+        senderUserEd25519Sk: senderUserEd25519Sk,
+        senderUserMlDsaSk: senderUserMlDsaSk,
+        recipientUserX25519Pk: recipientUserX25519Pk,
+        recipientUserMlKemPk: recipientUserMlKemPk,
+      );
+      final pow = skipPow
+          ? proto.ProofOfWork()
+          : ProofOfWork.compute(kemBytes, difficulty: powDifficulty);
+      return (kemBytes, pow);
+    }
   }
 
   /// §11.4.8: Build a de-attributed inner ApplicationFrame — empty
