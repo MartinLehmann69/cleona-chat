@@ -463,6 +463,18 @@ class CleonaNode {
   Duration _lastStage4TailWindow = Duration.zero;
   bool _stage4ReplySeen = false;
 
+  /// §5.5b First-CR-Mailbox: stored CRs waiting for the target to come
+  /// online. Keyed by recipientDeviceIdHex. Each entry holds the opaque
+  /// encrypted blob, the sender's deviceId, and a timestamp. Max 50
+  /// entries total, 7-day TTL, evicted on periodic tick.
+  final Map<String, List<_FirstCrMailboxEntry>> _firstCrMailbox = {};
+  static const int _firstCrMailboxMaxEntries = 50;
+  static const Duration _firstCrMailboxTtl = Duration(days: 7);
+
+  /// Callback for FIRST_CR_STORE_ACK — the service layer registers this
+  /// so it can update contact status to storedForDelivery.
+  void Function(Uint8List senderDeviceId, bool accepted)? onFirstCrStoreAck;
+
   CleonaNode({
     required this.profileDir,
     required this.port,
@@ -812,7 +824,7 @@ class CleonaNode {
     natTraversal.sendInfraFn = (type, body, deviceId) =>
         _sendInfra(messageType: type, innerPayload: body, recipientDeviceId: deviceId);
     natTraversal.sendInfraDirectFn = (type, body, deviceId, addr, port) =>
-        _sendInfraDirect(
+        sendInfraDirect(
           messageType: type,
           innerPayload: body,
           recipientDeviceId: deviceId,
@@ -833,7 +845,7 @@ class CleonaNode {
     // since Welle 1; legacy raw-UDP pings were silently dropped on the
     // wire and carrier-NAT pinholes expired after ~30-60s).
     udpKeepalive.sendInfraFn = (type, body, deviceId, addr, port) =>
-        _sendInfraDirect(
+        sendInfraDirect(
           messageType: type,
           innerPayload: body,
           recipientDeviceId: deviceId,
@@ -1361,6 +1373,14 @@ class CleonaNode {
             _pushTopNPeersToNewNeighbor(senderDeviceId);
           });
           _pushSelfToNeighborsExcept(senderDeviceId);
+          // §5.11: push our own Self-Broadcast BACK to the new neighbor.
+          // Seed peers from ContactSeed (§8.1.1) carry no PK/nonce — the
+          // new neighbor can only verify our admission PoW (D3, §13.1.2)
+          // after receiving this push. Without it, admission verification
+          // waits for the 1h cold-path, blocking relay for First-CRs.
+          _pushSelfToPeer(senderDeviceId);
+          _log.info('§5.11: new-neighbor self-push to '
+              '${senderHex.substring(0, 8)}');
         } else {
           _log.debug('DV: Welcome/push deferred — discovery not complete');
         }
@@ -1947,6 +1967,17 @@ class CleonaNode {
         return true;
       case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PONG:
         _handleHolePunchPongInfra(frame, senderDeviceId, from, fromPort);
+        return true;
+
+      // ── First-CR-Mailbox (§5.5b) ─────────────────────────────────────
+      case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
+        _handleFirstCrStore(frame, senderDeviceId, from, fromPort);
+        return true;
+      case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
+        _handleFirstCrStoreAck(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
+        _handleFirstCrDeliver(frame, senderDeviceId);
         return true;
 
       default:
@@ -2665,8 +2696,11 @@ class CleonaNode {
       final fromHex = bytesToHex(senderDeviceId);
 
       // D3 Phase 2 (§13.1.2): DV route acceptance requires admission PoW.
+      // §13.1.2 exception: isProtectedSeed peers (ContactSeed §8.1.1)
+      // are exempt — scanner needs routes from seed peers for First-CR.
       final senderPeer = routingTable.getPeer(senderDeviceId);
-      if (senderPeer != null && !senderPeer.idPowVerified) {
+      if (senderPeer != null && !senderPeer.idPowVerified &&
+          !senderPeer.isProtectedSeed) {
         _log.debug('D3: ROUTE_UPDATE from non-admitted '
             '${fromHex.substring(0, 8)} — dropped');
         return;
@@ -2853,6 +2887,141 @@ class CleonaNode {
       udpKeepalive.onPongReceived(bytesToHex(senderDeviceId));
     } catch (e) {
       _log.debug('HOLE_PUNCH_PONG parse error: $e');
+    }
+  }
+
+  // ── §5.5b First-CR-Mailbox receive handlers ─────────────────────────
+
+  void _handleFirstCrStore(proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId, InternetAddress from, int fromPort) {
+    try {
+      final store = proto.FirstCrStoreV3.fromBuffer(frame.payload);
+      final recipHex = bytesToHex(Uint8List.fromList(store.recipientDeviceId));
+      final senderHex = bytesToHex(Uint8List.fromList(store.senderDeviceId));
+      final ttlMs = store.ttlMs.toInt();
+      final ttl = ttlMs > 0 && ttlMs <= 604800000
+          ? Duration(milliseconds: ttlMs)
+          : _firstCrMailboxTtl;
+
+      // Quota check — total across all recipients.
+      var totalEntries = 0;
+      for (final list in _firstCrMailbox.values) {
+        totalEntries += list.length;
+      }
+      if (totalEntries >= _firstCrMailboxMaxEntries) {
+        _log.info('FIRST_CR_STORE reject: quota ($totalEntries >= '
+            '$_firstCrMailboxMaxEntries) from ${senderHex.substring(0, 8)}');
+        _sendFirstCrStoreAck(senderDeviceId, from, fromPort, false,
+            reason: 'quota_exceeded');
+        return;
+      }
+
+      // Dedup — same sender→recipient pair replaces the old entry.
+      final dedupKey = '$senderHex:$recipHex';
+      final bucket = _firstCrMailbox.putIfAbsent(recipHex, () => []);
+      bucket.removeWhere((e) => e.dedupKey == dedupKey);
+
+      bucket.add(_FirstCrMailboxEntry(
+        recipientDeviceId: Uint8List.fromList(store.recipientDeviceId),
+        senderDeviceId: Uint8List.fromList(store.senderDeviceId),
+        encryptedCrBlob: Uint8List.fromList(store.encryptedCrBlob),
+        storedAt: DateTime.now(),
+        ttl: ttl,
+      ));
+
+      _log.info('§5.5b FIRST_CR_STORE: stored CR from ${senderHex.substring(0, 8)} '
+          'for ${recipHex.substring(0, 8)} (ttl=${ttl.inHours}h, total=$totalEntries)');
+      _sendFirstCrStoreAck(senderDeviceId, from, fromPort, true);
+    } catch (e) {
+      _log.debug('FIRST_CR_STORE parse error: $e');
+    }
+  }
+
+  void _sendFirstCrStoreAck(Uint8List recipientDeviceId,
+      InternetAddress addr, int port, bool accepted, {String reason = ''}) {
+    final ack = proto.FirstCrStoreAckV3()
+      ..accepted = accepted
+      ..rejectReason = reason;
+    sendInfraDirect(
+      messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK,
+      innerPayload: Uint8List.fromList(ack.writeToBuffer()),
+      recipientDeviceId: recipientDeviceId,
+      addr: addr,
+      port: port,
+    );
+  }
+
+  void _handleFirstCrStoreAck(proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId) {
+    try {
+      final ack = proto.FirstCrStoreAckV3.fromBuffer(frame.payload);
+      _log.info('§5.5b FIRST_CR_STORE_ACK from '
+          '${bytesToHex(senderDeviceId).substring(0, 8)}: '
+          'accepted=${ack.accepted}'
+          '${ack.rejectReason.isNotEmpty ? " reason=${ack.rejectReason}" : ""}');
+      onFirstCrStoreAck?.call(senderDeviceId, ack.accepted);
+    } catch (e) {
+      _log.debug('FIRST_CR_STORE_ACK parse error: $e');
+    }
+  }
+
+  /// §5.5b: Deliver stored CRs when the target device's first packet
+  /// arrives (called from _touchPeer on hopCount==0 contact).
+  void deliverFirstCrMailbox(Uint8List deviceId, InternetAddress addr, int port) {
+    final hex = bytesToHex(deviceId);
+    final bucket = _firstCrMailbox.remove(hex);
+    if (bucket == null || bucket.isEmpty) return;
+
+    var delivered = 0;
+    for (final entry in bucket) {
+      if (entry.isExpired) continue;
+      final deliver = proto.FirstCrDeliverV3()
+        ..encryptedCrBlob = entry.encryptedCrBlob
+        ..senderDeviceId = entry.senderDeviceId
+        ..storedAtMs = Int64(entry.storedAt.millisecondsSinceEpoch);
+      sendInfraDirect(
+        messageType: proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER,
+        innerPayload: Uint8List.fromList(deliver.writeToBuffer()),
+        recipientDeviceId: deviceId,
+        addr: addr,
+        port: port,
+      );
+      delivered++;
+    }
+    if (delivered > 0) {
+      _log.info('§5.5b FIRST_CR_DELIVER: pushed $delivered stored CRs '
+          'to ${hex.substring(0, 8)} at ${addr.address}:$port');
+    }
+  }
+
+  /// Evict expired entries from the First-CR-Mailbox (called from periodic tick).
+  void _evictExpiredFirstCrMailbox() {
+    _firstCrMailbox.removeWhere((_, bucket) {
+      bucket.removeWhere((e) => e.isExpired);
+      return bucket.isEmpty;
+    });
+  }
+
+  /// §5.5b: Handle FIRST_CR_DELIVER — a seed peer is forwarding a
+  /// stored CR that was deposited while we were offline. Re-inject the
+  /// opaque blob into the normal receive pipeline via
+  /// `dispatchReassembledPacket` (same path as erasure-coded recovery).
+  void _handleFirstCrDeliver(proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId) {
+    try {
+      final deliver = proto.FirstCrDeliverV3.fromBuffer(frame.payload);
+      if (deliver.encryptedCrBlob.isEmpty) {
+        _log.debug('FIRST_CR_DELIVER drop: empty blob');
+        return;
+      }
+      final origSenderHex = bytesToHex(Uint8List.fromList(deliver.senderDeviceId));
+      _log.info('§5.5b FIRST_CR_DELIVER: received stored CR from '
+          '${origSenderHex.substring(0, 8)} via seed '
+          '${bytesToHex(senderDeviceId).substring(0, 8)} '
+          '(storedAt=${deliver.storedAtMs})');
+      dispatchReassembledPacket(Uint8List.fromList(deliver.encryptedCrBlob));
+    } catch (e) {
+      _log.debug('FIRST_CR_DELIVER parse error: $e');
     }
   }
 
@@ -3126,7 +3295,9 @@ class CleonaNode {
       final gwPeer = routingTable.getPeer(gwBytes);
       if (gwPeer != null) {
         // D3 Phase 2: skip GW if not admission-PoW verified.
-        if (!gwPeer.idPowVerified) {
+        // §13.1.2 exception: isProtectedSeed peers (ContactSeed §8.1.1)
+        // are exempt — bounded (≤5), ephemeral, integrity-anchored.
+        if (!gwPeer.idPowVerified && !gwPeer.isProtectedSeed) {
           _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
               '${gwHex.substring(0, 8)} skipped — not admission-verified');
         // §4.7 Relay-Candidate Reachability Filter: skip GW if unreachable from us.
@@ -3159,7 +3330,9 @@ class CleonaNode {
       final nPeer = routingTable.getPeer(nBytes);
       if (nPeer == null) continue;
       // D3 Phase 2: skip neighbor if not admission-PoW verified.
-      if (!nPeer.idPowVerified) {
+      // §13.1.2 exception: isProtectedSeed peers (ContactSeed §8.1.1)
+      // are exempt — bounded (≤5), ephemeral, integrity-anchored.
+      if (!nPeer.idPowVerified && !nPeer.isProtectedSeed) {
         _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
             '${neighborHex.substring(0, 8)} skipped — not admission-verified');
         continue;
@@ -3529,9 +3702,9 @@ class CleonaNode {
 
   /// Direct UDP send of an InfrastructureFrame to a specific peer's
   /// address. Bypasses DV cascade — used for hole-punch / port-probe /
-  /// ping where the caller already has the on-wire address. Returns false
-  /// on KEM-PK miss or transport rejection. Fire-and-forget.
-  Future<bool> _sendInfraDirect({
+  /// ping / FIRST_CR_STORE where the caller already has the on-wire
+  /// address. Returns false on KEM-PK miss or transport rejection.
+  Future<bool> sendInfraDirect({
     required proto.MessageTypeV3 messageType,
     required Uint8List innerPayload,
     required Uint8List recipientDeviceId,
@@ -3548,7 +3721,7 @@ class CleonaNode {
     try {
       return await transport.sendUdp(packet, addr, port);
     } catch (e) {
-      _log.debug('_sendInfraDirect: transport error to ${addr.address}:$port: $e');
+      _log.debug('sendInfraDirect: transport error to ${addr.address}:$port: $e');
       return false;
     }
   }
@@ -3720,6 +3893,13 @@ class CleonaNode {
         port > 0) {
       udpKeepalive.register(bytesToHex(peerId), ip, port, peerId);
     }
+
+    // §5.5b: Deliver stored First-CR-Mailbox entries to this device.
+    if (isAuthoritative && ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
+      try {
+        deliverFirstCrMailbox(peerId, InternetAddress(ip), port);
+      } catch (_) {}
+    }
   }
 
   // ── Kademlia Bootstrap ─────────────────────────────────────────────
@@ -3818,7 +3998,7 @@ class CleonaNode {
     final ping = proto.DhtPing()
       ..senderId = primaryIdentity.deviceNodeId;
 
-    await _sendInfraDirect(
+    await sendInfraDirect(
       messageType: proto.MessageTypeV3.MTV3_DHT_PING,
       innerPayload: ping.writeToBuffer(),
       recipientDeviceId: recipient.nodeId,
@@ -3847,13 +4027,18 @@ class CleonaNode {
       // IPv6 global: no NAT context needed — always routable
       if (addr.ip.contains(':') && !addr.ip.toLowerCase().startsWith('fe80:')) return true;
       if (!_isPrivateIp(addr.ip)) return true;
-      // Private-to-private: if WE are on a private network and the target is
-      // also private, allow it through. Same-subnet reaches via L2; cross-subnet
-      // (e.g. 192.168.10.x ↔ 192.0.2.x) reaches via the gateway router
-      // (OPNsense). Worst case: one wasted UDP packet. Without this, cross-subnet
-      // peers behind the same infrastructure are unreachable for DV ROUTE_UPDATEs
-      // and all routed traffic falls back to relay or times out.
-      if (_isPrivateIp(_localIp) && _isPrivateIp(addr.ip)) return true;
+      // Private-to-private: allow if both are in the same address class.
+      // §4.7: CGNAT (100.64/10) has zero routing relationship to RFC 1918
+      // — a mobile node on 100.65.x sending to 192.168.10.x is futile.
+      // Cross-subnet RFC 1918 (e.g. 192.168.10.x ↔ 192.0.2.x) remains
+      // permitted — reaches via the gateway router (OPNsense).
+      if (_isPrivateIp(_localIp) && _isPrivateIp(addr.ip)) {
+        final localCgnat = _isCgnat(_localIp);
+        final targetCgnat = _isCgnat(addr.ip);
+        if (localCgnat == targetCgnat) return true;
+        // CGNAT ↔ RFC 1918: guaranteed unreachable, skip
+        return false;
+      }
       // Private IP: only try if same NAT (matching public IP) or unknown
       return effectivePublicIp == null || effectivePublicIp == peer.publicIp || peer.publicIp.isEmpty;
     }).toList();
@@ -4106,6 +4291,7 @@ class CleonaNode {
 
     dvRouting.updateDefaultGateway();
     peerMessageStore.pruneExpired();
+    _evictExpiredFirstCrMailbox();
     // V3.0: messageQueue.pruneExpired() entfällt — keine persistente SendQueue.
     _saveRoutingTable();
     // Snapshot the DV-table together with the routing table so the two
@@ -4944,7 +5130,7 @@ class CleonaNode {
     // §4.6 (V3.1.72) liveness heartbeat: refresh `direct-confirmed` for ALL
     // direct neighbors — incl. LAN/IPv6/same-WAN, which UdpKeepalive
     // deliberately skips — by sending a gate-bypassing direct PING (via
-    // `_sendPing` → `_sendInfraDirect`). A returning direct (hopCount==0)
+    // `_sendPing` → `sendInfraDirect`). A returning direct (hopCount==0)
     // PONG re-confirms the peer (§4.6). This is the SOLE periodic refresh of
     // direct-confirmed for non-NAT peers; without it, idle LAN/IPv6 contacts
     // would silently decay past the 1h TTL and the first new message to them
@@ -5533,6 +5719,13 @@ bool _isPrivateIp(String ip) {
   return false;
 }
 
+/// §4.7: True for CGNAT addresses (100.64.0.0/10, RFC 6598).
+bool _isCgnat(String ip) {
+  if (!ip.startsWith('100.')) return false;
+  final second = int.tryParse(ip.split('.')[1]) ?? 0;
+  return second >= 64 && second <= 127;
+}
+
 PeerAddressType _classifyAddressType(String ip) {
   if (ip.contains(':')) return PeerAddressType.ipv6Global;
   return _isPrivateIp(ip) ? PeerAddressType.ipv4Private : PeerAddressType.ipv4Public;
@@ -5611,4 +5804,27 @@ class FrameDedupCache {
   }
 
   int get length => _cache.length;
+}
+
+/// §5.5b First-CR-Mailbox entry stored on a seed peer until the target
+/// device comes online and retrieves it.
+class _FirstCrMailboxEntry {
+  final Uint8List recipientDeviceId;
+  final Uint8List senderDeviceId;
+  final Uint8List encryptedCrBlob;
+  final DateTime storedAt;
+  final Duration ttl;
+
+  _FirstCrMailboxEntry({
+    required this.recipientDeviceId,
+    required this.senderDeviceId,
+    required this.encryptedCrBlob,
+    required this.storedAt,
+    required this.ttl,
+  });
+
+  bool get isExpired => DateTime.now().isAfter(storedAt.add(ttl));
+
+  String get dedupKey =>
+      '${bytesToHex(senderDeviceId)}:${bytesToHex(recipientDeviceId)}';
 }

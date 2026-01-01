@@ -1109,7 +1109,7 @@ class ContactInfo {
   Uint8List? mlDsaPk;
   Uint8List? x25519Pk;
   Uint8List? mlKemPk;
-  String status; // pending, accepted, rejected, pending_outgoing
+  String status; // pending, accepted, rejected, pending_outgoing, storedForDelivery
   String? message;
   String? profilePictureBase64;
   String? pendingNameChange; // Remote name change waiting for user decision

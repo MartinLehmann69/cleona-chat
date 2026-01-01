@@ -339,12 +339,16 @@ class PeerAddress {
     // Loopback is always reachable from the same machine
     if (ip.startsWith('127.')) return true;
     // Target is private — are WE also on a private network?
-    // Cross-class private routing is common in test labs and home networks,
-    // so any private local IP qualifies. If a target is genuinely on an
-    // isolated subnet, the UDP send simply fails and the cascade falls back
-    // to relay; better than blanket-suppressing valid local addresses.
+    // §4.7: CGNAT (100.64/10) has zero routing relationship to RFC 1918.
+    // A CGNAT local must NOT try to reach 192.168.x targets and vice versa.
+    // Cross-class RFC 1918 routing (e.g. 192.168.x ↔ 10.x behind the same
+    // gateway) is common in home/lab networks and remains permitted.
+    final targetIsCgnat = _isCgnat(ip);
     for (final localIp in currentLocalIps) {
-      if (_isPrivateIp(localIp)) return true;
+      if (!_isPrivateIp(localIp)) continue;
+      final localIsCgnat = _isCgnat(localIp);
+      // Both CGNAT or both RFC 1918: potentially same network
+      if (localIsCgnat == targetIsCgnat) return true;
     }
     return false;
   }

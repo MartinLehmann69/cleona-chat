@@ -423,7 +423,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.90';
+  static const String kCurrentAppVersion = '3.1.91';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -531,6 +531,27 @@ class CleonaService implements ICleonaService {
       final cachedDevHex = session.cachedRoute?.nodeIdHex;
       if (session.peerNodeIdHex == peerHex || cachedDevHex == peerHex) {
         session.invalidateCachedRoute();
+      }
+    };
+
+    // §5.5b: FIRST_CR_STORE_ACK callback — update contact status to
+    // storedForDelivery when a seed peer confirms it stored our CR.
+    node.onFirstCrStoreAck = (senderDeviceId, accepted) {
+      if (!accepted) return;
+      final senderHex = bytesToHex(senderDeviceId);
+      for (final entry in _contacts.entries) {
+        if (entry.value.status != 'pending_outgoing') continue;
+        // The ACK comes from the seed peer, not the target. Check if
+        // this seed peer is in the routing table as a protected seed.
+        final seedPeer = node.routingTable.getPeer(senderDeviceId);
+        if (seedPeer != null && seedPeer.isProtectedSeed) {
+          entry.value.status = 'storedForDelivery';
+          _saveContacts();
+          onStateChanged?.call();
+          _log.info('§5.5b CR storedForDelivery for '
+              '${entry.key.substring(0, 8)} via seed ${senderHex.substring(0, 8)}');
+          break;
+        }
       }
     };
 
@@ -3233,11 +3254,68 @@ class CleonaService implements ICleonaService {
     _log.info('CONTACT_REQUEST V3 First-CR-Bootstrap to '
         '${recipientUserIdHex.substring(0, 8)} (device='
         '${bytesToHex(recipientDeviceId).substring(0, 8)}) sendToDevice ok=$ok');
+
+    // §5.5b FIRST_CR_STORE: also deposit the CR on seed peers so the
+    // target can retrieve it even if currently offline (async CR via
+    // email/copy-paste). The blob is the serialized KEM-encrypted packet
+    // — opaque to the seed peer. Direct send bypasses DV cascade.
+    unawaited(_sendFirstCrStoreToSeedPeers(
+      recipientUserId: recipientUserId,
+      recipientDeviceId: recipientDeviceId,
+      encryptedCrBlob: Uint8List.fromList(packet.writeToBuffer()),
+    ));
+
     // First-contact CRs are persisted as pending_outgoing and retried by
     // _retryPendingContactRequests regardless of the initial send result.
     // Return true so the UI shows "sent" rather than "failed" — the retry
     // timer handles delivery even when the routing table isn't warm yet.
     return true;
+  }
+
+  // ── §5.5b First-CR-Store on seed peers ───────────────────────────────────
+
+  Future<void> _sendFirstCrStoreToSeedPeers({
+    required Uint8List recipientUserId,
+    required Uint8List recipientDeviceId,
+    required Uint8List encryptedCrBlob,
+  }) async {
+    final recipDevHex = bytesToHex(recipientDeviceId);
+    final storeMsg = proto.FirstCrStoreV3()
+      ..recipientUserId = recipientUserId
+      ..recipientDeviceId = recipientDeviceId
+      ..encryptedCrBlob = encryptedCrBlob
+      ..senderDeviceId = node.primaryIdentity.deviceNodeId
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..ttlMs = Int64(const Duration(days: 7).inMilliseconds);
+    final storeBytes = Uint8List.fromList(storeMsg.writeToBuffer());
+
+    // Find seed peers: protected DV neighbors that are NOT the target.
+    var sent = 0;
+    for (final nhHex in node.dvRouting.neighborIds) {
+      if (nhHex == recipDevHex) continue;
+      final peer = node.routingTable.getPeer(hexToBytes(nhHex));
+      if (peer == null || !peer.isProtectedSeed) continue;
+      if (peer.addresses.isEmpty) continue;
+      final addr = peer.addresses.first;
+      try {
+        final ok = await node.sendInfraDirect(
+          messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
+          innerPayload: storeBytes,
+          recipientDeviceId: hexToBytes(nhHex),
+          addr: InternetAddress(addr.ip),
+          port: addr.port,
+        );
+        if (ok) sent++;
+        _log.info('§5.5b FIRST_CR_STORE → ${nhHex.substring(0, 8)} '
+            '(${addr.ip}:${addr.port}) ok=$ok');
+      } catch (e) {
+        _log.debug('§5.5b FIRST_CR_STORE to ${nhHex.substring(0, 8)} error: $e');
+      }
+    }
+    if (sent > 0) {
+      _log.info('§5.5b FIRST_CR_STORE: deposited CR on $sent seed peers '
+          'for ${recipDevHex.substring(0, 8)}');
+    }
   }
 
   // ── §8.1.1 rev3 Deferred Key Exchange (step 1b) ─────────────────────────
@@ -3370,7 +3448,8 @@ class CleonaService implements ICleonaService {
       for (final e in _contacts.entries) {
         if (e.value.seedDeviceIdHex == senderHex &&
             e.value.seedEpB64 != null &&
-            e.value.status == 'pending_outgoing') {
+            (e.value.status == 'pending_outgoing' ||
+             e.value.status == 'storedForDelivery')) {
           contact = e.value;
           contactUserHex = e.key;
           break;
@@ -3461,8 +3540,9 @@ class CleonaService implements ICleonaService {
     final contact = _contacts[nodeIdHex];
     if (contact == null) return false;
     // Allow 'pending' (normal accept), 'accepted' (re-contact response),
-    // and 'pending_outgoing' (bidirectional CR auto-accept).
-    if (contact.status != 'pending' && contact.status != 'accepted' && contact.status != 'pending_outgoing') return false;
+    // 'pending_outgoing' and 'storedForDelivery' (bidirectional CR auto-accept).
+    if (contact.status != 'pending' && contact.status != 'accepted' &&
+        contact.status != 'pending_outgoing' && contact.status != 'storedForDelivery') return false;
 
     contact.status = 'accepted';
     contact.acceptedAt ??= DateTime.now();

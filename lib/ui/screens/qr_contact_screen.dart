@@ -159,11 +159,25 @@ class _QrShowScreenState extends State<QrShowScreen> {
         final bScore = _addressPriority(b);
         return aScore.compareTo(bScore);
       });
+      // §8.1.1: take top 3 addresses, but guarantee global IPv6 inclusion
+      // (DS-Lite bypass §4.7). Without this, the IPv6 that qualifies the
+      // peer as relay-capable may be excluded by the limit.
+      final top = sorted.isNotEmpty
+          ? sorted.take(3).toList()
+          : ['${p.address}:${p.port}'];
+      if (sorted.length > 3) {
+        final globalV6 = sorted.firstWhere(
+          (a) => a.startsWith('[') &&
+              !a.contains('fe80:') && !a.contains('fd') && !a.contains('fc'),
+          orElse: () => '',
+        );
+        if (globalV6.isNotEmpty && !top.contains(globalV6)) {
+          top.add(globalV6);
+        }
+      }
       return SeedPeer(
         nodeIdHex: p.nodeIdHex,
-        addresses: sorted.isNotEmpty
-            ? sorted.take(3).toList()
-            : ['${p.address}:${p.port}'],
+        addresses: top,
       );
     }).toList();
 
