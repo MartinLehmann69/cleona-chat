@@ -477,7 +477,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.153';
+  static const String kCurrentAppVersion = '3.1.154';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -9010,7 +9010,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       rttMap: node.dhtRpc.rttMap,
       isRunning: isRunning,
       profileDir: profileDir,
-      reachablePeerCount: node.reachablePeerIds.length,
+      reachablePeerCount: peerSummaries.length,
       // D5 (§13.1.3): collective-quota observability.
       poolDropsRate: node.rateLimiter.poolDroppedPackets,
       poolDropsRelay: node.relayPoolDrops,

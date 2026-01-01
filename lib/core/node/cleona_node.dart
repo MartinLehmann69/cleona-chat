@@ -592,13 +592,23 @@ class CleonaNode {
   Set<String> get confirmedPeerIds =>
       _confirmedPeers.keys.where(isPeerConfirmed).toSet();
 
+  /// UI-Fenster fuer "aktive Peers": 2h statt der vollen 72h
+  /// confirmedPeerTtl. Die 72h bleiben fuer isPeerConfirmed() (Sendepfad).
+  /// 2h = 2x DV-Safety-Net-Sweep-Periode (1h) mit Marge, damit idle
+  /// LAN-Peers die per Sweep refresht werden nicht flappen.
+  static const Duration _uiReachableWindow = Duration(hours: 2);
+
   /// S119 B / S210: authoritative "reachable" set for UI counters and peer
-  /// lists — confirmed (bidirectional UDP within TTL) ∪ recently-alive DV
-  /// route.  Uses [hasRecentAliveRouteTo] (10 min window) instead of bare
-  /// [hasAliveRouteTo] to exclude relay-route-hints that were never used
-  /// for actual traffic and accumulated indefinitely.
+  /// lists — confirmed (bidirectional UDP within _uiReachableWindow) ∪
+  /// recently-alive DV route.  Uses [hasRecentAliveRouteTo] (10 min window)
+  /// instead of bare [hasAliveRouteTo] to exclude relay-route-hints that
+  /// were never used for actual traffic and accumulated indefinitely.
   Set<String> get reachablePeerIds {
-    final set = confirmedPeerIds;
+    final now = DateTime.now();
+    final set = _confirmedPeers.entries
+        .where((e) => now.difference(e.value) <= _uiReachableWindow)
+        .map((e) => e.key)
+        .toSet();
     for (final destHex in dvRouting.allDestinations) {
       if (!set.contains(destHex) &&
           dvRouting.hasRecentAliveRouteTo(destHex)) {
@@ -2282,12 +2292,12 @@ class CleonaNode {
       if (senderPeerLocal?.userId != null) {
         _decrementUnackedPacketsToPeer(bytesToHex(senderPeerLocal!.userId!));
       }
-      // A BOOT-path response (e.g. DHT_PONG) proves bidirectional
-      // reachability just like an ApplicationFrame with hopCount==0.
-      // On Mobilfunk/CGNAT, BOOT is the ONLY inbound path — without this,
-      // hasSessionConfirmedPeers stays false and the QR convergence gate
-      // never opens.
-      if (from.address != '0.0.0.0') {
+      // Only direct packets (hopCount==0) prove bidirectional UDP
+      // reachability. Relayed infra-frames (hopCount>0) arrive from the
+      // relay's IP — confirming them inflated _confirmedPeers with every
+      // DHT/Auth peer in the network. BOOT-path responses are inherently
+      // direct (wasDirect=true), so CGNAT/Mobilfunk QR gate still works.
+      if (wasDirect) {
         final wasConfirmedLocal = isPeerConfirmed(senderHexLocal);
         _confirmedPeers[senderHexLocal] = DateTime.now();
         _notifyEndpointConfirmed(senderHexLocal);

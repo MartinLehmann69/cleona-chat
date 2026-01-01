@@ -59,13 +59,26 @@ class ClipboardHelper {
       MethodChannel('chat.cleona/clipboard');
 
   /// Detect which clipboard tool is available (cached).
+  ///
+  /// Probes connectivity, not just binary existence: `which wl-paste` returns 0
+  /// when the binary is in PATH, but wl-paste silently fails if the app runs
+  /// under X11 (GDK_BACKEND=x11) without a reachable Wayland compositor.
+  /// In that case we fall back to xclip which talks X11 directly.
   static Future<String?> _detectTool() async {
     if (_cachedTool != null) return _cachedTool;
     try {
-      final result = await Process.run('which', ['wl-paste']);
-      if (result.exitCode == 0) {
-        _cachedTool = 'wl-paste';
-        return _cachedTool;
+      final which = await Process.run('which', ['wl-paste']);
+      if (which.exitCode == 0) {
+        // Probe: wl-paste --list-types exits 0 when connected (even on an
+        // empty clipboard).  It exits 1 with stderr when no compositor is
+        // reachable.  A 2-second timeout guards against hangs.
+        final probe = await Process.run('wl-paste', ['--list-types'])
+            .timeout(const Duration(seconds: 2));
+        if (probe.exitCode == 0) {
+          _cachedTool = 'wl-paste';
+          return _cachedTool;
+        }
+        // wl-paste binary exists but cannot connect — fall through to xclip.
       }
     } catch (_) {}
     try {
