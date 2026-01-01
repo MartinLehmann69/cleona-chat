@@ -35,14 +35,16 @@ endif()
 
 # Apple (iOS / macOS): Core Audio via AudioToolbox + AVFoundation frameworks.
 # miniaudio detects the platform and uses the coreaudio backend automatically.
+# miniaudio.h includes AVFoundation.h which contains Objective-C (@class etc.),
+# so miniaudio_impl.c must be compiled as Objective-C on Apple platforms.
 if(APPLE)
+  set_source_files_properties(miniaudio_impl.c PROPERTIES LANGUAGE OBJC)
   target_link_libraries(cleona_audio PRIVATE
     "-framework AudioToolbox"
     "-framework CoreFoundation"
+    "-framework AVFoundation"
   )
-  if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    target_link_libraries(cleona_audio PRIVATE "-framework AVFAudio")
-  else()
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     target_link_libraries(cleona_audio PRIVATE "-framework CoreAudio")
   endif()
 endif()
