@@ -60,6 +60,7 @@ import 'package:cleona/core/crypto/linkable_ring_signature.dart';
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
+import 'package:cleona/core/channels/contact_issue_reporter.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -360,9 +361,12 @@ class CleonaService implements ICleonaService {
 
   // System channels (§9.5)
   CrashReporter? _crashReporter;
+  ContactIssueReporter? _contactIssueReporter;
   Timer? _systemChannelEvictionTimer;
 
   CrashReporter get crashReporter => _crashReporter ??= CrashReporter(this);
+  ContactIssueReporter get contactIssueReporter =>
+      _contactIssueReporter ??= ContactIssueReporter(this);
 
   // Guardian restore callback
   @override
@@ -2478,9 +2482,8 @@ class CleonaService implements ICleonaService {
   /// DV-route is registered. This is what unblocks `sendToDevice` for the
   /// First-CR InfraFrame — without it, `cascade exhausted (routes=0)`
   /// because DV-routing keys on Device-IDs while legacy seeds added the
-  /// peer under the User-ID. [targetDxkB64] / [targetDmkB64] are accepted
-  /// for forward-compat with a future DKR-cache and ignored for now (the
-  /// Device-KEM keys are still passed inline in `send_contact_request`).
+  /// peer under the User-ID. [targetDxkB64] / [targetDmkB64] (v1 legacy)
+  /// or [targetEpB64] (v2 rev3 trust-anchor) from ContactSeed.
   @override
   void addPeersFromContactSeed(
     String targetNodeIdHex,
@@ -2489,6 +2492,7 @@ class CleonaService implements ICleonaService {
     String? targetDeviceIdHex,
     String? targetDxkB64,
     String? targetDmkB64,
+    String? targetEpB64,
   }) {
     // Add the target node itself — always, even without addresses.
     // Without addresses the Three-Layer Cascade will relay via seed peers.
@@ -2658,7 +2662,8 @@ class CleonaService implements ICleonaService {
       {String message = '',
       String? seedDeviceIdHex,
       String? seedDxkB64,
-      String? seedDmkB64}) async {
+      String? seedDmkB64,
+      String? seedEpB64}) async {
     final existing = _contacts[recipientUserIdHex];
     final isReContact = existing != null && existing.status == 'accepted';
 
@@ -2685,6 +2690,7 @@ class CleonaService implements ICleonaService {
         seedDeviceIdHex: seedDeviceIdHex,
         seedDxkB64: seedDxkB64,
         seedDmkB64: seedDmkB64,
+        seedEpB64: seedEpB64,
       );
       _saveContacts();
     } else {
@@ -2735,29 +2741,31 @@ class CleonaService implements ICleonaService {
         return false;
       }
     } else {
-      _log.info('CONTACT_REQUEST V3 First-CR: ContactSeed lacks dxk/dmk — '
-          'falling back to 2D-DHT DeviceKemRecord lookup for '
-          '${recipientUserIdHex.substring(0, 8)} (§8.1.1 backward-compat)');
+      // §8.1.1 rev3 Deferred Key Exchange step 1a: resolve Device-KEM-PK
+      // from DHT (primary path for v2 ContactSeeds with ep trust-anchor).
+      _log.info('CONTACT_REQUEST First-CR: Deferred Key Exchange — '
+          'DHT lookup for ${recipientUserIdHex.substring(0, 8)}'
+          '${seedEpB64 != null ? " (v2 seed with ep)" : " (legacy seed)"}');
       final resolved = await node.identityResolver.resolve(recipientUserId);
       Uint8List? preferred;
       if (seedDeviceIdHex != null && seedDeviceIdHex.isNotEmpty) {
         try {
           preferred = hexToBytes(seedDeviceIdHex);
-        } catch (_) {/* malformed did — drop the prefer hint */}
+        } catch (_) {}
       }
       final picked = firstCrPickDeviceKem(resolved, preferred);
       if (picked == null) {
-        _log.warn('CONTACT_REQUEST drop (V3 first-contact): no DeviceKemRecord '
-            'in 2D-DHT for ${recipientUserIdHex.substring(0, 8)} — recipient '
-            'must publish IDENTITY_KEM_PUBLISH first, or sender must re-scan '
-            'a fresh ContactSeed-URI with dxk/dmk');
+        _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
+            'no DeviceKemRecord in DHT for '
+            '${recipientUserIdHex.substring(0, 8)}. '
+            'CR queued for retry (exponential backoff).');
         return false;
       }
       dxk = Uint8List.fromList(picked.deviceX25519Pk!);
       dmk = Uint8List.fromList(picked.deviceMlKemPk!);
       recipientDeviceId = Uint8List.fromList(picked.deviceNodeId);
-      _log.info('CONTACT_REQUEST V3 First-CR: 2D-DHT fallback resolved '
-          'device ${bytesToHex(recipientDeviceId).substring(0, 8)} for '
+      _log.info('CONTACT_REQUEST First-CR: DHT resolved device '
+          '${bytesToHex(recipientDeviceId).substring(0, 8)} for '
           '${recipientUserIdHex.substring(0, 8)} '
           '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
     }
@@ -3021,13 +3029,14 @@ class CleonaService implements ICleonaService {
       final ci = entry.value;
       _lastCrRetryPerContact[entry.key] = now;
       _crRetryCountPerContact[entry.key] = count + 1;
-      if (ci.seedDeviceIdHex == null ||
-          ci.seedDxkB64 == null ||
-          ci.seedDmkB64 == null) {
+      // v2 seeds have ep but no dxk/dmk — Deferred Key Exchange via DHT.
+      // v1 seeds have dxk+dmk. Both need seedDeviceIdHex.
+      final hasV1Seed = ci.seedDxkB64 != null && ci.seedDmkB64 != null;
+      final hasV2Seed = ci.seedEpB64 != null;
+      if (ci.seedDeviceIdHex == null || (!hasV1Seed && !hasV2Seed)) {
         _log.debug(
             'CR retry skipped for ${entry.key.substring(0, 8)} (attempt '
-            '${count + 1}): no persisted ContactSeed (legacy contact) — '
-            're-scan QR to resend');
+            '${count + 1}): no persisted ContactSeed — re-scan QR to resend');
         continue;
       }
       unawaited(sendContactRequest(
@@ -3036,6 +3045,7 @@ class CleonaService implements ICleonaService {
         seedDeviceIdHex: ci.seedDeviceIdHex,
         seedDxkB64: ci.seedDxkB64,
         seedDmkB64: ci.seedDmkB64,
+        seedEpB64: ci.seedEpB64,
       ));
       _log.info(
           'CR retry replayed for ${entry.key.substring(0, 8)} (attempt '
@@ -6745,6 +6755,8 @@ class CleonaService implements ICleonaService {
   @override
   Uint8List get deviceMlKemPk => node.deviceKem.mlKemPublicKey;
   @override
+  Uint8List get userEd25519Pk => identity.ed25519PublicKey;
+  @override
   int get peerCount => node.routingTable.peerCount;
   @override
   int get confirmedPeerCount => node.confirmedPeerIds.length;
@@ -6774,6 +6786,10 @@ class CleonaService implements ICleonaService {
   @override
   List<ContactInfo> get pendingContacts =>
       _contacts.values.where((c) => c.status == 'pending').toList();
+
+  @override
+  List<ContactInfo> get pendingOutgoingContacts =>
+      _contacts.values.where((c) => c.status == 'pending_outgoing').toList();
 
   @override
   ContactInfo? getContact(String nodeIdHex) => _contacts[nodeIdHex];
@@ -6870,6 +6886,7 @@ class CleonaService implements ICleonaService {
       'conversations': conversations.map((k, v) => MapEntry(k, v.toJson())),
       'acceptedContacts': acceptedContacts.map((c) => c.toJson()).toList(),
       'pendingContacts': pendingContacts.map((c) => c.toJson()).toList(),
+      'pendingOutgoingContacts': pendingOutgoingContacts.map((c) => c.toJson()).toList(),
       'currentCall': currentCall?.toJson(),
       'isMuted': isMuted,
       'isSpeakerEnabled': isSpeakerEnabled,
@@ -6885,6 +6902,7 @@ class CleonaService implements ICleonaService {
       'deviceNodeIdHex': deviceNodeIdHex,
       'deviceX25519PkB64': base64Encode(deviceX25519Pk),
       'deviceMlKemPkB64': base64Encode(deviceMlKemPk),
+      'userEd25519PkB64': base64Encode(userEd25519Pk),
     };
   }
 
@@ -6901,6 +6919,21 @@ class CleonaService implements ICleonaService {
       isRunning: isRunning,
       profileDir: profileDir,
     );
+  }
+
+  // ── Contact issue reporting ────────────────────────────────────────
+  @override
+  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex) {
+    final contact = _contacts[contactNodeIdHex];
+    if (contact == null) return null;
+    return contactIssueReporter.buildReport(contact);
+  }
+
+  @override
+  Future<bool> publishContactIssueReport(String contactNodeIdHex) async {
+    final report = buildContactIssueReport(contactNodeIdHex);
+    if (report == null) return false;
+    return contactIssueReporter.publishReport(report);
   }
 
   // ── NAT-Troubleshooting-Wizard (§27.9) ───────────────────────────────
@@ -12673,13 +12706,20 @@ class CleonaService implements ICleonaService {
     try {
       final payload = Uint8List.fromList(frame.payload);
       final senderUserId = Uint8List.fromList(frame.senderUserId);
-      final voteCandidate = proto.JuryVoteMsg.fromBuffer(payload);
-      final juryIdHex = bytesToHex(Uint8List.fromList(voteCandidate.juryId));
-      if (_activeSessions.containsKey(juryIdHex)) {
-        _handleIncomingJuryVote(payload, senderUserId);
-      } else {
-        _handleIncomingJuryRequest(payload, senderUserId);
+      // Try parsing as JuryVoteMsg first (vote-back from juror to initiator).
+      // If we hold an active session for this juryId, it's a vote; otherwise
+      // parse as JuryRequestMsg (initiator → juror selection).
+      try {
+        final voteCandidate = proto.JuryVoteMsg.fromBuffer(payload);
+        final juryIdHex = bytesToHex(Uint8List.fromList(voteCandidate.juryId));
+        if (_activeSessions.containsKey(juryIdHex)) {
+          _handleIncomingJuryVote(payload, senderUserId);
+          return;
+        }
+      } catch (_) {
+        // Not a valid JuryVoteMsg — fall through to JuryRequestMsg parse
       }
+      _handleIncomingJuryRequest(payload, senderUserId);
     } catch (e) {
       _log.warn('_handleChannelJuryVoteV3: dispatch fail: $e '
           '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');

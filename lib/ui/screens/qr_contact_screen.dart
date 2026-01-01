@@ -149,8 +149,8 @@ class _QrShowScreenState extends State<QrShowScreen> {
       );
     }).toList();
 
-    // §8.1.1 rev2: QR includes dxk/dmk (DHT fallback unreliable for
-    // cross-network scans). Compact binary + zstd keeps QR manageable.
+    // §8.1.1 rev3: QR carries userEd25519Pk (32B trust-anchor) instead of
+    // dxk+dmk (1216B). Device-KEM keys resolved via DHT or Deferred KE.
     final seed = ContactSeed(
       nodeIdHex: qrNodeIdHex,
       displayName: qrDisplayName,
@@ -158,26 +158,14 @@ class _QrShowScreenState extends State<QrShowScreen> {
       seedPeers: seedPeerList,
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
-      deviceX25519Pk: service.deviceX25519Pk,
-      deviceMlKemPk: service.deviceMlKemPk,
+      userEd25519Pk: service.userEd25519Pk,
     );
     final qrBytes = seed.toQrBytes();
     final qrCode = qr_lib.QrCode.fromUint8List(
       data: qrBytes,
       errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
     );
-
-    final shareSeed = ContactSeed(
-      nodeIdHex: qrNodeIdHex,
-      displayName: qrDisplayName,
-      ownAddresses: ownAddrs,
-      seedPeers: seedPeerList,
-      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
-      deviceIdHex: service.deviceNodeIdHex,
-      deviceX25519Pk: service.deviceX25519Pk,
-      deviceMlKemPk: service.deviceMlKemPk,
-    );
-    final shareUri = shareSeed.toUri();
+    final shareUri = seed.toUri();
 
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('qr_my_code'))),
@@ -450,13 +438,14 @@ class _QrScanScreenState extends State<QrScanScreen> {
     try {
       // Register target + seed peers in routing table, then wait for PONGs
       // so relay candidates are confirmed before sending the CR.
-      // Welle 5 §8.1.1: First-Contact-CR carries the recipient's Device-KEM
-      // pubkeys (dxk/dmk) and the recipient's deviceId so the daemon can
-      // build an InfrastructureFrame KEM-encapped under the correct device.
+      // §8.1.1 rev3: v2 seeds carry ep (userEd25519Pk) instead of dxk/dmk.
+      // v1 legacy seeds with dxk/dmk still work (passed through).
       final dxk = seed.deviceX25519Pk;
       final dmk = seed.deviceMlKemPk;
       final dxkB64 = dxk != null ? base64.encode(dxk) : null;
       final dmkB64 = dmk != null ? base64.encode(dmk) : null;
+      final ep = seed.userEd25519Pk;
+      final epB64 = ep != null ? base64Url.encode(ep).replaceAll('=', '') : null;
       widget.service.addPeersFromContactSeed(
         seed.nodeIdHex,
         seed.ownAddresses,
@@ -464,6 +453,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
         targetDeviceIdHex: seed.deviceIdHex,
         targetDxkB64: dxkB64,
         targetDmkB64: dmkB64,
+        targetEpB64: epB64,
       );
       await Future.delayed(const Duration(seconds: 3));
       final success = await widget.service.sendContactRequest(
@@ -471,6 +461,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
         seedDeviceIdHex: seed.deviceIdHex,
         seedDxkB64: dxkB64,
         seedDmkB64: dmkB64,
+        seedEpB64: epB64,
       );
       if (mounted) {
         if (success) {

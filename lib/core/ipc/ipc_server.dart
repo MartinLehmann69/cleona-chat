@@ -1050,6 +1050,47 @@ class IpcServer {
           ));
           break;
 
+        case 'build_contact_issue_report':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final ciNodeIdHex = req.params['nodeIdHex'] as String?;
+          if (ciNodeIdHex == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
+            break;
+          }
+          final ciReport = service.buildContactIssueReport(ciNodeIdHex);
+          if (ciReport == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Contact not found'));
+            break;
+          }
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {'report': ciReport.toJson()},
+          ));
+          break;
+
+        case 'publish_contact_issue_report':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final pubNodeIdHex = req.params['nodeIdHex'] as String?;
+          if (pubNodeIdHex == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
+            break;
+          }
+          final pubOk = await service.publishContactIssueReport(pubNodeIdHex);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: pubOk,
+          ));
+          break;
+
         case 'rename_contact':
           final service = _resolveService(client, req);
           if (service == null) {

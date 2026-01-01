@@ -36,7 +36,6 @@ import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
-import 'package:cleona/core/platform/app_paths.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -630,18 +629,18 @@ class CleonaNode {
     };
 
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
-    final identityFileEnc = FileEncryption(baseDir: '${AppPaths.home}/.cleona');
+    final identityFileEnc = FileEncryption(baseDir: profileDir);
 
     // V3.0 Device-Sig keypair (§3.5). Loaded once per daemon, shared across
     // all hosted identities. Lazy-created on first start.
     _deviceKeys = DeviceKeysStore.loadOrCreate(
-      baseDir: '${AppPaths.home}/.cleona',
+      baseDir: profileDir,
       fileEnc: identityFileEnc,
     );
     identityDhtHandler = IdentityDhtHandler(
       ownNodeId: primaryIdentity.deviceNodeId,
       fileEncryption: identityFileEnc,
-      storagePath: '${AppPaths.home}/.cleona/identity_dht_storage.json',
+      storagePath: '$profileDir/identity_dht_storage.json',
     );
     await identityDhtHandler.start();
     identityResolver = IdentityResolver(

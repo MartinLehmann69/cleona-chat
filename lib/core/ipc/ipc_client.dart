@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/core/service/service_interface.dart';
@@ -50,6 +51,7 @@ class IpcClient implements ICleonaService {
   String _deviceNodeIdHex = '';
   Uint8List _deviceX25519Pk = Uint8List(0);
   Uint8List _deviceMlKemPk = Uint8List(0);
+  Uint8List _userEd25519Pk = Uint8List(0);
   String _displayName = '';
   int _port = 0;
   int _peerCount = 0;
@@ -66,6 +68,7 @@ class IpcClient implements ICleonaService {
   final Map<String, Conversation> conversations = {};
   List<ContactInfo> _acceptedContacts = [];
   List<ContactInfo> _pendingContacts = [];
+  List<ContactInfo> _pendingOutgoingContacts = [];
 
   // Cached call state
   CallInfo? _currentCall;
@@ -527,6 +530,10 @@ class IpcClient implements ICleonaService {
     if (dmkB64 != null && dmkB64.isNotEmpty) {
       try { _deviceMlKemPk = base64Decode(dmkB64); } catch (_) {}
     }
+    final epB64 = state['userEd25519PkB64'] as String?;
+    if (epB64 != null && epB64.isNotEmpty) {
+      try { _userEd25519Pk = base64Decode(epB64); } catch (_) {}
+    }
     _displayName = state['displayName'] as String? ?? _displayName;
     _port = state['port'] as int? ?? _port;
     _peerCount = state['peerCount'] as int? ?? _peerCount;
@@ -604,6 +611,13 @@ class IpcClient implements ICleonaService {
     final pending = state['pendingContacts'] as List<dynamic>?;
     if (pending != null) {
       _pendingContacts = pending
+          .map((c) => ContactInfo.fromJson(c as Map<String, dynamic>))
+          .toList();
+    }
+
+    final pendingOut = state['pendingOutgoingContacts'] as List<dynamic>?;
+    if (pendingOut != null) {
+      _pendingOutgoingContacts = pendingOut
           .map((c) => ContactInfo.fromJson(c as Map<String, dynamic>))
           .toList();
     }
@@ -788,6 +802,8 @@ class IpcClient implements ICleonaService {
   @override
   Uint8List get deviceMlKemPk => _deviceMlKemPk;
   @override
+  Uint8List get userEd25519Pk => _userEd25519Pk;
+  @override
   String get displayName => _displayName;
   @override
   int get port => _port;
@@ -831,10 +847,12 @@ class IpcClient implements ICleonaService {
   List<ContactInfo> get acceptedContacts => _acceptedContacts;
   @override
   List<ContactInfo> get pendingContacts => _pendingContacts;
+  @override
+  List<ContactInfo> get pendingOutgoingContacts => _pendingOutgoingContacts;
 
   @override
   ContactInfo? getContact(String nodeIdHex) {
-    for (final c in [..._acceptedContacts, ..._pendingContacts]) {
+    for (final c in [..._acceptedContacts, ..._pendingContacts, ..._pendingOutgoingContacts]) {
       if (c.nodeIdHex == nodeIdHex) return c;
     }
     return null;
@@ -1478,13 +1496,15 @@ class IpcClient implements ICleonaService {
       {String message = '',
       String? seedDeviceIdHex,
       String? seedDxkB64,
-      String? seedDmkB64}) async {
+      String? seedDmkB64,
+      String? seedEpB64}) async {
     final resp = await _sendRequest('send_contact_request', params: {
       'recipientId': recipientUserIdHex,
       if (message.isNotEmpty) 'message': message,
       'seedDeviceIdHex': ?seedDeviceIdHex,
       'seedDxkB64': ?seedDxkB64,
       'seedDmkB64': ?seedDmkB64,
+      'seedEpB64': ?seedEpB64,
     });
     return resp.success;
   }
@@ -1508,8 +1528,8 @@ class IpcClient implements ICleonaService {
     String? targetDeviceIdHex,
     String? targetDxkB64,
     String? targetDmkB64,
+    String? targetEpB64,
   }) {
-    // On GUI side: send seed peers via IPC to daemon for routing table injection
     _sendRequest('add_seed_peers', params: {
       'targetNodeIdHex': targetNodeIdHex,
       'targetAddresses': targetAddresses,
@@ -1520,6 +1540,7 @@ class IpcClient implements ICleonaService {
       'targetDeviceIdHex': ?targetDeviceIdHex,
       'targetDxkB64': ?targetDxkB64,
       'targetDmkB64': ?targetDmkB64,
+      'targetEpB64': ?targetEpB64,
     });
   }
 
@@ -1687,6 +1708,38 @@ class IpcClient implements ICleonaService {
       _cachedStats = NetworkStats.fromJson(resp.data['stats'] as Map<String, dynamic>);
     }
     return _cachedStats ?? const NetworkStats();
+  }
+
+  // ── Contact issue reporting ────────────────────────────────────────
+  @override
+  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex) {
+    ContactIssueReport? result;
+    _sendRequest('build_contact_issue_report',
+        params: {'nodeIdHex': contactNodeIdHex}).then((resp) {
+      if (resp.success && resp.data.containsKey('report')) {
+        result = ContactIssueReport.fromJson(
+            resp.data['report'] as Map<String, dynamic>);
+      }
+    });
+    return result;
+  }
+
+  Future<ContactIssueReport?> fetchContactIssueReport(
+      String contactNodeIdHex) async {
+    final resp = await _sendRequest('build_contact_issue_report',
+        params: {'nodeIdHex': contactNodeIdHex});
+    if (resp.success && resp.data.containsKey('report')) {
+      return ContactIssueReport.fromJson(
+          resp.data['report'] as Map<String, dynamic>);
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> publishContactIssueReport(String contactNodeIdHex) async {
+    final resp = await _sendRequest('publish_contact_issue_report',
+        params: {'nodeIdHex': contactNodeIdHex});
+    return resp.success;
   }
 
   // ── NAT-Troubleshooting-Wizard (§27.9) — IPC proxy ──────────────────

@@ -33,6 +33,9 @@ class SystemChannelPost extends StatelessWidget {
     if (type == 'crash_duplicate') {
       return _buildDuplicate(context, json, colorScheme);
     }
+    if (type == 'contact_issue') {
+      return _buildContactIssue(context, json, colorScheme);
+    }
     return _plainFallback(colorScheme);
   }
 
@@ -158,6 +161,76 @@ class SystemChannelPost extends StatelessWidget {
                 fontSize: 10,
                 color: cs.outline,
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContactIssue(
+      BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
+    final report = ContactIssueReport.fromJson(json);
+    if (report == null) return _plainFallback(cs);
+
+    return Card(
+      color: cs.tertiaryContainer.withValues(alpha: 0.3),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.contact_support, size: 18, color: cs.tertiary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '${report.contactName} (${report.contactIdShort})',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: cs.onTertiaryContainer,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  'v${report.appVersion}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: cs.onTertiaryContainer.withValues(alpha: 0.7),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Seed-Alter: ${ContactIssueReport.formatDuration(report.seedAgeSeconds)} · '
+              'NAT: ${report.natType} · '
+              'DHT: ${report.peerSeenInDht ? "sichtbar" : "nicht sichtbar"}',
+              style: TextStyle(fontSize: 12, color: cs.onTertiaryContainer),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                _chip(cs, report.platform),
+                const SizedBox(width: 4),
+                _chip(cs, '${report.peerCount} peers'),
+                const SizedBox(width: 4),
+                _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
+                const Spacer(),
+                Text(
+                  timestamp,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: cs.onTertiaryContainer.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
             ),
           ],
         ),

@@ -385,6 +385,7 @@ class _MultiServiceDaemon {
 
     final primaryCtx = IdentityContext(
       profileDir: primaryId.profileDir,
+      baseDir: config.baseDir,
       displayName: primaryId.displayName,
       networkChannel: NetworkSecret.channel.name,
       hdIndex: primaryId.hdIndex,
@@ -416,6 +417,7 @@ class _MultiServiceDaemon {
       final id = identities[i];
       final ctx = IdentityContext(
         profileDir: id.profileDir,
+        baseDir: config.baseDir,
         displayName: id.displayName,
         networkChannel: NetworkSecret.channel.name,
         hdIndex: id.hdIndex,

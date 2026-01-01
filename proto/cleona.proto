@@ -1534,6 +1534,13 @@ enum MessageTypeV3 {
   MTV3_SCREEN_SHARE_FRAME         = 214;
   MTV3_CALL_CHAT                  = 215;
   MTV3_REMOTE_CONTROL_INPUT       = 216;
+
+  // Deferred Key Exchange + First-CR-Mailbox (rev3, §8.1.1 + §5.5b)
+  MTV3_DEVICE_KEM_REQUEST          = 220;
+  MTV3_DEVICE_KEM_OFFER            = 221;
+  MTV3_FIRST_CR_STORE              = 222;
+  MTV3_FIRST_CR_STORE_ACK          = 223;
+  MTV3_FIRST_CR_DELIVER            = 224;
 }
 
 // ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────
@@ -1647,5 +1654,44 @@ message RelayForwardV3 {
   bytes           origin_device_id    = 7;
   uint64          created_at_ms       = 8;
   repeated bytes  visited             = 9;   // device_ids that already forwarded
+}
+
+// ── Deferred Key Exchange (rev3, §8.1.1) ─────────────────────────────────
+
+message DeviceKemRequestV3 {
+  bytes   target_user_id    = 1;   // 32 bytes — userId of the device owner
+  bytes   target_device_id  = 2;   // 32 bytes — specific device being queried
+  bytes   nonce             = 3;   // 16 bytes — replay protection + OFFER binding
+  uint64  timestamp_ms      = 4;
+}
+
+message DeviceKemOfferV3 {
+  bytes   device_x25519_pk  = 1;   // 32 bytes
+  bytes   device_ml_kem_pk  = 2;   // 1184 bytes (ML-KEM-768)
+  bytes   nonce             = 3;   // echo of REQUEST nonce
+  bytes   user_ed25519_sig  = 4;   // Ed25519 sig over (device_x25519_pk + device_ml_kem_pk + nonce)
+  uint64  timestamp_ms      = 5;
+}
+
+// ── First-CR-Mailbox (rev3, §5.5b) ──────────────────────────────────────
+
+message FirstCrStoreV3 {
+  bytes   recipient_user_id   = 1;   // 32 bytes — target userId
+  bytes   recipient_device_id = 2;   // 32 bytes — target deviceId
+  bytes   encrypted_cr_blob   = 3;   // KEM-encrypted InfrastructureFrame (opaque to SeedPeer)
+  bytes   sender_device_id    = 4;   // 32 bytes — for dedup
+  uint64  timestamp_ms        = 5;
+  uint64  ttl_ms              = 6;   // max 7 days (604800000)
+}
+
+message FirstCrStoreAckV3 {
+  bool    accepted            = 1;
+  string  reject_reason       = 2;   // "quota_exceeded" | "ttl_exceeded" | ...
+}
+
+message FirstCrDeliverV3 {
+  bytes   encrypted_cr_blob   = 1;   // same blob from FIRST_CR_STORE
+  bytes   sender_device_id    = 2;   // original sender
+  uint64  stored_at_ms        = 3;   // when the SeedPeer received the STORE
 }
 

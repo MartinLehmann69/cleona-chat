@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:17c2681d3480, 2026-06-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:270c41f838eb, 2026-06-06). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -319,6 +319,8 @@ message InfrastructureFrame {
 | NAT/hole-punch | HOLE_PUNCH_REQUEST, HOLE_PUNCH_NOTIFY, HOLE_PUNCH_PING, HOLE_PUNCH_PONG | **BOOT** |
 | Delivery ACK | DELIVERY_RECEIPT (when targeting senderDeviceId without UserID context) | KEM |
 | Identity-Layer Infrastructure (Welle 6) | RESTORE_BROADCAST, KEY_ROTATION_BROADCAST (Emergency-variant only — when both `oldSignatureEd25519` and `newSignatureEd25519` are set in the body) | KEM |
+| Deferred Key Exchange (rev3) | DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER | **BOOT** |
+| First-CR-Mailbox (rev3) | FIRST_CR_STORE, FIRST_CR_STORE_ACK, FIRST_CR_DELIVER | KEM |
 
 **BOOT-path requirements** (mandatory for every BOOT-row above):
 
@@ -1110,7 +1112,7 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 **Use cases**:
 
 1. **Infrastructure-Frame KEM** (§2.3.5) — DHT pings, routing probes, NAT/hole-punch, reachability queries, peer-list gossip, fragment storage, S&F on mutual peers, 2D-DHT identity-resolution operations. Sender encapsulates under recipient Device-KEM-PK; recipient decapsulates with Device-KEM-PrivKey.
-2. **First-Contact-Request bootstrap** (§8.1.1) — when Alice scans Bob's ContactSeed she knows his DeviceID and Device-KEM-PK (from the URI), but not yet his User-KEM-PK (which she only learns from CONTACT_REQUEST_RESPONSE). The CONTACT_REQUEST itself is therefore wrapped as `InfrastructureFrame.payload` (KEM under Bob's Device-KEM-PK), with Alice's full user-signed ApplicationFrame carried as the inner payload.
+2. **First-Contact-Request bootstrap** (§8.1.1) — when Alice scans Bob's ContactSeed she knows his DeviceID and userEd25519Pk (from the QR/URI). She resolves his Device-KEM-PK via DHT lookup (primary, §4.3) or DEVICE_KEM_REQUEST/OFFER handshake (fallback, §8.1.1 rev3). She does not yet know his User-KEM-PK (which she only learns from CONTACT_REQUEST_RESPONSE). The CONTACT_REQUEST itself is therefore wrapped as `InfrastructureFrame.payload` (KEM under Bob's Device-KEM-PK), with Alice's full user-signed ApplicationFrame carried as the inner payload.
 3. **Onion routing** (§2.5, future) — the per-hop KEM subject that makes the onion-hook structurally tragfähig. Without a Device-KEM-Keypair the §2.5 onion construction had no concrete cryptographic subject.
 
 **Rationale for separation from User-KEM-Keypair**:
@@ -1128,9 +1130,10 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 
 **Distribution**:
 
-- Inside the **DeviceKemRecord** in the 2D-DHT (§4.3 — separate record with 24h TTL, storage-key `SHA-256("kem" || userId || deviceId)`)
-- Inside the **ContactSeed URI** (§8.1.1) for First-Contact-Request bootstrap, parameters `dxk` (X25519) + `dmk` (ML-KEM-768)
+- Inside the **DeviceKemRecord** in the 2D-DHT (§4.3 — separate record with 24h TTL, storage-key `SHA-256("kem" || userId || deviceId)`) — primary distribution channel
+- Via **Deferred Key Exchange** (§8.1.1 rev3): `DEVICE_KEM_REQUEST` → signed `DEVICE_KEM_OFFER` — synchronous fallback when DHT record is unavailable
 - Cached in the local routing table once a `ResolvedDevice` has been observed
+- Legacy: inside the **ContactSeed URI** (§8.1.1 v1 format), parameters `dxk` (X25519) + `dmk` (ML-KEM-768) — still parsed for backward compatibility, but no longer emitted by v2 ContactSeeds
 
 **Key generation**: locally on the device using cryptographic randomness (NOT derived from the User-Master-Seed). The same rationale as §3.5 applies: device-key independence ensures that a seed compromise does not retroactively compromise the device's KEM state. See §3.6 #5 for the unified explanation that covers both Sig and KEM device keys.
 
@@ -1944,6 +1947,7 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
   if Layer 2 returned false for ALL resolved devices (or Layer 1 was empty):
     → Erasure-coded backup on K=10 closest DHT nodes (§5.4)
     → S&F copy on 3 mutual peers (§5.5)
+    → For First-CRs (no mutual peers exist): First-CR-Mailbox on SeedPeers (§5.5b)
     → Mailbox entry (§5.6) for receiver pull
     → Sender is done — receiver will poll on next coming-online
 ```
@@ -2072,6 +2076,66 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 - Benefit: receiver-pull instead of sender-push, less traffic, less ID confusion
 
 **Storage limit**: per receiver, max 30 stored messages on a single mutual. On overflow: oldest-first eviction.
+
+### 5.5b First-CR-Mailbox (Store-and-Forward for Non-Contacts)
+
+Regular S&F (§5.5) requires mutual peers (peers that are contacts of both sender and receiver). For First-Contact-Requests this precondition is never met — the sender and receiver do not know each other yet. The First-CR-Mailbox extends S&F to cover this gap.
+
+**Mechanism**: The SeedPeers listed in the ContactSeed (§8.1.1) serve as the "mutual peers" for the First-CR. They are the only nodes known to both sides: the ContactSeed-generator selected them from its routing table, and the scanner learned about them from the QR/URI. Any node can be a SeedPeer — there is no special bootstrap role, no hardcoded addresses, no central infrastructure.
+
+**New message types** (Infrastructure-Level, §2.3.5 selector list):
+
+| Type | Code | Direction | Purpose |
+|---|---|---|---|
+| `MTV3_FIRST_CR_STORE` | 222 | Scanner → SeedPeer | Request to store an encrypted First-CR |
+| `MTV3_FIRST_CR_STORE_ACK` | 223 | SeedPeer → Scanner | Confirmation of storage |
+| `MTV3_FIRST_CR_DELIVER` | 224 | SeedPeer → Recipient | Push stored CRs on recipient connect |
+
+```protobuf
+message FirstCrStore {
+  bytes recipient_device_id = 1;  // 32B: delivery target
+  bytes encrypted_payload = 2;    // opaque KEM-encrypted First-CR (InfrastructureFrame bytes)
+  int64 stored_at_ms = 3;
+  bytes sender_device_id = 4;     // 32B: for dedup and rate-limiting
+}
+
+message FirstCrDeliver {
+  repeated bytes encrypted_payloads = 1;  // stored CRs, each an opaque InfrastructureFrame blob
+}
+```
+
+**Flow**:
+
+1. Scanner (A) builds First-CR (KEM-encrypted under B's Device-KEM-PK, see §8.1.1 rev3 step 6)
+2. A sends First-CR to recipient (B) via normal routing cascade (§4.4 sendToDevice)
+3. If no `DELIVERY_RECEIPT` after 15 seconds: A sends `FIRST_CR_STORE` to each reachable SeedPeer from the ContactSeed
+4. SeedPeer validates (see acceptance criteria below) and stores; responds with `FIRST_CR_STORE_ACK`
+5. When B sends any firstParty packet to the SeedPeer (PONG, DV-Update, DHT-Request — **not** relayed packets): SeedPeer checks mailbox for B's `deviceId` → pushes `FIRST_CR_DELIVER`
+6. B receives, decrypts with Device-KEM-SK, processes as normal First-CR (§8.1.1 step 8)
+
+**Acceptance criteria** (all must be true for a SeedPeer to store):
+
+1. Valid Closed-Network HMAC on the outer packet (only official builds)
+2. `recipient_device_id` is in the SeedPeer's routing table — the SeedPeer "knows" the recipient. This is guaranteed by construction: the ContactSeed-generator selected this SeedPeer from its own routing table (freshness < 30 min), so the SeedPeer has bidirectional contact with the generator's device.
+3. Budget: max 10 CRs per recipient, max 1 MB total mailbox per node
+4. Rate limit: max 5 `FIRST_CR_STORE` per sender per hour
+5. No duplicate: `SHA-256(encrypted_payload)` dedup
+
+**Storage**:
+
+- TTL: 7 days (consistent with regular S&F §5.5 and erasure §5.4)
+- Cleanup: lazy on access + periodic GC (1-hour interval)
+- Persistence: in-memory + write-through to disk (survives daemon restart)
+
+**Security**:
+
+- **Confidentiality**: SeedPeer sees only `recipient_device_id` and an opaque KEM-encrypted blob. No plaintext, no UserIDs, no message content.
+- **Integrity**: the encrypted CR contains the sender's User-Signature — verified by recipient on decryption (§8.1.1 step 8).
+- **DoS**: rate-limiting + budget-cap + Closed-Network HMAC. An attacker needs the Network Secret to even send packets.
+- **Privacy**: `deviceId ≠ userId ≠ nodeId` (§4) — SeedPeer cannot correlate the delivery target to a user identity.
+- **No trust center**: every node participates equally. If a SeedPeer is compromised, it cannot read stored CRs (KEM-encrypted) and can at worst withhold delivery — mitigated by redundancy (CR is stored on **all** reachable SeedPeers from the ContactSeed).
+
+**No special node role**: The First-CR-Mailbox is a protocol-level capability of every Cleona node, not a special-purpose service. A desktop node that runs 24/7, a friend's phone, a community relay — any node that appears as a SeedPeer in someone's ContactSeed participates automatically. Bootstrap is one such node today; when it is decommissioned, any other long-running node fills the same role without code changes.
 
 ### 5.6 Mailbox (UserID-based Pull)
 
@@ -2647,28 +2711,61 @@ A Contact Request (CR) is the only permitted form in which an **unknown** user m
 
 **Bidirectional CR auto-accept**: if Alice accepts Bob's CR while Bob has already sent Alice a CR (race), both CRs are auto-accepted without further user confirmation.
 
-### 8.1.1 ContactSeed URI Format
+### 8.1.1 ContactSeed Format (rev3 — Compact ContactSeed + Deferred Key Exchange)
 
-The ContactSeed URI is the canonical machine-readable form of "Bob's contact info" used for QR-code, NFC, and copy/paste exchange. It is the prerequisite for the First-Contact-Request bootstrap — without it, Alice has no way to address Bob.
+The ContactSeed is the canonical machine-readable form of "Bob's contact info" used for QR-code, NFC, and copy/paste exchange. It is the prerequisite for the First-Contact-Request bootstrap — without it, Alice has no way to address Bob.
 
-**URI format**:
+Two format generations coexist (backward-compatible):
+
+#### ContactSeed v2 (rev3, current)
+
+**URI format** (compact, SMS-safe, base64url throughout):
 
 ```
-cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&dxk=<deviceX25519Pk_b64>&dmk=<deviceMlKemPk_b64>&a=<addresses>&s=<seedPeers>
+cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd25519Pk_base64url>&a=<addresses>&s=<seedPeers>
 ```
 
-**Parameters**:
+**QR binary format** (format byte `0x03` = zstd-compressed, `0x04` = uncompressed):
+
+```
+[32B userId] [32B deviceId] [32B userEd25519Pk]
+[1B channel] [1B nameLen] [nameUTF8]
+[1B addrCount] [{1B len, addrUTF8}...]
+[1B peerCount] [{32B peerNodeId, 1B addrCount, {1B len, addrUTF8}...}...]
+```
+
+**Size**: ~130-180 bytes binary (QR Version 8-10), ~300-400 chars URI (fits in a single SMS).
+
+**Parameters** (v2):
 
 | Param | Source | Format | Purpose |
 |---|---|---|---|
 | `<userIdHex>` (path) | UserID | 64 hex chars (32 bytes) | Bob's stable UserID |
 | `n` | display name | URL-encoded UTF-8 | hint only — re-confirmed inside CONTACT_REQUEST_RESPONSE |
 | `c` | channel tag | `b` (beta) or `l` (live) | mismatched channels are rejected before any send |
-| `did` | DeviceID | 64 hex chars (32 bytes) | identifies the QR-emitting device of Bob, so Alice can address First-CR via `sendToDevice(deviceId)` |
-| `dxk` (NEW Welle 5) | Device-X25519-PK | 32 bytes, base64 | required for InfrastructureFrame KEM-encap of First-CR |
-| `dmk` (NEW Welle 5) | Device-ML-KEM-768-PK | 1184 bytes, base64 | same |
+| `did` | DeviceID | 64 hex chars (32 bytes) | identifies the QR-emitting device of Bob |
+| `ep` (NEW rev3) | userEd25519Pk | 32 bytes, **base64url** (RFC 4648 §5, no `+`/`/`/`=`) | Trust-anchor for Deferred Key Exchange and DHT record verification |
 | `a` | reachable addresses | `ip:port+ip:port+...` (`+` URL-encoded as `%2B`) | Bob's current addresses for direct send |
-| `s` | seed peers (≤5) | `nodeIdHex@ip:port+ip:port,...` | bootstrap routing helpers |
+| `s` | seed peers (≤5) | `nodeIdHex@ip:port+ip:port,...` | routing helpers (any node, not necessarily bootstrap) |
+
+**Integrity check**: the scanner verifies `SHA-256(networkSecret + ep) == userIdHex`. A manipulated QR fails this check.
+
+**Rationale for removing dxk/dmk from v2**: The 1184-byte ML-KEM-768-PK dominated the payload (75% of QR, 73% of URI). This caused two concrete problems: (1) QR Version 26-28 is too dense for reliable phone-to-phone camera scanning, especially in low light; (2) the 2163-char URI with standard base64 (`+`, `/`, `=` characters) was corrupted by messaging apps during copy-paste transfer (link-detection, URL-encoding normalization, line-wrapping). The 32-byte `userEd25519Pk` replaces 1216 bytes of key material with a trust-anchor that enables runtime key resolution via DHT or Deferred Key Exchange.
+
+#### ContactSeed v1 (legacy, still parsed)
+
+**URI format**: `cleona://...&dxk=<base64>&dmk=<base64>...` (standard base64, 2163 chars typical)
+
+**QR binary format**: format byte `0x01`/`0x02`, includes `dxk` (32B) + `dmk` (1184B).
+
+Legacy v1 ContactSeeds with `dxk`+`dmk` are still fully parsed and trigger the direct First-CR path (step 3 below) without key resolution. No code removal needed.
+
+#### v1 Parameters (legacy, retained for backward compat)
+
+| Param | Format | Purpose |
+|---|---|---|
+| `dxk` | 32 bytes, base64 | Device-X25519-PK — direct InfrastructureFrame KEM-encap |
+| `dmk` | 1184 bytes, base64 | Device-ML-KEM-768-PK — same |
 
 **Seed-peer selection criteria** (V3.1.x):
 
@@ -2690,16 +2787,57 @@ After a daemon restart, the `_confirmedPeers` map is empty — no peer has been 
   - Once `_hasSessionConfirmedPeers == true`: the convergence indicator disappears and the QR code is displayed normally with confirmed seed peers.
 - **Rationale:** Displaying a QR code with stale or empty seed peers wastes the user's time (scanner cannot connect) and creates a confusing failure mode. The brief wait for mesh convergence is preferable. Persisted `_confirmedPeers` accelerate subsequent sessions where the network hasn't changed (warm start: first PONG arrives within 1-2s from a known peer).
 
-**No User-KEM-PK in the URI**, intentionally: Alice learns Bob's User-KEM-PK only from CONTACT_REQUEST_RESPONSE (and Bob's User-Sig-Pubkey is in the CR-payload itself). Until Bob accepts the CR, Alice has no authorization to encrypt anything to Bob's user identity. The Device-KEM-PK is sufficient for the bootstrap because the CR-payload itself is User-signed, and the Device-KEM acts purely as a transport tunnel for that signed payload.
+**No User/Device-KEM-PK in the v2 URI**, intentionally:
 
-**Backward compatibility**: legacy URIs without `dxk`/`dmk` parse fine but cannot be used as the recipient for a First-CR. The First-CR sender then falls back to a synchronous "fetch DeviceKemRecord from 2D-DHT" lookup if Bob has already published one (§4.3 step 4b). If neither URI nor 2D-DHT yields a Device-KEM-PK, the CR cannot be sent and the user receives a clear error ("Bob's contact code is too old, please ask him to re-share").
+- **User-KEM-PK**: Alice learns Bob's User-KEM-PK only from CONTACT_REQUEST_RESPONSE. Until Bob accepts the CR, Alice has no authorization to encrypt anything to Bob's user identity.
+- **Device-KEM-PK** (removed in rev3): the 1184-byte ML-KEM-768-PK dominated the payload (75% of QR, 73% of URI), producing QR Version 26-28 (unreliable for phone cameras) and 2163-char URIs (corrupted by messaging apps). The 32-byte `userEd25519Pk` (`ep` parameter) replaces these keys as a **trust-anchor**: it allows verifying DHT-published DeviceKemRecords (§3.5b) and DEVICE_KEM_OFFER signatures. Key material is resolved at runtime via the Deferred Key Exchange (steps 1a-1c below).
+- **Legacy v1 URIs** with `dxk`+`dmk` skip key resolution entirely (step 1c path with inline keys).
+- **base64url** (RFC 4648 §5): `ep` uses `-`/`_` instead of `+`/`/` and no `=` padding, eliminating the URI-corruption problem that affected v1's standard-base64 `dxk`/`dmk` in messaging apps.
+
+#### Deferred Key Exchange
+
+When the ContactSeed does not contain Device-KEM keys (v2 format), Alice must resolve Bob's Device-KEM-PK before she can build the InfrastructureFrame for the First-CR. The resolution is a 3-step cascade:
+
+```
+1a. DHT lookup (primary, < 1s):
+    Alice queries the DHT for Bob's DeviceKemRecord (§3.5b):
+      key = SHA-256("kem" + bobUserId + bobDeviceId)
+    If found: verify record signature against ep (userEd25519Pk from ContactSeed).
+    On success: use the enclosed Device-X25519-PK + Device-ML-KEM-768-PK.
+    → proceed to step 2.
+
+1b. DEVICE_KEM_REQUEST/OFFER handshake (fallback, if DHT miss):
+    Alice sends DEVICE_KEM_REQUEST { targetUserId, targetDeviceId }
+    to each SeedPeer from the ContactSeed. SeedPeers relay to Bob.
+    Bob responds with DEVICE_KEM_OFFER {
+      deviceX25519Pk, deviceMlKemPk,
+      userEd25519Sig over (deviceX25519Pk + deviceMlKemPk + nonce)
+    }
+    Alice verifies the signature against ep.
+    On success: cache as synthetic DeviceKemRecord, proceed to step 2.
+    Timeout: 8s per SeedPeer, parallel to all SeedPeers.
+
+1c. Inline keys (legacy v1 ContactSeed):
+    dxk + dmk are present in the URI/QR → no resolution needed.
+    → proceed to step 2.
+
+    If all three paths fail: UI shows "Bob is currently unreachable.
+    The contact request will be sent when a connection can be established."
+    The CR is queued with exponential backoff (10s → 600s), retrying
+    steps 1a-1b on each attempt.
+```
+
+**DEVICE_KEM_REQUEST / DEVICE_KEM_OFFER** are InfrastructureFrame messages (§2.3.5 selector list). They are NOT KEM-encrypted (the whole point is that Alice does not yet have Bob's Device-KEM-PK). They are Ed25519-signed at Infrastructure level (Outer-Sig). Anti-abuse: per-sender rate limit 5/min, PoW required.
 
 #### First-Contact-Request Bootstrap Flow
 
-This is the only place in V3.0 where the §2.3.5 InfrastructureFrame selector list is intentionally relaxed to admit a non-infrastructure MessageType (CONTACT_REQUEST). It must remain strict for all other MessageTypes.
+This is the only place in V3 where the §2.3.5 InfrastructureFrame selector list is intentionally relaxed to admit a non-infrastructure MessageType (CONTACT_REQUEST). It must remain strict for all other MessageTypes.
 
 ```
-1. Alice parses Bob's URI → bobUserId, bobDeviceId, bobDeviceX25519Pk, bobDeviceMlKemPk
+1. Alice parses Bob's ContactSeed → bobUserId, bobDeviceId, bobUserEd25519Pk (ep),
+   addresses, seedPeers. (v1: also bobDeviceX25519Pk, bobDeviceMlKemPk.)
+   Integrity check: SHA-256(networkSecret + ep) == bobUserId.
+1a-c. Deferred Key Exchange (see above) → obtains bobDeviceX25519Pk + bobDeviceMlKemPk.
 2. Alice builds her CR payload:
    ContactRequest {
      displayName: "Alice",
@@ -2731,7 +2869,12 @@ This is the only place in V3.0 where the §2.3.5 InfrastructureFrame selector li
                    nextHopDeviceId: bobDeviceId,
                    payload: PerMessageKem-bytes,
                    ... Outer-Sig (Ed25519-only per §3.5 Infrastructure rule) }
-7. Send via standard routing (§4.4 sendToDevice). Per §4.6 this gates on reachability, not direct-confirmed: the target is by definition not yet direct-confirmed, so the cascade attempts the URI's a= addresses directly AND relays via the s= seed peers; RUDP-Light (CR-Retry) confirms delivery.
+7. Send via standard routing (§4.4 sendToDevice). Per §4.6 this gates on
+   reachability, not direct-confirmed: the target is by definition not yet
+   direct-confirmed, so the cascade attempts the URI's a= addresses directly
+   AND relays via the s= seed peers; RUDP-Light (CR-Retry) confirms delivery.
+   If Bob is OFFLINE: the CR is stored on SeedPeers via First-CR-Mailbox
+   (§5.5b), delivered when Bob comes online.
 8. Bob's daemon decrypts (using Device-KEM-SK), reads the InfrastructureFrame,
    sees messageType=CONTACT_REQUEST → CR-Bootstrap exception → unwraps the inner
    ApplicationFrame, verifies Alice's User-Sig, KEX-Gate exception applies (§8.2),
@@ -3106,6 +3249,42 @@ CrashDuplicateReply {
 
 **Manual reporting:** Users can also post free-text descriptions of problems directly in the channel, with optional screenshot or log attachments (max 2 MB per post). These manual reports do not have fingerprints and are not subject to dedup.
 
+#### 9.5.2a Contact Issue Reporting — Manual Diagnostic Reports
+
+When a contact exchange fails silently (`pending_outgoing` contact does not transition to `accepted`), the user can trigger a structured diagnostic report from the contact list.
+
+**Trigger:** Contacts with status `pending_outgoing` appear in a dedicated "Wartende Kontakte" section of the contact list. Each entry shows a three-dot menu with "Problem melden".
+
+**ContactIssueReport:**
+
+```
+ContactIssueReport {
+  fingerprint:        SHA-256("contact-issue" + targetUserIdHex)
+  appVersion:         string
+  platform:           string
+  timestamp:          int64
+  contactIdShort:     string        // first 16 hex chars of target user ID
+  contactName:        string
+  seedAgeSeconds:     int64         // time since CR was sent
+  natType:            string        // fullCone / symmetric / unknown / …
+  peerCount:          int32         // active peers in routing table
+  confirmedPeerCount: int32         // bidirectionally confirmed this session
+  hasPortMapping:     bool          // UPnP/PCP success
+  peerSeenInDht:      bool          // target user found in routing table
+  logTail:            string        // last 30 CLogger lines
+  uptimeSeconds:      int64
+}
+```
+
+**Fingerprint:** Deterministic per target contact (`SHA-256("contact-issue" + userId)`), enabling dedup across multiple reports for the same failed contact exchange.
+
+**Dual-path export (Henne-Ei-Problem):** A node attempting its first contact may not yet be connected to the Cleona network, making the Bug Log channel unreachable. The dialog therefore offers two paths:
+
+- **Export (always available):** Saves a human-readable `.txt` file via the platform file picker (`FilePicker.saveFile`). The user can send this file via email, Signal, or any other channel to the developer or the other party.
+- **Post to Bug Log (only when `peerCount > 0`):** Publishes the report as a structured JSON post to the Bug Log channel, rendered with the same card UI as crash reports but with a distinct tertiary-color scheme and contact-specific fields. When no peers are connected, this button is hidden and an info text explains the limitation.
+
+**Privacy:** The report contains no message content, no full node IDs (only first 16 hex chars), no encryption keys, and no IP addresses. The log tail is the same truncated, path-normalized excerpt used by CrashReport.
+
 #### 9.5.3 Feature Request Channel — Community Voting
 
 Users post feature requests as free-text posts. On submission, a **poll is automatically attached** to the post:
@@ -3188,6 +3367,7 @@ Three popup variants, shown as a modal dialog over the current screen:
 | Max channel storage | 25 MB | 25 MB |
 | Max single post (auto) | 256 KB | — |
 | Max single post (manual) | 2 MB | 2 MB |
+| Max contact issue report | 2 MB | — |
 | Rate limit | 3 reports/hour, 10/day per node | 3 posts/day per node |
 | Eviction strategy | Oldest posts first | Fewest votes first, then oldest |
 

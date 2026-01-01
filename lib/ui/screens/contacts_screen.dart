@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/contact_issue_dialog.dart';
 import 'package:cleona/ui/components/contact_tile.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
@@ -31,9 +33,11 @@ class ContactsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<CleonaAppState>();
+    final locale = AppLocale.of(context);
     final svc = appState.service ?? service;
     final accepted = svc.acceptedContacts;
     final pending = svc.pendingContacts;
+    final pendingOutgoing = svc.pendingOutgoingContacts;
 
     return AppBarScaffold(
       title: 'Kontakte',
@@ -113,6 +117,49 @@ class ContactsScreen extends StatelessWidget {
                         tooltip: 'Annehmen',
                         onPressed: () => svc.acceptContactRequest(contact.nodeIdHex),
                       ),
+                    ],
+                  ),
+                )),
+            const Divider(),
+          ],
+
+          // Pending outgoing contacts (waiting for response)
+          if (pendingOutgoing.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(
+                '${locale.get('contact_issue_waiting')} (${pendingOutgoing.length})',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            ...pendingOutgoing.map((contact) => ContactTile(
+                  name: contact.displayName,
+                  status: locale.get('contact_issue_waiting_status'),
+                  verificationLevel: _mapVerification(contact.verificationLevel),
+                  avatarOverride: ProfileAvatar(
+                    base64: contact.profilePictureBase64,
+                    radius: 22,
+                    fallback: Container(
+                      width: 44, height: 44,
+                      decoration: const BoxDecoration(color: Colors.blueGrey, shape: BoxShape.circle),
+                      child: const Icon(Icons.hourglass_top, color: Colors.white, size: 22),
+                    ),
+                  ),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (value) {
+                      if (value == 'report') {
+                        _showContactIssueReport(context, svc, contact);
+                      } else if (value == 'delete') {
+                        _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName);
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      PopupMenuItem(value: 'report', child: Row(children: [
+                        Icon(Icons.contact_support, size: 18, color: Theme.of(context).colorScheme.tertiary),
+                        const SizedBox(width: 8),
+                        Text(locale.get('contact_issue_report_menu')),
+                      ])),
+                      PopupMenuItem(value: 'delete', child: Text(locale.get('contact_delete'))),
                     ],
                   ),
                 )),
@@ -199,6 +246,38 @@ class ContactsScreen extends StatelessWidget {
         },
       ),
     );
+  }
+
+  void _showContactIssueReport(BuildContext context, ICleonaService svc, ContactInfo contact) async {
+    final report = svc.buildContactIssueReport(contact.nodeIdHex);
+    if (report == null) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppLocale.of(context).get('contact_issue_report_error'))),
+        );
+      }
+      return;
+    }
+
+    if (!context.mounted) return;
+    final result = await showContactIssueDialog(
+      context: context,
+      service: svc,
+      report: report,
+      contactNodeIdHex: contact.nodeIdHex,
+    );
+
+    if (!context.mounted) return;
+    final locale = AppLocale.of(context);
+    if (result == ContactIssueDialogResult.exported) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(locale.get('contact_issue_exported'))),
+      );
+    } else if (result == ContactIssueDialogResult.posted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(locale.get('contact_issue_posted'))),
+      );
+    }
   }
 
   void _confirmDelete(BuildContext context, ICleonaService svc, String nodeIdHex, String name) {

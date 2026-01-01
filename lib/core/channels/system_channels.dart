@@ -184,6 +184,128 @@ class CrashDuplicateReply {
   String toPostText() => jsonEncode(toJson());
 }
 
+/// Manual contact-issue report — collected when a pending_outgoing contact
+/// doesn't respond and the user taps "Problem melden" in the 3-dot menu.
+class ContactIssueReport {
+  final String fingerprint;
+  final String appVersion;
+  final String platform;
+  final int timestampMs;
+  final String contactIdShort;
+  final String contactName;
+  final int seedAgeSeconds;
+  final String natType;
+  final int peerCount;
+  final int confirmedPeerCount;
+  final bool hasPortMapping;
+  final bool peerSeenInDht;
+  final String logTail;
+  final int uptimeSeconds;
+
+  const ContactIssueReport({
+    required this.fingerprint,
+    required this.appVersion,
+    required this.platform,
+    required this.timestampMs,
+    required this.contactIdShort,
+    required this.contactName,
+    required this.seedAgeSeconds,
+    required this.natType,
+    required this.peerCount,
+    required this.confirmedPeerCount,
+    required this.hasPortMapping,
+    required this.peerSeenInDht,
+    required this.logTail,
+    required this.uptimeSeconds,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'type': 'contact_issue',
+        'fingerprint': fingerprint,
+        'appVersion': appVersion,
+        'platform': platform,
+        'timestampMs': timestampMs,
+        'contactIdShort': contactIdShort,
+        'contactName': contactName,
+        'seedAgeSeconds': seedAgeSeconds,
+        'natType': natType,
+        'peerCount': peerCount,
+        'confirmedPeerCount': confirmedPeerCount,
+        'hasPortMapping': hasPortMapping,
+        'peerSeenInDht': peerSeenInDht,
+        'logTail': logTail,
+        'uptimeSeconds': uptimeSeconds,
+      };
+
+  static ContactIssueReport? fromJson(Map<String, dynamic> json) {
+    if (json['type'] != 'contact_issue') return null;
+    try {
+      return ContactIssueReport(
+        fingerprint: json['fingerprint'] as String,
+        appVersion: json['appVersion'] as String,
+        platform: json['platform'] as String,
+        timestampMs: json['timestampMs'] as int,
+        contactIdShort: json['contactIdShort'] as String,
+        contactName: json['contactName'] as String,
+        seedAgeSeconds: json['seedAgeSeconds'] as int,
+        natType: json['natType'] as String,
+        peerCount: json['peerCount'] as int,
+        confirmedPeerCount: json['confirmedPeerCount'] as int,
+        hasPortMapping: json['hasPortMapping'] as bool,
+        peerSeenInDht: json['peerSeenInDht'] as bool,
+        logTail: json['logTail'] as String,
+        uptimeSeconds: json['uptimeSeconds'] as int,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String toPostText() => jsonEncode(toJson());
+
+  String toPreviewText() {
+    final buf = StringBuffer()
+      ..writeln('Version: $appVersion')
+      ..writeln('Plattform: $platform')
+      ..writeln('Kontakt: $contactName ($contactIdShort)')
+      ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
+      ..writeln('NAT-Typ: $natType')
+      ..writeln('Peers: $peerCount ($confirmedPeerCount bestätigt)')
+      ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
+      ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
+      ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
+      ..writeln('Logs: [letzte ${logTail.split('\n').length} Zeilen]');
+    return buf.toString();
+  }
+
+  String toExportText() {
+    final buf = StringBuffer()
+      ..writeln('=== Cleona Kontaktproblem-Bericht ===')
+      ..writeln('Erstellt: ${DateTime.fromMillisecondsSinceEpoch(timestampMs).toIso8601String()}')
+      ..writeln('')
+      ..writeln('Version: $appVersion')
+      ..writeln('Plattform: $platform')
+      ..writeln('Kontakt: $contactName ($contactIdShort)')
+      ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
+      ..writeln('NAT-Typ: $natType')
+      ..writeln('Peers: $peerCount ($confirmedPeerCount bestätigt)')
+      ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
+      ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
+      ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
+      ..writeln('')
+      ..writeln('--- Letzte Log-Einträge ---')
+      ..writeln(logTail);
+    return buf.toString();
+  }
+
+  static String formatDuration(int seconds) {
+    if (seconds < 60) return '${seconds}s';
+    if (seconds < 3600) return '${seconds ~/ 60}min';
+    if (seconds < 86400) return '${seconds ~/ 3600}h ${(seconds % 3600) ~/ 60}min';
+    return '${seconds ~/ 86400}d ${(seconds % 86400) ~/ 3600}h';
+  }
+}
+
 /// Compute a crash fingerprint from exception type and stack frames.
 /// Strips line numbers and normalizes paths so the same bug on different
 /// versions produces the same fingerprint.

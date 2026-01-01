@@ -790,6 +790,15 @@ bool isInfrastructureMessageTypeV3(proto.MessageTypeV3 type) {
     // Outer-Device-Sig (§3.5) is the wire authority; receivers treat the
     // payload as untrusted gossip regardless.
     case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+    // Deferred Key Exchange (rev3 §8.1.1) — BOOT path: sender does not yet
+    // have recipient's Device-KEM-PK (that's what we're requesting).
+    case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
+    case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
+    // First-CR-Mailbox (rev3 §5.5b) — KEM path (sender has SeedPeer's
+    // Device-KEM-PK from routing table).
+    case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
+    case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
+    case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
       return true;
     default:
       return false;
@@ -887,6 +896,10 @@ bool isBootstrapMessageTypeV3(proto.MessageTypeV3 type) {
     case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
     case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
     case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+    // Deferred Key Exchange (rev3 §8.1.1) — must be BOOT: sender needs
+    // recipient's Device-KEM-PK and cannot KEM-encrypt without it.
+    case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
+    case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
       // Sanity: every BOOT entry MUST also be in the §2.3.5 selector. If
       // these ever drift, the receiver-side `isInfrastructureMessageTypeV3`
       // gate in [decryptAndVerifyInfrastructure] would still admit BOOT

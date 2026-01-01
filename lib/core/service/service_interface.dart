@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
@@ -30,6 +31,8 @@ abstract class ICleonaService {
   Uint8List get deviceX25519Pk;
   /// Welle 5: Device-ML-KEM-768-PK (1184 bytes) — see [deviceX25519Pk].
   Uint8List get deviceMlKemPk;
+  /// rev3: User-Ed25519-PK (32 bytes) — trust-anchor for ContactSeed v2.
+  Uint8List get userEd25519Pk;
   int get peerCount;
   /// Peers with confirmed bidirectional UDP contact this session.
   /// Used for P2P-aware connection status icon.
@@ -65,6 +68,7 @@ abstract class ICleonaService {
 
   List<ContactInfo> get acceptedContacts;
   List<ContactInfo> get pendingContacts;
+  List<ContactInfo> get pendingOutgoingContacts;
   ContactInfo? getContact(String nodeIdHex);
   List<Conversation> get sortedConversations;
   List<PeerSummary> get peerSummaries;
@@ -144,10 +148,11 @@ abstract class ICleonaService {
       {String message = '',
       String? seedDeviceIdHex,
       String? seedDxkB64,
-      String? seedDmkB64});
-  /// Welle 5/6 (§8.1.1): pass [targetDeviceIdHex] + Device-KEM-PKs from a
-  /// modern ContactSeed-URI so the seeded peer is keyed by Device-Node-ID
-  /// and a direct DV-route is registered (otherwise sendToDevice exhausts).
+      String? seedDmkB64,
+      String? seedEpB64});
+  /// §8.1.1 rev3: pass [targetDeviceIdHex] + Device-KEM-PKs (v1 legacy) or
+  /// [targetEpB64] (v2 trust-anchor) from a ContactSeed so the seeded peer
+  /// is keyed by Device-Node-ID and a direct DV-route is registered.
   void addPeersFromContactSeed(
     String targetNodeIdHex,
     List<String> targetAddresses,
@@ -155,6 +160,7 @@ abstract class ICleonaService {
     String? targetDeviceIdHex,
     String? targetDxkB64,
     String? targetDmkB64,
+    String? targetEpB64,
   });
   bool addManualPeer(String ip, int port);
   Future<bool> acceptContactRequest(String nodeIdHex);
@@ -198,6 +204,10 @@ abstract class ICleonaService {
 
   // Network statistics
   NetworkStats getNetworkStats();
+
+  // Contact issue reporting
+  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex);
+  Future<bool> publishContactIssueReport(String contactNodeIdHex);
 
   // ── NAT-Troubleshooting-Wizard (§27.9) ─────────────────────────────
   /// Fired when the 10-min trigger (0 direct + UPnP fail + PCP fail +

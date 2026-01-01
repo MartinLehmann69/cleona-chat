@@ -1,6 +1,6 @@
 //
 //  Generated code. Do not modify.
-//  source: cleona.proto
+//  source: proto/cleona.proto
 //
 // @dart = 2.12
 

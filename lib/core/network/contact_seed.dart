@@ -6,24 +6,22 @@ import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
 
 /// ContactSeed: encodes node identity + reachability into a URI for QR codes.
 ///
-/// Format (V3.0 Welle 5):
-/// `cleona://<userIdHex>?n=<name>&c=<b|l>&did=<deviceIdHex>&dxk=<deviceX25519Pk_b64>&dmk=<deviceMlKemPk_b64>&a=<ip:port+ip:port>&s=<nodeId1@ip1:port1+ip2:port2,...>`
+/// Two format generations (§8.1.1):
 ///
-/// - nodeIdHex: 64-char hex of the user's 32-byte ID (kept name `nodeIdHex` for
-///   backward compat with callers; semantically this is the **UserID**, see
-///   Architecture §8.1.1).
+/// **v2 (rev3, current)** — compact, base64url, ~350 chars URI / QR Version 8-10:
+/// `cleona://<userIdHex>?n=<name>&c=<b|l>&did=<deviceIdHex>&ep=<userEd25519Pk_base64url>&a=<addrs>&s=<seedPeers>`
+///
+/// **v1 (legacy, still parsed)** — includes full Device-KEM keys:
+/// `cleona://<userIdHex>?...&dxk=<deviceX25519Pk_b64>&dmk=<deviceMlKemPk_b64>&...`
+///
+/// - nodeIdHex: 64-char hex of the user's 32-byte UserID (§8.1.1).
 /// - n: display name (URL-encoded)
-/// - c: network channel ('b' = beta, 'l' = live) — 1 char, for cross-channel detection
-/// - did: device_id (64-char hex of the QR-emitting device's 32-byte device id) —
-///        V3.0 2-Layer-Frames: required for the receiver to address the initial
-///        CONTACT_REQUEST via `sendToDevice(deviceId)` because the receiver does
-///        not yet have the sender's Auth-Manifest in the 2D-DHT. Optional/nullable
-///        for backward compatibility with pre-V3.0 QR codes.
-/// - dxk (NEW Welle 5): Device-X25519-PK, 32 bytes, base64 — required for
-///        InfrastructureFrame KEM-encap of the First-CR (§3.5b, §8.1.1).
-///        Treat as absent when malformed/wrong-length so legacy URIs still parse.
-/// - dmk (NEW Welle 5): Device-ML-KEM-768-PK, 1184 bytes, base64 — same purpose.
-/// - a: own addresses (multi-address separated by +, encoded as %2B in URI)
+/// - c: network channel ('b' = beta, 'l' = live)
+/// - did: deviceId (64-char hex)
+/// - ep (v2): userEd25519Pk, 32 bytes, base64url — trust-anchor for Deferred
+///   Key Exchange and DHT record verification. Integrity: SHA-256(networkSecret + ep) == nodeIdHex.
+/// - dxk/dmk (v1 legacy): Device-KEM keys inline — parsed but no longer emitted.
+/// - a: own addresses (multi-address, + encoded as %2B)
 /// - s: seed peers (up to 5, each: nodeIdHex@ip:port+ip:port)
 class ContactSeed {
   /// Length of the X25519 public key in bytes.
@@ -39,14 +37,16 @@ class ContactSeed {
   final String? channelTag; // 'b' or 'l' (null = legacy QR without channel)
   final String? deviceIdHex; // 64-char hex (null = legacy QR without device_id)
 
-  /// Device-X25519 public key (NEW Welle 5). 32 bytes, used as the KEM
-  /// subject for the First-CR InfrastructureFrame. `null` for legacy URIs;
-  /// the sender then falls back to a 2D-DHT DeviceKemRecord lookup
-  /// (Architecture §8.1.1 backward-compat note).
+  /// User-Ed25519 public key (v2 rev3). 32 bytes, base64url in URI.
+  /// Trust-anchor for Deferred Key Exchange: verifies DHT DeviceKemRecords
+  /// and DEVICE_KEM_OFFER signatures (§8.1.1).
+  final Uint8List? userEd25519Pk;
+
+  /// Device-X25519 public key (v1 legacy). 32 bytes. Present only in legacy
+  /// ContactSeeds that carried the full Device-KEM keys inline.
   final Uint8List? deviceX25519Pk;
 
-  /// Device-ML-KEM-768 public key (NEW Welle 5). 1184 bytes. Same role as
-  /// [deviceX25519Pk] — both halves needed for hybrid v2 KEM-encap.
+  /// Device-ML-KEM-768 public key (v1 legacy). 1184 bytes.
   final Uint8List? deviceMlKemPk;
 
   ContactSeed({
@@ -56,6 +56,7 @@ class ContactSeed {
     this.seedPeers = const [],
     this.channelTag,
     this.deviceIdHex,
+    this.userEd25519Pk,
     this.deviceX25519Pk,
     this.deviceMlKemPk,
   });
@@ -75,18 +76,10 @@ class ContactSeed {
       sb.write('&did=$deviceIdHex');
     }
 
-    // Device-KEM pubkeys (V3.0 Welle 5). Both halves are required together
-    // for a usable First-CR; emit as a pair, drop the pair when either is
-    // absent or malformed (silent — caller is expected to pass correct keys
-    // or none at all).
-    final dxk = deviceX25519Pk;
-    final dmk = deviceMlKemPk;
-    if (dxk != null &&
-        dmk != null &&
-        dxk.length == deviceX25519PkLength &&
-        dmk.length == deviceMlKemPkLength) {
-      sb.write('&dxk=${base64.encode(dxk)}');
-      sb.write('&dmk=${base64.encode(dmk)}');
+    // v2 (rev3): userEd25519Pk as trust-anchor, base64url (RFC 4648 §5).
+    final ep = userEd25519Pk;
+    if (ep != null && ep.length == 32) {
+      sb.write('&ep=${base64Url.encode(ep).replaceAll('=', '')}');
     }
 
     if (ownAddresses.isNotEmpty) {
@@ -153,10 +146,20 @@ class ContactSeed {
         deviceIdHex = didParam.toLowerCase();
       }
 
-      // Parse Device-KEM pubkeys (V3.0 Welle 5). Treat truncation/wrong-length
-      // / decode-failure as absent — legacy URIs and corrupted URIs both yield
-      // null without aborting the rest of the parse. Both halves are checked
-      // independently; an attacker cannot smuggle one half through.
+      // v2 (rev3): userEd25519Pk as trust-anchor (base64url, no padding).
+      Uint8List? ep;
+      final epParam = params['ep'];
+      if (epParam != null && epParam.isNotEmpty) {
+        try {
+          final decoded = base64Url.decode(base64Url.normalize(epParam));
+          if (decoded.length == 32) {
+            ep = Uint8List.fromList(decoded);
+          }
+        } catch (_) {}
+      }
+
+      // v1 legacy: Device-KEM pubkeys (standard base64). Parsed for backward
+      // compat — URIs with dxk+dmk skip the Deferred Key Exchange entirely.
       Uint8List? dxk;
       Uint8List? dmk;
       final dxkParam = params['dxk'];
@@ -166,9 +169,7 @@ class ContactSeed {
           if (decoded.length == deviceX25519PkLength) {
             dxk = Uint8List.fromList(decoded);
           }
-        } catch (_) {
-          // Malformed base64 — drop silently per backward-compat policy.
-        }
+        } catch (_) {}
       }
       final dmkParam = params['dmk'];
       if (dmkParam != null && dmkParam.isNotEmpty) {
@@ -177,9 +178,7 @@ class ContactSeed {
           if (decoded.length == deviceMlKemPkLength) {
             dmk = Uint8List.fromList(decoded);
           }
-        } catch (_) {
-          // Same — silent drop.
-        }
+        } catch (_) {}
       }
 
       return ContactSeed(
@@ -189,6 +188,7 @@ class ContactSeed {
         seedPeers: seedPeers,
         channelTag: params['c'],
         deviceIdHex: deviceIdHex,
+        userEd25519Pk: ep,
         deviceX25519Pk: dxk,
         deviceMlKemPk: dmk,
       );
@@ -231,18 +231,19 @@ class ContactSeed {
     return '?';
   }
 
-  // --- Compact binary QR format (§8.1.1 rev2) ---
+  // --- Compact binary QR format ---
   //
-  // Raw bytes are ~35% smaller than URI text (hex→raw, base64→raw).
-  // zstd is applied on top; for mostly-random key material the net gain
-  // is modest, but structured fields (addresses, name) do compress.
+  // v2 (rev3, format 0x03/0x04): 32B ep instead of 1216B dxk+dmk → QR Version 8-10.
+  // v1 (legacy, format 0x01/0x02): 32B dxk + 1184B dmk → QR Version 26-28.
   //
   // Wire: [1B format] [payload]
-  //   format 0x01 = zstd-compressed binary
-  //   format 0x02 = uncompressed binary
+  //   format 0x03 = zstd-compressed v2
+  //   format 0x04 = uncompressed v2
+  //   format 0x01 = zstd-compressed v1 (legacy)
+  //   format 0x02 = uncompressed v1 (legacy)
   //
-  // Binary payload:
-  //   [32B userId] [32B deviceId] [32B dxk] [1184B dmk]
+  // v2 binary payload:
+  //   [32B userId] [32B deviceId] [32B userEd25519Pk]
   //   [1B channel] [1B nameLen] [nameUTF8]
   //   [1B addrCount] [{1B len, addrUTF8}...]
   //   [1B peerCount] [{32B nodeId, 1B addrCount, {1B len, addrUTF8}...}...]
@@ -258,8 +259,7 @@ class ContactSeed {
       bb.add(Uint8List(32));
     }
 
-    bb.add(deviceX25519Pk ?? Uint8List(deviceX25519PkLength));
-    bb.add(deviceMlKemPk ?? Uint8List(deviceMlKemPkLength));
+    bb.add(userEd25519Pk ?? Uint8List(32));
 
     bb.addByte(channelTag == 'b' ? 0x62 : channelTag == 'l' ? 0x6C : 0x00);
 
@@ -297,13 +297,13 @@ class ContactSeed {
           Uint8List.fromList(raw), level: 3);
       if (compressed.length < raw.length) {
         final out = BytesBuilder(copy: false);
-        out.addByte(0x01);
+        out.addByte(0x03); // v2 compressed
         out.add(compressed);
         return out.toBytes();
       }
     } catch (_) {}
     final out = BytesBuilder(copy: false);
-    out.addByte(0x02);
+    out.addByte(0x04); // v2 uncompressed
     out.add(raw);
     return out.toBytes();
   }
@@ -312,21 +312,92 @@ class ContactSeed {
     if (data.length < 2) return null;
     final format = data[0];
     Uint8List payload;
-    if (format == 0x01) {
+    if (format == 0x01 || format == 0x03) {
       try {
         payload = ZstdCompression.instance.decompress(
             Uint8List.sublistView(data, 1));
       } catch (_) { return null; }
-    } else if (format == 0x02) {
+    } else if (format == 0x02 || format == 0x04) {
       payload = Uint8List.sublistView(data, 1);
     } else {
       return null;
     }
-    return _parseBinaryPayload(payload);
+    final isV2 = format == 0x03 || format == 0x04;
+    return isV2 ? _parseBinaryPayloadV2(payload) : _parseBinaryPayload(payload);
+  }
+
+  static ContactSeed? _parseBinaryPayloadV2(Uint8List p) {
+    // v2: 32+32+32+1+1+1+1 = 100 bytes minimum
+    if (p.length < 100) return null;
+    try {
+      var off = 0;
+
+      final userId = bytesToHex(Uint8List.sublistView(p, off, off + 32));
+      off += 32;
+
+      final deviceId = bytesToHex(Uint8List.sublistView(p, off, off + 32));
+      off += 32;
+      final hasDeviceId = deviceId != '0' * 64;
+
+      final ep = Uint8List.fromList(p.sublist(off, off + 32));
+      off += 32;
+      final allZeroEp = ep.every((b) => b == 0);
+
+      final chByte = p[off++];
+      final channelTag = chByte == 0x62 ? 'b' : chByte == 0x6C ? 'l' : null;
+
+      final nameLen = p[off++];
+      if (off + nameLen > p.length) return null;
+      final name = utf8.decode(p.sublist(off, off + nameLen), allowMalformed: true);
+      off += nameLen;
+
+      if (off >= p.length) return null;
+      final addrCount = p[off++];
+      final addrs = <String>[];
+      for (var i = 0; i < addrCount; i++) {
+        if (off >= p.length) return null;
+        final al = p[off++];
+        if (off + al > p.length) return null;
+        addrs.add(utf8.decode(p.sublist(off, off + al), allowMalformed: true));
+        off += al;
+      }
+
+      if (off >= p.length) return null;
+      final peerCount = p[off++];
+      final peers = <SeedPeer>[];
+      for (var i = 0; i < peerCount; i++) {
+        if (off + 32 > p.length) return null;
+        final pId = bytesToHex(Uint8List.sublistView(p, off, off + 32));
+        off += 32;
+        if (off >= p.length) return null;
+        final paCount = p[off++];
+        final pa = <String>[];
+        for (var j = 0; j < paCount; j++) {
+          if (off >= p.length) return null;
+          final al = p[off++];
+          if (off + al > p.length) return null;
+          pa.add(utf8.decode(p.sublist(off, off + al), allowMalformed: true));
+          off += al;
+        }
+        peers.add(SeedPeer(nodeIdHex: pId, addresses: pa));
+      }
+
+      return ContactSeed(
+        nodeIdHex: userId,
+        displayName: name,
+        ownAddresses: addrs,
+        seedPeers: peers,
+        channelTag: channelTag,
+        deviceIdHex: hasDeviceId ? deviceId : null,
+        userEd25519Pk: allZeroEp ? null : ep,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   static ContactSeed? _parseBinaryPayload(Uint8List p) {
-    // Minimum: 32+32+32+1184+1+1+1+1 = 1284 bytes
+    // v1 legacy: 32+32+32+1184+1+1+1+1 = 1284 bytes minimum
     if (p.length < 1284) return null;
     try {
       var off = 0;

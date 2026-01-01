@@ -1069,6 +1069,8 @@ class ContactInfo {
   String? seedDeviceIdHex;
   String? seedDxkB64;
   String? seedDmkB64;
+  /// rev3: userEd25519Pk trust-anchor from v2 ContactSeed (base64url, no padding).
+  String? seedEpB64;
 
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
@@ -1094,6 +1096,7 @@ class ContactInfo {
     this.seedDeviceIdHex,
     this.seedDxkB64,
     this.seedDmkB64,
+    this.seedEpB64,
   }) : deviceNodeIds = deviceNodeIds ?? {};
 
   String get nodeIdHex => bytesToHex(nodeId);
@@ -1119,6 +1122,7 @@ class ContactInfo {
         if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
         if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
         if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
+        if (seedEpB64 != null) 'seedEpB64': seedEpB64,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -1154,6 +1158,7 @@ class ContactInfo {
         seedDeviceIdHex: json['seedDeviceIdHex'] as String?,
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,
+        seedEpB64: json['seedEpB64'] as String?,
       );
 }
 
